@@ -1,0 +1,20 @@
+[package]
+name = "codegraph-query"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Graph query for CodeGraph: IDF-scored subgraph, shortest path, explain, affected."
+
+[dependencies]
+codegraph-core = { workspace = true }
+codegraph-graph = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "query"
+harness = false
