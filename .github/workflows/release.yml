@@ -1,0 +1,71 @@
+name: release
+
+# Build prebuilt `codegraph` binaries for Linux/macOS/Windows and attach them to
+# the GitHub Release when a `v*` tag is pushed. Run manually via workflow_dispatch
+# to smoke-test the build matrix without cutting a release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked -p codegraph --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          dist="codegraph-${{ matrix.target }}"
+          mkdir "$dist"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/codegraph.exe" "$dist/"
+          else
+            cp "target/${{ matrix.target }}/release/codegraph" "$dist/"
+          fi
+          cp README.md LICENSE CHANGELOG.md "$dist/"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "${dist}.zip" "$dist"
+          else
+            tar czf "${dist}.tar.gz" "$dist"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codegraph-${{ matrix.target }}
+          path: |
+            codegraph-${{ matrix.target }}.tar.gz
+            codegraph-${{ matrix.target }}.zip
+          if-no-files-found: ignore
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

@@ -1,0 +1,72 @@
+name: CI
+on: [push, pull_request]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - run: cargo test --workspace --all-features
+
+  # One job per language grammar: each `lang-*` feature is built and tested in
+  # isolation, so a grammar bump that silently drops nodes/edges (or breaks a
+  # single language's compile) fails CI on its own rather than hiding in the
+  # all-features build.
+  extract-langs:
+    strategy:
+      fail-fast: false
+      matrix:
+        lang:
+          - python
+          - javascript
+          - typescript
+          - go
+          - rust
+          - java
+          - csharp
+          - kotlin
+          - swift
+          - c
+          - cpp
+          - json
+          - yaml
+          - hcl
+          - sql
+          - ruby
+          - php
+          - lua
+          - bash
+          - powershell
+          - scala
+          - dart
+          - elixir
+          - julia
+          - zig
+          - asp
+          - groovy
+          - objc
+          - verilog
+          - fortran
+          - vue
+          - svelte
+          - astro
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - run: cargo test -p codegraph-extract --no-default-features --features lang-${{ matrix.lang }}
