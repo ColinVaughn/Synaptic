@@ -176,6 +176,11 @@ pub(crate) enum Cmd {
     Install {
         #[arg(default_value = "claude")]
         platform: String,
+        /// Codex only: register the MCP server in the GLOBAL `~/.codex/config.toml`
+        /// (per-repo named server) so the Codex desktop app picks it up, instead of
+        /// the per-project `.codex/` the CLI reads.
+        #[arg(long)]
+        global: bool,
     },
     /// Remove the CodeGraph skill for a platform (or `--all`).
     Uninstall {
@@ -184,6 +189,9 @@ pub(crate) enum Cmd {
         /// Uninstall from every supported platform.
         #[arg(long)]
         all: bool,
+        /// Codex only: remove this repo's server from the GLOBAL `~/.codex/config.toml`.
+        #[arg(long)]
+        global: bool,
     },
     /// Graph-aware PR dashboard (open PRs + CI/review state); a number shows one
     /// PR's detail with graph blast radius. Requires the `gh` CLI.

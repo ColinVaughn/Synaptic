@@ -130,8 +130,9 @@ codegraph serve --http 127.0.0.1:8765 --api-key "$CODEGRAPH_API_KEY"   # HTTP se
 The server exposes read-only graph tools (`query_graph`, `get_node`, `get_neighbors`,
 `get_community`, `god_nodes`, `graph_stats`, `shortest_path`, federation `list_repos` /
 `repo_stats`) plus PR tools (`list_prs`, `get_pr_impact`, `triage_prs`), and a small REST
-surface (`/api/stats`, `/api/query`, ...) for non-MCP clients. `codegraph install` wires a
-`PreToolUse` hook so the assistant consults the graph before grepping/reading. See
+surface (`/api/stats`, `/api/query`, ...) for non-MCP clients. `codegraph install` wires the
+graph into a host assistant (a `PreToolUse` hook for Claude; a native MCP server for Codex,
+with `codegraph install codex --global` for the Codex desktop app). See
 [MCP Server](wiki/MCP-Server.md) and [Assistant Integration](wiki/Assistant-Integration.md).
 
 ## Languages

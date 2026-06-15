@@ -81,8 +81,12 @@ fn main() -> Result<()> {
             password,
         } => run_export(&format, graph, out, push, &user, password, repo),
         Cmd::Ingest { source } => run_ingest(source),
-        Cmd::Install { platform } => run_install(&platform),
-        Cmd::Uninstall { platform, all } => run_uninstall(&platform, all),
+        Cmd::Install { platform, global } => run_install(&platform, global),
+        Cmd::Uninstall {
+            platform,
+            all,
+            global,
+        } => run_uninstall(&platform, all, global),
         Cmd::Serve {
             graph,
             http,

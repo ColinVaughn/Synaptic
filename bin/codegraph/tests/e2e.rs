@@ -565,6 +565,73 @@ fn install_then_uninstall_codex() {
 }
 
 #[test]
+fn install_codex_global_writes_to_codex_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    let codex_home = dir.path().join("codexhome");
+
+    Command::cargo_bin("codegraph")
+        .unwrap()
+        .current_dir(&root)
+        .env("CODEX_HOME", &codex_home)
+        .args(["install", "codex", "--global"])
+        .assert()
+        .success();
+
+    // MCP server lands in the GLOBAL config (named per-repo), with an absolute --graph.
+    let cfg = fs::read_to_string(codex_home.join("config.toml")).unwrap();
+    assert!(
+        cfg.contains("codegraph-repo") && cfg.contains("serve") && cfg.contains("--graph"),
+        "global config: {cfg}"
+    );
+    // AGENTS.md block is written; no project .codex/ files in global mode.
+    assert!(root.join("AGENTS.md").exists());
+    assert!(
+        !root.join(".codex/hooks.json").exists(),
+        "no project hook in global mode"
+    );
+    assert!(
+        !root.join(".codex/config.toml").exists(),
+        "no project config in global mode"
+    );
+
+    Command::cargo_bin("codegraph")
+        .unwrap()
+        .current_dir(&root)
+        .env("CODEX_HOME", &codex_home)
+        .args(["uninstall", "codex", "--global"])
+        .assert()
+        .success();
+    assert!(
+        !codex_home.join("config.toml").exists(),
+        "global entry removed (file was only ours)"
+    );
+}
+
+#[test]
+fn install_global_rejects_non_codex() {
+    let dir = tempfile::tempdir().unwrap();
+    Command::cargo_bin("codegraph")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["install", "gemini", "--global"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn uninstall_all_with_global_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    Command::cargo_bin("codegraph")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["uninstall", "--all", "--global"])
+        .assert()
+        .failure();
+}
+
+#[test]
 fn serve_answers_mcp_over_stdio() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

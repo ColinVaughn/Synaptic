@@ -1,10 +1,14 @@
-//! Codex-native integration written under a repo's `.codex/`: an MCP server
-//! registration plus a lifecycle hook. This is the "full install" for Codex,
-//! mirroring what the Claude install does via `.claude/`.
+//! Codex-native integration. Two modes, because the Codex CLI and the Codex
+//! desktop app read configuration differently:
 //!
-//! Codex reads MCP servers from `.codex/config.toml` (`[mcp_servers.<id>]`) and
-//! lifecycle hooks from `.codex/hooks.json`. Both project-scoped files load only
-//! when the user trusts the project in Codex.
+//! - **Project (CLI)** [`install`]/[`uninstall`]: writes a repo's `.codex/config.toml`
+//!   (`[mcp_servers.codegraph]`) + a `SessionStart` hook (`.codex/hooks.json` +
+//!   helper script). The CLI loads these for trusted projects.
+//! - **Global (app)** [`install_global_mcp`]/[`uninstall_global_mcp`]: writes a
+//!   per-repo `[mcp_servers.codegraph-<repo>]` into the GLOBAL `~/.codex/config.toml`.
+//!   The desktop app ignores a project's `.codex/config.toml` for MCP and reads
+//!   only the global file, so app users need this. No hook in this mode (the app
+//!   would not fire it); orientation rides on the always-on AGENTS.md block.
 //!
 //! Why a SessionStart hook (not PreToolUse like Claude): Codex does NOT honor
 //! `additionalContext` on PreToolUse (it marks the hook run failed), and its
@@ -93,29 +97,45 @@ pub fn uninstall(repo_root: &Path) -> std::io::Result<()> {
 
 // --- MCP server (.codex/config.toml) ----------------------------------------
 
-/// Our `[mcp_servers.codegraph]` table: launch `codegraph serve` (stdio MCP).
-/// No `--graph` arg, so it defaults to `codegraph-out/graph.json` relative to the
-/// server's cwd (the project root), keeping `config.toml` machine-independent
-/// and safe to commit.
+/// Generous startup timeout: loading a large graph when `serve` starts can take
+/// a few seconds, and Codex's default (10s) is tight. Matches the app convention.
+const STARTUP_TIMEOUT_SEC: i64 = 120;
+
+/// Project-mode server table: `codegraph serve` with no `--graph`, so it defaults
+/// to `codegraph-out/graph.json` relative to the server's cwd (the project root).
 fn codegraph_server_table() -> Table {
     let mut server = Table::new();
     server["command"] = value("codegraph");
     let mut args = Array::new();
     args.push("serve");
     server["args"] = value(args);
-    server["startup_timeout_sec"] = value(30_i64);
+    server["startup_timeout_sec"] = value(STARTUP_TIMEOUT_SEC);
     server
 }
 
-/// Insert/replace `[mcp_servers.codegraph]` in `.codex/config.toml`, preserving
-/// every other server and key (format-preserving via `toml_edit`). Idempotent.
-fn install_mcp_server(repo_root: &Path) -> std::io::Result<PathBuf> {
-    let path = repo_root.join(CONFIG_REL);
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+/// Global-mode server table: `codegraph serve --graph <abs>`. The desktop app
+/// gives a server no per-project cwd, so the graph path must be absolute.
+fn global_server_table(graph_path: &Path) -> Table {
+    let mut server = Table::new();
+    server["command"] = value("codegraph");
+    let mut args = Array::new();
+    args.push("serve");
+    args.push("--graph");
+    args.push(graph_path.to_string_lossy().as_ref());
+    server["args"] = value(args);
+    server["startup_timeout_sec"] = value(STARTUP_TIMEOUT_SEC);
+    server
+}
+
+/// Insert/replace `[mcp_servers.<name>]` in `config_path`, preserving every other
+/// server and key (format-preserving via `toml_edit`). Creates parent dirs.
+/// Idempotent: `Table::insert` overwrites a same-named key in place.
+fn upsert_mcp_server(config_path: &Path, name: &str, table: Table) -> std::io::Result<()> {
+    let existing = std::fs::read_to_string(config_path).unwrap_or_default();
     let mut doc = existing.parse::<DocumentMut>().unwrap_or_default();
 
-    // Ensure `mcp_servers` is a table holding sub-tables. When we create it,
-    // mark it `implicit` so it emits `[mcp_servers.codegraph]` rather than a bare
+    // Ensure `mcp_servers` is a table holding sub-tables. When we create it, mark
+    // it `implicit` so it emits `[mcp_servers.<name>]` rather than a bare
     // `[mcp_servers]` header. A pre-existing table is left as the user wrote it
     // (we only insert our sub-table) so any direct keys/headers they have survive.
     let servers = doc.entry("mcp_servers").or_insert_with(|| {
@@ -125,42 +145,104 @@ fn install_mcp_server(repo_root: &Path) -> std::io::Result<PathBuf> {
     });
     match servers {
         Item::Table(t) => {
-            t.insert("codegraph", Item::Table(codegraph_server_table()));
+            t.insert(name, Item::Table(table));
         }
         // `mcp_servers` exists but isn't a plain table (e.g. an array/value): replace.
         other => {
             let mut t = Table::new();
             t.set_implicit(true);
-            t.insert("codegraph", Item::Table(codegraph_server_table()));
+            t.insert(name, Item::Table(table));
             *other = Item::Table(t);
         }
     }
 
-    write_string(&path, &doc.to_string())?;
-    Ok(path)
+    write_string(config_path, &doc.to_string())
 }
 
-/// Remove `[mcp_servers.codegraph]`, dropping the `mcp_servers` table when it
-/// becomes empty and the file when nothing remains. Foreign servers are kept.
-fn uninstall_mcp_server(repo_root: &Path) -> std::io::Result<()> {
-    let path = repo_root.join(CONFIG_REL);
-    let Ok(existing) = std::fs::read_to_string(&path) else {
+/// Remove `[mcp_servers.<name>]`, dropping the `mcp_servers` table when it becomes
+/// empty and the file when nothing remains. Foreign servers/keys are kept.
+fn remove_mcp_server(config_path: &Path, name: &str) -> std::io::Result<()> {
+    let Ok(existing) = std::fs::read_to_string(config_path) else {
         return Ok(());
     };
     let mut doc = existing.parse::<DocumentMut>().unwrap_or_default();
     if let Some(Item::Table(t)) = doc.get_mut("mcp_servers") {
-        t.remove("codegraph");
+        t.remove(name);
         if t.is_empty() {
             doc.remove("mcp_servers");
         }
     }
     let out = doc.to_string();
     if out.trim().is_empty() {
-        std::fs::remove_file(&path)?;
+        std::fs::remove_file(config_path)?;
     } else {
-        std::fs::write(&path, out)?;
+        std::fs::write(config_path, out)?;
     }
     Ok(())
+}
+
+/// Insert/replace our project-scoped server (CLI; the app ignores this file).
+fn install_mcp_server(repo_root: &Path) -> std::io::Result<PathBuf> {
+    let path = repo_root.join(CONFIG_REL);
+    upsert_mcp_server(&path, "codegraph", codegraph_server_table())?;
+    Ok(path)
+}
+
+/// Remove our project-scoped server.
+fn uninstall_mcp_server(repo_root: &Path) -> std::io::Result<()> {
+    remove_mcp_server(&repo_root.join(CONFIG_REL), "codegraph")
+}
+
+// --- MCP server: global (app) registration in <codex_home>/config.toml ------
+
+/// Sanitized per-repo server name, e.g. `codegraph-pitframe`. The Codex desktop
+/// app only reads the global config (it ignores a project's `.codex/config.toml`
+/// for MCP), so each repo is registered as its own named server.
+fn global_server_name(repo_root: &Path) -> String {
+    let base = repo_root
+        .file_name()
+        .map(|n| sanitize(&n.to_string_lossy()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "repo".to_string());
+    format!("codegraph-{base}")
+}
+
+/// Lowercase and keep only `[a-z0-9_-]`, mapping any other char to `-`, so the
+/// result is a valid TOML bare key for the `[mcp_servers.<name>]` header.
+fn sanitize(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// Register `[mcp_servers.codegraph-<repo>]` in the global `<codex_home>/config.toml`,
+/// pointing `codegraph serve` at this repo's graph with an absolute `--graph`
+/// (the app gives a server no per-project cwd). Idempotent. Returns the config path.
+pub fn install_global_mcp(codex_home: &Path, repo_root: &Path) -> std::io::Result<PathBuf> {
+    let path = codex_home.join("config.toml");
+    let graph = repo_root.join("codegraph-out").join("graph.json");
+    upsert_mcp_server(
+        &path,
+        &global_server_name(repo_root),
+        global_server_table(&graph),
+    )?;
+    Ok(path)
+}
+
+/// Remove this repo's `[mcp_servers.codegraph-<repo>]` from the global config,
+/// deleting the file only if nothing else remains. Foreign servers/keys survive.
+pub fn uninstall_global_mcp(codex_home: &Path, repo_root: &Path) -> std::io::Result<()> {
+    remove_mcp_server(
+        &codex_home.join("config.toml"),
+        &global_server_name(repo_root),
+    )
 }
 
 // --- Lifecycle hook (.codex/hooks.json + helper script) ---------------------
@@ -485,5 +567,123 @@ mod tests {
     fn uninstall_on_missing_is_noop() {
         let dir = tempfile::tempdir().unwrap();
         assert!(uninstall(dir.path()).is_ok());
+    }
+
+    // --- global (app) MCP registration ---
+
+    #[test]
+    fn global_install_writes_named_server_with_absolute_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("codexhome");
+        let repo = dir.path().join("pitframe");
+        fs::create_dir_all(&repo).unwrap();
+        let written = install_global_mcp(&home, &repo).unwrap();
+        assert!(written.ends_with("config.toml"), "{written:?}");
+        let toml = fs::read_to_string(home.join("config.toml")).unwrap();
+        let parsed: DocumentMut = toml.parse().unwrap();
+        let s = &parsed["mcp_servers"]["codegraph-pitframe"];
+        assert_eq!(s["command"].as_str(), Some("codegraph"), "{toml}");
+        let args: Vec<String> = s["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(args.first().map(String::as_str), Some("serve"), "{args:?}");
+        assert!(args.iter().any(|a| a == "--graph"), "{args:?}");
+        assert!(
+            args.iter().any(|a| a
+                .replace('\\', "/")
+                .ends_with("pitframe/codegraph-out/graph.json")),
+            "absolute graph path expected: {args:?}"
+        );
+    }
+
+    #[test]
+    fn global_install_preserves_foreign_servers_and_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("codexhome");
+        fs::create_dir_all(&home).unwrap();
+        fs::write(
+            home.join("config.toml"),
+            "[projects.'C:\\x']\ntrust_level = \"trusted\"\n\n[mcp_servers.sonarqube]\ncommand = \"docker\"\n",
+        )
+        .unwrap();
+        let repo = dir.path().join("vpn");
+        fs::create_dir_all(&repo).unwrap();
+        install_global_mcp(&home, &repo).unwrap();
+        let toml = fs::read_to_string(home.join("config.toml")).unwrap();
+        let parsed: DocumentMut = toml.parse().unwrap();
+        assert_eq!(
+            parsed["mcp_servers"]["sonarqube"]["command"].as_str(),
+            Some("docker"),
+            "foreign server kept: {toml}"
+        );
+        assert!(toml.contains("[projects."), "projects table kept: {toml}");
+        assert!(
+            parsed["mcp_servers"]["codegraph-vpn"]["command"].is_str(),
+            "ours added: {toml}"
+        );
+    }
+
+    #[test]
+    fn global_install_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("codexhome");
+        let repo = dir.path().join("hub");
+        fs::create_dir_all(&repo).unwrap();
+        install_global_mcp(&home, &repo).unwrap();
+        install_global_mcp(&home, &repo).unwrap();
+        // A duplicate table would make this fail to parse (TOML forbids it).
+        let toml = fs::read_to_string(home.join("config.toml")).unwrap();
+        let parsed: DocumentMut = toml.parse().unwrap();
+        assert!(
+            parsed["mcp_servers"]["codegraph-hub"]["command"].is_str(),
+            "{toml}"
+        );
+    }
+
+    #[test]
+    fn global_uninstall_removes_ours_keeps_foreign() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("codexhome");
+        fs::create_dir_all(&home).unwrap();
+        fs::write(
+            home.join("config.toml"),
+            "[mcp_servers.sonarqube]\ncommand = \"docker\"\n",
+        )
+        .unwrap();
+        let repo = dir.path().join("login");
+        fs::create_dir_all(&repo).unwrap();
+        install_global_mcp(&home, &repo).unwrap();
+        uninstall_global_mcp(&home, &repo).unwrap();
+        let toml = fs::read_to_string(home.join("config.toml")).unwrap();
+        assert!(!toml.contains("codegraph-login"), "ours gone: {toml}");
+        assert!(
+            toml.contains("[mcp_servers.sonarqube]"),
+            "foreign kept: {toml}"
+        );
+    }
+
+    #[test]
+    fn global_uninstall_removes_now_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("codexhome");
+        let repo = dir.path().join("wrapper");
+        fs::create_dir_all(&repo).unwrap();
+        install_global_mcp(&home, &repo).unwrap();
+        uninstall_global_mcp(&home, &repo).unwrap();
+        assert!(
+            !home.join("config.toml").exists(),
+            "global config holding only our server is removed"
+        );
+    }
+
+    #[test]
+    fn global_server_name_is_sanitized() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("New Project 2");
+        fs::create_dir_all(&repo).unwrap();
+        assert_eq!(global_server_name(&repo), "codegraph-new-project-2");
     }
 }
