@@ -108,9 +108,27 @@ pub fn validate_url(url: &str) -> Result<Url, FetchError> {
     if BLOCKED_HOSTS.contains(&host.to_lowercase().as_str()) {
         return Err(FetchError::Blocked(format!("cloud-metadata host '{host}'")));
     }
-    // Resolve and reject any private/internal IP. (An IP literal resolves
-    // without network I/O, so the rejection paths are offline-testable.)
     let port = parsed.port_or_known_default().unwrap_or(80);
+
+    // IP literals are judged directly, before any DNS. The OS resolver's handling
+    // of a bracketed IPv6 literal (e.g. `[::1]`, `[::ffff:127.0.0.1]`) differs by
+    // platform (Windows resolves it, glibc/macOS reject the brackets), so routing
+    // literals through `to_socket_addrs` would let them slip past on some hosts.
+    // Parsing the literal ourselves keeps the SSRF check deterministic and offline.
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = literal.parse::<IpAddr>() {
+        if ip_is_blocked(ip) {
+            return Err(FetchError::Blocked(format!(
+                "private/internal IP {ip} (from '{host}')"
+            )));
+        }
+        return Ok(parsed);
+    }
+
+    // Otherwise it is a domain name: resolve and reject any private/internal IP.
     let addrs = (host, port)
         .to_socket_addrs()
         .map_err(|e| FetchError::Invalid(format!("DNS resolution failed: {e}")))?;
