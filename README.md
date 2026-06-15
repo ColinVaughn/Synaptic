@@ -9,8 +9,6 @@ both machine-readable graphs and human-readable reports and visualizations.
 It is a single static Rust binary (`codegraph`) with no runtime and no interpreter, plus an
 MCP server so an AI coding assistant can consult the graph before grepping or reading files.
 
-> **Status:** active development, with first-class monorepo / multi-repo federation.
-
 ---
 
 ## Why
