@@ -354,19 +354,24 @@ Install the CodeGraph skill for a host assistant in the current directory.
 Syntax:
 
 ```sh
-codegraph install [PLATFORM]
+codegraph install [PLATFORM] [--global]
 ```
 
 | Name | Default | Description |
 | --- | --- | --- |
 | `PLATFORM` | `claude` | One of: `claude`, `agents`, `codex`, `opencode`, `gemini`, `cursor`, `copilot`, `kilo`. |
+| `--global` | off | Codex only: register the MCP server in the global `~/.codex/config.toml` (per-repo server) for the Codex desktop app, instead of the project `.codex/`. |
 
-Prints the files written.
+`codex` gets extra wiring: a native MCP server and a `SessionStart` hook (project
+`.codex/` by default, or a global per-repo server with `--global` for the desktop
+app). Prints the files written.
 
-Example:
+Examples:
 
 ```sh
 codegraph install claude
+codegraph install codex            # Codex CLI (project .codex/)
+codegraph install codex --global   # Codex desktop app (global ~/.codex)
 ```
 
 See [Assistant-Integration](Assistant-Integration).
@@ -378,18 +383,20 @@ Remove the CodeGraph skill for a platform.
 Syntax:
 
 ```sh
-codegraph uninstall [PLATFORM] [--all]
+codegraph uninstall [PLATFORM] [--all] [--global]
 ```
 
 | Name | Default | Description |
 | --- | --- | --- |
 | `PLATFORM` | `claude` | The platform to remove (same set as [`install`](#install)). |
 | `--all` | off | Uninstall from every supported platform (ignores `PLATFORM`). |
+| `--global` | off | Codex only: remove this repo's server from the global `~/.codex/config.toml`. |
 
 Example:
 
 ```sh
 codegraph uninstall cursor
+codegraph uninstall codex --global
 codegraph uninstall --all
 ```
 

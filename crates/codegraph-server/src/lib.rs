@@ -6,12 +6,14 @@
 //! pure [`Server::handle_request`] dispatcher, which makes the whole protocol
 //! unit-testable without an async runtime.
 //!
-//! Seven tools (`query_graph`, `get_node`, `get_neighbors`, `get_community`,
-//! `god_nodes`, `graph_stats`, `shortest_path`) + six resources, all read-only
-//! over a graph loaded at startup. Every label is run through
+//! Twelve read-only tools over a graph loaded at startup: graph (`query_graph`,
+//! `get_node`, `get_neighbors`, `get_community`, `god_nodes`, `graph_stats`,
+//! `shortest_path`), federation (`list_repos`, `repo_stats`), and PR (`list_prs`,
+//! `get_pr_impact`, `triage_prs`), plus six resources. The `initialize` reply
+//! returns server `instructions` orienting the agent, and each tool documents its
+//! parameters, so an assistant uses them correctly. Every label is run through
 //! [`codegraph_core::sanitize_label`] before it reaches tool text (a security
-//! boundary on LLM/corpus-derived names). HTTP transport + auth + sessions
-//! (C3b) and the PR tools + hot-reload + query log (C3c) follow.
+//! boundary on LLM/corpus-derived names).
 #![forbid(unsafe_code)]
 
 mod http;
@@ -639,6 +641,7 @@ impl Server {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": {}, "resources": {} },
                 "serverInfo": { "name": "codegraph", "version": env!("CARGO_PKG_VERSION") },
+                "instructions": SERVER_INSTRUCTIONS,
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": tools_list() })),
@@ -848,45 +851,66 @@ fn truncate_to_tokens(text: String, token_budget: usize) -> String {
     format!("{}\n… (truncated to ~{token_budget} tokens)", &text[..end])
 }
 
-/// The MCP `tools/list` payload.
+/// Server-level orientation returned in the MCP `initialize` result. It frames
+/// the whole toolset (these tools all query THIS repo's CodeGraph), gives the
+/// recommended flow, and defines the jargon, so an agent picks the right tool.
+const SERVER_INSTRUCTIONS: &str = "\
+This server exposes a CodeGraph knowledge graph of THIS repository's code: symbols \
+(functions, classes, files) as nodes and relationships (calls, imports, inheritance) \
+as edges, clustered into communities. All tools here operate on that loaded graph and \
+make no code edits. Query the graph before grepping or reading files broadly; it is \
+faster and surfaces structure (callers, callees, impact).\n\
+\n\
+Recommended flow: call graph_stats or god_nodes to orient, query_graph for a question \
+(returns a relevant subgraph), then get_neighbors / shortest_path / get_node to drill \
+in. For a multi-repo graph, call list_repos then pass the repo argument to scope. The \
+PR tools (list_prs / get_pr_impact / triage_prs) need the `gh` CLI.\n\
+\n\
+Terms: a 'god node' is a high-degree hub (structurally central); a 'community' is a \
+cluster of densely-connected nodes (roughly a module); edge confidence is EXTRACTED \
+(observed in code), INFERRED, or AMBIGUOUS.";
+
+/// The MCP `tools/list` payload. Descriptions and per-parameter docs make the
+/// implicit domain knowledge explicit so an agent uses each tool correctly
+/// (graph jargon, the lenient label resolution, the relation vocabulary).
 fn tools_list() -> Value {
     json!([
         {
             "name": "query_graph",
-            "description": "Retrieve a relevant subgraph for a natural-language question.",
+            "description": "Primary entry point: return a relevant subgraph (nodes + edges) for a natural-language question about this codebase, instead of grepping or reading files. Good for 'where is X handled', 'how does auth work', 'what is related to Y'.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "question": { "type": "string" },
-                    "mode": { "type": "string", "enum": ["bfs", "dfs"] },
-                    "token_budget": { "type": "integer" },
-                    "context_filter": { "type": "array", "items": { "type": "string" } }
+                    "question": { "type": "string", "description": "Natural-language question, e.g. 'how does login work' or 'what handles payments'." },
+                    "mode": { "type": "string", "enum": ["bfs", "dfs"], "description": "Traversal from the seed nodes: 'bfs' (default) expands a broad neighbourhood; 'dfs' follows deep call chains. Use dfs to trace one flow end to end." },
+                    "token_budget": { "type": "integer", "description": "Approximate token budget for the result (default 2000). Controls how many nodes return (about budget/40, capped 10-400). Raise it for broader context." },
+                    "context_filter": { "type": "array", "items": { "type": "string" }, "description": "Optional source-file path substrings; keeps only nodes whose file matches one (e.g. ['src/auth','login']). Use to scope a question to a subsystem." }
                 },
                 "required": ["question"]
             }
         },
-        { "name": "get_node", "description": "Show a node's metadata and degree.",
-          "inputSchema": { "type": "object", "properties": { "label": { "type": "string" } }, "required": ["label"] } },
-        { "name": "get_neighbors", "description": "List a node's neighbours, optionally filtered by relation.",
-          "inputSchema": { "type": "object", "properties": { "label": { "type": "string" }, "relation_filter": { "type": "string" } }, "required": ["label"] } },
-        { "name": "get_community", "description": "List the members of a community.",
-          "inputSchema": { "type": "object", "properties": { "community_id": { "type": "integer" } }, "required": ["community_id"] } },
-        { "name": "god_nodes", "description": "The most-connected nodes.",
-          "inputSchema": { "type": "object", "properties": { "top_n": { "type": "integer" } } } },
-        { "name": "graph_stats", "description": "Node/edge/community counts and confidence breakdown.",
+        { "name": "get_node", "description": "Show one node's metadata (type, source file, community, degree). Use after query_graph to inspect a specific symbol.",
+          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name (e.g. 'login_user', 'AuthService'); resolved leniently." } }, "required": ["label"] } },
+        { "name": "get_neighbors", "description": "List a node's directly connected nodes and the relation on each edge. Answers 'what does X call/use' and 'what calls X'.",
+          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." }, "relation_filter": { "type": "string", "description": "Optional: keep only this edge relation (substring match). Common relations: calls, imports, inherits, implements, references, contains, depends_on." } }, "required": ["label"] } },
+        { "name": "get_community", "description": "List the members of a community: a cluster of densely-connected nodes, roughly a module or subsystem. Use to see what belongs together.",
+          "inputSchema": { "type": "object", "properties": { "community_id": { "type": "integer", "description": "Community id, as reported by graph_stats, god_nodes, or a node's 'Community' field." } }, "required": ["community_id"] } },
+        { "name": "god_nodes", "description": "The most-connected nodes ('god nodes' = high-degree hubs, the structurally central symbols). Use to orient in an unfamiliar codebase.",
+          "inputSchema": { "type": "object", "properties": { "top_n": { "type": "integer", "description": "How many hubs to return (default is a small list)." } } } },
+        { "name": "graph_stats", "description": "Graph size and health: node/edge/community counts and the EXTRACTED/INFERRED/AMBIGUOUS edge-confidence breakdown. Good first call to confirm a graph is loaded and how large it is.",
           "inputSchema": { "type": "object", "properties": {} } },
-        { "name": "list_repos", "description": "Federated workspace members (repo tags) with node/edge counts.",
+        { "name": "list_repos", "description": "For a federated (multi-repo) graph, list member repos (tags) with node/edge counts; empty for a single repo. Use before scoping a query to one repo.",
           "inputSchema": { "type": "object", "properties": {} } },
-        { "name": "repo_stats", "description": "Node/edge counts for one federated member.",
-          "inputSchema": { "type": "object", "properties": { "repo": { "type": "string" } }, "required": ["repo"] } },
-        { "name": "shortest_path", "description": "Shortest path between two nodes.",
-          "inputSchema": { "type": "object", "properties": { "source": { "type": "string" }, "target": { "type": "string" }, "max_hops": { "type": "integer" } }, "required": ["source", "target"] } },
-        { "name": "list_prs", "description": "Open PRs with CI/review state targeting the base branch (needs gh).",
-          "inputSchema": { "type": "object", "properties": { "base": { "type": "string" }, "repo": { "type": "string" } } } },
-        { "name": "get_pr_impact", "description": "One PR's detail and graph blast radius (needs gh).",
-          "inputSchema": { "type": "object", "properties": { "pr_number": { "type": "integer" }, "repo": { "type": "string" } }, "required": ["pr_number"] } },
-        { "name": "triage_prs", "description": "Actionable PRs ranked by status with blast radius, for the model to prioritize (needs gh).",
-          "inputSchema": { "type": "object", "properties": { "base": { "type": "string" }, "repo": { "type": "string" } } } }
+        { "name": "repo_stats", "description": "Node/edge counts for one federated member repo.",
+          "inputSchema": { "type": "object", "properties": { "repo": { "type": "string", "description": "Repo tag, as listed by list_repos." } }, "required": ["repo"] } },
+        { "name": "shortest_path", "description": "Shortest path between two nodes, showing the chain of relations. Answers 'how does A reach B' or 'is X connected to Y'.",
+          "inputSchema": { "type": "object", "properties": { "source": { "type": "string", "description": "Start node: label, id, or bare name." }, "target": { "type": "string", "description": "End node: label, id, or bare name." }, "max_hops": { "type": "integer", "description": "Optional cap on path length (hops)." } }, "required": ["source", "target"] } },
+        { "name": "list_prs", "description": "Open pull requests targeting the base branch with their CI/review state. Requires the `gh` CLI authenticated for the repo.",
+          "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch to filter to (default: the repo's default branch)." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } } } },
+        { "name": "get_pr_impact", "description": "One PR's detail plus its graph blast radius: which graph nodes and communities its changed files touch. Requires the `gh` CLI.",
+          "inputSchema": { "type": "object", "properties": { "pr_number": { "type": "integer", "description": "PR number." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } }, "required": ["pr_number"] } },
+        { "name": "triage_prs", "description": "Open PRs ranked by actionability (status plus graph blast radius) so the model can prioritize review and merge order. Requires the `gh` CLI.",
+          "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch (default: the repo's default branch)." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } } } }
     ])
 }
 
@@ -961,6 +985,64 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string()
+    }
+
+    #[test]
+    fn every_tool_and_param_is_documented() {
+        // Findings #1/#3: each tool needs a substantive description, and every
+        // input-schema property needs its own description so agents use it right.
+        let tools = tools_list();
+        for t in tools.as_array().unwrap() {
+            let name = t["name"].as_str().unwrap();
+            assert!(
+                t["description"]
+                    .as_str()
+                    .map(|d| d.len() > 20)
+                    .unwrap_or(false),
+                "tool {name} needs a substantive description"
+            );
+            if let Some(props) = t["inputSchema"]["properties"].as_object() {
+                for (pname, schema) in props {
+                    assert!(
+                        schema
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(|d| !d.is_empty())
+                            .unwrap_or(false),
+                        "tool {name} param '{pname}' needs a description"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tool_surface_is_plain_ascii() {
+        // The instructions + tool descriptions are agent-facing output; keep them
+        // free of em-dashes / smart quotes / arrows (AI tells).
+        let mut text = SERVER_INSTRUCTIONS.to_string();
+        text.push_str(&tools_list().to_string());
+        for t in [
+            '\u{2014}', '\u{2013}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2192}',
+        ] {
+            assert!(!text.contains(t), "AI tell {t:?} in tool surface");
+        }
+    }
+
+    #[test]
+    fn initialize_returns_orienting_instructions() {
+        // Finding #2: the MCP initialize result should carry server `instructions`
+        // that orient the agent to the whole toolset.
+        let mut s = server();
+        let req = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}});
+        let resp = s.handle_request(&req).unwrap();
+        let instr = resp["result"]["instructions"].as_str().unwrap_or("");
+        assert!(instr.len() > 100, "instructions should orient: {instr}");
+        assert!(instr.contains("query_graph"), "should name the entry tool");
+        assert!(
+            instr.to_lowercase().contains("graph"),
+            "should frame the toolset"
+        );
     }
 
     #[test]

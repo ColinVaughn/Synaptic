@@ -26,32 +26,36 @@ use std::path::{Path, PathBuf};
 
 const SKILL_TEMPLATE: &str = r#"---
 name: codegraph
-description: Query this repo's CodeGraph knowledge graph before broad file exploration.
+description: Queries this repo's CodeGraph knowledge graph (symbols and their calls, imports, and inheritance) instead of grepping or reading files. Use when exploring an unfamiliar codebase, finding what calls or depends on a symbol, tracing how one part reaches another, or judging the blast radius of a change.
 ---
 
-# CodeGraph — @@HOST@@
+# CodeGraph for @@HOST@@
 
 This repository has a **CodeGraph** knowledge graph of its code. Before grepping
-or reading files broadly, query the graph — it is faster and surfaces
+or reading files broadly, query the graph. It is faster and surfaces
 relationships (calls, imports, inheritance, impact).
 
 ## Build / refresh
-- `codegraph extract .` — build the graph into `codegraph-out/`.
-- `codegraph update <changed files>` — incremental rebuild after edits.
+- `codegraph extract .`: build the graph into `codegraph-out/`.
+- `codegraph update <changed files>`: incremental rebuild after edits.
 
-## Query
-- `codegraph query "<question>"` — the relevant subgraph for a question.
-- `codegraph explain <node>` — a node and its neighbours.
-- `codegraph path <a> <b>` — shortest path between two nodes.
-- `codegraph affected <node>` — what (transitively) depends on a node.
+## Query (CLI)
+- `codegraph query "<question>"`: the relevant subgraph for a question.
+- `codegraph explain <node>`: a node and its neighbours.
+- `codegraph path <a> <b>`: shortest path between two nodes.
+- `codegraph affected <node>`: what (transitively) depends on a node.
 
 ## MCP (preferred for @@HOST@@)
-Run `codegraph serve` and use the MCP tools: `query_graph`, `get_node`,
-`get_neighbors`, `get_community`, `god_nodes`, `graph_stats`, `shortest_path`,
-plus the PR tools `list_prs` / `get_pr_impact` / `triage_prs`.
+Use the **codegraph** MCP server's tools (`query_graph` first), then
+`get_neighbors`, `shortest_path`, `god_nodes`, `graph_stats`, `get_node`,
+`get_community`, plus the PR tools `list_prs` / `get_pr_impact` / `triage_prs`.
+Reference them with your client's MCP prefix (Claude Code:
+`mcp__codegraph__query_graph`). The server's `initialize` reply describes the
+toolset, and each tool documents its parameters. If the server is not already
+connected, start it with `codegraph serve`.
 
 Reach for the graph on "what calls X", "what breaks if I change Y", and "how does
-A reach B" — don't reconstruct those by reading files.
+A reach B". Don't reconstruct those by reading files.
 "#;
 
 const MARK_START: &str = "<!-- codegraph:start -->";
@@ -64,9 +68,9 @@ fn always_on_section() -> String {
 ## CodeGraph\n\
 \n\
 This repo has a CodeGraph knowledge graph (`codegraph-out/graph.json`). Query it\n\
-before broad file exploration: `codegraph query \"<question>\"`, `codegraph affected\n\
-<node>`, or run `codegraph serve` for the MCP tools. Rebuild with `codegraph\n\
-extract .` / `codegraph update <files>`.\n\
+before broad file exploration: `codegraph query \"<question>\"` / `codegraph affected\n\
+<node>`, or the **codegraph** MCP tools if your assistant has them connected.\n\
+Rebuild with `codegraph extract .` / `codegraph update <files>`.\n\
 {MARK_END}"
     )
 }
@@ -240,15 +244,7 @@ pub fn install(platform: Platform, repo_root: &Path) -> std::io::Result<Vec<Path
         std::fs::write(&path, render_skill(platform))?;
         written.push(path);
     }
-    let ao_path = repo_root.join(platform.always_on_file());
-    // Some always-on files live in a subdir (.github/, .kilocode/rules/).
-    if let Some(parent) = ao_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let existing = std::fs::read_to_string(&ao_path).unwrap_or_default();
-    let updated = replace_or_append_section(&existing, &always_on_section());
-    std::fs::write(&ao_path, updated)?;
-    written.push(ao_path);
+    written.push(inject_always_on(platform, repo_root)?);
     // Claude Code also reads PreToolUse hooks from .claude/settings.json; install
     // them so the assistant is nudged to query the graph before broad exploration.
     if platform == Platform::Claude {
@@ -276,6 +272,33 @@ pub fn uninstall(platform: Platform, repo_root: &Path) -> std::io::Result<()> {
             }
         }
     }
+    strip_always_on(platform, repo_root)?;
+    if platform == Platform::Claude {
+        settings_hooks::uninstall_settings_hook(repo_root)?;
+    }
+    if platform == Platform::Codex {
+        codex_config::uninstall(repo_root)?;
+    }
+    Ok(())
+}
+
+/// Inject (or refresh) the always-on section into the platform's instructions
+/// file, creating its parent dir (some live under `.github/`, `.kilocode/rules/`).
+/// Idempotent. Returns the path written.
+fn inject_always_on(platform: Platform, repo_root: &Path) -> std::io::Result<PathBuf> {
+    let ao_path = repo_root.join(platform.always_on_file());
+    if let Some(parent) = ao_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let existing = std::fs::read_to_string(&ao_path).unwrap_or_default();
+    let updated = replace_or_append_section(&existing, &always_on_section());
+    std::fs::write(&ao_path, updated)?;
+    Ok(ao_path)
+}
+
+/// Strip the always-on section from the platform's instructions file, removing
+/// the file if nothing else remains. No-op if the file is absent.
+fn strip_always_on(platform: Platform, repo_root: &Path) -> std::io::Result<()> {
     let ao_path = repo_root.join(platform.always_on_file());
     if let Ok(existing) = std::fs::read_to_string(&ao_path) {
         let stripped = strip_section(&existing);
@@ -285,13 +308,24 @@ pub fn uninstall(platform: Platform, repo_root: &Path) -> std::io::Result<()> {
             std::fs::write(&ao_path, stripped)?;
         }
     }
-    if platform == Platform::Claude {
-        settings_hooks::uninstall_settings_hook(repo_root)?;
-    }
-    if platform == Platform::Codex {
-        codex_config::uninstall(repo_root)?;
-    }
     Ok(())
+}
+
+/// Install CodeGraph for the Codex **desktop app**: register the MCP server in the
+/// GLOBAL `<codex_home>/config.toml` (the app ignores a project's `.codex/` for
+/// MCP) and inject the always-on AGENTS.md block. No project hook is written (the
+/// app would not fire it). Returns the paths written.
+pub fn install_codex_global(repo_root: &Path, codex_home: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut written = vec![inject_always_on(Platform::Codex, repo_root)?];
+    written.push(codex_config::install_global_mcp(codex_home, repo_root)?);
+    Ok(written)
+}
+
+/// Reverse [`install_codex_global`]: strip the AGENTS.md block and remove this
+/// repo's global MCP server entry.
+pub fn uninstall_codex_global(repo_root: &Path, codex_home: &Path) -> std::io::Result<()> {
+    strip_always_on(Platform::Codex, repo_root)?;
+    codex_config::uninstall_global_mcp(codex_home, repo_root)
 }
 
 #[cfg(test)]
@@ -302,9 +336,47 @@ mod tests {
     fn render_fills_all_slots() {
         let s = render_skill(Platform::Claude);
         assert!(!s.contains("@@"), "no unfilled slots");
-        assert!(s.contains("# CodeGraph — Claude Code"));
+        assert!(s.contains("# CodeGraph for Claude Code"));
         assert!(s.contains("codegraph query"));
         assert!(s.contains("codegraph serve"));
+    }
+
+    #[test]
+    fn skill_orients_with_triggers_and_qualified_tools() {
+        let s = render_skill(Platform::Claude);
+        // Finding #5: the description encodes WHEN to use the skill (triggers).
+        assert!(
+            s.contains("Use when"),
+            "description needs trigger keywords: {s}"
+        );
+        // Findings #4/#5: reference MCP tools with the server-qualified prefix so
+        // the agent does not hit "tool not found".
+        assert!(s.contains("mcp__codegraph__"), "qualify MCP tools: {s}");
+        // Finding #5: do not tell an already-connected assistant to launch serve.
+        assert!(
+            !s.contains("Run `codegraph serve` and use"),
+            "serve redundancy: {s}"
+        );
+    }
+
+    #[test]
+    fn generated_artifacts_are_plain_ascii() {
+        // The skill + always-on ship into users' repos; keep them free of em-dashes,
+        // smart quotes, and arrows so the generated text does not read as machine
+        // written. (Doc comments elsewhere are exempt; this guards the OUTPUT.)
+        let tells = [
+            '\u{2014}', '\u{2013}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2192}',
+        ];
+        let mut bodies: Vec<String> = Platform::all().iter().map(|p| render_skill(*p)).collect();
+        bodies.push(always_on_section());
+        for body in &bodies {
+            for t in tells {
+                assert!(
+                    !body.contains(t),
+                    "AI tell {t:?} in generated artifact: {body}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -412,6 +484,43 @@ mod tests {
             written.iter().any(|p| p.ends_with("config.toml"))
                 && written.iter().any(|p| p.ends_with("hooks.json")),
             "returns the paths it wrote: {written:?}"
+        );
+    }
+
+    #[test]
+    fn codex_global_install_writes_agents_and_global_mcp_no_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("codexhome");
+        let repo = dir.path().join("myrepo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let written = install_codex_global(&repo, &home).unwrap();
+        // AGENTS.md block in the repo (the app reads project AGENTS.md)...
+        let agents = std::fs::read_to_string(repo.join("AGENTS.md")).unwrap();
+        assert!(agents.contains("## CodeGraph"), "{agents}");
+        // ...plus the per-repo MCP server in the GLOBAL config...
+        let toml = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        assert!(toml.contains("codegraph-myrepo"), "{toml}");
+        assert!(written.iter().any(|p| p.ends_with("config.toml")));
+        // ...and NO project .codex/ hook (the app would not fire it).
+        assert!(!repo.join(".codex/hooks.json").exists());
+        assert!(!repo.join(".codex/config.toml").exists());
+    }
+
+    #[test]
+    fn codex_global_uninstall_reverts() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("codexhome");
+        let repo = dir.path().join("myrepo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("AGENTS.md"), "# Repo\n\nKeep this.\n").unwrap();
+        install_codex_global(&repo, &home).unwrap();
+        uninstall_codex_global(&repo, &home).unwrap();
+        let agents = std::fs::read_to_string(repo.join("AGENTS.md")).unwrap();
+        assert!(!agents.contains("## CodeGraph"), "block removed: {agents}");
+        assert!(agents.contains("Keep this."), "foreign content survives");
+        assert!(
+            !home.join("config.toml").exists(),
+            "global entry removed (file empty)"
         );
     }
 

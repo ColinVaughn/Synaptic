@@ -43,6 +43,15 @@ JSON-RPC stream on stdout.
 This is the mode an assistant launches as a subprocess. See
 [Assistant-Integration](Assistant-Integration) for wiring it into a host.
 
+### Registering with Codex
+
+`codegraph install codex` wires this stdio server into Codex automatically: a
+`[mcp_servers.codegraph]` entry in the project `.codex/config.toml` (Codex CLI),
+or a per-repo `[mcp_servers.codegraph-<repo>]` in the global `~/.codex/config.toml`
+with `codegraph install codex --global` (Codex desktop app, which only reads the
+global config). `codegraph` must be on your `PATH`. See
+[Assistant-Integration](Assistant-Integration#codex).
+
 ### HTTP transport
 
 ```
@@ -99,6 +108,11 @@ address (`0.0.0.0` / `::`) disables this check, treated as an intentional public
 exposure.
 
 ## MCP tools
+
+The `initialize` reply carries a server-level `instructions` string that orients
+an assistant to the whole toolset (the recommended flow, and what "god node",
+"community", and edge confidence mean), and every tool in `tools/list` documents
+its parameters in the input schema, so an agent can use each one correctly.
 
 All tools return a single text content block. The text is purpose-formatted (it
 is the load-bearing output). The full set, exactly as listed by `tools/list`:
