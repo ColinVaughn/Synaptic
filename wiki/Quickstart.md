@@ -76,8 +76,9 @@ codegraph serve                 # MCP server over stdio
 codegraph install               # wire CodeGraph into a host assistant
 ```
 
-`install` writes a skill file and a hook that nudges the assistant to query the graph before
-grepping or reading files. See [MCP Server](MCP-Server) and
+`install` wires CodeGraph into a host assistant so it queries the graph before grepping or
+reading files: a Claude skill file + hooks, an always-on instructions block for other
+assistants, and a native MCP server + hook for Codex. See [MCP Server](MCP-Server) and
 [Assistant Integration](Assistant-Integration).
 
 ## Next steps

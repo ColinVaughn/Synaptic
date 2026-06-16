@@ -76,6 +76,7 @@ OpenAI, DeepSeek, Azure OpenAI, Bedrock, Ollama. Set `CODEGRAPH_BACKEND` to forc
 | `~/.codegraph/` | read/written | Global cross-repo store (`global-graph.json`, `global-manifest.json`) |
 | `.claude/settings.json` | read/written | `PreToolUse` hooks installed by `codegraph install` (Claude). See [Assistant Integration](Assistant-Integration) |
 | `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` and per-platform skill files | written | Assistant instruction sections written by `install` |
+| `.codex/config.toml` / `.codex/hooks.json` (+ `~/.codex/config.toml`) | read/written | Codex MCP server + `SessionStart` hook from `codegraph install codex` (project, or global with `--global`). See [Assistant Integration](Assistant-Integration) |
 
 ## Notes
 
