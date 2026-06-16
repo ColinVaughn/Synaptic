@@ -164,6 +164,10 @@ pub(crate) enum Cmd {
         /// Require this API key for HTTP requests (or set CODEGRAPH_API_KEY).
         #[arg(long)]
         api_key: Option<String>,
+        /// Trusted root for resolving source files in code-reading tools
+        /// (default: the directory above codegraph-out/, i.e. the repo root).
+        #[arg(long)]
+        source_root: Option<PathBuf>,
     },
     /// Ingest an external source into the graph (cargo workspace, MCP config) or
     /// fetch a URL into codegraph-out/ingested/ for the next extract.

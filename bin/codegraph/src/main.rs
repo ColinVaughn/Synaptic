@@ -91,7 +91,8 @@ fn main() -> Result<()> {
             graph,
             http,
             api_key,
-        } => run_serve(graph, http, api_key),
+            source_root,
+        } => run_serve(graph, http, api_key, source_root),
         Cmd::Prs {
             number,
             repo,

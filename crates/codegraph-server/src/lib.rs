@@ -18,6 +18,7 @@
 
 mod http;
 pub mod session;
+mod source;
 pub use http::serve_http;
 pub use session::{SessionStore, DEFAULT_SESSION_IDLE};
 
@@ -63,6 +64,9 @@ pub struct Server {
     runner: Box<dyn CommandRunner>,
     /// JSONL query-log path (opt-in via `CODEGRAPH_QUERY_LOG`); `None` = off.
     log_path: Option<PathBuf>,
+    /// Trusted root for resolving repo-relative `source_file` paths to real
+    /// files (the code-retrieval tools). `None` disables source reading.
+    source_root: Option<PathBuf>,
 }
 
 fn reload_key_for(path: &Path) -> Option<(u64, u64)> {
@@ -105,6 +109,7 @@ impl Server {
             reload_key,
             runner: Box::new(SystemCommands),
             log_path: query_log_path(),
+            source_root: None,
         }
     }
 
@@ -120,6 +125,19 @@ impl Server {
     pub fn with_runner(mut self, runner: Box<dyn CommandRunner>) -> Server {
         self.runner = runner;
         self
+    }
+
+    /// Set the trusted source root for `get_source` (and other code-reading
+    /// tools). Stored as-is; resolution canonicalizes per request.
+    pub fn with_source_root(mut self, root: PathBuf) -> Server {
+        self.source_root = Some(root);
+        self
+    }
+
+    /// Resolve a node's `source_file` to a real, in-jail path (or `None`).
+    fn resolve_source_path(&self, rel: &str) -> Option<PathBuf> {
+        let root = self.source_root.as_deref()?;
+        source::resolve_in_root(root, rel)
     }
 
     /// Reload `graph.json` if it changed on disk since the last check.
