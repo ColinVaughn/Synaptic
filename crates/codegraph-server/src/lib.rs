@@ -36,7 +36,10 @@ use codegraph_prs::{
     format_pr_detail, format_prs_text, today_epoch_days, CommandRunner, ImpactIndex, PrInfo,
     Status, SystemCommands,
 };
-use codegraph_query::{explain, resolve_seed, shortest_path, QueryIndex, TraversalMode};
+use codegraph_query::{
+    affected_nodes, explain, resolve_seed, shortest_path, QueryIndex, TraversalMode,
+    DEFAULT_AFFECTED_RELATIONS,
+};
 use serde_json::{json, Value};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -487,6 +490,36 @@ impl Server {
         }
     }
 
+    /// `affected` — the nodes that transitively depend on `label`, found by
+    /// walking impact edges backward up to `depth` hops. Empty `relations`
+    /// uses the default structural-impact set.
+    pub fn tool_affected(&self, label: &str, depth: usize, relations: &[String]) -> String {
+        let Some(id) = resolve_seed(&self.kg, label) else {
+            return format!("No node matches '{}'.", sanitize_label(label));
+        };
+        let rels: Vec<&str> = if relations.is_empty() {
+            DEFAULT_AFFECTED_RELATIONS.to_vec()
+        } else {
+            relations.iter().map(String::as_str).collect()
+        };
+        let depth = depth.clamp(1, 16);
+        let hits = affected_nodes(&self.kg, &id, &rels, depth);
+        let seed = sanitize_label(&self.label_of(&id));
+        if hits.is_empty() {
+            return format!("Nothing depends on {seed} within {depth} hops.");
+        }
+        let mut out = format!("{} nodes depend on {seed} (<= {depth} hops):", hits.len());
+        for h in &hits {
+            out.push_str(&format!(
+                "\n  [{}h via {}] {}",
+                h.depth,
+                sanitize_label(&h.via_relation),
+                sanitize_label(&self.label_of(&h.node_id))
+            ));
+        }
+        out
+    }
+
     // PR tools (via codegraph-prs; data-only, no LLM)
 
     fn resolve_base(&self, base: Option<&str>, repo: Option<&str>) -> String {
@@ -784,6 +817,18 @@ impl Server {
             "shortest_path" => {
                 self.tool_shortest_path(&s("source"), &s("target"), u("max_hops", 8) as usize)
             }
+            "affected" => {
+                let rels: Vec<String> = args
+                    .get("relations")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.tool_affected(&s("label"), u("depth", 3) as usize, &rels)
+            }
             "list_prs" => self.tool_list_prs(opt("base"), opt("repo")),
             "get_pr_impact" => self.tool_get_pr_impact(u("pr_number", 0), opt("repo")),
             "triage_prs" => self.tool_triage_prs(opt("base"), opt("repo")),
@@ -974,6 +1019,12 @@ fn tools_list() -> Value {
           "inputSchema": { "type": "object", "properties": { "repo": { "type": "string", "description": "Repo tag, as listed by list_repos." } }, "required": ["repo"] } },
         { "name": "shortest_path", "description": "Shortest path between two nodes, showing the chain of relations. Answers 'how does A reach B' or 'is X connected to Y'.",
           "inputSchema": { "type": "object", "properties": { "source": { "type": "string", "description": "Start node: label, id, or bare name." }, "target": { "type": "string", "description": "End node: label, id, or bare name." }, "max_hops": { "type": "integer", "description": "Optional cap on path length (hops)." } }, "required": ["source", "target"] } },
+        { "name": "affected", "description": "Reverse-impact: the nodes that transitively depend on a symbol, i.e. what could break if you change it. Walks calls/imports/inherits/uses edges backward. Answers 'what is the blast radius of changing X'.",
+          "inputSchema": { "type": "object", "properties": {
+              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." },
+              "depth": { "type": "integer", "description": "Max hops to walk backward (default 3, max 16)." },
+              "relations": { "type": "array", "items": { "type": "string" }, "description": "Optional edge relations to follow; defaults to the structural-impact set (calls, imports, inherits, implements, uses, references, depends_on, reads_from)." }
+          }, "required": ["label"] } },
         { "name": "list_prs", "description": "Open pull requests targeting the base branch with their CI/review state. Requires the `gh` CLI authenticated for the repo.",
           "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch to filter to (default: the repo's default branch)." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } } } },
         { "name": "get_pr_impact", "description": "One PR's detail plus its graph blast radius: which graph nodes and communities its changed files touch. Requires the `gh` CLI.",
@@ -1157,7 +1208,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 13);
+        assert_eq!(names.len(), 14);
         for expected in [
             "query_graph",
             "get_node",
@@ -1169,6 +1220,7 @@ mod tests {
             "list_repos",
             "repo_stats",
             "shortest_path",
+            "affected",
             "list_prs",
             "get_pr_impact",
             "triage_prs",
@@ -1254,6 +1306,29 @@ mod tests {
         let mut s = server(); // no source root
         let out = call_tool(&mut s, "get_source", json!({"label": "AuthService"}));
         assert!(out.contains("Source not available"), "{out}");
+    }
+
+    #[test]
+    fn affected_lists_transitive_dependents() {
+        // login_user calls check; AuthService calls login_user.
+        // Changing `check` affects login_user (1 hop) and AuthService (2 hops).
+        let gd = GraphData {
+            nodes: vec![
+                node("check", "check", Some(0)),
+                node("login", "login_user", Some(0)),
+                node("auth", "AuthService", Some(0)),
+            ],
+            links: vec![
+                edge("login", "check", "calls"),
+                edge("auth", "login", "calls"),
+            ],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        let out = call_tool(&mut s, "affected", json!({"label": "check", "depth": 5}));
+        assert!(out.contains("login_user"), "{out}");
+        assert!(out.contains("AuthService"), "{out}");
+        assert!(out.contains("via calls"), "{out}");
     }
 
     #[test]
