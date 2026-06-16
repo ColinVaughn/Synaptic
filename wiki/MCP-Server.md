@@ -137,16 +137,17 @@ exposure.
 
 ## MCP tools
 
-`tools/list` reports 17 tools. Every tool documents its parameters in its input
+`tools/list` reports 20 tools. Every tool documents its parameters in its input
 schema, and every tool carries annotations so a host knows how safe it is to run:
 
 ```json
 "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": <bool> }
 ```
 
-All 17 tools are `readOnlyHint: true`. `openWorldHint` is `true` only for the
+All 20 tools are `readOnlyHint: true`. `openWorldHint` is `true` only for the
 tools that reach outside the graph by shelling out (`list_prs`, `get_pr_impact`,
-`triage_prs`, `working_changes_impact`); it is `false` for the rest.
+`triage_prs`, `working_changes_impact`, and `time_travel_diff`); it is `false`
+for the rest. `plan_rename` is plan-only and never edits source.
 
 Each tool returns a text content block (the load-bearing, purpose-formatted
 output). Four tools additionally declare an `outputSchema` and return a typed
@@ -353,6 +354,53 @@ Parameters:
 
 Returns `Working changes vs <base>: <n> files, <n> graph nodes, <n> communities
 touched` and the changed files, or `No changes vs <base> (or git unavailable).`
+
+### structural_search
+
+Structural search over the graph with CGQL (a small Cypher-inspired query
+language), or a named architectural pattern. Not text search: it matches on
+kind/visibility/loc/fan-in/out/etc. `.name` is the bare symbol (no parentheses);
+use `=~` for a regex/substring match.
+
+Parameters:
+- `query` (string) -- a CGQL query, e.g. `MATCH (c:class) WHERE c.loc > 500 RETURN c`.
+  Omit when using `pattern`.
+- `pattern` (string) -- a built-in pattern name instead of a query: `singleton`,
+  `factory`, `observer`, `service-locator`, `god-class`.
+- `limit` (integer) -- max rows to return. Default 50.
+
+Returns the matched rows (one node per line: label, kind/visibility, source
+location), or the parse error if the query is malformed.
+
+### time_travel_diff
+
+How the code graph changed between two git revisions: added/removed module
+dependencies, removed APIs, architectural drift, new dependency cycles, and
+change hotspots. Builds each revision in a throwaway git worktree (slow on a cold
+repo; cached per commit SHA afterwards). `openWorldHint: true`.
+
+Parameters:
+- `rev1` (string, required) -- the base revision (e.g. `HEAD~10`, a branch, a SHA).
+- `rev2` (string) -- the target revision. Defaults to the current working tree.
+- `top` (integer) -- max rows per ranked section. Default 20.
+
+Returns a summary (`<n> new nodes, <n> new edges, ...`), the added/removed
+dependencies, removed APIs, drift, new cycles, and hotspots.
+
+### plan_rename
+
+Plan-only: a confidence-scored rename plan (edit sites, blast radius, collision
+check) for an agent to apply. Never edits source. After applying the edits, run
+`codegraph refactor verify` on the CLI to check the post-edit graph.
+
+Parameters:
+- `name` (string, required) -- the symbol to rename (its name, or a node id).
+- `to` (string, required) -- the new name.
+- `id` (string) -- disambiguate by node id when the name matches several definitions.
+- `file` (string) -- disambiguate by a file-path substring.
+
+Returns `Rename <old> -> <new> [<confidence>], <n> edit(s) across <n> file(s), <n>
+to review, <n> affected`, or an error string if the symbol is not found.
 
 ### Structured output
 
