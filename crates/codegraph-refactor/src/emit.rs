@@ -19,24 +19,44 @@ pub fn write_plan(plan: &RenamePlan, out_dir: &Path) -> Result<(PathBuf, PathBuf
     Ok((json_path, md_path))
 }
 
-fn site_line(s: &EditSite) -> String {
-    let loc = match (s.span, s.line) {
+fn loc_str(s: &EditSite) -> String {
+    match (s.span, s.line) {
         (Some(sp), _) => format!("{}:{}:{}", s.file, sp.start_line, sp.start_col),
         (None, Some(l)) => format!("{}:{}", s.file, l),
         (None, None) => s.file.clone(),
-    };
-    let repo = match &s.repo {
+    }
+}
+
+fn repo_str(s: &EditSite) -> String {
+    match &s.repo {
         Some(r) => format!(" [repo: {r}]"),
         None => String::new(),
-    };
+    }
+}
+
+/// A rename edit line: the symbol's text changes, so show `old -> new`.
+fn site_line(s: &EditSite) -> String {
     format!(
         "- `{}` -- rename `{}` -> `{}` ({}, {}){}",
-        loc,
+        loc_str(s),
         s.old,
         s.new,
         s.reason,
         crate::confidence_str(s.confidence),
-        repo
+        repo_str(s)
+    )
+}
+
+/// A relocate (move/extract) line: the symbol name is unchanged, so a `rename`
+/// arrow would read as `X -> X`. The action is in the reason (e.g. "update import
+/// of `X` to ...") or it is a usage that needs no text change at all.
+fn relocate_site_line(s: &EditSite) -> String {
+    format!(
+        "- `{}` -- {} ({}){}",
+        loc_str(s),
+        s.reason,
+        crate::confidence_str(s.confidence),
+        repo_str(s)
     )
 }
 
@@ -254,7 +274,7 @@ pub fn render_relocate_md(plan: &crate::relocate::RelocatePlan, plan_json_path: 
         let _ = writeln!(o, "(no referencing files import the symbol)");
     } else {
         for s in &plan.import_updates {
-            let _ = writeln!(o, "{}", site_line(s));
+            let _ = writeln!(o, "{}", relocate_site_line(s));
         }
     }
     let _ = writeln!(o);
@@ -266,7 +286,7 @@ pub fn render_relocate_md(plan: &crate::relocate::RelocatePlan, plan_json_path: 
             "## References (no text change; confirm they still resolve)"
         );
         for s in &plan.references {
-            let _ = writeln!(o, "{}", site_line(s));
+            let _ = writeln!(o, "{}", relocate_site_line(s));
         }
         let _ = writeln!(o);
     }
@@ -374,5 +394,94 @@ mod tests {
         assert!(md.contains("codegraph refactor verify --plan custom/out/plan.json"));
         // ambiguity note present
         assert!(md.contains("matches"));
+    }
+
+    fn sample_relocate_plan() -> crate::relocate::RelocatePlan {
+        let edit = |file: &str, reason: String| EditSite {
+            file: file.into(),
+            span: None,
+            line: Some(2),
+            // name unchanged on a move: old == new
+            old: "getCached".into(),
+            new: "getCached".into(),
+            confidence: Confidence::Inferred,
+            reason,
+            needs_review: true,
+            repo: None,
+        };
+        crate::relocate::RelocatePlan {
+            version: 1,
+            operation: "extract".into(),
+            symbol: "getCached".into(),
+            target: Candidate {
+                id: "lib::cache::getCached".into(),
+                label: "getCached()".into(),
+                kind: Some("function".into()),
+                visibility: None,
+                file: "src/lib/cache.ts".into(),
+                span: Some(Span {
+                    start_line: 19,
+                    start_col: 17,
+                    end_line: 19,
+                    end_col: 26,
+                }),
+            },
+            dest_file: "src/lib/cacheGet.ts".into(),
+            dest_exists: false,
+            ambiguous_target: false,
+            candidates: vec![],
+            def_span: Some(Span {
+                start_line: 19,
+                start_col: 17,
+                end_line: 27,
+                end_col: 2,
+            }),
+            blast_radius: BlastRadius {
+                edit_count: 2,
+                file_count: 2,
+                affected_node_count: 4,
+                affected_node_ids: vec![],
+            },
+            import_updates: vec![edit(
+                "src/lib/blogService.ts",
+                "update import of `getCached` to `src/lib/cacheGet.ts`".into(),
+            )],
+            references: vec![EditSite {
+                file: "src/lib/cache.ts".into(),
+                span: Some(Span {
+                    start_line: 72,
+                    start_col: 18,
+                    end_line: 72,
+                    end_col: 27,
+                }),
+                line: Some(72),
+                old: "getCached".into(),
+                new: "getCached".into(),
+                confidence: Confidence::Extracted,
+                reason: "call site".into(),
+                needs_review: false,
+                repo: None,
+            }],
+            collision: Collision {
+                exists: false,
+                severity: "none".into(),
+                locations: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn relocate_markdown_omits_the_rename_arrow() {
+        let md = render_relocate_md(&sample_relocate_plan(), Path::new("out/plan.json"));
+        // A move/extract leaves the name unchanged, so it must not read "X -> X".
+        assert!(
+            !md.contains("rename `getCached` -> `getCached`"),
+            "relocate output must not render a no-op rename arrow:\n{md}"
+        );
+        // The real action is carried by the reason text.
+        assert!(md.contains("update import of `getCached` to `src/lib/cacheGet.ts`"));
+        // The reference line still appears (for context), just without the arrow.
+        assert!(md.contains("`src/lib/cache.ts:72:18` -- call site (EXTRACTED)"));
+        assert!(md.contains("codegraph refactor verify --plan out/plan.json --relocate"));
     }
 }

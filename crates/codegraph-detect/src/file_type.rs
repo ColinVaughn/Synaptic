@@ -34,7 +34,7 @@ pub const ALL_FILE_TYPES: [FileType; 5] = [
 // (`.inc` is ambiguous - PHP/ASP/Pascal includes - so it stays deferred rather
 // than be force-routed to one parser. BYOND `.dm*` need binary parsers + a
 // grammar that doesn't exist; deferred indefinitely.)
-// Phase 6 re-added: csproj/fsproj/vbproj/sln/slnx (.NET, `dotnet.rs`),
+// Also recognized: csproj/fsproj/vbproj/sln/slnx (.NET, `dotnet.rs`),
 // cls/trigger (Apex regex, `apex.rs`), pas/pp/dpr/dpk/lpr (Pascal/Delphi regex,
 // `pascal.rs`), razor/cshtml (Razor -> C#, `razor.rs`). Markdown (md/mdx/qmd)
 // stays a *document*: it gets structural extraction via a dedicated pass, not

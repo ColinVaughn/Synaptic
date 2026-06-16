@@ -291,7 +291,9 @@ pub(crate) enum Cmd {
     },
     /// Structural search over the graph with CGQL, or a named architectural
     /// pattern. Not text search: matches on kind/visibility/loc/fan-in/out/etc.
+    /// `.name` is the bare symbol (no `()`); use `=~` for a regex/substring match.
     /// Example: codegraph search "MATCH (c:class) WHERE c.loc > 500 RETURN c"
+    /// Example: codegraph search "MATCH (f:function) WHERE f.name =~ \"announce\" RETURN f"
     Search {
         /// A CGQL query. Omit when using --pattern or --list-patterns.
         query: Option<String>,

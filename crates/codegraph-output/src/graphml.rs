@@ -21,7 +21,7 @@ pub fn to_graphml_string(kg: &KnowledgeGraph) -> String {
     // federated graphs, so single-repo GraphML is unchanged.
     let federated = gd.nodes.iter().any(|n| n.repo.is_some());
     // Enrichment attrs (kind/visibility/loc) are declared + emitted only when at
-    // least one node carries them, so a graph built before Phase 2 is unchanged.
+    // least one node carries them, so a graph built before enrichment is unchanged.
     let enriched = gd
         .nodes
         .iter()

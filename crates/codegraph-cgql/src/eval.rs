@@ -43,10 +43,21 @@ fn lang_of(file: &str) -> Option<String> {
     Some(fam.to_string())
 }
 
+/// The bare symbol name for matching: a node label without the trailing `()`
+/// the extractor appends to callables. So `f.name = "announce"` matches a node
+/// labelled `announce()`, and `.name` is consistent across kinds (a class label
+/// is already bare). Only an exact trailing `()` is removed, so a label like
+/// `Setup (Windows)` is left intact. Partial matches use the `=~` regex operator.
+fn bare_name(label: &str) -> &str {
+    label.strip_suffix("()").unwrap_or(label)
+}
+
 fn prop(kg: &KnowledgeGraph, id: &NodeId, field: Field) -> Val {
     let node = kg.node(id);
     match field {
-        Field::Name => node.map(|n| Val::S(n.label.clone())).unwrap_or(Val::Null),
+        Field::Name => node
+            .map(|n| Val::S(bare_name(&n.label).to_string()))
+            .unwrap_or(Val::Null),
         Field::File => node
             .map(|n| Val::S(n.source_file.clone()))
             .unwrap_or(Val::Null),
@@ -120,7 +131,7 @@ fn eval_expr(
             Some(id) => compare(&prop(kg, id, p.field), *op, v, regexes),
             None => false,
         },
-        // Per-node modifiers are not populated yet (Phase 2); always false.
+        // Per-node modifiers are not populated yet; always false.
         Expr::Has(_, _) => false,
     }
 }
@@ -547,6 +558,44 @@ mod tests {
         let mut classes = run(&kg, "MATCH (c:class) RETURN c");
         classes.sort();
         assert_eq!(classes, vec!["big", "small"]);
+    }
+
+    #[test]
+    fn name_matches_bare_identifier_not_the_call_label() {
+        let kg = graph(
+            vec![
+                node("announce", "announce()", NodeKind::Function, 5),
+                node("user", "User", NodeKind::Class, 5),
+            ],
+            vec![],
+        );
+        // `.name` is the bare identifier: a plain equality matches without `()`.
+        assert_eq!(
+            run(
+                &kg,
+                "MATCH (f:function) WHERE f.name = \"announce\" RETURN f"
+            ),
+            vec!["announce"]
+        );
+        // The decorated label no longer matches `.name` (parens are stripped).
+        assert!(run(
+            &kg,
+            "MATCH (f:function) WHERE f.name = \"announce()\" RETURN f"
+        )
+        .is_empty());
+        // A class label is already bare and keeps matching.
+        assert_eq!(
+            run(&kg, "MATCH (c:class) WHERE c.name = \"User\" RETURN c"),
+            vec!["user"]
+        );
+        // Partial matches still use the `=~` regex operator.
+        assert_eq!(
+            run(
+                &kg,
+                "MATCH (f:function) WHERE f.name =~ \"nounce\" RETURN f"
+            ),
+            vec!["announce"]
+        );
     }
 
     #[test]

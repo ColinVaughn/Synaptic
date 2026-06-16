@@ -26,7 +26,7 @@ pub struct SemanticOutcome {
 /// Run the semantic extraction over `docs` (`(relative_path, content)` pairs) and
 /// return the resulting concept nodes/edges plus token usage. When `cache` is
 /// set, the whole-corpus result is cached (a coarse cache; per-file incremental
-/// is a Phase C refinement).
+/// would be a future refinement).
 pub async fn run_semantic_pass(
     client: &dyn LlmClient,
     docs: Vec<(String, String)>,

@@ -128,8 +128,8 @@ fn extract_then_query_roundtrip() {
     );
 }
 
-/// Phase 6.1 + 6.2: .NET project files and Markdown structure flow through a
-/// full `extract` into graph.json.
+/// .NET project files and Markdown structure flow through a full `extract` into
+/// graph.json.
 #[test]
 fn extract_dotnet_and_markdown_structure() {
     let dir = tempfile::tempdir().unwrap();
@@ -200,9 +200,9 @@ fn extract_dotnet_and_markdown_structure() {
     );
 }
 
-/// Phase 6 audit fix (B1): `update` re-extracts markdown headings — the
-/// structural markdown pass now runs in the incremental rebuild, not just
-/// `extract`. (The same `rebuild` backs `watch` and `workspace build`.)
+/// `update` re-extracts markdown headings: the structural markdown pass runs in
+/// the incremental rebuild, not just `extract`. (The same `rebuild` backs `watch`
+/// and `workspace build`.)
 #[test]
 fn update_reextracts_markdown_headings() {
     let dir = tempfile::tempdir().unwrap();
@@ -242,8 +242,8 @@ fn update_reextracts_markdown_headings() {
     );
 }
 
-/// Phase 6.5/6.6: `export` re-emits formats from an existing graph.json without
-/// re-extracting (here DOT + a Neo4j cypher script).
+/// `export` re-emits formats from an existing graph.json without re-extracting
+/// (here DOT + a Neo4j cypher script).
 #[test]
 fn export_reemits_without_rebuild() {
     let dir = tempfile::tempdir().unwrap();

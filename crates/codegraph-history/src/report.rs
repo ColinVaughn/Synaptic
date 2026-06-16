@@ -128,7 +128,7 @@ pub fn dependency_delta(
 }
 
 /// Removed code symbols that were a public API of `old`. When enrichment is
-/// present (Phase 2), a removed `Public` node counts even with no observed
+/// present, a removed `Public` node counts even with no observed
 /// references; otherwise it falls back to the export-surface heuristic (a node
 /// referenced from another file). `Private`/`Internal` removals are never APIs.
 pub fn removed_apis(old: &KnowledgeGraph, new: &KnowledgeGraph, top: usize) -> Vec<RemovedApi> {

@@ -6,13 +6,13 @@
 //! - **Neo4j → `cypher-shell`** (ships with Neo4j, speaks Bolt). We shell out and
 //!   pipe the `;`-terminated script to stdin, so the user supplies a
 //!   `bolt://…` URI — and we avoid pulling a heavy async
-//!   Bolt crate (the Phase 5 "shell out to an installed tool" decision).
+//!   Bolt crate (the "shell out to an installed tool" decision).
 //! - **FalkorDB → the pure-Rust `redis` client** (FalkorDB is a Redis module;
 //!   `GRAPH.QUERY` over RESP). Programmatic args sidestep shell-quoting hazards.
 //!
 //! The statement generation + URI parsing are pure and unit-tested; the actual
 //! subprocess / socket round-trip is thin glue (it needs a live server, so it
-//! can't be exercised offline — like the Phase 5 external integrations).
+//! can't be exercised offline — like the external integrations).
 
 use std::io::{self, Write};
 use std::process::{Command, Stdio};

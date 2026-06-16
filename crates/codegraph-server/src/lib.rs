@@ -298,7 +298,7 @@ impl Server {
         let Some(n) = self.kg.node(&id) else {
             return format!("No node matches '{}'.", sanitize_label(label));
         };
-        // Enrichment (Phase 2) is shown only when present, so a pre-enrichment
+        // Enrichment is shown only when present, so a pre-enrichment
         // graph yields the original output.
         let mut extra = String::new();
         if let Some(k) = n.kind() {
@@ -353,7 +353,7 @@ impl Server {
         let window = context_lines.clamp(1, 400);
         let lines: Vec<&str> = text.lines().collect();
         let from = start.saturating_sub(1).min(lines.len());
-        // With a span (Phase 2), stop at the symbol's real end line (capped by the
+        // With a span, stop at the symbol's real end line (capped by the
         // window) so the body isn't over- or under-read; else use a fixed window.
         let span_end = n.span().map(|s| s.end_line as usize);
         let to = match span_end {
@@ -1590,7 +1590,7 @@ fn tools_list() -> Value {
           "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch (default: the repo's default branch)." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } } } },
         { "name": "working_changes_impact", "description": "Graph blast radius of your branch's changes against a base branch (committed plus uncommitted, the same set a PR would have): which graph nodes and communities they touch, before opening a PR. Uses git, no gh needed.",
           "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch to diff against (default: the repo's default branch)." } } } },
-        { "name": "structural_search", "description": "Structural search over the graph with CGQL, or a named architectural pattern. Not text search: matches on kind/visibility/loc/fan-in/out/etc. Example query: 'MATCH (c:class) WHERE c.loc > 500 RETURN c'. Patterns: singleton, factory, observer, service-locator, god-class.",
+        { "name": "structural_search", "description": "Structural search over the graph with CGQL, or a named architectural pattern. Not text search: matches on kind/visibility/loc/fan-in/out/etc. `.name` is the bare symbol (no parentheses); use `=~` for a regex/substring match. Example query: 'MATCH (c:class) WHERE c.loc > 500 RETURN c'. Example name match: 'MATCH (f:function) WHERE f.name =~ \"announce\" RETURN f'. Patterns: singleton, factory, observer, service-locator, god-class.",
           "inputSchema": { "type": "object", "properties": {
               "query": { "type": "string", "description": "A CGQL query. Omit when using `pattern`." },
               "pattern": { "type": "string", "description": "A built-in pattern name instead of a query." },

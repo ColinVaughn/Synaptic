@@ -180,7 +180,7 @@ pub fn deduplicate_entities(
     // Cross-repo dedup is unsafe (labels collide across repos by coincidence).
     // We have no Result to return, so warn on stderr
     // and skip merging rather than silently no-op'ing (which masks the
-    // misconfiguration). Federation (per-repo dedup) is Phase D.
+    // misconfiguration). Federation handles per-repo dedup separately.
     let repos: HashSet<&str> = nodes.iter().filter_map(|n| n.repo.as_deref()).collect();
     if repos.len() > 1 {
         eprintln!(

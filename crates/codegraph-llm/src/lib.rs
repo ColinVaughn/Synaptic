@@ -1,6 +1,6 @@
 //! CodeGraph LLM provider layer: the semantic-pass infrastructure.
 //!
-//! Phase B scope (design §3.4 B5 — "one backend + cache + retry"):
+//! Scope (one backend + cache + retry):
 //! - [`LlmClient`] trait + an OpenAI-compatible backend ([`OpenAiCompat`]),
 //! - a [`registry`] of OpenAI-compatible providers with env-var auto-detection,
 //! - a content-hash [`SemanticCache`],

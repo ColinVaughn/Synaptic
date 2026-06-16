@@ -1,8 +1,17 @@
-//! Phase 2 metadata enrichment: kind / visibility / span on code nodes.
+//! Metadata enrichment: kind / visibility / span on code nodes.
+//!
+//! Each test is gated on the `lang-*` feature it exercises so the suite is green
+//! under any single-language build (the `extract-langs` CI matrix), not just
+//! `--all-features`. An ungated test would panic when its grammar is absent.
+
+// A single-language build with no enrichment test for that language (e.g. json)
+// compiles this file with every test gated out, leaving these imports unused.
+#![allow(unused_imports)]
 
 use codegraph_core::{NodeKind, Visibility};
 use codegraph_extract::extract_source;
 
+#[cfg(feature = "lang-python")]
 #[test]
 fn python_kind_visibility_span() {
     let src = b"class Foo:\n    def _bar(self):\n        return 1\n\ndef top():\n    return 2\n";
@@ -34,6 +43,7 @@ fn python_kind_visibility_span() {
     assert_eq!(top.kind(), Some(NodeKind::Function));
 }
 
+#[cfg(feature = "lang-rust")]
 #[test]
 fn rust_kind_visibility_span() {
     let src = b"pub struct S {\n    x: i32,\n}\nimpl S {\n    pub fn go(&self) {}\n    fn hidden(&self) {}\n}\nfn free() {}\n";
@@ -72,6 +82,7 @@ fn rust_kind_visibility_span() {
     assert_eq!(free.visibility(), Some(Visibility::Private)); // no `pub`
 }
 
+#[cfg(feature = "lang-go")]
 #[test]
 fn go_kind_visibility() {
     let src = b"package p\n\nfunc Exported() {}\n\nfunc internal() {}\n\ntype T struct{}\n";
@@ -97,6 +108,7 @@ fn go_kind_visibility() {
     assert_eq!(t.visibility(), Some(Visibility::Public));
 }
 
+#[cfg(feature = "lang-java")]
 #[test]
 fn java_visibility_ignores_annotation_names() {
     // `@PublicApi private` must resolve to Private, not Public (annotation name
@@ -121,6 +133,7 @@ fn java_visibility_ignores_annotation_names() {
     assert_eq!(baz.visibility(), Some(Visibility::Public));
 }
 
+#[cfg(feature = "lang-go")]
 #[test]
 fn go_type_enriched_even_when_method_precedes_declaration() {
     // Method appears before the type decl: the type node must still be enriched.
@@ -130,6 +143,7 @@ fn go_type_enriched_even_when_method_precedes_declaration() {
     assert_eq!(t.kind(), Some(NodeKind::Struct), "stub upgraded in place");
 }
 
+#[cfg(feature = "lang-python")]
 #[test]
 fn raw_call_span_captured_by_generic_walker() {
     // The generic walker (Python here) records a column-accurate call span.

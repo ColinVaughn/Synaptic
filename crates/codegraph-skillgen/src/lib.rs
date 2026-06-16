@@ -47,8 +47,9 @@ relationships (calls, imports, inheritance, impact).
 - `codegraph search "<cgql>"` / `--pattern <name>`: structural search (CGQL) by
   kind/visibility/loc/fan-in-out, variable-length paths, and `count(...)`
   aggregation + named patterns (singleton, factory, observer, service-locator,
-  god-class). Not text search. `--explain` shows the plan; `--save`/`--saved`
-  store queries.
+  god-class). Not text search. `.name` is the bare symbol (no `()`); use `=~` for
+  a regex/substring match. `--explain` shows the plan; `--save`/`--saved` store
+  queries.
 - `codegraph diff <rev1> [rev2]` (or `--since <date>`): how the graph changed
   between two git revisions (new/removed dependencies, removed APIs, drift, new
   cycles, hotspots); `--html` writes a report.

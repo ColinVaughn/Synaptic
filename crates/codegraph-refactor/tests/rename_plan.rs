@@ -65,10 +65,17 @@ fn plan_enumerates_sites_and_routes_ambiguous_to_review() {
     assert_eq!(plan.candidates.len(), 2);
 
     // Definition site is present and high-confidence (it lands in edits).
-    assert!(
-        plan.edits.iter().any(|s| s.reason == "definition"),
-        "definition edit present: {:?}",
-        plan.edits
+    let def = plan
+        .edits
+        .iter()
+        .find(|s| s.reason == "definition")
+        .expect("definition edit present");
+    // Its span is backfilled to the precise name token: a single-line range, not
+    // the coarse whole-definition block the node span carries.
+    let sp = def.span.expect("definition has a span");
+    assert_eq!(
+        sp.start_line, sp.end_line,
+        "definition span is the name token (single line), got {sp:?}"
     );
 
     // At least the definition + one reference were found.
@@ -166,13 +173,21 @@ fn same_file_calls_are_recovered_as_references() {
         },
     )
     .expect("plan");
-    let all: Vec<_> = plan.edits.iter().chain(plan.review.iter()).collect();
+    // The same-file direct call is recovered AND promoted into `edits` with a
+    // precise column (it was previously line-only and stuck in `review`).
+    let call = plan
+        .edits
+        .iter()
+        .find(|s| s.reason == "call site" && s.file.ends_with("helpers.py") && s.line == Some(6))
+        .unwrap_or_else(|| {
+            panic!(
+                "same-file call on line 6 promoted to edits; edits={:?} review={:?}",
+                plan.edits, plan.review
+            )
+        });
     assert!(
-        all.iter().any(|s| s.reason == "call site"
-            && s.file.ends_with("helpers.py")
-            && s.line == Some(6)),
-        "same-file call on line 6 recovered: {:?}",
-        all
+        call.span.is_some(),
+        "promoted same-file call carries a recovered column: {call:?}"
     );
 
     // Move: the def's own file (still using the symbol) gets an import update.

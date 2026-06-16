@@ -6,6 +6,23 @@ All notable changes to CodeGraph are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-01
+
+### Fixed
+- **CI `extract-langs` matrix:** the metadata-enrichment integration test ran every
+  language's case under each single-language build, so the non-enabled grammars panicked
+  and turned the whole matrix red. Each test is now gated on its `lang-*` feature.
+- **Refactor plans no longer double-list a site:** the definition and same-file call sites
+  are given a precise name-token column, so they dedup against the textual scan instead of
+  appearing twice. A trustworthy same-file direct call now lands in the apply set rather
+  than review. `move`/`extract` plans no longer render a no-op `rename X -> X`.
+
+### Changed
+- **CGQL `.name` is the bare symbol.** A query like `WHERE f.name = "announce"` now matches a
+  function whose label is `announce()`; `.name` is consistent across kinds (class labels were
+  already bare). Use the existing `=~` operator for a regex/substring match. Results still show
+  the full label.
+
 ## [0.2.0] - 2026-06-30
 
 ### Added
@@ -107,14 +124,15 @@ All notable changes to CodeGraph are documented here. The format is based on
   extractor, inflating corpus stats and silently producing zero nodes. `.mm` now routes to
   the Objective-C extractor; the remaining unextractable extensions are no longer
   classified as code. A new invariant test (`every_detected_code_extension_has_an_extractor`)
-  keeps the detect and extract sets from drifting. (Phase 6 re-added `.csproj/.sln/.slnx/.fsproj/
-  .vbproj`, `.cls/.trigger`, `.pas/.pp/.dpr/.dpk/.lpr`, and `.razor/.cshtml` as their
-  extractors landed.)
+  keeps the detect and extract sets from drifting. (`.csproj/.sln/.slnx/.fsproj/
+  .vbproj`, `.cls/.trigger`, `.pas/.pp/.dpr/.dpk/.lpr`, and `.razor/.cshtml` are recognized
+  again now that their extractors have landed.)
 - **Reasoning-model temperature:** requests to OpenAI o1/o3/o4 and gpt-5 models no longer
   send an explicit `temperature` (which those models reject with HTTP 400).
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/ColinVaughn/CodeGraph/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/ColinVaughn/CodeGraph/releases/tag/v0.1.1

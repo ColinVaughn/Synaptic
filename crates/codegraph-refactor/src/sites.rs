@@ -1,6 +1,6 @@
 //! Recover concrete edit sites for a rename: the definition plus every resolved
 //! reference. Call references get a column-accurate span from the AST cache
-//! (`RawCall.span`, Phase 2); other references (inherits/implements/uses/...) use
+//! (`RawCall.span`); other references (inherits/implements/uses/...) use
 //! the edge's line and are flagged for the agent to locate the exact token.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -73,6 +73,42 @@ fn line_of(loc: &Option<String>) -> Option<u32> {
             .find(|d| !d.is_empty())
             .and_then(|d| d.parse().ok())
     })
+}
+
+/// Find the first whole-word occurrence of the rename target on a 1-based line of
+/// a file, returning its precise single-line span and whether it is a member
+/// access (`recv.name`). `lines` caches each file's content (None = unreadable or
+/// over the size cap) so a file is read at most once. This recovers a name-token
+/// column for sites that the graph only knows by line (same-file calls) or by a
+/// coarse whole-definition span.
+fn span_on_line(
+    root: &Path,
+    file: &str,
+    line_no: u32,
+    re: &Regex,
+    lines: &mut HashMap<String, Option<Vec<String>>>,
+) -> Option<(Span, bool)> {
+    let entry = lines.entry(file.to_string()).or_insert_with(|| {
+        let abs = root.join(file);
+        match std::fs::metadata(&abs) {
+            Ok(m) if m.len() <= MAX_FILE_BYTES => std::fs::read_to_string(&abs)
+                .ok()
+                .map(|t| t.lines().map(|l| l.to_string()).collect()),
+            _ => None,
+        }
+    });
+    let line = entry.as_ref()?.get((line_no as usize).checked_sub(1)?)?;
+    let m = re.find(line)?;
+    // A member call (`recv.name()`) renames the same token, but its receiver type
+    // is uncertain; the caller keeps it flagged. ASCII byte offsets are char-safe.
+    let member = line[..m.start()].trim_end().ends_with('.');
+    let span = Span {
+        start_line: line_no,
+        start_col: (m.start() as u32) + 1,
+        end_line: line_no,
+        end_col: (m.end() as u32) + 1,
+    };
+    Some((span, member))
 }
 
 /// Build the edit-site list. `root` is the repo root used to read referencing
@@ -228,6 +264,34 @@ pub fn recover_sites(
             needs_review: true,
             repo: kg.node(caller).and_then(|n| n.repo.clone()),
         });
+    }
+
+    // 5. Backfill a precise name-token column for sites the graph only knows by
+    //    line (same-file calls, member calls, non-call references) or by a coarse
+    //    whole-definition span. A precise column lets these dedup against the
+    //    textual scan (no double-listing) and lets a trustworthy same-file *direct*
+    //    call leave `review` -- it was only flagged for want of a locator.
+    if let Ok(re) = Regex::new(&format!(r"\b{}\b", regex::escape(old_name))) {
+        let mut lines: HashMap<String, Option<Vec<String>>> = HashMap::new();
+        for s in &mut sites {
+            let coarse = match s.span {
+                None => true,
+                Some(sp) => sp.start_line != sp.end_line,
+            };
+            if !coarse {
+                continue;
+            }
+            let Some(line_no) = s.line else { continue };
+            let Some((span, member)) = span_on_line(root, &s.file, line_no, &re, &mut lines) else {
+                continue;
+            };
+            s.span = Some(span);
+            // Promote only a same-file direct call: a member call's receiver type
+            // is uncertain and a non-call reference's token may sit in a comment.
+            if s.reason == "call site" && !member && s.confidence == Confidence::Extracted {
+                s.needs_review = false;
+            }
+        }
     }
 
     sites.sort_by(|a, b| {
