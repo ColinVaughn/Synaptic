@@ -83,6 +83,7 @@ fn synthetic_raw_calls(n: usize) -> Vec<RawCall> {
             is_member_call: false,
             source_file: format!("src/mod_{}.rs", i % 32),
             source_location: Some(format!("L{i}")),
+            span: None,
         })
         .collect()
 }

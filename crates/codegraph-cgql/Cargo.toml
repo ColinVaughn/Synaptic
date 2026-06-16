@@ -1,0 +1,22 @@
+[package]
+name = "codegraph-cgql"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "CGQL: a structural query language + architectural pattern library over the CodeGraph."
+
+[dependencies]
+codegraph-core = { workspace = true }
+codegraph-graph = { workspace = true }
+regex = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+codegraph-extract = { workspace = true }
+criterion = { workspace = true }
+serde_json = { workspace = true }
+
+[[bench]]
+name = "cgql"
+harness = false

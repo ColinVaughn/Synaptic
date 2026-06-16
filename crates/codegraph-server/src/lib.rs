@@ -298,8 +298,20 @@ impl Server {
         let Some(n) = self.kg.node(&id) else {
             return format!("No node matches '{}'.", sanitize_label(label));
         };
+        // Enrichment (Phase 2) is shown only when present, so a pre-enrichment
+        // graph yields the original output.
+        let mut extra = String::new();
+        if let Some(k) = n.kind() {
+            extra.push_str(&format!("\nKind: {}", k.as_str()));
+        }
+        if let Some(v) = n.visibility() {
+            extra.push_str(&format!("\nVisibility: {}", v.as_str()));
+        }
+        if let Some(loc) = n.loc() {
+            extra.push_str(&format!("\nLOC: {loc}"));
+        }
         format!(
-            "Node: {}\nID: {}\nSource: {}\nType: {}\nCommunity: {}\nDegree: {}",
+            "Node: {}\nID: {}\nSource: {}\nType: {}\nCommunity: {}\nDegree: {}{}",
             sanitize_label(&n.label),
             sanitize_label(&n.id.0),
             sanitize_label(&n.source_file),
@@ -307,7 +319,8 @@ impl Server {
             n.community
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "-".into()),
-            self.degree(&id)
+            self.degree(&id),
+            extra
         )
     }
 
@@ -340,7 +353,13 @@ impl Server {
         let window = context_lines.clamp(1, 400);
         let lines: Vec<&str> = text.lines().collect();
         let from = start.saturating_sub(1).min(lines.len());
-        let to = (from + window).min(lines.len());
+        // With a span (Phase 2), stop at the symbol's real end line (capped by the
+        // window) so the body isn't over- or under-read; else use a fixed window.
+        let span_end = n.span().map(|s| s.end_line as usize);
+        let to = match span_end {
+            Some(end) => end.clamp(from + 1, from + window).min(lines.len()),
+            None => (from + window).min(lines.len()),
+        };
         // Header labels are sanitized; the code body is returned verbatim.
         let mut out = format!(
             "{} [{}] {}:L{}-L{}\n",
@@ -993,6 +1012,140 @@ impl Server {
         }
     }
 
+    /// Repo root for tools that shell out (diff) or read source (plan_rename):
+    /// the configured source root, else the current directory.
+    fn repo_root(&self) -> std::path::PathBuf {
+        self.source_root
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    }
+
+    /// Structural search via CGQL (or a named pattern) over the loaded graph.
+    pub fn tool_structural_search(
+        &self,
+        query: Option<&str>,
+        pattern: Option<&str>,
+        limit: usize,
+    ) -> String {
+        let result = if let Some(p) = pattern {
+            codegraph_cgql::patterns::run_pattern(&self.kg, p)
+        } else if let Some(q) = query {
+            codegraph_cgql::run(&self.kg, q)
+        } else {
+            return "Provide a CGQL query or a pattern name.".to_string();
+        };
+        let r = match result {
+            Ok(r) => r,
+            Err(e) => return format!("search error: {e}"),
+        };
+        if let Some(agg) = &r.aggregates {
+            let mut out = format!("{} group(s) [{}]", agg.len(), r.columns.join(", "));
+            for row in agg.iter().take(limit) {
+                out.push_str(&format!("\n  {}", row.join("  |  ")));
+            }
+            return out;
+        }
+        if r.rows.is_empty() {
+            return "0 results.".to_string();
+        }
+        let mut out = format!("{} result(s) [{}]", r.rows.len(), r.columns.join(", "));
+        for row in r.rows.iter().take(limit) {
+            let cells: Vec<String> = row
+                .iter()
+                .map(|id| sanitize_label(&self.label_of(id)))
+                .collect();
+            out.push_str(&format!("\n  {}", cells.join("  |  ")));
+        }
+        out
+    }
+
+    /// Time-travel diff between two git revisions (builds each in a worktree).
+    pub fn tool_time_travel_diff(&self, rev1: &str, rev2: Option<&str>, top: usize) -> String {
+        let opts = codegraph_history::DiffOptions {
+            top,
+            ..Default::default()
+        };
+        let r = match codegraph_history::diff(&self.repo_root(), rev1, rev2, &opts) {
+            Ok(r) => r,
+            Err(e) => return format!("diff error: {e}"),
+        };
+        let mut o = format!("Diff {} -> {}\n{}\n", r.rev1, r.rev2, r.summary);
+        o.push_str(&format!(
+            "Added deps: {}; removed deps: {}; removed APIs: {}; new cycles: {}\n",
+            r.added_dependencies.len(),
+            r.removed_dependencies.len(),
+            r.removed_apis.len(),
+            r.new_cycles.len()
+        ));
+        o.push_str(&format!(
+            "Drift: coupling {:.3} -> {:.3}, communities {} -> {}\n",
+            r.drift.coupling_before,
+            r.drift.coupling_after,
+            r.drift.communities_before,
+            r.drift.communities_after
+        ));
+        for h in r.hotspots.iter().take(top) {
+            o.push_str(&format!(
+                "  hotspot {} (+{}/-{} lines)\n",
+                h.file, h.lines_added, h.lines_removed
+            ));
+        }
+        o
+    }
+
+    /// Plan a rename (plan-only; never edits). Returns a human-readable summary.
+    pub fn tool_plan_rename(
+        &self,
+        name: &str,
+        to: &str,
+        id: Option<&str>,
+        file: Option<&str>,
+    ) -> String {
+        // `name` may be a node id; pin it only when --id is not given.
+        let (old, opt_id) = match (id, self.kg.node(&codegraph_core::NodeId(name.to_string()))) {
+            (Some(_), _) => (name.to_string(), id.map(str::to_string)),
+            (None, Some(n)) => (n.label.clone(), Some(n.id.0.clone())),
+            (None, None) => (name.to_string(), None),
+        };
+        let opts = codegraph_refactor::RenameOptions {
+            id: opt_id,
+            file: file.map(str::to_string),
+            // Reading every indexed file is too heavy for an MCP call; the CLI does it.
+            scan_text: false,
+            ..Default::default()
+        };
+        let plan =
+            match codegraph_refactor::plan_rename(&self.kg, &old, to, &self.repo_root(), &opts) {
+                Ok(p) => p,
+                Err(e) => return format!("rename error: {e}"),
+            };
+        let mut o = format!(
+            "Rename {} -> {} [{:?}], {} edit(s) across {} file(s), {} to review, {} affected",
+            plan.old_name,
+            plan.new_name,
+            plan.overall_confidence,
+            plan.blast_radius.edit_count,
+            plan.blast_radius.file_count,
+            plan.review.len(),
+            plan.blast_radius.affected_node_count
+        );
+        if plan.ambiguous_target {
+            o.push_str(&format!(
+                "\n  note: {} definitions share `{}`",
+                plan.candidates.len(),
+                plan.old_name
+            ));
+        }
+        if plan.collision.exists {
+            o.push_str(&format!(
+                "\n  WARNING ({}): `{}` already exists",
+                plan.collision.severity, plan.new_name
+            ));
+        }
+        o.push_str("\n  (plan-only; CodeGraph did not edit source)");
+        o
+    }
+
     fn dispatch_tool(&self, params: &Value) -> Result<Value, (i64, String)> {
         let name = params.get("name").and_then(Value::as_str).unwrap_or("");
         let args = params.get("arguments").cloned().unwrap_or(Value::Null);
@@ -1073,6 +1226,13 @@ impl Server {
             "get_pr_impact" => self.tool_get_pr_impact(u("pr_number", 0), opt("repo")),
             "triage_prs" => self.tool_triage_prs(opt("base"), opt("repo")),
             "working_changes_impact" => self.tool_working_changes_impact(opt("base")),
+            "structural_search" => {
+                self.tool_structural_search(opt("query"), opt("pattern"), u("limit", 50) as usize)
+            }
+            "time_travel_diff" => {
+                self.tool_time_travel_diff(&s("rev1"), opt("rev2"), u("top", 20) as usize)
+            }
+            "plan_rename" => self.tool_plan_rename(&s("name"), &s("to"), opt("id"), opt("file")),
             // An unknown tool is a tool-result with isError, NOT a JSON-RPC
             // protocol error (return text content).
             other => {
@@ -1337,7 +1497,10 @@ get_neighbors / find_callers / find_callees / shortest_path to navigate, and get
 for detail. For change impact, affected gives the blast radius of editing a symbol and \
 working_changes_impact does the same for your current git diff. For a multi-repo graph, \
 call list_repos then pass the repo argument to scope. The PR tools (list_prs / \
-get_pr_impact / triage_prs) need the `gh` CLI.\n\
+get_pr_impact / triage_prs) need the `gh` CLI. To see how the architecture changed \
+over time, run the CLI (not exposed as a tool here): `codegraph diff <rev1> [rev2]` \
+reports new/removed dependencies, removed APIs, drift, new cycles, and hotspots \
+between two git revisions.\n\
 \n\
 Terms: a 'god node' is a high-degree hub (structurally central); a 'community' is a \
 cluster of densely-connected nodes (roughly a module); edge confidence is EXTRACTED \
@@ -1368,7 +1531,7 @@ fn tools_list() -> Value {
                     "source": {"type":"string"}, "relation": {"type":"string"}, "target": {"type":"string"} } } }
             }, "required": ["nodes", "edges"] }
         },
-        { "name": "get_node", "description": "Show one node's metadata (type, source file, community, degree). Use after query_graph to inspect a specific symbol.",
+        { "name": "get_node", "description": "Show one node's metadata: type, source file, community, degree, plus kind (class/function/method/etc.), visibility, and LOC when available. Use after query_graph to inspect a specific symbol.",
           "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name (e.g. 'login_user', 'AuthService'); resolved leniently." } }, "required": ["label"] } },
         { "name": "get_source", "description": "Return the actual source code for a symbol (the lines at its location), so you do not have to open the file. Use after query_graph or get_node to read a function or class body directly.",
           "inputSchema": { "type": "object", "properties": {
@@ -1426,16 +1589,36 @@ fn tools_list() -> Value {
         { "name": "triage_prs", "description": "Open PRs ranked by actionability (status plus graph blast radius) so the model can prioritize review and merge order. Requires the `gh` CLI.",
           "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch (default: the repo's default branch)." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } } } },
         { "name": "working_changes_impact", "description": "Graph blast radius of your branch's changes against a base branch (committed plus uncommitted, the same set a PR would have): which graph nodes and communities they touch, before opening a PR. Uses git, no gh needed.",
-          "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch to diff against (default: the repo's default branch)." } } } }
+          "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch to diff against (default: the repo's default branch)." } } } },
+        { "name": "structural_search", "description": "Structural search over the graph with CGQL, or a named architectural pattern. Not text search: matches on kind/visibility/loc/fan-in/out/etc. Example query: 'MATCH (c:class) WHERE c.loc > 500 RETURN c'. Patterns: singleton, factory, observer, service-locator, god-class.",
+          "inputSchema": { "type": "object", "properties": {
+              "query": { "type": "string", "description": "A CGQL query. Omit when using `pattern`." },
+              "pattern": { "type": "string", "description": "A built-in pattern name instead of a query." },
+              "limit": { "type": "integer", "description": "Max rows to return (default 50)." }
+          } } },
+        { "name": "time_travel_diff", "description": "How the code graph changed between two git revisions: added/removed module dependencies, removed APIs, architectural drift, new cycles, and hotspots. Builds each revision in a throwaway git worktree (slow on a cold repo).",
+          "inputSchema": { "type": "object", "properties": {
+              "rev1": { "type": "string", "description": "Base revision (e.g. HEAD~10, a branch, or a SHA)." },
+              "rev2": { "type": "string", "description": "Target revision (default: the current working tree)." },
+              "top": { "type": "integer", "description": "Max rows per ranked section (default 20)." }
+          }, "required": ["rev1"] } },
+        { "name": "plan_rename", "description": "Plan-only: a confidence-scored rename plan (edit sites, blast radius, collision check) for an agent to apply. Never edits source. Use `codegraph refactor verify` on the CLI after applying.",
+          "inputSchema": { "type": "object", "properties": {
+              "name": { "type": "string", "description": "The symbol to rename (its name, or a node id)." },
+              "to": { "type": "string", "description": "The new name." },
+              "id": { "type": "string", "description": "Disambiguate by node id when several definitions share the name." },
+              "file": { "type": "string", "description": "Disambiguate by file-path substring." }
+          }, "required": ["name", "to"] } }
     ]);
-    // Every tool is a pure read; the PR tools additionally reach the network
-    // (gh), so they carry openWorldHint. Merged here to keep the entries above
-    // focused on schema.
+    // Every tool is a pure read; the PR tools and time_travel_diff additionally
+    // reach the environment (gh / git worktrees), so they carry openWorldHint.
+    // Merged here to keep the entries above focused on schema.
     let open_world = [
         "list_prs",
         "get_pr_impact",
         "triage_prs",
         "working_changes_impact",
+        "time_travel_diff",
     ];
     for t in tools.as_array_mut().unwrap() {
         let name = t["name"].as_str().unwrap_or("").to_string();
@@ -1634,7 +1817,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 17);
+        assert_eq!(names.len(), 20);
         for expected in [
             "query_graph",
             "get_node",
@@ -1653,9 +1836,37 @@ mod tests {
             "get_pr_impact",
             "triage_prs",
             "working_changes_impact",
+            "structural_search",
+            "time_travel_diff",
+            "plan_rename",
         ] {
             assert!(names.contains(&expected), "missing tool {expected}");
         }
+    }
+
+    #[test]
+    fn structural_search_tool_returns_rows() {
+        let mut s = server();
+        let out = call_tool(
+            &mut s,
+            "structural_search",
+            json!({"query": "MATCH (n) RETURN n", "limit": 5}),
+        );
+        // The default server() graph has nodes; a bare match returns some.
+        assert!(
+            out.contains("result(s)") || out.contains("0 results"),
+            "search output: {out}"
+        );
+        // A plan_rename on a missing symbol reports an error string, never panics.
+        let pr = call_tool(
+            &mut s,
+            "plan_rename",
+            json!({"name": "DefinitelyMissingSymbol", "to": "X"}),
+        );
+        assert!(
+            pr.contains("rename error") || pr.contains("not found"),
+            "{pr}"
+        );
     }
 
     #[test]
@@ -2036,10 +2247,15 @@ mod tests {
                 json!(true),
                 "tool {name} must be read-only"
             );
-            // PR + working-tree tools reach outside the graph (gh/git) -> open.
+            // PR + working-tree tools reach outside the graph (gh/git), and
+            // time_travel_diff builds revisions in a worktree -> open world.
             let open = matches!(
                 name,
-                "list_prs" | "get_pr_impact" | "triage_prs" | "working_changes_impact"
+                "list_prs"
+                    | "get_pr_impact"
+                    | "triage_prs"
+                    | "working_changes_impact"
+                    | "time_travel_diff"
             );
             assert_eq!(
                 ann["openWorldHint"],

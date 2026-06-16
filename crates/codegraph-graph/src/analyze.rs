@@ -996,6 +996,90 @@ pub fn graph_diff(old: &KnowledgeGraph, new: &KnowledgeGraph) -> GraphDelta {
     }
 }
 
+// strongly connected components (tarjan)
+
+/// Strongly connected components over edges whose relation is in `relations`
+/// (empty = all relations). Each returned component is a sorted `Vec<NodeId>`;
+/// trivial singletons (no self-loop) are omitted, so the result is exactly the
+/// set of directed cycles' node sets. Iterative Tarjan — no recursion depth limit.
+pub fn strongly_connected_components(kg: &KnowledgeGraph, relations: &[&str]) -> Vec<Vec<NodeId>> {
+    let want = |r: &str| relations.is_empty() || relations.contains(&r);
+    let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for n in kg.nodes() {
+        adj.entry(n.id.clone()).or_default();
+    }
+    for e in kg.edges() {
+        if want(e.relation.as_str()) {
+            adj.entry(e.source.clone())
+                .or_default()
+                .push(e.target.clone());
+        }
+    }
+
+    let mut index = 0i64;
+    let mut indices: HashMap<NodeId, i64> = HashMap::new();
+    let mut low: HashMap<NodeId, i64> = HashMap::new();
+    let mut on_stack: HashSet<NodeId> = HashSet::new();
+    let mut stack: Vec<NodeId> = Vec::new();
+    let mut out: Vec<Vec<NodeId>> = Vec::new();
+
+    let mut order: Vec<NodeId> = adj.keys().cloned().collect();
+    order.sort();
+    for start in order {
+        if indices.contains_key(&start) {
+            continue;
+        }
+        // Explicit DFS stack of (node, next-child cursor) to avoid recursion.
+        let mut call: Vec<(NodeId, usize)> = vec![(start.clone(), 0)];
+        while let Some((v, ci)) = call.last().cloned() {
+            if ci == 0 {
+                indices.insert(v.clone(), index);
+                low.insert(v.clone(), index);
+                index += 1;
+                stack.push(v.clone());
+                on_stack.insert(v.clone());
+            }
+            let children = adj.get(&v).cloned().unwrap_or_default();
+            if ci < children.len() {
+                let w = children[ci].clone();
+                call.last_mut().unwrap().1 += 1;
+                if !indices.contains_key(&w) {
+                    call.push((w, 0));
+                } else if on_stack.contains(&w) {
+                    let lw = indices[&w];
+                    let lv = low[&v];
+                    low.insert(v.clone(), lv.min(lw));
+                }
+            } else {
+                if low[&v] == indices[&v] {
+                    let mut comp = Vec::new();
+                    loop {
+                        let w = stack.pop().unwrap();
+                        on_stack.remove(&w);
+                        comp.push(w.clone());
+                        if w == v {
+                            break;
+                        }
+                    }
+                    let self_loop = adj.get(&v).map(|c| c.contains(&v)).unwrap_or(false);
+                    if comp.len() > 1 || self_loop {
+                        comp.sort();
+                        out.push(comp);
+                    }
+                }
+                call.pop();
+                if let Some((parent, _)) = call.last().cloned() {
+                    let lp = low[&parent];
+                    let lv = low[&v];
+                    low.insert(parent, lp.min(lv));
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 // aggregator
 
 /// Headline graph counts + edge-confidence breakdown.
@@ -1142,6 +1226,33 @@ mod tests {
         sorted.sort_by(|a, b| b.cmp(a));
         assert_eq!(degs, sorted);
         assert_eq!(gods[0].label, "Hub");
+    }
+
+    #[test]
+    fn scc_finds_directed_cycles_only() {
+        // a->b->c->a is one SCC; d is acyclic (omitted).
+        let kg = build(
+            &[
+                n("a", "A", "a.rs"),
+                n("b", "B", "b.rs"),
+                n("c", "C", "c.rs"),
+                n("d", "D", "d.rs"),
+            ],
+            &[
+                e("a", "b", "calls", Confidence::Extracted),
+                e("b", "c", "calls", Confidence::Extracted),
+                e("c", "a", "calls", Confidence::Extracted),
+                e("a", "d", "calls", Confidence::Extracted),
+            ],
+        );
+        let sccs = strongly_connected_components(&kg, &[]);
+        assert_eq!(sccs.len(), 1, "exactly one non-trivial SCC");
+        assert_eq!(
+            sccs[0],
+            vec![NodeId("a".into()), NodeId("b".into()), NodeId("c".into())]
+        );
+        // Relation filter excludes everything when no edges match.
+        assert!(strongly_connected_components(&kg, &["imports"]).is_empty());
     }
 
     #[test]

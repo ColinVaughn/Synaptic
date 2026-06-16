@@ -111,6 +111,9 @@ Required keys are always present; optional keys are omitted when unset. Any othe
 - `source_location` optional (e.g. a line marker); omitted when unset.
 - `community` optional cluster id (integer); omitted when unset.
 - `repo` optional federation tag; absent for single-repo graphs.
+- `kind` optional node kind (`class`, `function`, `method`, `struct`, ...); set for code nodes in supported languages, omitted otherwise. See [Extraction].
+- `visibility` optional declared visibility (`public`, `private`, `protected`, `internal`); omitted when unknown.
+- `span` optional source range object (`start_line`, `start_col`, `end_line`, `end_col`); omitted when unknown. Lines-of-code is `end_line - start_line + 1`.
 - `norm_label` lowercased search key, added by the JSON writer on export.
 
 Non-code asset nodes may also carry `asset_kind` (e.g. `stylesheet`, `data`, `image`, `font`, `media`) in `extra`, which the SVG and 3D viewers use to pick a distinct shape. Federated external-package stubs carry `external_package: true`.
@@ -156,7 +159,7 @@ GraphML for Gephi, yEd, or any GraphML consumer. The document declares `<key>`s 
 - Node: `label`, `file_type`, `source_file`, `community` (declared as `long`; `-1` when unset).
 - Edge: `relation`, `confidence`.
 
-For federated graphs only, two extra attributes are declared and emitted: a node `repo` (string) and an edge `cross_repo` (boolean, written only on cross-repo edges). Single-repo GraphML is unchanged. Internal `_`-prefixed extras are dropped. All text is XML-escaped.
+For federated graphs only, two extra attributes are declared and emitted: a node `repo` (string) and an edge `cross_repo` (boolean, written only on cross-repo edges). Single-repo GraphML is unchanged. When any node carries enrichment metadata, three node attributes are also declared and emitted: `kind`, `visibility`, and `loc` (long). Cypher's rich (live-push) form sets the same `n.kind`/`n.visibility`/`n.loc`. Internal `_`-prefixed extras are dropped. All text is XML-escaped.
 
 ## graph.cypher
 

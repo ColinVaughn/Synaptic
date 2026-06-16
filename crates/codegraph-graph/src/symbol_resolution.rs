@@ -378,6 +378,7 @@ mod tests {
             is_member_call: member,
             source_file: sf.into(),
             source_location: Some("L2".into()),
+            span: None,
         }
     }
 

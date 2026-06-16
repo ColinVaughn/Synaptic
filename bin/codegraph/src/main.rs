@@ -8,6 +8,7 @@ use clap::Parser;
 use cli::{Cli, Cmd};
 use codegraph_incremental::run_merge_driver;
 use commands::cache::run_cache;
+use commands::diff::run_diff;
 use commands::export::run_export;
 use commands::extract::run_extract;
 use commands::global::run_global;
@@ -17,6 +18,8 @@ use commands::install::{run_install, run_uninstall};
 use commands::merge::run_merge_graphs;
 use commands::prs::run_prs;
 use commands::query::{run_affected, run_explain, run_path, run_query};
+use commands::refactor::run_refactor;
+use commands::search::run_search;
 use commands::serve::run_serve;
 use commands::skill::run_skill;
 use commands::update::run_update;
@@ -106,5 +109,58 @@ fn main() -> Result<()> {
         Cmd::Global { action } => run_global(action),
         Cmd::MergeGraphs { graphs, out } => run_merge_graphs(graphs, out),
         Cmd::Cache { action } => run_cache(action),
+        Cmd::Diff {
+            rev1,
+            rev2,
+            since,
+            root,
+            directed,
+            scope,
+            top,
+            module_depth,
+            json,
+            report,
+            html,
+            no_cache,
+        } => run_diff(commands::diff::DiffArgs {
+            rev1,
+            rev2,
+            since,
+            root,
+            directed,
+            scope,
+            top,
+            module_depth,
+            json,
+            report_path: report,
+            html_path: html,
+            no_cache,
+        }),
+        Cmd::Search {
+            query,
+            pattern,
+            list_patterns,
+            explain,
+            save,
+            saved,
+            list_saved,
+            graph,
+            repo,
+            json,
+            limit,
+        } => run_search(commands::search::SearchArgs {
+            query,
+            pattern,
+            list_patterns,
+            explain,
+            save,
+            saved,
+            list_saved,
+            graph,
+            repo,
+            json,
+            limit,
+        }),
+        Cmd::Refactor { action } => run_refactor(action),
     }
 }

@@ -116,6 +116,15 @@ impl<'tree> GoExtractor<'_, 'tree> {
         n.children(&mut c).collect()
     }
 
+    /// Go visibility is by name case: an uppercase initial is exported (public).
+    fn go_vis(name: &str) -> Option<codegraph_core::Visibility> {
+        match name.chars().next() {
+            Some(c) if c.is_uppercase() => Some(codegraph_core::Visibility::Public),
+            Some(_) => Some(codegraph_core::Visibility::Private),
+            None => None,
+        }
+    }
+
     fn walk(&mut self, node: TsNode<'tree>, depth: usize) {
         if depth >= MAX_DEPTH {
             return;
@@ -126,8 +135,13 @@ impl<'tree> GoExtractor<'_, 'tree> {
                     let func_name = self.text(name);
                     let line = Self::line(node);
                     let func_nid = NodeId(make_id(&[&self.stem, &func_name]));
-                    self.b
-                        .add_node(func_nid.clone(), format!("{func_name}()"), line);
+                    self.b.add_code_node(
+                        func_nid.clone(),
+                        format!("{func_name}()"),
+                        node,
+                        codegraph_core::NodeKind::Function,
+                        Self::go_vis(&func_name),
+                    );
                     self.b.add_edge(
                         self.file_nid.clone(),
                         func_nid.clone(),
@@ -159,15 +173,28 @@ impl<'tree> GoExtractor<'_, 'tree> {
                 let line = Self::line(node);
                 let method_nid = if let Some(recv) = recv_type {
                     let parent = NodeId(make_id(&[&self.pkg_scope, &recv]));
+                    // Receiver-type stub (the type's own decl is enriched in
+                    // walk_type_spec); leave it a plain node.
                     self.b.add_node(parent.clone(), recv, line);
                     let m = NodeId(make_id(&[parent.as_str(), &method_name]));
-                    self.b
-                        .add_node(m.clone(), format!(".{method_name}()"), line);
+                    self.b.add_code_node(
+                        m.clone(),
+                        format!(".{method_name}()"),
+                        node,
+                        codegraph_core::NodeKind::Method,
+                        Self::go_vis(&method_name),
+                    );
                     self.b.add_edge(parent, m.clone(), "method", line, None);
                     m
                 } else {
                     let m = NodeId(make_id(&[&self.stem, &method_name]));
-                    self.b.add_node(m.clone(), format!("{method_name}()"), line);
+                    self.b.add_code_node(
+                        m.clone(),
+                        format!("{method_name}()"),
+                        node,
+                        codegraph_core::NodeKind::Method,
+                        Self::go_vis(&method_name),
+                    );
                     self.b
                         .add_edge(self.file_nid.clone(), m.clone(), "contains", line, None);
                     m
@@ -201,7 +228,17 @@ impl<'tree> GoExtractor<'_, 'tree> {
         let type_name = self.text(name);
         let line = Self::line(spec);
         let type_nid = NodeId(make_id(&[&self.pkg_scope, &type_name]));
-        self.b.add_node(type_nid.clone(), type_name, line);
+        let kind = Self::children(spec)
+            .into_iter()
+            .find_map(|c| match c.kind() {
+                "struct_type" => Some(codegraph_core::NodeKind::Struct),
+                "interface_type" => Some(codegraph_core::NodeKind::Interface),
+                _ => None,
+            })
+            .unwrap_or(codegraph_core::NodeKind::TypeAlias);
+        let vis = Self::go_vis(&type_name);
+        self.b
+            .add_code_node(type_nid.clone(), type_name, spec, kind, vis);
         self.b.add_edge(
             self.file_nid.clone(),
             type_nid.clone(),

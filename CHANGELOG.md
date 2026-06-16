@@ -6,6 +6,38 @@ All notable changes to CodeGraph are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-30
+
+### Added
+- **Time-travel diff (`codegraph diff <rev1> [rev2]`):** new `codegraph-history` crate builds
+  the graph at each git revision in a throwaway worktree (cached per commit SHA) and reports
+  added/removed module dependencies, removed APIs, architectural drift, new dependency cycles,
+  and change hotspots. `--since <date>` resolves the base from a date; `--report` writes
+  Markdown and `--html` a self-contained, theme-aware HTML report.
+- **Architectural search with CGQL (`codegraph search`):** new `codegraph-cgql` crate, a
+  Cypher-inspired structural query language matching on kind/visibility/loc/fan-in/out/degree/
+  community/name/file/lang with `= != < <= > >= =~` and `AND`/`OR`/`NOT`, relationship patterns
+  including variable-length paths (`-[:calls*1..3]->`), `count(...)` aggregation, `--explain`
+  query plans, and saved queries (`--save`/`--saved`/`--list-saved`). Ships a named-pattern
+  library: singleton, factory, observer, service-locator, god-class.
+- **Safe refactor (`codegraph refactor`):** new `codegraph-refactor` crate. `rename`, `move`,
+  and `extract` resolve a symbol (surfacing ambiguity), compute the blast radius, score each
+  edit site by confidence, and emit a `plan.json` + `plan.md` for an AI agent to apply, plus a
+  whole-word textual scan for type references the graph does not record as edges and a
+  cross-repo `repo` tag on federated sites. CodeGraph never edits source. `refactor verify`
+  (and `verify --relocate`) rebuilds and checks the graph held its shape: the symbol was
+  renamed/relocated, no references lost, no located nodes dropped, no new cycles.
+- **Node metadata enrichment:** code nodes now carry `kind` (class/function/method/...),
+  `visibility`, and line-`span`/LOC, surfaced in `get_node`/`get_source`, Cypher/GraphML
+  exports, and CGQL. New graph helpers: `fan_in`/`fan_out`/`filter_nodes`/`loc` and an
+  iterative Tarjan `strongly_connected_components`.
+- **Three new MCP tools (17 -> 20):** `structural_search` (CGQL or a named pattern),
+  `time_travel_diff` (graph diff between two revisions), and plan-only `plan_rename` (a
+  confidence-scored rename plan; never edits). All read-only.
+
+### Changed
+- `codegraph diff`'s base revision (`rev1`) is now optional when `--since` is given.
+
 ## [0.1.1] - 2026-06-30
 
 ### Added
@@ -83,5 +115,6 @@ All notable changes to CodeGraph are documented here. The format is based on
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/CodeGraph/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ColinVaughn/CodeGraph/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/ColinVaughn/CodeGraph/releases/tag/v0.1.1

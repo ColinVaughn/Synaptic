@@ -29,6 +29,29 @@ LLM-driven concept layer, see [Semantic-Analysis].
    communities, and analyze.
 7. Write artifacts into `codegraph-out/`.
 
+## Node metadata: kind, visibility, span
+
+Code nodes carry structured metadata beyond their label and location:
+
+- **`kind`** — what the node is: `class`, `interface`, `trait`, `struct`, `enum`,
+  `function`, `method`, and so on (the `Other` fallback when a declaration can't be
+  classified).
+- **`visibility`** — `public`, `protected`, `private`, or `internal`, read from
+  language modifiers (Java/C#/Kotlin/Swift/TS), Rust `pub`, Go name capitalization,
+  or the Python `_name` convention. Absent when a language has no visibility concept.
+- **`span`** — the full source range (`start_line`, `start_col`, `end_line`,
+  `end_col`), from which lines-of-code (`loc`) is derived.
+
+These are populated for the config-driven languages (Python, JavaScript/TypeScript,
+Java, C#, Kotlin, Swift, C, C++, PHP, Scala, Groovy) and for Go and Rust. Other
+languages omit the fields rather than guessing, so consumers treat a missing value
+as "unknown". The fields appear in `graph.json` (and in Cypher/GraphML output), and
+the MCP `get_node` tool surfaces them. They power [architectural search] and
+visibility-aware [time-travel] "removed API" detection.
+
+[architectural search]: Commands
+[time-travel]: Commands
+
 ## Directory discovery
 
 Discovery walks the root with the `ignore` crate's directory walker. The walk:

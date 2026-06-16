@@ -3,6 +3,8 @@ use serde_json::{Map, Value};
 
 use crate::file_type::FileType;
 use crate::id::NodeId;
+use crate::node_kind::{NodeKind, Visibility};
+use crate::span::Span;
 
 /// A graph node. The required fields are the ones in `REQUIRED_NODE_FIELDS`.
 /// Optional fields are omitted from `graph.json` when unset so output stays in
@@ -25,6 +27,68 @@ pub struct Node {
 
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// Keys used to carry the enrichment metadata inside `extra`. Stored there (not
+/// as struct fields) so the ~80 existing `Node { .. }` construction sites stay
+/// unchanged; the typed accessors below are the supported API. Because `extra`
+/// is `#[serde(flatten)]`, these serialize to `graph.json` as plain top-level
+/// node keys (`"kind"`, `"visibility"`, `"span"`), identical to typed fields,
+/// and round-trip losslessly.
+const KIND_KEY: &str = "kind";
+const VISIBILITY_KEY: &str = "visibility";
+const SPAN_KEY: &str = "span";
+
+impl Node {
+    /// The node's kind (class/function/method/...), if the extractor set one.
+    pub fn kind(&self) -> Option<NodeKind> {
+        self.extra
+            .get(KIND_KEY)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
+    /// Set the node's kind.
+    pub fn set_kind(&mut self, kind: NodeKind) {
+        self.extra.insert(
+            KIND_KEY.to_string(),
+            serde_json::to_value(kind).expect("NodeKind serializes"),
+        );
+    }
+
+    /// The node's declared visibility, if known.
+    pub fn visibility(&self) -> Option<Visibility> {
+        self.extra
+            .get(VISIBILITY_KEY)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
+    /// Set the node's visibility.
+    pub fn set_visibility(&mut self, visibility: Visibility) {
+        self.extra.insert(
+            VISIBILITY_KEY.to_string(),
+            serde_json::to_value(visibility).expect("Visibility serializes"),
+        );
+    }
+
+    /// The node's source span, if the extractor captured one.
+    pub fn span(&self) -> Option<Span> {
+        self.extra
+            .get(SPAN_KEY)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
+    /// Set the node's source span.
+    pub fn set_span(&mut self, span: Span) {
+        self.extra.insert(
+            SPAN_KEY.to_string(),
+            serde_json::to_value(span).expect("Span serializes"),
+        );
+    }
+
+    /// Lines of code, derived from the span.
+    pub fn loc(&self) -> Option<u32> {
+        self.span().map(|s| s.line_count())
+    }
 }
 
 #[cfg(test)]
@@ -63,6 +127,38 @@ mod tests {
             assert!(obj.contains_key(k), "missing {k}");
         }
         assert_eq!(obj["file_type"], serde_json::json!("code"));
+    }
+
+    #[test]
+    fn enrichment_accessors_roundtrip_and_omit_when_unset() {
+        // Old-style node (no enrichment) reports None for all three.
+        let n = sample();
+        assert!(n.kind().is_none() && n.visibility().is_none() && n.span().is_none());
+        assert!(n.loc().is_none());
+        let obj = serde_json::to_value(&n).unwrap();
+        assert!(!obj.as_object().unwrap().contains_key("kind"));
+        assert!(!obj.as_object().unwrap().contains_key("span"));
+
+        // Set enrichment, confirm it serializes as plain top-level keys.
+        let mut e = sample();
+        e.set_kind(NodeKind::Class);
+        e.set_visibility(Visibility::Public);
+        e.set_span(Span {
+            start_line: 1,
+            start_col: 1,
+            end_line: 9,
+            end_col: 2,
+        });
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["kind"], serde_json::json!("class"));
+        assert_eq!(v["visibility"], serde_json::json!("public"));
+        assert_eq!(v["span"]["end_line"], serde_json::json!(9));
+
+        // Round-trip back through serde restores the typed values.
+        let back: Node = serde_json::from_value(v).unwrap();
+        assert_eq!(back.kind(), Some(NodeKind::Class));
+        assert_eq!(back.visibility(), Some(Visibility::Public));
+        assert_eq!(back.loc(), Some(9));
     }
 
     #[test]

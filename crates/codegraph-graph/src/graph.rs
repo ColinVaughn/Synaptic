@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use codegraph_core::{Edge, GraphData, Hyperedge, Node, NodeId};
 use petgraph::graph::{Graph, NodeIndex};
@@ -83,6 +83,44 @@ impl KnowledgeGraph {
     /// Degree of `id` (incident edges, either endpoint), O(degree). 0 if absent.
     pub fn degree(&self, id: &NodeId) -> usize {
         self.incident_edges(id).count()
+    }
+
+    /// Distinct out-neighbours of `id` over the given relations (empty = all).
+    pub fn fan_out(&self, id: &NodeId, relations: &[&str]) -> usize {
+        let mut seen = HashSet::new();
+        for e in self.incident_edges(id) {
+            if &e.source == id
+                && &e.target != id
+                && (relations.is_empty() || relations.contains(&e.relation.as_str()))
+            {
+                seen.insert(&e.target);
+            }
+        }
+        seen.len()
+    }
+
+    /// Distinct in-neighbours of `id` over the given relations (empty = all).
+    pub fn fan_in(&self, id: &NodeId, relations: &[&str]) -> usize {
+        let mut seen = HashSet::new();
+        for e in self.incident_edges(id) {
+            if &e.target == id
+                && &e.source != id
+                && (relations.is_empty() || relations.contains(&e.relation.as_str()))
+            {
+                seen.insert(&e.source);
+            }
+        }
+        seen.len()
+    }
+
+    /// Nodes matching a predicate, in insertion order.
+    pub fn filter_nodes<F: Fn(&Node) -> bool>(&self, pred: F) -> Vec<&Node> {
+        self.nodes().filter(|n| pred(n)).collect()
+    }
+
+    /// Lines of code for `id` from its span, if present.
+    pub fn loc(&self, id: &NodeId) -> Option<u32> {
+        self.node(id).and_then(|n| n.loc())
     }
 
     /// Insert/overwrite a node (last write wins on duplicate id), preserving
@@ -218,6 +256,33 @@ mod tests {
             cross_repo: false,
             extra: Map::new(),
         }
+    }
+
+    #[test]
+    fn fan_in_out_filter_and_loc() {
+        let mut a = node("a", "a", "a.rs");
+        a.set_span(codegraph_core::Span {
+            start_line: 1,
+            start_col: 1,
+            end_line: 10,
+            end_col: 1,
+        });
+        let gd = GraphData {
+            nodes: vec![a, node("b", "b", "b.rs"), node("c", "c", "c.rs")],
+            links: vec![
+                edge("a", "b", "calls"),
+                edge("a", "c", "calls"),
+                edge("c", "a", "calls"),
+            ],
+            ..Default::default()
+        };
+        let kg = KnowledgeGraph::from_graph_data(gd);
+        assert_eq!(kg.fan_out(&NodeId("a".into()), &["calls"]), 2);
+        assert_eq!(kg.fan_in(&NodeId("a".into()), &["calls"]), 1);
+        assert_eq!(kg.fan_out(&NodeId("a".into()), &["imports"]), 0); // relation filter
+        assert_eq!(kg.loc(&NodeId("a".into())), Some(10));
+        assert_eq!(kg.loc(&NodeId("b".into())), None);
+        assert_eq!(kg.filter_nodes(|n| n.source_file == "b.rs").len(), 1);
     }
 
     #[test]

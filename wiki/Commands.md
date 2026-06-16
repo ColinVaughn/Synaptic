@@ -11,11 +11,13 @@ Most read commands operate on `codegraph-out/graph.json` by default; build it fi
 | [`extract`](#extract) | Build the graph for a directory and write `codegraph-out/`. |
 | [`export`](#export) | Re-emit an output format from an existing `graph.json` (no re-extraction), or push live to a database. |
 | [`query`](#query) | Find a relevant subgraph for a free-text query. |
+| [`search`](#search) | Structural search (CGQL) and named architectural patterns. Not text search. |
 | [`path`](#path) | Shortest path between two nodes. |
 | [`explain`](#explain) | Show a node and its neighbours. |
 | [`update`](#update) | Incrementally rebuild after files change (or fully with `--full`). |
 | [`watch`](#watch) | Watch the working tree and rebuild on change (debounced). |
 | [`affected`](#affected) | Nodes that transitively depend on a node (reverse-impact). |
+| [`diff`](#diff) | Time-travel: diff the graph between two git revisions (dependencies, removed APIs, drift, cycles, hotspots). |
 | [`hook`](#hook) | Manage git hooks and the `graph.json` merge driver. |
 | [`serve`](#serve) | Run the MCP server (stdio or HTTP). |
 | [`ingest`](#ingest) | Ingest an external source into the graph, or fetch a URL for the next extract. |
@@ -176,6 +178,96 @@ codegraph explain "PaymentService"
 
 See [Querying](Querying).
 
+## search
+
+Structural search over the graph with **CGQL** (a small Cypher-inspired query
+language), or a built-in architectural pattern. This is not text search: it
+matches on structure (kind, visibility, lines-of-code, fan-in/out, degree,
+community) and relationships.
+
+Syntax:
+
+```sh
+codegraph search [QUERY] [--pattern <NAME>] [--list-patterns]
+                 [--explain] [--save <NAME>] [--saved <NAME>] [--list-saved]
+                 [--graph <PATH>] [--repo <TAG>] [--json] [--limit <N>]
+```
+
+| Name | Default | Description |
+| --- | --- | --- |
+| `QUERY` | none | A CGQL query (omit when using `--pattern`/`--saved`/`--list-patterns`). |
+| `--pattern` | none | Run a built-in pattern instead of a query. |
+| `--list-patterns` | off | List the built-in patterns and exit. |
+| `--explain` | off | Print the query plan (scan, joins, filter, project/aggregate) without running it. |
+| `--save` | none | Save the given query under a name (`codegraph-out/cgql/<name>.cgql`). |
+| `--saved` | none | Run a previously saved query by name. |
+| `--list-saved` | off | List saved query names and exit. |
+| `--graph` | `codegraph-out/graph.json` | Source graph. |
+| `--repo` | none | Scope to one federated member (its `repo` tag). |
+| `--json` | off | Emit results as JSON. |
+| `--limit` | `50` | Max rows to display. |
+
+### CGQL
+
+```
+MATCH pattern [WHERE expr] RETURN items [LIMIT n]
+```
+
+- `pattern` is `(var:kind)` node patterns joined by relationships
+  `-[:rel]->`, `<-[:rel]-`, or `-[:rel]-` (either direction). The `:kind` and
+  relationship name are optional.
+- **Variable-length paths:** a relationship may repeat: `-[:calls*1..3]->`
+  (1 to 3 hops), `*` (1 to 8), `*2` (exactly 2), `*2..` / `*..3`. Bounded by a
+  cap so a cycle always terminates; matches by reachability within the range.
+- Node properties usable in `WHERE` / comparisons: `kind`, `name`, `file`,
+  `lang`, `visibility`, `loc`, `fan_in`, `fan_out`, `degree`, `community`.
+- Operators: `=`, `!=`, `<`, `<=`, `>`, `>=`, and `=~` (regex on a string
+  property); combine with `AND` / `OR` / `NOT` and parentheses.
+- **RETURN** takes bound variables (`RETURN a, b`), or an **aggregation**:
+  `RETURN c.community, count(c)` groups by the property and counts per group;
+  `count(*)` totals. (A `var.field` projection returns the distinct values.)
+
+Evaluation is lenient: a comparison against a missing property (e.g. `loc` on a
+node with no span, or any property on a graph built before metadata enrichment)
+simply does not match, rather than erroring.
+
+Examples:
+
+```sh
+codegraph search "MATCH (c:class) WHERE c.loc > 500 AND c.fan_out > 20 RETURN c"
+codegraph search 'MATCH (c:struct) WHERE c.name =~ "Extractor$" RETURN c'
+codegraph search "MATCH (a:class)-[:implements]->(b:interface) RETURN a, b"
+codegraph search "MATCH (a)-[:calls*1..3]->(b) RETURN a, b"   # transitive callers
+codegraph search "MATCH (c:class) RETURN c.community, count(c)" # group + count
+codegraph search "MATCH (c:class) WHERE c.loc > 500 RETURN c" --explain
+codegraph search "MATCH (c:class) RETURN c" --save big_classes
+codegraph search --saved big_classes
+```
+
+### Named patterns
+
+`codegraph search --list-patterns` lists them; `--pattern <name>` runs one:
+
+| Pattern | Matches |
+| --- | --- |
+| `god-class` | Classes over 500 LOC with more than 20 outgoing dependencies. |
+| `singleton` | Classes that hold or return an instance of their own type. |
+| `factory` | Functions/methods returning an abstract type with 2+ implementations. |
+| `observer` | Subject classes holding a field of an interface implemented by 2+ types. |
+| `service-locator` | Classes accessed from 3+ distinct communities. |
+
+The patterns are structural heuristics over the enriched graph; their precision
+depends on how much `kind`/`visibility` a language extractor supplies (see
+[Extraction]). `service-locator` requires community assignments (build with
+`codegraph extract`).
+
+```sh
+codegraph search --pattern god-class
+codegraph search --pattern singleton --json
+```
+
+See [Querying](Querying), [Extraction](Extraction), and [Analysis-and-Reports](Analysis-and-Reports).
+
 ## update
 
 Incrementally rebuild the graph after files change, or do a full rebuild.
@@ -256,6 +348,126 @@ codegraph affected "User" --relation calls --relation references
 ```
 
 See [Querying](Querying) and [Analysis-and-Reports](Analysis-and-Reports).
+
+## diff
+
+Time-travel: compare the code graph at two git revisions and report what changed architecturally.
+
+Syntax:
+
+```sh
+codegraph diff [REV1] [REV2] [--since <DATE>] [--root <DIR>] [--directed] [--scope <PREFIX>] [--top <N>] [--module-depth <N>] [--json] [--report <PATH>] [--html <PATH>] [--no-cache]
+```
+
+| Name | Default | Description |
+| --- | --- | --- |
+| `REV1` | required* | Base revision (for example `HEAD~10`, a branch, or a SHA). *Optional when `--since` is given. |
+| `REV2` | working tree | Target revision; omit to compare the base against the current working tree. |
+| `--since` | none | Resolve the base from a date (latest commit on HEAD at or before it, by commit date). Mutually exclusive with `REV1`. |
+| `--root` | `.` | Repo root. |
+| `--directed` | off | Build a directed graph for each revision. |
+| `--scope` | none | Limit reports to source files under this repo-relative path prefix. |
+| `--top` | `20` | Max rows per ranked section. |
+| `--module-depth` | `2` | Path-component depth defining a "module" (for example `2` => `crates/foo`). |
+| `--json` | off | Emit the full report as JSON. |
+| `--report` | none | Also write a Markdown report to this path. |
+| `--html` | none | Also write a self-contained, theme-aware HTML report to this path. |
+| `--no-cache` | off | Always rebuild; skip the per-commit snapshot store. |
+
+Each revision is materialized into a throwaway `git worktree` and built with the same pipeline as [`extract`](#extract) (nothing is written into your working tree). Built graphs are cached per commit SHA under `codegraph-out/history/`, so the first diff of a cold repo builds two full graphs and later diffs of the same commits are near-instant. The report has five sections:
+
+- **Added / removed dependencies** — module-to-module dependency edges that appeared or disappeared.
+- **Removed APIs** — code symbols that were referenced from another file and are now gone (an export-surface heuristic).
+- **Architectural drift** — change in module coupling (cross-module edge fraction) overall and per module, plus community count.
+- **New cycles** — dependency cycles present in `REV2` but not in `REV1`.
+- **Hotspots of change** — files ranked by line churn (`git diff --numstat`) plus graph node churn.
+
+Example:
+
+```sh
+codegraph diff HEAD~10 HEAD
+codegraph diff v1.2.0 main --report drift.md
+codegraph diff HEAD --scope crates/auth --json
+codegraph diff --since 2026-01-01 --html drift.html
+```
+
+See [Analysis-and-Reports](Analysis-and-Reports) and [Incremental-Updates](Incremental-Updates).
+
+## refactor
+
+Safe refactor: plan a single-symbol rename and verify the graph after an AI agent applies it. CodeGraph never edits source itself; it produces an execution plan for the agent (Claude / Codex / Cursor) and then checks invariants.
+
+### refactor rename
+
+Syntax:
+
+```sh
+codegraph refactor rename <NAME> --to <NEWNAME> [--id <NODEID>] [--file <SUBSTR>] [--root <DIR>] [--graph <PATH>] [--out <DIR>] [--min-confidence <F>] [--json]
+```
+
+| Name | Default | Description |
+| --- | --- | --- |
+| `NAME` | required | The symbol to rename (its name, or a node id). |
+| `--to` | required | The new name. |
+| `--id` | none | Disambiguate by node id when the name matches several definitions. |
+| `--file` | none | Disambiguate by file-path substring. |
+| `--root` | `.` | Repo root; referencing files are read from here for column-accurate sites. |
+| `--graph` | `codegraph-out/graph.json` | Graph to plan against. |
+| `--out` | `codegraph-out/refactor` | Output directory for the plan. |
+| `--min-confidence` | `0.8` | Minimum per-site confidence score `[0,1]` to land in `edits` vs `review`. |
+| `--json` | off | Emit the plan as JSON to stdout. |
+
+The symbol is resolved to a definition node. If the name matches several definitions the command lists the candidates (with `--id` hints) and exits — ambiguity is surfaced, never silently guessed. The plan recovers concrete edit sites: the definition plus every resolved reference. Call sites get a column-accurate span from the AST cache (member calls fall back to line-only); other references (inherits/implements/uses) use the edge line and are flagged for the agent to locate the token. A whole-word textual scan additionally enumerates references the conservative graph does not record as edges (type annotations, enum-variant paths); these land in `review` (disable with `--no-text-scan`). Sites carry a `repo` tag on a federated graph, so a cross-repo rename is surfaced (verify is single-repo in v1).
+
+Each site is scored (`EXTRACTED` / `INFERRED` / `AMBIGUOUS`); low-confidence or ambiguous sites are routed to a `review` list instead of `edits`. A name collision (the new name already exists) is flagged. Two artifacts are written, plus a `before-graph.json` snapshot used by `verify`:
+
+- `plan.json` — machine-readable: target, new name, overall confidence + score, blast radius, ordered `edits`, and a `review` list.
+- `plan.md` — agent-readable narrative: definition first, references grouped by file, the review list, and the exact verify command.
+
+Examples:
+
+```sh
+codegraph refactor rename UserService --to AccountService
+codegraph refactor rename User --to Account --file models/   # disambiguate
+codegraph refactor rename Confidence --to Trust --id src_confidence_confidence --json
+```
+
+### refactor move / extract
+
+Relocate a symbol's definition to another module. `move` targets an existing file; `extract` a new one. The symbol name is unchanged — what changes is where it lives and the imports that reach it.
+
+```sh
+codegraph refactor move <NAME> --to <FILE> [--id <ID>] [--file <SUBSTR>] [--root <DIR>] [--graph <PATH>] [--out <DIR>] [--json]
+codegraph refactor extract <NAME> --to <NEWFILE> [ ...same flags... ]
+```
+
+The plan identifies the definition block to cut (its span), the destination, one import-update site per referencing file, the resolved usages for context, and a destination name collision if any. Verify with `--relocate`.
+
+```sh
+codegraph refactor move parse_config --to crates/core/src/config.rs
+codegraph refactor extract Helper --to src/helpers.rs
+```
+
+### refactor verify
+
+Syntax:
+
+```sh
+codegraph refactor verify --plan <PLAN.JSON> [--root <DIR>] [--relocate] [--json]
+```
+
+Run after the agent applies the plan's edits. It rebuilds the current source and checks invariants against the pre-edit snapshot, exiting non-zero on failure. For a **rename**:
+
+- **definition-renamed** — the old definition is gone and the new one exists at the target's file (matched by full path + kind).
+- **references-preserved** — every file that referenced the old symbol still references the renamed one (compares the set of referencing files, naming any that went missing).
+- **no-lost-nodes** — no located code nodes were dropped (guards against an accidental deletion during the rename).
+- **no-new-cycles** — no dependency cycle exists that was absent before.
+
+For a **move/extract** (`--relocate`): **definition-relocated** (the definition now lives in the destination file, not the old one), **references-preserved**, and **no-new-cycles**.
+
+Scope (v1): a single named symbol; rename/move/extract. Cross-repo is surfaced in the plan but verify rebuilds a single repo. No signature changes. The plan format is designed to extend further.
+
+See [Analysis-and-Reports](Analysis-and-Reports).
 
 ## hook
 

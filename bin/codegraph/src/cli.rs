@@ -248,6 +248,184 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         action: CacheAction,
     },
+    /// Diff the code graph between two git revisions: added/removed dependencies,
+    /// removed APIs, architectural drift, new cycles, and hotspots of change.
+    /// Each revision is built in a throwaway git worktree; built graphs are cached
+    /// per commit under codegraph-out/history/.
+    Diff {
+        /// The base revision (e.g. HEAD~10, a branch, or a SHA). Omit when using --since.
+        rev1: Option<String>,
+        /// The target revision (default: the current working tree).
+        rev2: Option<String>,
+        /// Resolve the base revision from a date (e.g. 2026-01-01); the base is the
+        /// latest commit on HEAD at or before it. Mutually exclusive with rev1.
+        #[arg(long)]
+        since: Option<String>,
+        /// Repo root (default: current directory).
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Produce a directed graph for each revision.
+        #[arg(long)]
+        directed: bool,
+        /// Limit reports to source files under this repo-relative prefix.
+        #[arg(long)]
+        scope: Option<String>,
+        /// Max rows per ranked section.
+        #[arg(long, default_value_t = 20)]
+        top: usize,
+        /// Path-component depth defining a "module" (e.g. 2 => crates/foo).
+        #[arg(long, default_value_t = 2)]
+        module_depth: usize,
+        /// Emit the report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Also write a Markdown report to this path.
+        #[arg(long)]
+        report: Option<PathBuf>,
+        /// Also write a self-contained HTML report to this path.
+        #[arg(long)]
+        html: Option<PathBuf>,
+        /// Always rebuild; skip the per-SHA snapshot store.
+        #[arg(long)]
+        no_cache: bool,
+    },
+    /// Structural search over the graph with CGQL, or a named architectural
+    /// pattern. Not text search: matches on kind/visibility/loc/fan-in/out/etc.
+    /// Example: codegraph search "MATCH (c:class) WHERE c.loc > 500 RETURN c"
+    Search {
+        /// A CGQL query. Omit when using --pattern or --list-patterns.
+        query: Option<String>,
+        /// Run a built-in pattern instead (singleton|factory|observer|service-locator|god-class).
+        #[arg(long)]
+        pattern: Option<String>,
+        /// List the built-in patterns and exit.
+        #[arg(long)]
+        list_patterns: bool,
+        /// Print the query plan instead of running it.
+        #[arg(long)]
+        explain: bool,
+        /// Save the given query under this name (codegraph-out/cgql/<name>.cgql).
+        #[arg(long)]
+        save: Option<String>,
+        /// Run a previously saved query by name.
+        #[arg(long)]
+        saved: Option<String>,
+        /// List saved query names and exit.
+        #[arg(long)]
+        list_saved: bool,
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        /// Scope to one federated member (its `repo` tag).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Emit results as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Max rows to display.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Plan and verify a safe rename. CodeGraph does not edit source: `rename`
+    /// emits a confidence-scored plan (plan.json + plan.md) for an AI agent, and
+    /// `verify` checks graph invariants after the agent applies it.
+    Refactor {
+        #[command(subcommand)]
+        action: RefactorAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum RefactorAction {
+    /// Plan renaming a symbol; writes plan.json + plan.md (no edits made).
+    Rename {
+        /// The symbol to rename (its name, or a node id).
+        name: String,
+        /// The new name.
+        #[arg(long)]
+        to: String,
+        /// Disambiguate by node id when the name matches several definitions.
+        #[arg(long)]
+        id: Option<String>,
+        /// Disambiguate by file-path substring.
+        #[arg(long)]
+        file: Option<String>,
+        /// Repo root (used to read referencing files for column-accurate sites).
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        /// Output directory (default: codegraph-out/refactor).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Minimum per-site confidence score [0,1] to land in edits vs review.
+        #[arg(long, default_value_t = 0.8)]
+        min_confidence: f32,
+        /// Skip the whole-word textual scan for references the graph does not
+        /// record as edges (type uses, enum-variant paths).
+        #[arg(long)]
+        no_text_scan: bool,
+        /// Cap on textual occurrences enumerated by the scan.
+        #[arg(long, default_value_t = 200)]
+        max_text_sites: usize,
+        /// Emit the plan as JSON to stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Plan moving a symbol's definition to an existing file (imports updated by the agent).
+    Move {
+        /// The symbol to move.
+        name: String,
+        /// Destination file (repo-relative).
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        file: Option<String>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Plan extracting a symbol's definition into a new file.
+    Extract {
+        /// The symbol to extract.
+        name: String,
+        /// New destination file (repo-relative).
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        file: Option<String>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify the graph after an agent applied a plan's edits.
+    Verify {
+        /// The plan.json produced by `rename`, `move`, or `extract`.
+        #[arg(long)]
+        plan: PathBuf,
+        /// Repo root to rebuild the post-edit graph from.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// The plan is a move/extract relocation (not a rename).
+        #[arg(long)]
+        relocate: bool,
+        /// Emit the verify report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]

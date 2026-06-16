@@ -36,6 +36,7 @@ mod tests {
             is_member_call: false,
             source_file: "a.py".into(),
             source_location: Some("L3".into()),
+            span: None,
         };
         let json = serde_json::to_string(&rc).unwrap();
         let back: RawCall = serde_json::from_str(&json).unwrap();

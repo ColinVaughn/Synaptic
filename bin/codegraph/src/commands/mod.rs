@@ -2,6 +2,7 @@
 
 pub(crate) mod cache;
 pub(crate) mod common;
+pub(crate) mod diff;
 pub(crate) mod export;
 pub(crate) mod extract;
 pub(crate) mod global;
@@ -11,6 +12,8 @@ pub(crate) mod install;
 pub(crate) mod merge;
 pub(crate) mod prs;
 pub(crate) mod query;
+pub(crate) mod refactor;
+pub(crate) mod search;
 pub(crate) mod serve;
 pub(crate) mod skill;
 pub(crate) mod update;
