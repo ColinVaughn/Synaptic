@@ -4,3 +4,5 @@
 codegraph-out/
 # Local design notes (not tracked).
 /design/
+# Internal implementation plans live in design/ or codegraph-out/, never the root.
+/plan.md
