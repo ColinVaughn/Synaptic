@@ -9,6 +9,12 @@ extract` (see [Commands] and [Output-Formats]).
 By default each command loads `codegraph-out/graph.json`. Pass `--graph <path>`
 to point at a different file.
 
+For *structural* queries (match on kind, visibility, lines of code, fan-in/out,
+relationships, variable-length paths, and aggregation), use the `search` command
+and its CGQL query language instead. CGQL is documented in full under
+[Commands](Commands#search); `search` matches on structure rather than on the
+free-text relevance that `query` scores.
+
 ## query
 
 ```

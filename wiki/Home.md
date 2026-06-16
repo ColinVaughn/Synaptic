@@ -16,6 +16,9 @@ codegraph extract .                      # build codegraph-out/ for the current 
 codegraph query "authentication flow"    # get a relevant subgraph back
 codegraph explain parse_config           # show a node and its neighbours
 codegraph affected parse_config          # what would changing it break?
+codegraph search "MATCH (c:class) WHERE c.loc > 500 RETURN c"   # structural query (CGQL)
+codegraph diff HEAD~10 HEAD              # how the graph changed between two revisions
+codegraph refactor rename old_name --to new_name   # a safe, confidence-scored rename plan
 codegraph serve                          # expose the graph to an assistant over MCP
 ```
 
@@ -31,8 +34,14 @@ get the binary.
   ([Output Formats](Output-Formats), [Visualizations](Visualizations)).
 - Graph queries: relevant-subgraph search, shortest path, and reverse impact
   ([Querying](Querying)).
-- An MCP server and one-command assistant integration ([MCP Server](MCP-Server),
-  [Assistant Integration](Assistant-Integration)).
+- Structural search with CGQL, a Cypher-inspired query language matching on
+  kind/visibility/loc/fan-in-out plus named architectural patterns ([Commands](Commands)).
+- Time-travel diff between two git revisions: added/removed dependencies, removed
+  APIs, architectural drift, new cycles, and change hotspots ([Commands](Commands)).
+- Safe refactor: confidence-scored `rename`/`move`/`extract` plans for an agent to
+  apply, with a graph-invariant `verify` afterwards ([Commands](Commands)).
+- An MCP server (20 read-only tools) and one-command assistant integration
+  ([MCP Server](MCP-Server), [Assistant Integration](Assistant-Integration)).
 - Multi-repo federation with real cross-repo edge resolution
   ([Workspaces and Federation](Workspaces-and-Federation)).
 
