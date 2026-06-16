@@ -120,6 +120,18 @@ impl<'tree> RustExtractor<'_, 'tree> {
         n.children(&mut c).collect()
     }
 
+    /// Rust visibility: a `visibility_modifier` child (`pub`, `pub(crate)`, ...)
+    /// is public; its absence means module-private.
+    fn rust_vis(node: TsNode<'tree>) -> Option<codegraph_core::Visibility> {
+        let mut c = node.walk();
+        for ch in node.children(&mut c) {
+            if ch.kind() == "visibility_modifier" {
+                return Some(codegraph_core::Visibility::Public);
+            }
+        }
+        Some(codegraph_core::Visibility::Private)
+    }
+
     fn walk(&mut self, node: TsNode<'tree>, parent_impl: Option<&NodeId>, depth: usize) {
         if depth >= MAX_DEPTH {
             return;
@@ -129,16 +141,28 @@ impl<'tree> RustExtractor<'_, 'tree> {
                 if let Some(name) = node.child_by_field_name("name") {
                     let func_name = self.text(name);
                     let line = Self::line(node);
+                    let vis = Self::rust_vis(node);
                     let func_nid = if let Some(impl_nid) = parent_impl {
                         let nid = NodeId(make_id(&[impl_nid.as_str(), &func_name]));
-                        self.b
-                            .add_node(nid.clone(), format!(".{func_name}()"), line);
+                        self.b.add_code_node(
+                            nid.clone(),
+                            format!(".{func_name}()"),
+                            node,
+                            codegraph_core::NodeKind::Method,
+                            vis,
+                        );
                         self.b
                             .add_edge(impl_nid.clone(), nid.clone(), "method", line, None);
                         nid
                     } else {
                         let nid = NodeId(make_id(&[&self.stem, &func_name]));
-                        self.b.add_node(nid.clone(), format!("{func_name}()"), line);
+                        self.b.add_code_node(
+                            nid.clone(),
+                            format!("{func_name}()"),
+                            node,
+                            codegraph_core::NodeKind::Function,
+                            vis,
+                        );
                         self.b
                             .add_edge(self.file_nid.clone(), nid.clone(), "contains", line, None);
                         nid
@@ -167,7 +191,19 @@ impl<'tree> RustExtractor<'_, 'tree> {
         let item_name = self.text(name);
         let line = Self::line(node);
         let item_nid = NodeId(make_id(&[&self.stem, &item_name]));
-        self.b.add_node(item_nid.clone(), item_name, line);
+        let kind = match node.kind() {
+            "struct_item" => codegraph_core::NodeKind::Struct,
+            "enum_item" => codegraph_core::NodeKind::Enum,
+            "trait_item" => codegraph_core::NodeKind::Trait,
+            _ => codegraph_core::NodeKind::Other,
+        };
+        self.b.add_code_node(
+            item_nid.clone(),
+            item_name,
+            node,
+            kind,
+            Self::rust_vis(node),
+        );
         self.b.add_edge(
             self.file_nid.clone(),
             item_nid.clone(),

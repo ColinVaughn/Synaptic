@@ -71,6 +71,15 @@ pub fn cypher_statements(kg: &KnowledgeGraph, rich: bool) -> Vec<String> {
             if let Some(c) = n.community {
                 sets.push_str(&format!(", n.community = {c}"));
             }
+            if let Some(k) = n.kind() {
+                sets.push_str(&format!(", n.kind = '{}'", escape(k.as_str())));
+            }
+            if let Some(v) = n.visibility() {
+                sets.push_str(&format!(", n.visibility = '{}'", escape(v.as_str())));
+            }
+            if let Some(loc) = n.loc() {
+                sets.push_str(&format!(", n.loc = {loc}"));
+            }
         }
         out.push(format!(
             "MERGE (n:{ftype} {{id: '{}'}}) SET {sets}",

@@ -19,6 +19,18 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         node.start_position().row + 1
     }
 
+    /// The node's full source range (1-based lines and columns).
+    pub(crate) fn span(node: TsNode<'tree>) -> codegraph_core::Span {
+        let s = node.start_position();
+        let e = node.end_position();
+        codegraph_core::Span {
+            start_line: s.row as u32 + 1,
+            start_col: s.column as u32 + 1,
+            end_line: e.row as u32 + 1,
+            end_col: e.column as u32 + 1,
+        }
+    }
+
     /// `extra` with the AST-provenance tag, so the build-stage ghost remap can
     /// distinguish AST nodes from (future) semantic nodes.
     fn ast_origin() -> Map<String, serde_json::Value> {
@@ -42,6 +54,127 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                 repo: None,
                 extra: Self::ast_origin(),
             });
+        }
+    }
+
+    /// Add a located code node enriched with kind, optional visibility, and the
+    /// full source span (derived from `node`). Deduped by id like [`add_node`].
+    pub(crate) fn add_code_node(
+        &mut self,
+        id: NodeId,
+        label: String,
+        node: TsNode<'tree>,
+        kind: codegraph_core::NodeKind,
+        visibility: Option<codegraph_core::Visibility>,
+    ) {
+        if self.seen.insert(id.clone()) {
+            let mut n = Node {
+                id,
+                label,
+                file_type: FileType::Code,
+                source_file: self.path.clone(),
+                source_location: Some(format!("L{}", node.start_position().row + 1)),
+                community: None,
+                repo: None,
+                extra: Self::ast_origin(),
+            };
+            n.set_kind(kind);
+            n.set_span(Self::span(node));
+            if let Some(v) = visibility {
+                n.set_visibility(v);
+            }
+            self.nodes.push(n);
+        } else if let Some(n) = self.nodes.iter_mut().find(|n| n.id == id) {
+            // Enrich a plain stub created earlier (e.g. a name referenced before its
+            // declaration), without overwriting an already-enriched node.
+            if n.kind().is_none() {
+                n.set_kind(kind);
+                n.set_span(Self::span(node));
+                if let Some(v) = visibility {
+                    n.set_visibility(v);
+                }
+            }
+        }
+    }
+
+    /// Map a class-family grammar node kind to a [`NodeKind`].
+    pub(crate) fn class_kind(ts_kind: &str) -> codegraph_core::NodeKind {
+        use codegraph_core::NodeKind::*;
+        let k = ts_kind.to_ascii_lowercase();
+        if k.contains("interface") {
+            Interface
+        } else if k.contains("trait") {
+            Trait
+        } else if k.contains("enum") {
+            Enum
+        } else if k.contains("struct") {
+            Struct
+        } else if k.contains("protocol") {
+            Protocol
+        } else if k.contains("object") {
+            Object
+        } else {
+            Class
+        }
+    }
+
+    /// Best-effort declared visibility from a declaration node: scans an immediate
+    /// `modifiers`/`modifier`/`visibility` child (Java/C#/Kotlin/Swift/TS/Rust) or a
+    /// bare `public`/`private`/`protected`/`internal` keyword child. None = unknown.
+    pub(crate) fn visibility_of(&self, node: TsNode<'tree>) -> Option<codegraph_core::Visibility> {
+        use codegraph_core::Visibility::*;
+        let kw = |w: &str| match w {
+            "public" => Some(Public),
+            "protected" => Some(Protected),
+            "private" => Some(Private),
+            "internal" => Some(Internal),
+            _ => None,
+        };
+        let mut cur = node.walk();
+        for child in node.children(&mut cur) {
+            let k = child.kind();
+            // A bare keyword child is unambiguous.
+            if let Some(v) = kw(k) {
+                return Some(v);
+            }
+            if k == "modifiers"
+                || k == "modifier"
+                || k == "visibility_modifier"
+                || k == "visibility"
+            {
+                // Tokenize so an annotation whose NAME contains a keyword substring
+                // (e.g. `@PublicApi private`) can't masquerade as a modifier: skip
+                // any `@...` token and match keywords as whole words, in order.
+                for tok in self.text(child).split_whitespace() {
+                    if tok.starts_with('@') {
+                        continue;
+                    }
+                    if let Some(v) = kw(&tok.to_ascii_lowercase()) {
+                        return Some(v);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Python has no AST modifiers: a leading underscore is the private convention.
+    pub(crate) fn python_visibility(name: &str) -> Option<codegraph_core::Visibility> {
+        name.starts_with('_')
+            .then_some(codegraph_core::Visibility::Private)
+    }
+
+    /// Visibility for a declaration named `name`: the Python underscore convention
+    /// for Python configs, else the AST-modifier scan.
+    fn decl_visibility(
+        &self,
+        node: TsNode<'tree>,
+        name: &str,
+    ) -> Option<codegraph_core::Visibility> {
+        if matches!(self.cfg.type_ref_style, Some(TypeRefStyle::Python)) {
+            Self::python_visibility(name)
+        } else {
+            self.visibility_of(node)
         }
     }
 
@@ -263,7 +396,9 @@ impl<'tree> Extractor<'_, '_, 'tree> {
             let class_name = self.text(name_node);
             let class_nid = NodeId(make_id(&[stem, &class_name]));
             let line = Self::line(node);
-            self.add_node(class_nid.clone(), class_name, line);
+            let kind = Self::class_kind(t);
+            let vis = self.decl_visibility(node, &class_name);
+            self.add_code_node(class_nid.clone(), class_name, node, kind, vis);
             self.add_edge(file_nid.clone(), class_nid.clone(), "contains", line, None);
 
             if let Some(field) = self.cfg.superclasses_field {
@@ -327,14 +462,27 @@ impl<'tree> Extractor<'_, '_, 'tree> {
             };
             let func_name = self.text(name_node);
             let line = Self::line(node);
+            let vis = self.decl_visibility(node, &func_name);
             let func_nid = if let Some(class_nid) = parent_class {
                 let nid = NodeId(make_id(&[class_nid.as_str(), &func_name]));
-                self.add_node(nid.clone(), format!(".{func_name}()"), line);
+                self.add_code_node(
+                    nid.clone(),
+                    format!(".{func_name}()"),
+                    node,
+                    codegraph_core::NodeKind::Method,
+                    vis,
+                );
                 self.add_edge(class_nid.clone(), nid.clone(), "method", line, None);
                 nid
             } else {
                 let nid = NodeId(make_id(&[stem, &func_name]));
-                self.add_node(nid.clone(), format!("{func_name}()"), line);
+                self.add_code_node(
+                    nid.clone(),
+                    format!("{func_name}()"),
+                    node,
+                    codegraph_core::NodeKind::Function,
+                    vis,
+                );
                 self.add_edge(file_nid.clone(), nid.clone(), "contains", line, None);
                 nid
             };
@@ -578,7 +726,15 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         if self.cfg.call_types.contains(&node.kind()) {
             if let Some((callee, is_member)) = self.callee_name(node) {
                 let line = Self::line(node);
-                self.record_call(caller, callee, is_member, line, label_to_nid, seen_pairs);
+                self.record_call(
+                    caller,
+                    callee,
+                    is_member,
+                    line,
+                    Some(Self::span(node)),
+                    label_to_nid,
+                    seen_pairs,
+                );
             }
         }
         // `new X(...)` constructor call: the callee is the constructed type.
@@ -587,7 +743,15 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                 if matches!(ctor.kind(), "identifier" | "type_identifier") {
                     let callee = self.text(ctor);
                     let line = Self::line(node);
-                    self.record_call(caller, callee, false, line, label_to_nid, seen_pairs);
+                    self.record_call(
+                        caller,
+                        callee,
+                        false,
+                        line,
+                        Some(Self::span(node)),
+                        label_to_nid,
+                        seen_pairs,
+                    );
                 }
             }
         }
@@ -608,12 +772,14 @@ impl<'tree> Extractor<'_, '_, 'tree> {
 
     /// Resolve a discovered callee to a `calls` edge (in-file target) or a
     /// `RawCall` (unresolved, for cross-file resolution). Builtins are skipped.
+    #[allow(clippy::too_many_arguments)]
     fn record_call(
         &mut self,
         caller: &NodeId,
         callee: String,
         is_member: bool,
         line: usize,
+        span: Option<codegraph_core::Span>,
         label_to_nid: &HashMap<String, NodeId>,
         seen_pairs: &mut HashSet<(NodeId, NodeId)>,
     ) {
@@ -635,6 +801,7 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                     is_member_call: is_member,
                     source_file: self.path.clone(),
                     source_location: Some(format!("L{line}")),
+                    span,
                 });
             }
         }

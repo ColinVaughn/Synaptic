@@ -68,6 +68,55 @@ impl Builder {
         }
     }
 
+    /// Add a located code node enriched with kind, optional visibility, and the
+    /// full source span (from `node`). Deduped by id like [`add_node`].
+    pub fn add_code_node(
+        &mut self,
+        id: NodeId,
+        label: String,
+        node: tree_sitter::Node,
+        kind: codegraph_core::NodeKind,
+        visibility: Option<codegraph_core::Visibility>,
+    ) {
+        let s = node.start_position();
+        let e = node.end_position();
+        let span = codegraph_core::Span {
+            start_line: s.row as u32 + 1,
+            start_col: s.column as u32 + 1,
+            end_line: e.row as u32 + 1,
+            end_col: e.column as u32 + 1,
+        };
+        if self.seen.insert(id.clone()) {
+            let mut n = Node {
+                id,
+                label,
+                file_type: FileType::Code,
+                source_file: self.path.clone(),
+                source_location: Some(format!("L{}", s.row + 1)),
+                community: None,
+                repo: None,
+                extra: ast_origin(),
+            };
+            n.set_kind(kind);
+            n.set_span(span);
+            if let Some(v) = visibility {
+                n.set_visibility(v);
+            }
+            self.nodes.push(n);
+        } else if let Some(n) = self.nodes.iter_mut().find(|n| n.id == id) {
+            // Enrich a previously-added plain stub in place (e.g. a Go receiver
+            // type / Rust impl type emitted before its own declaration). Only when
+            // not already enriched, so the first enriched write stays authoritative.
+            if n.kind().is_none() {
+                n.set_kind(kind);
+                n.set_span(span);
+                if let Some(v) = visibility {
+                    n.set_visibility(v);
+                }
+            }
+        }
+    }
+
     /// Add an external stub node (no source file) so an edge to an out-of-corpus
     /// target (e.g. an imported package) survives build's dangling-edge drop.
     pub fn add_external_node(&mut self, id: NodeId, label: String) {
@@ -166,6 +215,9 @@ impl Builder {
                 is_member_call: is_member,
                 source_file: self.path.clone(),
                 source_location: Some(format!("L{line}")),
+                // Custom (Builder-based) walkers stay line-only for now; the
+                // generic walker captures column-accurate call spans.
+                span: None,
             });
         }
     }

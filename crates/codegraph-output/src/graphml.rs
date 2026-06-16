@@ -20,6 +20,12 @@ pub fn to_graphml_string(kg: &KnowledgeGraph) -> String {
     // Federation attrs (`repo`, `cross_repo`) are declared + emitted ONLY for
     // federated graphs, so single-repo GraphML is unchanged.
     let federated = gd.nodes.iter().any(|n| n.repo.is_some());
+    // Enrichment attrs (kind/visibility/loc) are declared + emitted only when at
+    // least one node carries them, so a graph built before Phase 2 is unchanged.
+    let enriched = gd
+        .nodes
+        .iter()
+        .any(|n| n.kind().is_some() || n.visibility().is_some() || n.span().is_some());
     let mut s = String::new();
     s.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     s.push_str("<graphml xmlns=\"http://graphml.graphdrawing.org/xmlns\">\n");
@@ -34,6 +40,11 @@ pub fn to_graphml_string(kg: &KnowledgeGraph) -> String {
     if federated {
         keys.push(("repo", "node", "string"));
         keys.push(("cross_repo", "edge", "boolean"));
+    }
+    if enriched {
+        keys.push(("kind", "node", "string"));
+        keys.push(("visibility", "node", "string"));
+        keys.push(("loc", "node", "long"));
     }
     for (id, target, ty) in keys {
         s.push_str(&format!(
@@ -56,6 +67,17 @@ pub fn to_graphml_string(kg: &KnowledgeGraph) -> String {
         if federated {
             if let Some(r) = &n.repo {
                 s.push_str(&data("repo", &xml_escape(r)));
+            }
+        }
+        if enriched {
+            if let Some(k) = n.kind() {
+                s.push_str(&data("kind", k.as_str()));
+            }
+            if let Some(v) = n.visibility() {
+                s.push_str(&data("visibility", v.as_str()));
+            }
+            if let Some(loc) = n.loc() {
+                s.push_str(&data("loc", &loc.to_string()));
             }
         }
         s.push_str("    </node>\n");

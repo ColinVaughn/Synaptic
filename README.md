@@ -46,6 +46,22 @@ the result's nodes live in (whole files, the conservative grep-then-read case; i
 count the dead-end files you would open without the graph). Run `codegraph extract .` on any
 repo and compare for yourself.
 
+## Advanced-tool performance (measured)
+
+The analysis tools answer in milliseconds because they run over the in-memory graph, not the
+source. Criterion micro-benchmarks (dev machine; run `cargo bench -p codegraph-cgql -p codegraph-refactor`):
+
+| Operation | Workload | Time |
+|---|---|--:|
+| CGQL property query (`search`) | `WHERE`/`loc`/`fan_out` over a 2,000-node graph | **~0.47 ms** |
+| CGQL relationship-pattern join (`search`) | one-hop join over a 2,000-node graph | **~0.97 ms** |
+| Safe-refactor rename plan (`refactor rename`) | hot symbol, ~120 call sites across 40 files, incl. the textual scan | **~4.9 ms** |
+
+Time-travel `diff` is build-bound rather than query-bound: the graph delta itself is
+near-instant, and the cost is building each revision in a throwaway git worktree. Built
+graphs are cached per commit SHA under `codegraph-out/history/`, so a repeat diff of the same
+commits returns immediately and only the working-tree side is rebuilt.
+
 ---
 
 ## Why
@@ -71,9 +87,22 @@ repo and compare for yourself.
   and GraphML / Cypher / DOT / Obsidian / wiki exports. See [Output Formats](https://github.com/ColinVaughn/CodeGraph/wiki/Output-Formats).
 - **Graph queries**: relevant-subgraph search, shortest path, node explanation, and
   reverse-impact ("what depends on this"). See [Querying](https://github.com/ColinVaughn/CodeGraph/wiki/Querying).
-- **MCP server** (protocol 2025-06-18) exposing 17 read-only tools over stdio or HTTP:
-  subgraph search, source reading, reverse-impact, and PR/working-tree blast radius, plus
-  prompts, completions, resource subscriptions, and structured tool output. See
+- **Time-travel diff**: `codegraph diff <rev1> [rev2]` (or `--since <date>`) reports how the
+  graph changed between two git revisions, added/removed dependencies, removed APIs,
+  architectural drift, new cycles, and hotspots, with a Markdown or self-contained HTML report.
+- **Architectural search (CGQL)**: `codegraph search` runs a small Cypher-inspired query
+  language over the graph, matching on structure (kind, visibility, LOC, fan-in/out,
+  variable-length paths) with `count(...)` aggregation, `--explain`, saved queries, and a
+  library of named patterns (singleton, factory, observer, service-locator, god-class). Not
+  text search.
+- **Safe refactor**: `codegraph refactor rename` / `move` / `extract` emit a confidence-scored
+  execution plan (`plan.json` + `plan.md`) for an AI agent to apply, then `refactor verify`
+  rebuilds and checks the graph held (the definition moved/renamed, no references lost, no new
+  cycles). CodeGraph never edits source itself.
+- **MCP server** (protocol 2025-06-18) exposing 20 read-only tools over stdio or HTTP:
+  subgraph search, source reading, reverse-impact, PR/working-tree blast radius, structural
+  search, time-travel diff, and plan-only rename, plus prompts, completions, resource
+  subscriptions, and structured tool output. See
   [MCP Server](https://github.com/ColinVaughn/CodeGraph/wiki/MCP-Server).
 - **Incremental rebuilds**, file watching, and git hooks keep the graph current. See
   [Incremental Updates](https://github.com/ColinVaughn/CodeGraph/wiki/Incremental-Updates).
@@ -144,6 +173,9 @@ A code-only corpus runs fully offline; the optional LLM semantic pass over docs 
 | `path <from> <to>` | Shortest path between two nodes |
 | `explain <node>` | Show a node and its neighbours |
 | `affected <node>` | Nodes that (transitively) depend on a node. Flags: `--depth`, `--relation` |
+| `search [cgql]` | Structural search via CGQL or a named `--pattern`. Flags: `--explain`, `--save`/`--saved`, `--json` |
+| `diff <rev1> [rev2]` | Time-travel graph diff between two git revisions. Flags: `--since`, `--report`, `--html`, `--scope` |
+| `refactor <action>` | Plan a safe `rename`/`move`/`extract` for an agent, then `verify` the graph (never edits source) |
 | `update [paths...]` | Incrementally rebuild after files change (`--full` for a full rebuild) |
 | `watch` | Rebuild automatically as files change |
 | `serve` | Run the MCP server (stdio, or `--http <addr> --api-key <key>`) |
@@ -166,11 +198,12 @@ codegraph serve                                                        # stdio M
 codegraph serve --http 127.0.0.1:8765 --api-key "$CODEGRAPH_API_KEY"   # HTTP server
 ```
 
-The server exposes 17 read-only tools: graph navigation (`query_graph`, `get_node`,
+The server exposes 20 read-only tools: graph navigation (`query_graph`, `get_node`,
 `get_source`, `get_neighbors`, `get_community`, `god_nodes`, `graph_stats`, `shortest_path`),
 impact analysis (`affected`, `find_callers`, `find_callees`), federation (`list_repos`,
-`repo_stats`), and change/PR review (`working_changes_impact`, `list_prs`, `get_pr_impact`,
-`triage_prs`). It also serves MCP prompts, argument completions, resource templates and
+`repo_stats`), change/PR review (`working_changes_impact`, `list_prs`, `get_pr_impact`,
+`triage_prs`), and the advanced trio (`structural_search`, `time_travel_diff`, plan-only
+`plan_rename`). It also serves MCP prompts, argument completions, resource templates and
 subscriptions, and a small REST surface (`/api/stats`, `/api/query`, ...) for non-MCP
 clients. `codegraph install` wires the graph into a host assistant (a `PreToolUse` hook for
 Claude; a native MCP server for Codex, with `codegraph install codex --global` for the Codex

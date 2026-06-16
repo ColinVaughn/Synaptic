@@ -39,6 +39,9 @@ codegraph-server = { workspace = true }
 codegraph-ingest = { workspace = true }
 codegraph-skillgen = { workspace = true }
 codegraph-workspace = { workspace = true }
+codegraph-history = { workspace = true }
+codegraph-cgql = { workspace = true }
+codegraph-refactor = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 rayon = { workspace = true }

@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::span::Span;
 use crate::NodeId;
 
 /// An unresolved call captured during extraction, resolved across files by the
@@ -15,6 +16,9 @@ pub struct RawCall {
     pub is_member_call: bool,
     pub source_file: String,
     pub source_location: Option<String>,
+    /// Precise call-site range (column-accurate), when the extractor captured it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub span: Option<Span>,
 }
 
 /// A top-level `from M import name [as local]` captured during extraction, used

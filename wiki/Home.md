@@ -40,7 +40,8 @@ get the binary.
 
 **Getting started:** [Installation](Installation) - [Quickstart](Quickstart)
 
-**Concepts:** [Architecture](Architecture) - [Languages](Languages)
+**Concepts:** [Architecture](Architecture) - [Languages](Languages) -
+[CodeGraph vs Other Tools](CodeGraph-vs-Other-Tools)
 
 **Using CodeGraph:** [Commands](Commands) - [Extraction](Extraction) - [Querying](Querying)
 - [Analysis and Reports](Analysis-and-Reports) - [Output Formats](Output-Formats) -

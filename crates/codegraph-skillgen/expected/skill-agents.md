@@ -18,6 +18,18 @@ relationships (calls, imports, inheritance, impact).
 - `codegraph explain <node>`: a node and its neighbours.
 - `codegraph path <a> <b>`: shortest path between two nodes.
 - `codegraph affected <node>`: what (transitively) depends on a node.
+- `codegraph search "<cgql>"` / `--pattern <name>`: structural search (CGQL) by
+  kind/visibility/loc/fan-in-out, variable-length paths, and `count(...)`
+  aggregation + named patterns (singleton, factory, observer, service-locator,
+  god-class). Not text search. `--explain` shows the plan; `--save`/`--saved`
+  store queries.
+- `codegraph diff <rev1> [rev2]` (or `--since <date>`): how the graph changed
+  between two git revisions (new/removed dependencies, removed APIs, drift, new
+  cycles, hotspots); `--html` writes a report.
+- `codegraph refactor rename <name> --to <new>` (also `move`/`extract`): a
+  confidence-scored plan (plan.json + plan.md) for you to apply; CodeGraph never
+  edits source. Then `codegraph refactor verify --plan <plan.json>` checks the
+  graph after you edit.
 
 ## MCP (preferred for your AI agent)
 Use the **codegraph** MCP server's tools. Start with `query_graph`, then:
@@ -27,6 +39,10 @@ Use the **codegraph** MCP server's tools. Start with `query_graph`, then:
 - `find_callers` / `find_callees` -- who calls a symbol / what it calls.
 - `get_neighbors`, `shortest_path`, `god_nodes`, `graph_stats`, `get_node`,
   `get_community` -- navigate and inspect the graph.
+- `structural_search` -- CGQL or a named pattern (kind/loc/fan-in-out, not text).
+- `time_travel_diff` -- how the graph changed between two git revisions.
+- `plan_rename` -- a plan-only, confidence-scored rename plan (never edits;
+  apply it, then `codegraph refactor verify` on the CLI).
 - `list_prs` / `get_pr_impact` / `triage_prs` -- graph-aware PR review (need `gh`).
 
 Reference them with your client's MCP prefix (Claude Code:

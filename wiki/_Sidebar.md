@@ -8,6 +8,7 @@
 **Concepts**
 - [Architecture](Architecture)
 - [Languages](Languages)
+- [CodeGraph vs Other Tools](CodeGraph-vs-Other-Tools)
 
 **Using CodeGraph**
 - [Commands](Commands)
