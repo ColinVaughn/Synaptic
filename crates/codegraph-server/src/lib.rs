@@ -268,6 +268,51 @@ impl Server {
         )
     }
 
+    /// `get_source` — the actual source lines for a symbol. Resolves the node,
+    /// reads its file under the source-root jail, and returns a window starting
+    /// at the node's recorded line (`source_location` = "L<n>"). The graph has
+    /// no end line, so it returns `context_lines` lines from the start.
+    pub fn tool_get_source(&self, label: &str, context_lines: usize) -> String {
+        let Some(id) = resolve_seed(&self.kg, label) else {
+            return format!("No node matches '{}'.", sanitize_label(label));
+        };
+        let Some(n) = self.kg.node(&id) else {
+            return format!("No node matches '{}'.", sanitize_label(label));
+        };
+        let Some(path) = self.resolve_source_path(&n.source_file) else {
+            return format!(
+                "Source not available for {} ({}).",
+                sanitize_label(&n.label),
+                sanitize_label(&n.source_file)
+            );
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return format!("Could not read {}.", sanitize_label(&n.source_file));
+        };
+        let start = n
+            .source_location
+            .as_deref()
+            .and_then(source::parse_line_marker)
+            .unwrap_or(1);
+        let window = context_lines.clamp(1, 400);
+        let lines: Vec<&str> = text.lines().collect();
+        let from = start.saturating_sub(1).min(lines.len());
+        let to = (from + window).min(lines.len());
+        // Header labels are sanitized; the code body is returned verbatim.
+        let mut out = format!(
+            "{} [{}] {}:L{}-L{}\n",
+            sanitize_label(&n.label),
+            file_type_str(&n.file_type),
+            sanitize_label(&n.source_file),
+            from + 1,
+            to
+        );
+        for (i, line) in lines[from..to].iter().enumerate() {
+            out.push_str(&format!("{:>5}  {}\n", from + 1 + i, line));
+        }
+        out
+    }
+
     /// `get_neighbors` — in/out neighbours, optionally filtered by relation.
     pub fn tool_get_neighbors(&self, label: &str, relation_filter: Option<&str>) -> String {
         let Some(id) = resolve_seed(&self.kg, label) else {
@@ -726,6 +771,7 @@ impl Server {
                 text
             }
             "get_node" => self.tool_get_node(&s("label")),
+            "get_source" => self.tool_get_source(&s("label"), u("context_lines", 40) as usize),
             "get_neighbors" => {
                 let rf = args.get("relation_filter").and_then(Value::as_str);
                 self.tool_get_neighbors(&s("label"), rf)
@@ -909,6 +955,11 @@ fn tools_list() -> Value {
         },
         { "name": "get_node", "description": "Show one node's metadata (type, source file, community, degree). Use after query_graph to inspect a specific symbol.",
           "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name (e.g. 'login_user', 'AuthService'); resolved leniently." } }, "required": ["label"] } },
+        { "name": "get_source", "description": "Return the actual source code for a symbol (the lines at its location), so you do not have to open the file. Use after query_graph or get_node to read a function or class body directly.",
+          "inputSchema": { "type": "object", "properties": {
+              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." },
+              "context_lines": { "type": "integer", "description": "How many lines to return from the symbol start (default 40, max 400)." }
+          }, "required": ["label"] } },
         { "name": "get_neighbors", "description": "List a node's directly connected nodes and the relation on each edge. Answers 'what does X call/use' and 'what calls X'.",
           "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." }, "relation_filter": { "type": "string", "description": "Optional: keep only this edge relation (substring match). Common relations: calls, imports, inherits, implements, references, contains, depends_on." } }, "required": ["label"] } },
         { "name": "get_community", "description": "List the members of a community: a cluster of densely-connected nodes, roughly a module or subsystem. Use to see what belongs together.",
@@ -1106,10 +1157,11 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 12);
+        assert_eq!(names.len(), 13);
         for expected in [
             "query_graph",
             "get_node",
+            "get_source",
             "get_neighbors",
             "get_community",
             "god_nodes",
@@ -1166,6 +1218,42 @@ mod tests {
             json!({"question": "authentication", "mode": "dfs"}),
         );
         assert!(q.contains("Traversal: dfs"), "{q}");
+    }
+
+    #[test]
+    fn get_source_returns_lines_under_jail() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/auth.py"),
+            "def login_user(u):\n    return check(u)\n\n\ndef check(u):\n    return True\n",
+        )
+        .unwrap();
+
+        let mut n = node("login", "login_user", Some(0));
+        n.source_file = "src/auth.py".into();
+        n.source_location = Some("L1".into());
+        let gd = GraphData {
+            nodes: vec![n],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None).with_source_root(root.to_path_buf());
+
+        let out = call_tool(
+            &mut s,
+            "get_source",
+            json!({"label": "login_user", "context_lines": 2}),
+        );
+        assert!(out.contains("def login_user(u):"), "should include the body: {out}");
+        assert!(out.contains("src/auth.py:L1"), "header names the file+line: {out}");
+    }
+
+    #[test]
+    fn get_source_without_root_is_graceful() {
+        let mut s = server(); // no source root
+        let out = call_tool(&mut s, "get_source", json!({"label": "AuthService"}));
+        assert!(out.contains("Source not available"), "{out}");
     }
 
     #[test]
