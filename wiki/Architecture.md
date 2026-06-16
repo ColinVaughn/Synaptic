@@ -48,7 +48,7 @@ and [MCP Server](MCP-Server).
 | `codegraph-prs` | Graph-aware PR dashboard: classification, CI rollup, blast radius, conflict grouping |
 | `codegraph-incremental` | Changed-files rebuild engine plus git integration (hooks, merge driver, watch, concurrency lock) |
 | `codegraph-workspace` | Multi-repo / monorepo federation: member discovery, namespacing, cross-repo resolution, global store, `merge-graphs` |
-| `codegraph-skillgen` | Generates and installs the assistant skill file and the `.claude/settings.json` hooks |
+| `codegraph-skillgen` | Generates and installs the host-assistant integration: the Claude skill file + `.claude/settings.json` hooks, the always-on instruction blocks (`AGENTS.md`/`GEMINI.md`/etc.), and the Codex MCP server + `SessionStart` hook config (project `.codex/` or global `~/.codex/`) |
 | `bin/codegraph` | The CLI that wires the crates into commands |
 
 ## Data model

@@ -29,17 +29,17 @@ MCP server so an AI coding assistant can consult the graph before grepping or re
 
 - **30+ languages** via tree-sitter, each built and tested in isolation in CI, plus
   regex-based extractors for a few formats and script extraction for Vue/Svelte/Astro and
-  Razor/Blazor. See [Languages](wiki/Languages.md).
+  Razor/Blazor. See [Languages](https://github.com/ColinVaughn/CodeGraph/wiki/Languages).
 - **One command to a full graph** plus 2D, 3D, and SVG visualizations, a Markdown report,
-  and GraphML / Cypher / DOT / Obsidian / wiki exports. See [Output Formats](wiki/Output-Formats.md).
+  and GraphML / Cypher / DOT / Obsidian / wiki exports. See [Output Formats](https://github.com/ColinVaughn/CodeGraph/wiki/Output-Formats).
 - **Graph queries**: relevant-subgraph search, shortest path, node explanation, and
-  reverse-impact ("what depends on this"). See [Querying](wiki/Querying.md).
+  reverse-impact ("what depends on this"). See [Querying](https://github.com/ColinVaughn/CodeGraph/wiki/Querying).
 - **MCP server** exposing read-only graph and PR tools over stdio or HTTP. See
-  [MCP Server](wiki/MCP-Server.md).
+  [MCP Server](https://github.com/ColinVaughn/CodeGraph/wiki/MCP-Server).
 - **Incremental rebuilds**, file watching, and git hooks keep the graph current. See
-  [Incremental Updates](wiki/Incremental-Updates.md).
+  [Incremental Updates](https://github.com/ColinVaughn/CodeGraph/wiki/Incremental-Updates).
 - **Graph-aware PR dashboard** with blast radius and merge-order conflict detection. See
-  [PR Dashboard](wiki/PR-Dashboard.md).
+  [PR Dashboard](https://github.com/ColinVaughn/CodeGraph/wiki/PR-Dashboard).
 
 ## Install
 
@@ -59,7 +59,7 @@ Prebuilt binaries for Linux/macOS/Windows are attached to each tagged
 behind feature flags (off by default): `pg` (Postgres introspection), `push` (live
 Neo4j/FalkorDB export), and `office` / `gws` / `media` (spreadsheet / Google-Workspace /
 audio-video ingest), e.g. `cargo install --path bin/codegraph --features pg,push`. See
-[Installation](wiki/Installation.md) and [Configuration](wiki/Configuration.md).
+[Installation](https://github.com/ColinVaughn/CodeGraph/wiki/Installation) and [Configuration](https://github.com/ColinVaughn/CodeGraph/wiki/Configuration).
 
 ## Quickstart
 
@@ -80,7 +80,7 @@ codegraph serve
 `extract` honors `.codegraphignore` / `.gitignore` and skips sensitive files (`.env`, keys).
 A code-only corpus runs fully offline; the optional LLM semantic pass over docs and papers
 (`extract --semantic`) needs an API key (e.g. `OPENAI_API_KEY`). See
-[Quickstart](wiki/Quickstart.md).
+[Quickstart](https://github.com/ColinVaughn/CodeGraph/wiki/Quickstart).
 
 ## Output artifacts (`codegraph-out/`)
 
@@ -117,7 +117,7 @@ A code-only corpus runs fully offline; the optional LLM semantic pass over docs 
 | `install` / `uninstall [platform]` | Install the CodeGraph skill for a host assistant |
 | `cache <action>` | Maintain the on-disk extraction cache |
 
-The full reference with every flag is in [Commands](wiki/Commands.md). Run
+The full reference with every flag is in [Commands](https://github.com/ColinVaughn/CodeGraph/wiki/Commands). Run
 `codegraph <command> --help` for the flag list at the terminal.
 
 ## Use it from an AI assistant (MCP)
@@ -133,7 +133,7 @@ The server exposes read-only graph tools (`query_graph`, `get_node`, `get_neighb
 surface (`/api/stats`, `/api/query`, ...) for non-MCP clients. `codegraph install` wires the
 graph into a host assistant (a `PreToolUse` hook for Claude; a native MCP server for Codex,
 with `codegraph install codex --global` for the Codex desktop app). See
-[MCP Server](wiki/MCP-Server.md) and [Assistant Integration](wiki/Assistant-Integration.md).
+[MCP Server](https://github.com/ColinVaughn/CodeGraph/wiki/MCP-Server) and [Assistant Integration](https://github.com/ColinVaughn/CodeGraph/wiki/Assistant-Integration).
 
 ## Languages
 
@@ -144,19 +144,18 @@ Verilog, Fortran, and regex/delegation extractors for Classic ASP, Salesforce Ap
 Pascal/Delphi, and Razor/Blazor. Plus data and project formats: SQL, JSON, YAML,
 HCL/Terraform, .NET project files (`.csproj`/`.sln`/`.slnx`), and Markdown structure.
 Framework-aware edges for PHP/Laravel and Dart/Flutter. Full breakdown in
-[Languages](wiki/Languages.md).
+[Languages](https://github.com/ColinVaughn/CodeGraph/wiki/Languages).
 
 ## Documentation
 
-The full documentation lives in the [`wiki/`](wiki/) directory (publishable to the GitHub
-Wiki):
+The full documentation lives in the [project wiki](https://github.com/ColinVaughn/CodeGraph/wiki):
 
-- **Getting started:** [Home](wiki/Home.md) - [Installation](wiki/Installation.md) - [Quickstart](wiki/Quickstart.md)
-- **Concepts:** [Architecture](wiki/Architecture.md) - [Languages](wiki/Languages.md)
-- **Using it:** [Commands](wiki/Commands.md) - [Extraction](wiki/Extraction.md) - [Querying](wiki/Querying.md) - [Analysis and Reports](wiki/Analysis-and-Reports.md) - [Output Formats](wiki/Output-Formats.md) - [Visualizations](wiki/Visualizations.md)
-- **Integrations:** [MCP Server](wiki/MCP-Server.md) - [Assistant Integration](wiki/Assistant-Integration.md) - [Ingestion](wiki/Ingestion.md) - [Semantic Analysis](wiki/Semantic-Analysis.md)
-- **Scaling:** [Workspaces and Federation](wiki/Workspaces-and-Federation.md) - [Incremental Updates](wiki/Incremental-Updates.md) - [PR Dashboard](wiki/PR-Dashboard.md)
-- **Reference:** [Configuration](wiki/Configuration.md) - [Development](wiki/Development.md)
+- **Getting started:** [Home](https://github.com/ColinVaughn/CodeGraph/wiki/Home) - [Installation](https://github.com/ColinVaughn/CodeGraph/wiki/Installation) - [Quickstart](https://github.com/ColinVaughn/CodeGraph/wiki/Quickstart)
+- **Concepts:** [Architecture](https://github.com/ColinVaughn/CodeGraph/wiki/Architecture) - [Languages](https://github.com/ColinVaughn/CodeGraph/wiki/Languages)
+- **Using it:** [Commands](https://github.com/ColinVaughn/CodeGraph/wiki/Commands) - [Extraction](https://github.com/ColinVaughn/CodeGraph/wiki/Extraction) - [Querying](https://github.com/ColinVaughn/CodeGraph/wiki/Querying) - [Analysis and Reports](https://github.com/ColinVaughn/CodeGraph/wiki/Analysis-and-Reports) - [Output Formats](https://github.com/ColinVaughn/CodeGraph/wiki/Output-Formats) - [Visualizations](https://github.com/ColinVaughn/CodeGraph/wiki/Visualizations)
+- **Integrations:** [MCP Server](https://github.com/ColinVaughn/CodeGraph/wiki/MCP-Server) - [Assistant Integration](https://github.com/ColinVaughn/CodeGraph/wiki/Assistant-Integration) - [Ingestion](https://github.com/ColinVaughn/CodeGraph/wiki/Ingestion) - [Semantic Analysis](https://github.com/ColinVaughn/CodeGraph/wiki/Semantic-Analysis)
+- **Scaling:** [Workspaces and Federation](https://github.com/ColinVaughn/CodeGraph/wiki/Workspaces-and-Federation) - [Incremental Updates](https://github.com/ColinVaughn/CodeGraph/wiki/Incremental-Updates) - [PR Dashboard](https://github.com/ColinVaughn/CodeGraph/wiki/PR-Dashboard)
+- **Reference:** [Configuration](https://github.com/ColinVaughn/CodeGraph/wiki/Configuration) - [Development](https://github.com/ColinVaughn/CodeGraph/wiki/Development)
 
 ## Development
 
@@ -168,7 +167,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 The codebase is 15 library crates (`crates/*`) plus the `codegraph` binary (`bin/`). CI
 builds each language grammar in isolation so a grammar bump that silently drops nodes/edges
-fails on its own. See [Development](wiki/Development.md) and [Architecture](wiki/Architecture.md).
+fails on its own. See [Development](https://github.com/ColinVaughn/CodeGraph/wiki/Development) and [Architecture](https://github.com/ColinVaughn/CodeGraph/wiki/Architecture).
 
 ## License
 
