@@ -42,7 +42,20 @@ use codegraph_query::{
 };
 use serde_json::{json, Value};
 
-const PROTOCOL_VERSION: &str = "2024-11-05";
+const SUPPORTED_PROTOCOLS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+const LATEST_PROTOCOL: &str = "2025-06-18";
+
+/// Echo the client's requested protocol when we support it, else our latest.
+fn negotiate_protocol(requested: Option<&str>) -> &'static str {
+    match requested {
+        Some(v) => SUPPORTED_PROTOCOLS
+            .iter()
+            .copied()
+            .find(|s| *s == v)
+            .unwrap_or(LATEST_PROTOCOL),
+        None => LATEST_PROTOCOL,
+    }
+}
 
 /// A loaded graph + the server's view of it. Hot-reloads when `graph.json`
 /// changes (C3c). [`handle_request`](Server::handle_request) takes `&mut self`;
@@ -772,12 +785,15 @@ impl Server {
         let params = req.get("params").cloned().unwrap_or(Value::Null);
 
         let result = match method {
-            "initialize" => Ok(json!({
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": { "tools": {}, "resources": {} },
-                "serverInfo": { "name": "codegraph", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": SERVER_INSTRUCTIONS,
-            })),
+            "initialize" => {
+                let requested = params.get("protocolVersion").and_then(Value::as_str);
+                Ok(json!({
+                    "protocolVersion": negotiate_protocol(requested),
+                    "capabilities": { "tools": {}, "resources": {} },
+                    "serverInfo": { "name": "codegraph", "version": env!("CARGO_PKG_VERSION") },
+                    "instructions": SERVER_INSTRUCTIONS,
+                }))
+            }
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": tools_list() })),
             "resources/list" => Ok(json!({ "resources": resources_list() })),
@@ -1024,7 +1040,7 @@ cluster of densely-connected nodes (roughly a module); edge confidence is EXTRAC
 /// implicit domain knowledge explicit so an agent uses each tool correctly
 /// (graph jargon, the lenient label resolution, the relation vocabulary).
 fn tools_list() -> Value {
-    json!([
+    let mut tools = json!([
         {
             "name": "query_graph",
             "description": "Primary entry point: return a relevant subgraph (nodes + edges) for a natural-language question about this codebase, instead of grepping or reading files. Good for 'where is X handled', 'how does auth work', 'what is related to Y'.",
@@ -1076,7 +1092,21 @@ fn tools_list() -> Value {
           "inputSchema": { "type": "object", "properties": { "pr_number": { "type": "integer", "description": "PR number." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } }, "required": ["pr_number"] } },
         { "name": "triage_prs", "description": "Open PRs ranked by actionability (status plus graph blast radius) so the model can prioritize review and merge order. Requires the `gh` CLI.",
           "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch (default: the repo's default branch)." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } } } }
-    ])
+    ]);
+    // Every tool is a pure read; the PR tools additionally reach the network
+    // (gh), so they carry openWorldHint. Merged here to keep the entries above
+    // focused on schema.
+    let open_world = ["list_prs", "get_pr_impact", "triage_prs"];
+    for t in tools.as_array_mut().unwrap() {
+        let name = t["name"].as_str().unwrap_or("").to_string();
+        t["annotations"] = json!({
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": open_world.contains(&name.as_str()),
+        });
+    }
+    tools
 }
 
 /// The MCP `resources/list` payload.
@@ -1242,7 +1272,7 @@ mod tests {
             .handle_request(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
             .unwrap();
         assert_eq!(init["result"]["serverInfo"]["name"], "codegraph");
-        assert_eq!(init["result"]["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
 
         let tl = s
             .handle_request(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}))
@@ -1353,6 +1383,41 @@ mod tests {
         let mut s = server(); // no source root
         let out = call_tool(&mut s, "get_source", json!({"label": "AuthService"}));
         assert!(out.contains("Source not available"), "{out}");
+    }
+
+    #[test]
+    fn initialize_echoes_supported_protocol_else_latest() {
+        let mut s = server();
+        // Client asks for a supported version -> echoed back.
+        let r = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":1,"method":"initialize",
+                "params":{"protocolVersion":"2025-06-18"}
+            }))
+            .unwrap();
+        assert_eq!(r["result"]["protocolVersion"], "2025-06-18");
+
+        // Unknown version -> server returns its latest supported.
+        let r = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":2,"method":"initialize",
+                "params":{"protocolVersion":"1999-01-01"}
+            }))
+            .unwrap();
+        assert_eq!(r["result"]["protocolVersion"], "2025-06-18");
+    }
+
+    #[test]
+    fn every_tool_is_annotated_read_only() {
+        let tools = tools_list();
+        for t in tools.as_array().unwrap() {
+            let name = t["name"].as_str().unwrap();
+            let ann = &t["annotations"];
+            assert_eq!(ann["readOnlyHint"], json!(true), "tool {name} must be read-only");
+            // PR tools reach the network (gh) -> openWorldHint true.
+            let open = matches!(name, "list_prs" | "get_pr_impact" | "triage_prs");
+            assert_eq!(ann["openWorldHint"], json!(open), "tool {name} openWorldHint");
+        }
     }
 
     #[test]
