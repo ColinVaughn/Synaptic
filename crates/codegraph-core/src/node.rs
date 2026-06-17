@@ -4,6 +4,7 @@ use serde_json::{Map, Value};
 use crate::file_type::FileType;
 use crate::id::NodeId;
 use crate::node_kind::{NodeKind, Visibility};
+use crate::signature::Signature;
 use crate::span::Span;
 
 /// A graph node. The required fields are the ones in `REQUIRED_NODE_FIELDS`.
@@ -38,6 +39,7 @@ pub struct Node {
 const KIND_KEY: &str = "kind";
 const VISIBILITY_KEY: &str = "visibility";
 const SPAN_KEY: &str = "span";
+const SIGNATURE_KEY: &str = "signature";
 
 impl Node {
     /// The node's kind (class/function/method/...), if the extractor set one.
@@ -88,6 +90,23 @@ impl Node {
     /// Lines of code, derived from the span.
     pub fn loc(&self) -> Option<u32> {
         self.span().map(|s| s.line_count())
+    }
+
+    /// The node's captured signature (params + return type), if the extractor
+    /// recorded one. Only set for function/method nodes whose grammar exposes
+    /// parameters.
+    pub fn signature(&self) -> Option<Signature> {
+        self.extra
+            .get(SIGNATURE_KEY)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
+    /// Set the node's signature.
+    pub fn set_signature(&mut self, signature: Signature) {
+        self.extra.insert(
+            SIGNATURE_KEY.to_string(),
+            serde_json::to_value(signature).expect("Signature serializes"),
+        );
     }
 
     /// True if this node lives in test code (heuristic, by its source path; see
@@ -165,6 +184,49 @@ mod tests {
         assert_eq!(back.kind(), Some(NodeKind::Class));
         assert_eq!(back.visibility(), Some(Visibility::Public));
         assert_eq!(back.loc(), Some(9));
+    }
+
+    #[test]
+    fn signature_accessor_roundtrips_and_serializes_top_level() {
+        use crate::signature::{Param, Signature};
+        let mut n = sample();
+        assert!(n.signature().is_none(), "unset signature reads as None");
+
+        let sig = Signature {
+            params: vec![
+                Param {
+                    name: "a".into(),
+                    type_ref: Some("int".into()),
+                },
+                Param {
+                    name: "b".into(),
+                    type_ref: None,
+                },
+            ],
+            return_type: Some("Result".into()),
+            raw: "(a: int, b) -> Result".into(),
+        };
+        n.set_signature(sig.clone());
+        assert_eq!(n.signature(), Some(sig));
+
+        // Serializes as a plain top-level "signature" key (extra is flattened).
+        let v = serde_json::to_value(&n).unwrap();
+        assert_eq!(v["signature"]["params"][0]["name"], serde_json::json!("a"));
+        assert_eq!(
+            v["signature"]["params"][0]["type_ref"],
+            serde_json::json!("int")
+        );
+        // An untyped param omits type_ref entirely.
+        assert!(!v["signature"]["params"][1]
+            .as_object()
+            .unwrap()
+            .contains_key("type_ref"));
+        assert_eq!(v["signature"]["return_type"], serde_json::json!("Result"));
+
+        // Round-trips back through serde to the typed value.
+        let back: Node = serde_json::from_value(v).unwrap();
+        assert_eq!(back.signature().unwrap().params.len(), 2);
+        assert_eq!(back.signature().unwrap().raw, "(a: int, b) -> Result");
     }
 
     #[test]

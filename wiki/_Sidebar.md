@@ -14,6 +14,7 @@
 - [Commands](Commands)
 - [Extraction](Extraction)
 - [Querying](Querying)
+- [Cross-Language Edges](Cross-Language-Edges)
 - [Analysis and Reports](Analysis-and-Reports)
 - [Output Formats](Output-Formats)
 - [Visualizations](Visualizations)

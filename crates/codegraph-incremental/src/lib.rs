@@ -32,8 +32,9 @@ use codegraph_detect::{classify_file, detect, FileType};
 use codegraph_extract::cached_extract_source;
 use codegraph_graph::{
     apply_communities, build_from_parts, cluster, deduplicate_entities, guard_shrink,
-    norm_source_file, remap_communities_to_previous, resolve_symbols, BuildOptions, ClusterOptions,
-    KnowledgeGraph,
+    norm_source_file, remap_communities_to_previous, resolve_command_invocations,
+    resolve_parameterized_routes, resolve_pyo3_imports, resolve_pyo3_modules,
+    resolve_route_handlers, resolve_symbols, BuildOptions, ClusterOptions, KnowledgeGraph,
 };
 use rayon::prelude::*;
 
@@ -322,6 +323,49 @@ pub fn rebuild(
         let mut e: Vec<Edge> = kg.edges().cloned().collect();
         e.extend(resolved);
         kg = build_from_parts(n, e, kg.hyperedges.clone(), &build_opts);
+    }
+
+    // Cross-language: retarget subprocess command stubs to in-repo file targets,
+    // matching the one-shot `extract` path so an incremental update produces the
+    // same edges (e.g. subprocess.run("tool") -> src/bin/tool.rs).
+    let before_cmd = kg.node_count();
+    let hyper = kg.hyperedges.clone();
+    let (cn, ce) =
+        resolve_command_invocations(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
+    if cn.len() < before_cmd {
+        kg = build_from_parts(cn, ce, hyper, &build_opts);
+    }
+
+    // Cross-language: resolve named route handlers across files (axum), matching
+    // the one-shot `extract` path. Before the parameterized-route merge.
+    let before_edges = kg.edges().count();
+    let hyper = kg.hyperedges.clone();
+    let (hn, he) =
+        resolve_route_handlers(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
+    if he.len() > before_edges {
+        kg = build_from_parts(hn, he, hyper, &build_opts);
+    }
+
+    // Cross-language: merge concrete client route paths into the parameterized
+    // server route they match, matching the one-shot `extract` path.
+    let before_routes = kg.node_count();
+    let hyper = kg.hyperedges.clone();
+    let (rn, re) =
+        resolve_parameterized_routes(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
+    if rn.len() < before_routes {
+        kg = build_from_parts(rn, re, hyper, &build_opts);
+    }
+
+    // Cross-language pyo3: stitch #[pymodule] boundaries to their registered
+    // #[pyfunction]/#[pyclass] definitions (across files), then connect Python
+    // importers -- matching the one-shot `extract` path.
+    let before_edges = kg.edges().count();
+    let hyper = kg.hyperedges.clone();
+    let (pn, pe) =
+        resolve_pyo3_modules(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
+    let (pn, pe) = resolve_pyo3_imports(pn, pe);
+    if pe.len() > before_edges {
+        kg = build_from_parts(pn, pe, hyper, &build_opts);
     }
 
     // Dedup near-duplicate non-code entities (a no-op on a code-only graph).

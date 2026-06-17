@@ -142,6 +142,7 @@ impl<'tree> RustExtractor<'_, 'tree> {
                     let func_name = self.text(name);
                     let line = Self::line(node);
                     let vis = Self::rust_vis(node);
+                    let sig = crate::signature::extract_signature(node, self.src);
                     let func_nid = if let Some(impl_nid) = parent_impl {
                         let nid = NodeId(make_id(&[impl_nid.as_str(), &func_name]));
                         self.b.add_code_node(
@@ -150,6 +151,7 @@ impl<'tree> RustExtractor<'_, 'tree> {
                             node,
                             codegraph_core::NodeKind::Method,
                             vis,
+                            Some(sig),
                         );
                         self.b
                             .add_edge(impl_nid.clone(), nid.clone(), "method", line, None);
@@ -162,6 +164,7 @@ impl<'tree> RustExtractor<'_, 'tree> {
                             node,
                             codegraph_core::NodeKind::Function,
                             vis,
+                            Some(sig),
                         );
                         self.b
                             .add_edge(self.file_nid.clone(), nid.clone(), "contains", line, None);
@@ -203,6 +206,7 @@ impl<'tree> RustExtractor<'_, 'tree> {
             node,
             kind,
             Self::rust_vis(node),
+            None,
         );
         self.b.add_edge(
             self.file_nid.clone(),

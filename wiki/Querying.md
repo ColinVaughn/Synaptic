@@ -178,7 +178,14 @@ commands use a simpler resolver: exact id, then exact label.)
 
   `calls`, `references`, `imports`, `imports_from`, `re_exports`, `inherits`,
   `extends`, `implements`, `uses`, `mixes_in`, `embeds`, `depends_on`,
-  `reads_from`.
+  `reads_from`, and the cross-language relations `invokes`, `binds_native`,
+  `calls_service`, and `handled_by`.
+
+  The four cross-language relations mean reverse-impact crosses language
+  boundaries: changing an HTTP/gRPC handler reaches the clients that call it, a
+  Rust function exported through PyO3 reaches the Python that imports it, and a
+  binary reaches the scripts that invoke it. See
+  [Cross-Language-Edges](Cross-Language-Edges).
 
   Containment relations such as `contains` and `method` are intentionally not in
   the default set: containing something is not the same as depending on it, so

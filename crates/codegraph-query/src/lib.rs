@@ -6,11 +6,15 @@
 //! true token-budgeting (tiktoken) is deferred (§2.9).
 #![forbid(unsafe_code)]
 
+pub mod describe;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use codegraph_core::NodeId;
 use codegraph_graph::KnowledgeGraph;
 use serde::Serialize;
+
+pub use describe::{describe_node, NodeDescription};
 
 /// Result of a text query: matched seeds plus the surrounding subgraph.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -69,6 +73,13 @@ pub const DEFAULT_AFFECTED_RELATIONS: &[&str] = &[
     // impact in reverse (change the dependency, the dependent is affected).
     "depends_on",
     "reads_from",
+    // Cross-language relations (the `cross-language` post-passes): a subprocess
+    // invocation, an FFI binding, and an HTTP client->route->handler chain all
+    // point dependent->dependency, so reverse-impact crosses the boundary.
+    "invokes",
+    "binds_native",
+    "calls_service",
+    "handled_by",
 ];
 
 /// One node reached by the reverse-impact walk: which node, how many hops from

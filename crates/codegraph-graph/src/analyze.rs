@@ -625,6 +625,27 @@ pub fn suggest_questions(
         return questions;
     }
 
+    // 1b. Unresolved cross-language sinks: a subprocess invocation that did not
+    // resolve to an in-repo binary/script (the `cross-language` pass leaves the
+    // command stub in place). Surfaces an external runtime dependency to confirm.
+    for n in kg.nodes() {
+        if n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("command") {
+            questions.push(Question {
+                kind: "cross_language_sink".to_string(),
+                question: Some(format!(
+                    "What runs when this code invokes `{}`, and is that external command expected here?",
+                    n.label
+                )),
+                why: "A subprocess invocation did not resolve to an in-repo binary or script."
+                    .to_string(),
+            });
+        }
+    }
+    if top_n > 0 && questions.len() >= top_n {
+        questions.truncate(top_n);
+        return questions;
+    }
+
     // 2. Bridge nodes (high betweenness): cross-community questions.
     // Rank non-file/non-concept nodes by Brandes betweenness, take the top 3, and
     // ask about each that actually spans communities.
@@ -1497,6 +1518,35 @@ mod tests {
                 .collect();
         let qs = suggest_questions(&kg, &comms, &BTreeMap::new(), 7);
         assert!(qs.iter().any(|q| q.kind == "ambiguous_edge"));
+    }
+
+    #[test]
+    fn suggest_questions_flags_unresolved_command_sink() {
+        use codegraph_core::{FileType, GraphData, Node};
+        let mk = |id: &str, label: &str, sf: &str| Node {
+            id: NodeId(id.into()),
+            label: label.into(),
+            file_type: FileType::Code,
+            source_file: sf.into(),
+            source_location: None,
+            community: None,
+            repo: None,
+            extra: serde_json::Map::new(),
+        };
+        let caller = mk("c", "deploy()", "d.py");
+        let mut stub = mk("cmd::mytool", "mytool", "");
+        stub.extra
+            .insert("_node_type".into(), serde_json::json!("command"));
+        let kg = KnowledgeGraph::from_graph_data(GraphData {
+            nodes: vec![caller, stub],
+            links: vec![],
+            ..Default::default()
+        });
+        let qs = suggest_questions(&kg, &BTreeMap::new(), &BTreeMap::new(), 7);
+        assert!(
+            qs.iter().any(|q| q.kind == "cross_language_sink"),
+            "expected a cross_language_sink question"
+        );
     }
 
     #[test]

@@ -33,10 +33,47 @@ fn cache_key(path: &str, source: &[u8]) -> String {
     h.finalize().to_hex().to_string()
 }
 
+/// On-disk extension for a cache entry. MessagePack and JSON entries are kept on
+/// distinct paths so the two formats never collide in a shared cache dir (and a
+/// stale entry of the wrong format is simply a miss, not a decode of garbage).
+#[cfg(feature = "cache-binary")]
+const CACHE_EXT: &str = "mp";
+#[cfg(not(feature = "cache-binary"))]
+const CACHE_EXT: &str = "json";
+
 fn cache_file(cache_dir: &Path, key: &str) -> PathBuf {
     cache_dir
         .join(format!("ast/v{AST_CACHE_VERSION}"))
-        .join(format!("{key}.json"))
+        .join(format!("{key}.{CACHE_EXT}"))
+}
+
+/// Decode a cache entry. MessagePack under `cache-binary`, else JSON. Returns
+/// `None` on any decode error so a corrupt/wrong-format entry falls back to
+/// extraction.
+fn decode_result(bytes: &[u8]) -> Option<ExtractionResult> {
+    #[cfg(feature = "cache-binary")]
+    {
+        rmp_serde::from_slice(bytes).ok()
+    }
+    #[cfg(not(feature = "cache-binary"))]
+    {
+        serde_json::from_slice(bytes).ok()
+    }
+}
+
+/// Encode a result for the cache. MessagePack under `cache-binary`, else JSON.
+/// Uses `to_vec_named` so `#[serde(flatten)]` fields round-trip (rmp's default
+/// array encoding can't merge a flattened map). Returns `None` on serialize
+/// error so a write failure is best-effort (skip the entry).
+fn encode_result(res: &ExtractionResult) -> Option<Vec<u8>> {
+    #[cfg(feature = "cache-binary")]
+    {
+        rmp_serde::to_vec_named(res).ok()
+    }
+    #[cfg(not(feature = "cache-binary"))]
+    {
+        serde_json::to_vec(res).ok()
+    }
 }
 
 /// Extract `source`, using and populating an on-disk cache when `cache_dir` is
@@ -53,14 +90,14 @@ pub fn cached_extract_source(
     };
     let file = cache_file(dir, &cache_key(path, source));
     if let Ok(bytes) = std::fs::read(&file) {
-        if let Ok(res) = serde_json::from_slice::<ExtractionResult>(&bytes) {
+        if let Some(res) = decode_result(&bytes) {
             return Some(res);
         }
     }
     let res = extract_source(path, source)?;
     if let Some(parent) = file.parent() {
         if std::fs::create_dir_all(parent).is_ok() {
-            if let Ok(bytes) = serde_json::to_vec(&res) {
+            if let Some(bytes) = encode_result(&res) {
                 let _ = std::fs::write(&file, bytes);
             }
         }
@@ -85,6 +122,17 @@ mod tests {
         // Second call hits the cache and returns an identical result.
         let r2 = cached_extract_source(Some(cache), "a.py", SRC).unwrap();
         assert_eq!(r1, r2);
+        // The captured signature (stored in node.extra) survives the round-trip:
+        // a regression guard that the cache format preserves flattened metadata.
+        let f = r2
+            .nodes
+            .iter()
+            .find(|n| n.label == "f()")
+            .expect("f() node");
+        let sig = f
+            .signature()
+            .expect("signature survives the cache round-trip");
+        assert_eq!(sig.params.first().map(|p| p.name.as_str()), Some("x"));
     }
 
     #[test]
@@ -112,6 +160,92 @@ mod tests {
     fn no_cache_dir_extracts_directly() {
         let r = cached_extract_source(None, "a.py", SRC).unwrap();
         assert!(r.nodes.iter().any(|n| n.label == "f()"));
+    }
+}
+
+// Viability + equivalence gate for the `cache-binary` (MessagePack) format. The
+// cache stores `ExtractionResult`, whose `Node`/`Edge` use `#[serde(flatten)]`
+// over a `serde_json::Value` map -- both need a self-describing format, and rmp's
+// default array encoding can't merge a flattened map (hence `to_vec_named`). These
+// prove the encode/decode path used by `encode_result`/`decode_result` round-trips
+// that shape losslessly AND decodes to the same value JSON does, so the format
+// swap can't silently drop or alter data (esp. floats).
+#[cfg(all(test, feature = "cache-binary"))]
+mod msgpack_format_tests {
+    use super::*;
+    use codegraph_core::{Confidence, Edge, FileType, Node, NodeId};
+
+    fn sample_result() -> ExtractionResult {
+        let mut node_extra = serde_json::Map::new();
+        node_extra.insert("kind".into(), serde_json::json!("class"));
+        node_extra.insert("_origin".into(), serde_json::json!("ast"));
+        // Nested object + array + a float inside the flattened extra map.
+        node_extra.insert(
+            "span".into(),
+            serde_json::json!({"start_line": 1, "end_line": 9, "ratio": 0.3333333333333333}),
+        );
+        node_extra.insert("tags".into(), serde_json::json!(["a", "b", 3]));
+
+        let node = Node {
+            id: NodeId("auth".into()),
+            label: "AuthService".into(),
+            file_type: FileType::Code,
+            source_file: "src/auth.rs".into(),
+            source_location: Some("L42".into()),
+            community: Some(7),
+            repo: None,
+            extra: node_extra,
+        };
+
+        let mut edge_extra = serde_json::Map::new();
+        edge_extra.insert("note".into(), serde_json::json!("via trait"));
+        let edge = Edge {
+            source: NodeId("auth".into()),
+            target: NodeId("db".into()),
+            relation: "calls".into(),
+            confidence: Confidence::Extracted,
+            source_file: "src/auth.rs".into(),
+            source_location: Some("L50".into()),
+            confidence_score: Some(0.875),
+            weight: 2.5,
+            context: Some("call".into()),
+            cross_repo: false,
+            extra: edge_extra,
+        };
+
+        ExtractionResult {
+            nodes: vec![node],
+            edges: vec![edge],
+            raw_calls: vec![],
+            imports: vec![],
+        }
+    }
+
+    #[test]
+    fn msgpack_roundtrips_flatten_value_and_floats_losslessly() {
+        let original = sample_result();
+        // Exercise the exact functions the cache uses.
+        let bytes = encode_result(&original).expect("encode");
+        let back = decode_result(&bytes).expect("decode");
+        assert_eq!(back, original, "MessagePack round-trip must be lossless");
+    }
+
+    #[test]
+    fn msgpack_and_json_produce_identical_values() {
+        let original = sample_result();
+
+        let json_bytes = serde_json::to_vec(&original).expect("json serialize");
+        let from_json: ExtractionResult =
+            serde_json::from_slice(&json_bytes).expect("json deserialize");
+
+        let mp_bytes = encode_result(&original).expect("encode");
+        let from_mp = decode_result(&mp_bytes).expect("decode");
+
+        // The format swap must be observationally identical to the JSON baseline.
+        assert_eq!(
+            from_mp, from_json,
+            "MessagePack and JSON must decode to the same value"
+        );
     }
 }
 

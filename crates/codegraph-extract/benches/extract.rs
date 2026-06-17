@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use codegraph_extract::python::python_config;
-use codegraph_extract::{cached_extract_source, extract_source};
+use codegraph_extract::{cached_extract_source, extract_source, ExtractionResult};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use tree_sitter::Parser;
 
@@ -365,10 +365,67 @@ fn bench_parser_setup(c: &mut Criterion) {
     group.finish();
 }
 
+/// A/B of the AST-cache serialization format: deserialize every repo file's
+/// `ExtractionResult` from an in-memory JSON blob vs a MessagePack blob. In-memory
+/// (no file I/O) isolates the pure decode cost -- the part a format change moves --
+/// from the per-file syscall overhead `warm_cache_hits` also pays. The `msgpack`
+/// arm and the size report only exist under `--features cache-binary`.
+fn bench_cache_format(c: &mut Criterion) {
+    let files = repo_rs_files();
+    let results: Vec<ExtractionResult> = files
+        .iter()
+        .filter_map(|(p, s)| extract_source(p, s))
+        .collect();
+    let json_blobs: Vec<Vec<u8>> = results
+        .iter()
+        .map(|r| serde_json::to_vec(r).expect("json serialize"))
+        .collect();
+    let total_json: u64 = json_blobs.iter().map(|b| b.len() as u64).sum();
+
+    let mut group = c.benchmark_group("extract/cache_format");
+    group.throughput(Throughput::Bytes(total_json));
+    group.sample_size(20);
+
+    group.bench_function("json_deserialize", |b| {
+        b.iter(|| {
+            for blob in &json_blobs {
+                let r: ExtractionResult = serde_json::from_slice(blob).unwrap();
+                black_box(r);
+            }
+        });
+    });
+
+    #[cfg(feature = "cache-binary")]
+    {
+        // MessagePack (rmp-serde, named maps so `#[serde(flatten)]` round-trips).
+        let mp_blobs: Vec<Vec<u8>> = results
+            .iter()
+            .map(|r| rmp_serde::to_vec_named(r).expect("msgpack serialize"))
+            .collect();
+        let total_mp: u64 = mp_blobs.iter().map(|b| b.len() as u64).sum();
+        eprintln!(
+            "cache_format on-disk size: json={total_json} B, msgpack={total_mp} B \
+             ({:.1}% of json)",
+            100.0 * total_mp as f64 / total_json as f64
+        );
+        group.bench_function("msgpack_deserialize", |b| {
+            b.iter(|| {
+                for blob in &mp_blobs {
+                    let r: ExtractionResult = rmp_serde::from_slice(blob).unwrap();
+                    black_box(r);
+                }
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_per_language,
     bench_repo_walk,
-    bench_parser_setup
+    bench_parser_setup,
+    bench_cache_format
 );
 criterion_main!(benches);

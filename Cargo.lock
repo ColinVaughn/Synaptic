@@ -465,7 +465,7 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "codegraph"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-cgql"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "codegraph-core",
  "codegraph-extract",
@@ -513,7 +513,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-core"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "caseless",
  "regex",
@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-detect"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "blake3",
  "criterion",
@@ -539,7 +539,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-eval"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "codegraph-core",
  "codegraph-graph",
@@ -554,7 +554,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-extract"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "blake3",
  "codegraph-core",
@@ -562,6 +562,7 @@ dependencies = [
  "criterion",
  "proptest",
  "regex",
+ "rmp-serde",
  "roxmltree",
  "serde",
  "serde_json",
@@ -600,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-graph"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "blake3",
  "codegraph-core",
@@ -616,7 +617,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-history"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "codegraph-core",
  "codegraph-graph",
@@ -630,7 +631,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-incremental"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "codegraph-core",
  "codegraph-detect",
@@ -646,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-ingest"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "blake3",
  "calamine",
@@ -665,7 +666,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-llm"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -686,7 +687,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-output"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "codegraph-core",
  "codegraph-graph",
@@ -698,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-predict"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "codegraph-core",
  "codegraph-graph",
@@ -712,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-prs"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "criterion",
  "serde_json",
@@ -721,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-query"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "codegraph-core",
  "codegraph-graph",
@@ -732,7 +733,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-refactor"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "codegraph-core",
  "codegraph-extract",
@@ -749,7 +750,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-report"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "codegraph-core",
  "codegraph-graph",
@@ -759,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-sandbox"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "codegraph-history",
  "criterion",
@@ -771,7 +772,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-semantic"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "codegraph-core",
@@ -784,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-server"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "axum",
  "codegraph-cgql",
@@ -808,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-skillgen"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -817,7 +818,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-workspace"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "blake3",
  "codegraph-core",
@@ -2480,6 +2481,25 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rmp"
+version = "0.8.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ba8be72d372b2c9b35542551678538b562e7cf86c3315773cae48dfbfe7790c"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "rmp-serde"
+version = "1.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
+dependencies = [
+ "rmp",
+ "serde",
 ]
 
 [[package]]

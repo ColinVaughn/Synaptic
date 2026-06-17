@@ -66,6 +66,7 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         node: TsNode<'tree>,
         kind: codegraph_core::NodeKind,
         visibility: Option<codegraph_core::Visibility>,
+        signature: Option<codegraph_core::Signature>,
     ) {
         if self.seen.insert(id.clone()) {
             let mut n = Node {
@@ -83,6 +84,9 @@ impl<'tree> Extractor<'_, '_, 'tree> {
             if let Some(v) = visibility {
                 n.set_visibility(v);
             }
+            if let Some(s) = signature {
+                n.set_signature(s);
+            }
             self.nodes.push(n);
         } else if let Some(n) = self.nodes.iter_mut().find(|n| n.id == id) {
             // Enrich a plain stub created earlier (e.g. a name referenced before its
@@ -92,6 +96,9 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                 n.set_span(Self::span(node));
                 if let Some(v) = visibility {
                     n.set_visibility(v);
+                }
+                if let Some(s) = signature {
+                    n.set_signature(s);
                 }
             }
         }
@@ -398,7 +405,7 @@ impl<'tree> Extractor<'_, '_, 'tree> {
             let line = Self::line(node);
             let kind = Self::class_kind(t);
             let vis = self.decl_visibility(node, &class_name);
-            self.add_code_node(class_nid.clone(), class_name, node, kind, vis);
+            self.add_code_node(class_nid.clone(), class_name, node, kind, vis, None);
             self.add_edge(file_nid.clone(), class_nid.clone(), "contains", line, None);
 
             if let Some(field) = self.cfg.superclasses_field {
@@ -463,6 +470,7 @@ impl<'tree> Extractor<'_, '_, 'tree> {
             let func_name = self.text(name_node);
             let line = Self::line(node);
             let vis = self.decl_visibility(node, &func_name);
+            let sig = crate::signature::extract_signature(node, self.source);
             let func_nid = if let Some(class_nid) = parent_class {
                 let nid = NodeId(make_id(&[class_nid.as_str(), &func_name]));
                 self.add_code_node(
@@ -471,6 +479,7 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                     node,
                     codegraph_core::NodeKind::Method,
                     vis,
+                    Some(sig),
                 );
                 self.add_edge(class_nid.clone(), nid.clone(), "method", line, None);
                 nid
@@ -482,6 +491,7 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                     node,
                     codegraph_core::NodeKind::Function,
                     vis,
+                    Some(sig),
                 );
                 self.add_edge(file_nid.clone(), nid.clone(), "contains", line, None);
                 nid

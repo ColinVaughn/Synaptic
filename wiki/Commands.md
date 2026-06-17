@@ -339,7 +339,7 @@ codegraph affected <NODE> [--graph <PATH>] [--depth <N>] [--relation <REL>]...
 | `--depth` | `2` | Max hops to walk backward. |
 | `--relation` | structural impact relations | Restrict to these edge relations; repeatable. |
 
-When no `--relation` is given, the default structural impact relations are: `calls`, `references`, `imports`, `imports_from`, `re_exports`, `inherits`, `extends`, `implements`, `uses`, `mixes_in`, `embeds`, `depends_on`, `reads_from`. Containment relations (such as `contains`/`method`) are intentionally excluded. Output lists each affected node with the relation it was reached through and its source location.
+When no `--relation` is given, the default structural impact relations are: `calls`, `references`, `imports`, `imports_from`, `re_exports`, `inherits`, `extends`, `implements`, `uses`, `mixes_in`, `embeds`, `depends_on`, `reads_from`, plus the cross-language relations `invokes`, `binds_native`, `calls_service`, and `handled_by` (so impact spans subprocess/FFI/HTTP/gRPC boundaries; see [Cross-Language-Edges](Cross-Language-Edges)). Containment relations (such as `contains`/`method`) are intentionally excluded. Output lists each affected node with the relation it was reached through and its source location.
 
 Example:
 
@@ -488,7 +488,11 @@ See [`predict`](#predict) (forecast the same change without running it) and [`di
 
 ## eval
 
-Measure forecast quality by replaying history. For each commit in a range, CodeGraph re-predicts the change from the **parent**-state graph (built in a throwaway worktree) and scores the prediction against git ground truth: the tests co-edited in the commit (that already existed at the parent) and the public APIs the time-travel diff reports as removed. It reports pooled recall/precision and blast-radius selectivity, and can gate CI on a recall floor. This turns prediction quality into a regression-testable metric.
+Calibrate CodeGraph's own inference quality. `eval replay` measures
+change-forecast quality by replaying git history; `eval cross-language` measures
+how grounded the inferred cross-language edges are on a single graph.
+
+`eval replay` re-predicts each commit in a range from the **parent**-state graph (built in a throwaway worktree) and scores the prediction against git ground truth: the tests co-edited in the commit (that already existed at the parent) and the public APIs the time-travel diff reports as removed. It reports pooled recall/precision and blast-radius selectivity, and can gate CI on a recall floor. This turns prediction quality into a regression-testable metric.
 
 ### eval replay
 
@@ -517,6 +521,37 @@ Example:
 codegraph eval replay HEAD~20 --json
 codegraph eval replay main --min-test-recall 60   # a CI gate
 ```
+
+### eval cross-language
+
+Calibrate the [cross-language edge layer](Cross-Language-Edges) (subprocess /
+FFI / HTTP / gRPC / PyO3) over a single built graph. These edges are `INFERRED`,
+so the calibration reports not just counts but how grounded they are. No git
+history is involved.
+
+Syntax:
+
+```sh
+codegraph eval cross-language [--graph <PATH>] [--json]
+```
+
+| Name | Default | Description |
+| --- | --- | --- |
+| `--graph` | `codegraph-out/graph.json` | The built graph to calibrate. |
+| `--json` | off | Print the full `CrossLanguageReport` as JSON to stdout. |
+
+It prints the per-relation edge counts plus two precision proxies: **service
+connectivity** (the fraction of service-boundary nodes that are two-sided, with
+both a `calls_service` consumer and a `handled_by` producer) and **invocation
+resolution** (the fraction of `invokes` edges whose target resolved to an
+in-repo file). Example output:
+
+```
+Cross-language calibration: cross-language: 14 edge(s); service boundaries 4/6 two-sided (66%); invocations 0/0 resolved (0%); 0 FFI binding(s)
+```
+
+Calibration is advisory: it measures detector precision across releases, it does
+not retune anything.
 
 See [`predict`](#predict), [`speculate`](#speculate), and [`diff`](#diff).
 

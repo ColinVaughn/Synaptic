@@ -69,6 +69,9 @@ Use the **codegraph** MCP server's tools. Start with `query_graph`, then:
 - `get_neighbors`, `shortest_path`, `god_nodes`, `graph_stats`, `get_node`,
   `get_community` -- navigate and inspect the graph.
 - `structural_search` -- CGQL or a named pattern (kind/loc/fan-in-out, not text).
+  Structured results include each match's captured signature (params + return).
+- `describe_node` -- a compact "takes X, returns Y, calls Z" summary of a symbol
+  from its signature and outgoing calls; handy for writing a tool/function blurb.
 - `time_travel_diff` -- how the graph changed between two git revisions.
 - `plan_rename` -- a plan-only, confidence-scored rename plan (never edits;
   apply it, then `codegraph refactor verify` on the CLI).
@@ -81,6 +84,11 @@ connected, start it with `codegraph serve`.
 
 Reach for the graph on "what calls X", "what breaks if I change Y", "how does A
 reach B", and to read a symbol's code. Don't reconstruct those by reading files.
+Impact analysis crosses language boundaries: a change to a Rust function exported
+to Python via PyO3, an HTTP or gRPC handler and the clients that call it, or a
+binary a script invokes all surface as dependents, because those couplings are
+graph edges too (subprocess `invokes`, FFI `binds_native`, service
+`calls_service`/`handled_by`).
 Before editing a symbol other code depends on, forecast the change with
 `predict_impact` (or `codegraph predict`) and run the checks it lists.
 

@@ -6,6 +6,45 @@ All notable changes to CodeGraph are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-06-17
+
+### Added
+- **Function signatures in node metadata:** functions and methods now carry a captured
+  `signature` (parameter names with optional types, a return type, and a raw header), surfaced in
+  `graph.json`, the structured `structural_search` output, and the `get_node` tool. Captured for
+  the config-driven languages plus Go and Rust; types appear when the source annotates them.
+- **`describe_node` MCP tool:** a graph-only "takes X, returns Y, calls Z" description composed
+  from a symbol's signature and outgoing call edges (the "calls" clause includes the cross-language
+  `invokes`/`calls_service` targets). Read-only and in the default tool set.
+- **Cross-language edges (`invokes` / `binds_native` / `calls_service` / `handled_by`, all
+  INFERRED):** a post-extraction pass that links coupling no single-language parse can see, so
+  impact analysis spans language boundaries.
+  - Subprocess invocations for Python, JS/TS, Go, Rust, Ruby, and PHP, resolved to in-repo
+    binaries/scripts where a unique match exists.
+  - FFI bindings: PyO3, ctypes/cffi, JNI, cgo, and node-gyp/N-API.
+  - HTTP/RPC service boundaries: server routes for Flask/FastAPI, Express, axum/actix, Go net/http
+    (including Go 1.22 `"METHOD /path"` patterns), and tonic/Python gRPC; client calls for
+    requests/httpx, axios/fetch, Go http, and reqwest.
+  - Cross-file and cross-repo resolution: cross-file axum handlers, two-sided PyO3 (a Python
+    importer to a Rust `#[pymodule]` across files), parameterized route matching (`/users/7` to
+    `/users/{id}`), and cross-repo route matching in federated workspaces.
+  - Detection runs over masked source (comments, docstrings, string and raw-string contents blanked
+    first) with precision guards (the reqwest file-gate, a gRPC `<Name>Client` denylist, and
+    per-impl gRPC method resolution).
+- **`codegraph eval cross-language`:** single-graph calibration of the cross-language edge layer
+  (per-relation counts plus service-connectivity and invocation-resolution precision proxies).
+
+### Changed
+- Reverse-impact (`affected`, `predict_impact`, `affected_tests`, `predict_edit`) now traverses the
+  four cross-language relations by default, so the blast radius crosses subprocess/FFI/HTTP/gRPC
+  boundaries.
+- `structural_search` and `describe_node` join the structured-output tools (typed
+  `structuredContent` + `outputSchema`); the default MCP server now exposes 24 read-only tools (25
+  with `--allow-exec`).
+- Documentation: a new "Cross-Language Edges" wiki page, plus updates to the MCP, querying,
+  extraction, commands, and languages pages; the assistant skill and MCP `affected` description now
+  note cross-language impact.
+
 ## [0.2.2] - 2026-07-02
 
 ### Added

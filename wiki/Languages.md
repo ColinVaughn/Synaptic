@@ -302,6 +302,11 @@ method or class):
 - Bloc event and state flow (`on<Event>`, `emit(State)`, `bloc.add(Event)`)
   via `calls`; type lookups (`context.read<Bloc>()`) via `references`.
 
+Beyond these single-language framework edges, a separate post-pass adds
+**cross-language** edges (`invokes`, `binds_native`, `calls_service`,
+`handled_by`) for subprocess calls, FFI bindings, and HTTP/gRPC routes that span
+languages. See [Cross-Language-Edges](Cross-Language-Edges).
+
 ## Per-language feature flags
 
 Every language is behind a `lang-*` Cargo feature, all enabled by default. The

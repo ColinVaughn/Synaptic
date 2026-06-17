@@ -13,7 +13,10 @@
 use std::path::{Path, PathBuf};
 
 use codegraph_core::{GraphData, NodeId};
-use codegraph_graph::{apply_communities, cluster, ClusterOptions, KnowledgeGraph};
+use codegraph_graph::{
+    apply_communities, cluster, mark_cross_repo_edges, resolve_parameterized_routes,
+    resolve_route_handlers, ClusterOptions, KnowledgeGraph,
+};
 use codegraph_incremental::{rebuild, ChangeSet, RebuildOptions};
 use std::collections::BTreeMap;
 
@@ -96,7 +99,16 @@ fn finalize(
 ) -> (KnowledgeGraph, BTreeMap<u32, Vec<NodeId>>, CrossRepoReport) {
     let composed = compose(subgraphs);
     let aliases = crate::alias::collect_aliases(member_roots);
-    let (resolved, report) = resolve_cross_repo(composed, surfaces, &aliases);
+    let (mut resolved, report) = resolve_cross_repo(composed, surfaces, &aliases);
+    // Cross-repo HTTP routes: resolve any named route handler that spans repos
+    // (router in one member, handler in another); exact same-path route nodes were
+    // already merged by label in `compose`; then match a concrete client path in
+    // one repo to a parameterized server route in another (/users/7 -> /users/{id});
+    // finally flag the cross-language edges that end up spanning repos.
+    let (hn, he) = resolve_route_handlers(resolved.nodes, resolved.links);
+    let (rn, re) = resolve_parameterized_routes(hn, he);
+    resolved.nodes = rn;
+    resolved.links = mark_cross_repo_edges(&resolved.nodes, re);
     let mut kg = KnowledgeGraph::from_graph_data(resolved);
     let communities = cluster(&kg, &ClusterOptions::default());
     apply_communities(&mut kg, &communities);

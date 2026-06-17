@@ -29,7 +29,7 @@ LLM-driven concept layer, see [Semantic-Analysis].
    communities, and analyze.
 7. Write artifacts into `codegraph-out/`.
 
-## Node metadata: kind, visibility, span
+## Node metadata: kind, visibility, span, signature
 
 Code nodes carry structured metadata beyond their label and location:
 
@@ -41,13 +41,30 @@ Code nodes carry structured metadata beyond their label and location:
   or the Python `_name` convention. Absent when a language has no visibility concept.
 - **`span`** — the full source range (`start_line`, `start_col`, `end_line`,
   `end_col`), from which lines-of-code (`loc`) is derived.
+- **`signature`** — for functions and methods, the captured parameter list and
+  return type: `params` (each a `name` plus an optional `type_ref`), an optional
+  `return_type`, and a `raw` verbatim header. Parameter *names* are captured
+  wherever the grammar exposes them (the config-driven languages plus Go and
+  Rust); parameter and return *types* only when the source annotates them, with
+  the `raw` header always kept as a fallback so a description is never empty.
 
 These are populated for the config-driven languages (Python, JavaScript/TypeScript,
 Java, C#, Kotlin, Swift, C, C++, PHP, Scala, Groovy) and for Go and Rust. Other
 languages omit the fields rather than guessing, so consumers treat a missing value
 as "unknown". The fields appear in `graph.json` (and in Cypher/GraphML output), and
-the MCP `get_node` tool surfaces them. They power [architectural search] and
-visibility-aware [time-travel] "removed API" detection.
+the MCP `get_node` tool surfaces them. `kind`/`visibility`/`loc` power
+[architectural search] and visibility-aware [time-travel] "removed API"
+detection; `signature` feeds the MCP `describe_node` tool and the structured
+`structural_search` output.
+
+## Cross-language edges
+
+Beyond the per-file parse, an opt-in post-pass detects coupling that no single
+language parse can see: subprocess invocations, FFI bindings, and HTTP/gRPC
+service calls. These add `invokes` / `binds_native` / `calls_service` /
+`handled_by` edges at `INFERRED` confidence, so impact analysis traverses
+language boundaries. See [Cross-Language-Edges](Cross-Language-Edges) for the
+full model.
 
 [architectural search]: Commands
 [time-travel]: Commands

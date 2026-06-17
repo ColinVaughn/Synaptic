@@ -85,6 +85,8 @@ pub fn extract_go_source(path: &str, source: &[u8]) -> ExtractionResult {
         pkg_scope,
         imported_pkgs: HashSet::new(),
         function_bodies: Vec::new(),
+        #[cfg(feature = "cross-language")]
+        cgo: false,
     };
     ex.b.add_node(file_nid, file_label, 1);
     ex.walk(tree.root_node(), 0);
@@ -100,6 +102,11 @@ struct GoExtractor<'a, 'tree> {
     pkg_scope: String,
     imported_pkgs: HashSet<String>,
     function_bodies: Vec<(NodeId, TsNode<'tree>)>,
+    /// True once `import "C"` (the cgo pseudo-import) is seen, so `C.fn()` calls
+    /// are treated as native bindings rather than unresolved package calls. Only
+    /// present with the `cross-language` feature (the binding-edge consumer).
+    #[cfg(feature = "cross-language")]
+    cgo: bool,
 }
 
 impl<'tree> GoExtractor<'_, 'tree> {
@@ -141,6 +148,7 @@ impl<'tree> GoExtractor<'_, 'tree> {
                         node,
                         codegraph_core::NodeKind::Function,
                         Self::go_vis(&func_name),
+                        Some(crate::signature::extract_signature(node, self.src)),
                     );
                     self.b.add_edge(
                         self.file_nid.clone(),
@@ -171,6 +179,7 @@ impl<'tree> GoExtractor<'_, 'tree> {
                 };
                 let method_name = self.text(name);
                 let line = Self::line(node);
+                let sig = crate::signature::extract_signature(node, self.src);
                 let method_nid = if let Some(recv) = recv_type {
                     let parent = NodeId(make_id(&[&self.pkg_scope, &recv]));
                     // Receiver-type stub (the type's own decl is enriched in
@@ -183,6 +192,7 @@ impl<'tree> GoExtractor<'_, 'tree> {
                         node,
                         codegraph_core::NodeKind::Method,
                         Self::go_vis(&method_name),
+                        Some(sig),
                     );
                     self.b.add_edge(parent, m.clone(), "method", line, None);
                     m
@@ -194,6 +204,7 @@ impl<'tree> GoExtractor<'_, 'tree> {
                         node,
                         codegraph_core::NodeKind::Method,
                         Self::go_vis(&method_name),
+                        Some(sig),
                     );
                     self.b
                         .add_edge(self.file_nid.clone(), m.clone(), "contains", line, None);
@@ -238,7 +249,7 @@ impl<'tree> GoExtractor<'_, 'tree> {
             .unwrap_or(codegraph_core::NodeKind::TypeAlias);
         let vis = Self::go_vis(&type_name);
         self.b
-            .add_code_node(type_nid.clone(), type_name, spec, kind, vis);
+            .add_code_node(type_nid.clone(), type_name, spec, kind, vis, None);
         self.b.add_edge(
             self.file_nid.clone(),
             type_nid.clone(),
@@ -344,6 +355,16 @@ impl<'tree> GoExtractor<'_, 'tree> {
             let raw = self.text(path_node);
             let raw = raw.trim_matches('"');
             if raw.is_empty() {
+                continue;
+            }
+            // `import "C"` is cgo's pseudo-package, not a real import. The
+            // pseudo-import is skipped regardless; the cgo flag (which drives the
+            // binding edges) is only tracked under the cross-language feature.
+            if raw == "C" {
+                #[cfg(feature = "cross-language")]
+                {
+                    self.cgo = true;
+                }
                 continue;
             }
             // Prefix so stdlib names (e.g. "context") don't collide with local files.
@@ -492,25 +513,33 @@ impl<'tree> GoExtractor<'_, 'tree> {
         }
         if node.kind() == "call_expression" {
             if let Some(func) = node.child_by_field_name("function") {
-                let (callee, is_member) = match func.kind() {
-                    "identifier" => (Some(self.text(func)), false),
-                    "selector_expression" => {
-                        let field = func.child_by_field_name("field").map(|f| self.text(f));
-                        let operand = func
-                            .child_by_field_name("operand")
-                            .map(|o| self.text(o))
-                            .unwrap_or_default();
-                        // Package-qualified call is resolvable; receiver method is a member.
-                        (field, !self.imported_pkgs.contains(&operand))
-                    }
-                    _ => (None, false),
-                };
-                if let Some(callee) = callee {
-                    if !callee.is_empty() && !GO_BUILTINS.contains(&callee.as_str()) {
-                        let line = Self::line(node);
-                        self.b.resolve_call(
-                            caller, &callee, is_member, line, index, seen_pairs, true,
-                        );
+                // cgo `C.fn()` is a native binding, not a Go call (cross-language
+                // feature only); when handled it suppresses the normal call.
+                #[cfg(feature = "cross-language")]
+                let handled = self.try_cgo_call(func, node, caller);
+                #[cfg(not(feature = "cross-language"))]
+                let handled = false;
+                if !handled {
+                    let (callee, is_member) = match func.kind() {
+                        "identifier" => (Some(self.text(func)), false),
+                        "selector_expression" => {
+                            let field = func.child_by_field_name("field").map(|f| self.text(f));
+                            let operand = func
+                                .child_by_field_name("operand")
+                                .map(|o| self.text(o))
+                                .unwrap_or_default();
+                            // Package-qualified call is resolvable; receiver is a member.
+                            (field, !self.imported_pkgs.contains(&operand))
+                        }
+                        _ => (None, false),
+                    };
+                    if let Some(callee) = callee {
+                        if !callee.is_empty() && !GO_BUILTINS.contains(&callee.as_str()) {
+                            let line = Self::line(node);
+                            self.b.resolve_call(
+                                caller, &callee, is_member, line, index, seen_pairs, true,
+                            );
+                        }
                     }
                 }
             }
@@ -518,6 +547,34 @@ impl<'tree> GoExtractor<'_, 'tree> {
         for child in Self::children(node) {
             self.walk_calls(child, caller, index, seen_pairs, depth + 1);
         }
+    }
+
+    /// cgo: a `C.fn()` selector in a file that imported "C" links the caller to a
+    /// native target via `binds_native`. Returns true when it handled the call
+    /// (so the normal call resolution is skipped).
+    #[cfg(feature = "cross-language")]
+    fn try_cgo_call(&mut self, func: TsNode<'tree>, node: TsNode<'tree>, caller: &NodeId) -> bool {
+        if !self.cgo || func.kind() != "selector_expression" {
+            return false;
+        }
+        let operand = func
+            .child_by_field_name("operand")
+            .map(|o| self.text(o))
+            .unwrap_or_default();
+        if operand != "C" {
+            return false;
+        }
+        if let Some(field) = func.child_by_field_name("field") {
+            let fname = self.text(field);
+            if !fname.is_empty() {
+                let line = Self::line(node);
+                let tgt = NodeId(make_id(&["native", "c", &fname]));
+                self.b.add_external_node(tgt.clone(), format!("C.{fname}"));
+                self.b
+                    .add_inferred_edge(caller.clone(), tgt, "binds_native", line, Some("cgo"));
+            }
+        }
+        true
     }
 }
 
@@ -597,5 +654,35 @@ mod tests {
             !rc.unwrap().is_member_call,
             "fmt is an imported pkg, not a receiver"
         );
+    }
+
+    #[cfg(feature = "cross-language")]
+    #[test]
+    fn cgo_calls_emit_binds_native_edges() {
+        // A cgo file (`import "C"`) calling C.sqrt links to a native target via a
+        // `binds_native` edge (INFERRED) rather than an unresolved package call.
+        let src = b"package main\n\n// #include <math.h>\nimport \"C\"\n\nfunc Compute() float64 {\n\treturn float64(C.sqrt(4))\n}\n";
+        let r = extract_go_source("m.go", src);
+
+        let csqrt = r
+            .nodes
+            .iter()
+            .find(|n| n.label == "C.sqrt")
+            .expect("native target node for the C function");
+        assert!(
+            csqrt.source_file.is_empty(),
+            "native target is an external stub"
+        );
+
+        let compute = r.nodes.iter().find(|n| n.label == "Compute()").unwrap();
+        let edge = r
+            .edges
+            .iter()
+            .find(|e| e.relation == "binds_native")
+            .expect("a binds_native edge");
+        assert_eq!(edge.source, compute.id);
+        assert_eq!(edge.target, csqrt.id);
+        assert_eq!(edge.confidence, codegraph_core::Confidence::Inferred);
+        assert_eq!(edge.context.as_deref(), Some("cgo"));
     }
 }

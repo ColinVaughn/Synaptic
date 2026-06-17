@@ -7,7 +7,20 @@ rust-version.workspace = true
 description = "Tree-sitter code extraction for CodeGraph (multi-language behind lang-* features)."
 
 [features]
-default = ["lang-python", "lang-javascript", "lang-typescript", "lang-go", "lang-rust", "lang-java", "lang-csharp", "lang-kotlin", "lang-swift", "lang-c", "lang-cpp", "lang-json", "lang-yaml", "lang-hcl", "lang-sql", "lang-ruby", "lang-php", "lang-lua", "lang-bash", "lang-powershell", "lang-scala", "lang-dart", "lang-elixir", "lang-julia", "lang-zig", "lang-asp", "lang-groovy", "lang-objc", "lang-verilog", "lang-fortran", "lang-vue", "lang-svelte", "lang-astro", "lang-dotnet", "lang-markdown", "lang-apex", "lang-pascal", "lang-razor"]
+# `cache-binary`: store the per-file AST cache as MessagePack (rmp-serde) instead
+# of JSON. A self-describing format is required: Node/Edge use `#[serde(flatten)]`
+# + `serde_json::Value`, which need `deserialize_any` (rules out bincode/postcard;
+# CBOR works but benched ~58% slower to decode). MessagePack benched ~36% faster
+# to decode than serde_json and ~14% smaller on disk. Off by default; the on-disk
+# format is internal/derived (hash-keyed, never committed) so flipping it is safe.
+cache-binary = ["dep:rmp-serde"]
+# `cross-language`: post-extraction passes that detect cross-language coupling
+# the per-language AST walk does not model (FFI bindings, subprocess invocations,
+# HTTP/RPC calls), emitting INFERRED edges to target stubs. Regex-driven over
+# source, so it needs the regex dep. On by default; turn off to drop the extra
+# inferred edges (and the regex build cost on single-language builds).
+cross-language = ["dep:regex"]
+default = ["cross-language", "lang-python", "lang-javascript", "lang-typescript", "lang-go", "lang-rust", "lang-java", "lang-csharp", "lang-kotlin", "lang-swift", "lang-c", "lang-cpp", "lang-json", "lang-yaml", "lang-hcl", "lang-sql", "lang-ruby", "lang-php", "lang-lua", "lang-bash", "lang-powershell", "lang-scala", "lang-dart", "lang-elixir", "lang-julia", "lang-zig", "lang-asp", "lang-groovy", "lang-objc", "lang-verilog", "lang-fortran", "lang-vue", "lang-svelte", "lang-astro", "lang-dotnet", "lang-markdown", "lang-apex", "lang-pascal", "lang-razor"]
 lang-python = ["dep:tree-sitter-python"]
 lang-javascript = ["dep:tree-sitter-javascript"]
 lang-typescript = ["dep:tree-sitter-typescript"]
@@ -60,6 +73,7 @@ codegraph-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 blake3 = { workspace = true }
+rmp-serde = { version = "1", optional = true }
 regex = { workspace = true, optional = true }
 roxmltree = { workspace = true, optional = true }
 tree-sitter = { workspace = true }

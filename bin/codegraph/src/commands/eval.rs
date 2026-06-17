@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use codegraph_eval::{replay, ReplayOptions, ReplayReport};
+use codegraph_eval::{calibrate_cross_language, replay, ReplayOptions, ReplayReport};
 
 use crate::cli::EvalAction;
 
@@ -32,7 +32,26 @@ pub(crate) fn run_eval(action: EvalAction) -> Result<()> {
             out,
             json,
         }),
+        EvalAction::CrossLanguage { graph, json } => run_cross_language(graph, json),
     }
+}
+
+/// Calibrate the cross-language edge layer over a built graph.json.
+fn run_cross_language(graph_path: PathBuf, json: bool) -> Result<()> {
+    let bytes =
+        std::fs::read(&graph_path).with_context(|| format!("reading {}", graph_path.display()))?;
+    let graph: codegraph_core::GraphData = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing {}", graph_path.display()))?;
+    let report = calibrate_cross_language(&graph);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("Cross-language calibration: {}", report.summary());
+        for (rel, n) in &report.relation_counts {
+            println!("  {rel}: {n}");
+        }
+    }
+    Ok(())
 }
 
 struct ReplayArgs {

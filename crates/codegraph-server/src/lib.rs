@@ -15,6 +15,9 @@
 //! [`codegraph_core::sanitize_label`] before it reaches tool text (a security
 //! boundary on LLM/corpus-derived names).
 #![forbid(unsafe_code)]
+// The `tools_list` JSON schema literal is large and deeply nested (tool input +
+// output schemas); the default 128 macro-expansion depth is not enough.
+#![recursion_limit = "256"]
 
 mod http;
 mod prompts;
@@ -27,7 +30,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use codegraph_core::{sanitize_label, GraphData, NodeId};
+use codegraph_core::{sanitize_label, sanitize_metadata_value, GraphData, NodeId};
 use codegraph_graph::{
     god_nodes, graph_stats, suggest_questions, surprising_connections, GodNode, GraphStats,
     KnowledgeGraph,
@@ -39,8 +42,8 @@ use codegraph_prs::{
     Status, SystemCommands,
 };
 use codegraph_query::{
-    affected_nodes, explain, resolve_seed, shortest_path, QueryIndex, ReverseImpactIndex,
-    TraversalMode, DEFAULT_AFFECTED_RELATIONS,
+    affected_nodes, describe_node, explain, resolve_seed, shortest_path, QueryIndex,
+    ReverseImpactIndex, TraversalMode, DEFAULT_AFFECTED_RELATIONS,
 };
 use codegraph_sandbox::{
     render_markdown as render_speculate_md, speculate, Change, SpeculateOptions,
@@ -349,6 +352,57 @@ impl Server {
             self.degree(&id),
             extra
         )
+    }
+
+    /// `describe_node` — a compact "takes X, returns Y, calls Z" description of a
+    /// symbol from its captured signature and outgoing call edges (graph-only, no
+    /// source read). Built for feeding tool/function description generation.
+    pub fn tool_describe_node(&self, label: &str) -> String {
+        let not_found = || format!("No node matches '{}'.", sanitize_label(label));
+        let Some(id) = resolve_seed(&self.kg, label) else {
+            return not_found();
+        };
+        let Some(d) = describe_node(&self.kg, &id) else {
+            return not_found();
+        };
+        let mut out = sanitize_label(&d.summary);
+        if let Some(sig) = &d.signature {
+            out.push_str(&format!("\nSignature: {}", sanitize_label(&sig.raw)));
+        }
+        if !d.callees.is_empty() {
+            let calls: Vec<String> = d.callees.iter().map(|c| sanitize_label(c)).collect();
+            out.push_str(&format!(
+                "\nCalls ({}): {}",
+                d.callees.len(),
+                calls.join(", ")
+            ));
+        }
+        out
+    }
+
+    /// Typed mirror of [`tool_describe_node`](Server::tool_describe_node).
+    fn describe_node_json(&self, label: &str) -> Value {
+        let Some(d) = resolve_seed(&self.kg, label).and_then(|i| describe_node(&self.kg, &i))
+        else {
+            return json!({ "found": false, "query": sanitize_label(label) });
+        };
+        let mut obj = serde_json::Map::new();
+        obj.insert("found".into(), json!(true));
+        obj.insert("id".into(), json!(sanitize_label(&d.id.0)));
+        obj.insert("label".into(), json!(sanitize_label(&d.label)));
+        obj.insert("summary".into(), json!(sanitize_label(&d.summary)));
+        if let Some(k) = &d.kind {
+            obj.insert("kind".into(), json!(k));
+        }
+        if let Some(sig) = &d.signature {
+            let raw = serde_json::to_value(sig).unwrap_or(Value::Null);
+            obj.insert("signature".into(), sanitize_metadata_value(&raw));
+        }
+        obj.insert(
+            "callees".into(),
+            Value::Array(d.callees.iter().map(|c| json!(sanitize_label(c))).collect()),
+        );
+        Value::Object(obj)
     }
 
     /// `get_source` — the actual source lines for a symbol. Resolves the node,
@@ -1123,6 +1177,45 @@ impl Server {
         json!({ "seed": sanitize_label(&self.label_of(&id)), "affected": arr })
     }
 
+    /// Typed mirror of [`tool_structural_search`](Server::tool_structural_search):
+    /// runs the same CGQL query / pattern and returns structured rows of resolved
+    /// node views (label, kind, visibility, file, and the captured signature) so
+    /// an agent can route on a function's shape without reading source. Aggregate
+    /// queries return `groups` of scalar cells instead.
+    fn structural_search_json(
+        &self,
+        query: Option<&str>,
+        pattern: Option<&str>,
+        limit: usize,
+    ) -> Value {
+        let result = if let Some(p) = pattern {
+            codegraph_cgql::patterns::run_pattern(&self.kg, p)
+        } else if let Some(q) = query {
+            codegraph_cgql::run(&self.kg, q)
+        } else {
+            return json!({ "error": "Provide a CGQL query or a pattern name.", "results": [] });
+        };
+        let r = match result {
+            Ok(r) => r,
+            Err(e) => return json!({ "error": format!("search error: {e}"), "results": [] }),
+        };
+        if let Some(agg) = &r.aggregates {
+            let groups: Vec<Value> = agg
+                .iter()
+                .take(limit)
+                .map(|row| Value::Array(row.iter().map(|c| json!(sanitize_label(c))).collect()))
+                .collect();
+            return json!({ "columns": r.columns, "groups": groups });
+        }
+        let results: Vec<Value> = r
+            .node_views(&self.kg)
+            .iter()
+            .take(limit)
+            .map(|row| Value::Array(row.iter().map(node_view_to_json).collect()))
+            .collect();
+        json!({ "columns": r.columns, "results": results })
+    }
+
     /// Typed mirror of [`render_query_text`](Server::render_query_text) over the
     /// same filtered retrieval, so structuredContent stays consistent with the
     /// rendered text without re-querying.
@@ -1570,6 +1663,7 @@ impl Server {
             "structural_search" => {
                 self.tool_structural_search(opt("query"), opt("pattern"), u("limit", 50) as usize)
             }
+            "describe_node" => self.tool_describe_node(&s("label")),
             "time_travel_diff" => {
                 self.tool_time_travel_diff(&s("rev1"), opt("rev2"), u("top", 20) as usize)
             }
@@ -1602,6 +1696,12 @@ impl Server {
                     .unwrap_or_default();
                 Some(self.affected_json(&s("label"), u("depth", 3) as usize, &rels))
             }
+            "structural_search" => Some(self.structural_search_json(
+                opt("query"),
+                opt("pattern"),
+                u("limit", 50) as usize,
+            )),
+            "describe_node" => Some(self.describe_node_json(&s("label"))),
             _ => None,
         };
 
@@ -1770,6 +1870,34 @@ fn file_type_str(ft: &codegraph_core::FileType) -> &'static str {
     }
 }
 
+/// Serialize a resolved [`NodeView`](codegraph_cgql::NodeView) for structured
+/// tool output. Free-text fields (label/id/file, and the signature, which is
+/// source-derived) are sanitized; `kind`/`visibility` come from fixed enums.
+fn node_view_to_json(v: &codegraph_cgql::NodeView) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("id".into(), json!(sanitize_label(&v.id)));
+    obj.insert("label".into(), json!(sanitize_label(&v.label)));
+    obj.insert("file".into(), json!(sanitize_label(&v.file)));
+    if let Some(k) = &v.kind {
+        obj.insert("kind".into(), json!(k));
+    }
+    if let Some(vis) = &v.visibility {
+        obj.insert("visibility".into(), json!(vis));
+    }
+    if let Some(line) = &v.line {
+        obj.insert("line".into(), json!(sanitize_label(line)));
+    }
+    if let Some(loc) = v.loc {
+        obj.insert("loc".into(), json!(loc));
+    }
+    if let Some(sig) = &v.signature {
+        // The signature is source-derived text; sanitize it like other metadata.
+        let raw = serde_json::to_value(sig).unwrap_or(Value::Null);
+        obj.insert("signature".into(), sanitize_metadata_value(&raw));
+    }
+    Value::Object(obj)
+}
+
 /// Parse the `<n> nodes found` count from a `query_graph` result header (the
 /// count of nodes found, independent of any later truncation).
 fn nodes_found(text: &str) -> usize {
@@ -1908,7 +2036,7 @@ fn tools_list(allow_exec: bool) -> Value {
           "inputSchema": { "type": "object", "properties": { "repo": { "type": "string", "description": "Repo tag, as listed by list_repos." } }, "required": ["repo"] } },
         { "name": "shortest_path", "description": "Shortest path between two nodes, showing the chain of relations. Answers 'how does A reach B' or 'is X connected to Y'.",
           "inputSchema": { "type": "object", "properties": { "source": { "type": "string", "description": "Start node: label, id, or bare name." }, "target": { "type": "string", "description": "End node: label, id, or bare name." }, "max_hops": { "type": "integer", "description": "Optional cap on path length (hops)." } }, "required": ["source", "target"] } },
-        { "name": "affected", "description": "Reverse-impact: the nodes that transitively depend on a symbol, i.e. what could break if you change it. Walks calls/imports/inherits/uses edges backward. Answers 'what is the blast radius of changing X'.",
+        { "name": "affected", "description": "Reverse-impact: the nodes that transitively depend on a symbol, i.e. what could break if you change it. Walks calls/imports/inheritance edges plus cross-language coupling (subprocess `invokes`, FFI `binds_native`, HTTP/gRPC `calls_service`/`handled_by`) backward, so the blast radius spans language boundaries. Answers 'what is the blast radius of changing X'.",
           "inputSchema": { "type": "object", "properties": {
               "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." },
               "depth": { "type": "integer", "description": "Max hops to walk backward (default 3, max 16)." },
@@ -1936,7 +2064,41 @@ fn tools_list(allow_exec: bool) -> Value {
               "query": { "type": "string", "description": "A CGQL query. Omit when using `pattern`." },
               "pattern": { "type": "string", "description": "A built-in pattern name instead of a query." },
               "limit": { "type": "integer", "description": "Max rows to return (default 50)." }
+          } },
+          "outputSchema": { "type": "object", "properties": {
+              "columns": { "type": "array", "items": { "type": "string" }, "description": "RETURN headers." },
+              "results": { "type": "array", "description": "One array of node cells per matched row.",
+                "items": { "type": "array", "items": { "type": "object", "properties": {
+                  "id": { "type": "string" },
+                  "label": { "type": "string" },
+                  "kind": { "type": "string" },
+                  "visibility": { "type": "string" },
+                  "file": { "type": "string" },
+                  "line": { "type": "string" },
+                  "loc": { "type": "integer" },
+                  "signature": { "type": "object", "description": "Captured signature: params (name + optional type_ref), optional return_type, and the raw header.", "properties": {
+                    "params": { "type": "array", "items": { "type": "object", "properties": {
+                      "name": { "type": "string" }, "type_ref": { "type": "string" } }, "required": ["name"] } },
+                    "return_type": { "type": "string" },
+                    "raw": { "type": "string" }
+                  } }
+                }, "required": ["id", "label"] } } },
+              "groups": { "type": "array", "description": "Scalar cells per group, for aggregation queries (count/projection).",
+                "items": { "type": "array", "items": { "type": "string" } } }
           } } },
+        { "name": "describe_node", "description": "Compact 'takes X, returns Y, calls Z' description of a symbol, composed from its captured signature and outgoing call edges (graph-only, no source read). Useful for generating tool/function descriptions or quickly understanding a function's shape. Resolve `label` by bare name, full label, id, or file.",
+          "inputSchema": { "type": "object", "properties": {
+              "label": { "type": "string", "description": "Symbol to describe (bare name, label, node id, or source file)." }
+          }, "required": ["label"] },
+          "outputSchema": { "type": "object", "properties": {
+              "found": { "type": "boolean" },
+              "id": { "type": "string" },
+              "label": { "type": "string" },
+              "kind": { "type": "string" },
+              "summary": { "type": "string", "description": "The one-line 'takes X, returns Y, calls Z' description." },
+              "callees": { "type": "array", "items": { "type": "string" }, "description": "Distinct outgoing call-target labels." },
+              "signature": { "type": "object", "description": "Captured signature: params (name + optional type_ref), optional return_type, raw header." }
+          }, "required": ["found"] } },
         { "name": "time_travel_diff", "description": "How the code graph changed between two git revisions: added/removed module dependencies, removed APIs, architectural drift, new cycles, and hotspots. Builds each revision in a throwaway git worktree (slow on a cold repo).",
           "inputSchema": { "type": "object", "properties": {
               "rev1": { "type": "string", "description": "Base revision (e.g. HEAD~10, a branch, or a SHA)." },
@@ -2150,6 +2312,83 @@ mod tests {
     }
 
     #[test]
+    fn structural_search_returns_structured_signature() {
+        use codegraph_core::{NodeKind, Param, Signature};
+        let mut greet = node("greet", "greet()", None);
+        greet.set_kind(NodeKind::Function);
+        greet.set_signature(Signature {
+            params: vec![Param {
+                name: "name".into(),
+                type_ref: Some("str".into()),
+            }],
+            return_type: Some("str".into()),
+            raw: "def greet(name: str) -> str".into(),
+        });
+        let gd = GraphData {
+            directed: false,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![greet],
+            links: vec![],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        let req = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"structural_search","arguments":{"query":"MATCH (f:function) RETURN f"}}});
+        let resp = s.handle_request(&req).unwrap();
+        let sc = &resp["result"]["structuredContent"];
+        let cell = &sc["results"][0][0];
+        assert_eq!(cell["label"], "greet()", "structured row carries label");
+        assert_eq!(cell["kind"], "function");
+        assert_eq!(cell["signature"]["return_type"], "str");
+        assert_eq!(cell["signature"]["params"][0]["name"], "name");
+        assert_eq!(cell["signature"]["params"][0]["type_ref"], "str");
+    }
+
+    #[test]
+    fn describe_node_tool_returns_summary_and_structured() {
+        use codegraph_core::{NodeKind, Param, Signature};
+        let mut greet = node("greet", "greet()", None);
+        greet.set_kind(NodeKind::Function);
+        greet.set_signature(Signature {
+            params: vec![Param {
+                name: "name".into(),
+                type_ref: Some("str".into()),
+            }],
+            return_type: Some("str".into()),
+            raw: "def greet(name: str) -> str".into(),
+        });
+        let gd = GraphData {
+            directed: false,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![greet, node("parse", "parse()", None)],
+            links: vec![edge("greet", "parse", "calls")],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let mut s = Server::from_graph_data(gd, None);
+
+        let txt = call_tool(&mut s, "describe_node", json!({ "label": "greet" }));
+        assert!(txt.contains("takes (name: str)"), "{txt}");
+        assert!(txt.contains("returns str"), "{txt}");
+        assert!(txt.contains("calls [parse()]"), "{txt}");
+
+        let req = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"describe_node","arguments":{"label":"greet"}}});
+        let resp = s.handle_request(&req).unwrap();
+        let sc = &resp["result"]["structuredContent"];
+        assert_eq!(sc["found"], true);
+        assert_eq!(sc["signature"]["return_type"], "str");
+        assert_eq!(sc["callees"][0], "parse()");
+        assert!(sc["summary"]
+            .as_str()
+            .unwrap_or("")
+            .contains("takes (name: str)"));
+    }
+
+    #[test]
     fn initialize_returns_orienting_instructions() {
         // Finding #2: the MCP initialize result should carry server `instructions`
         // that orient the agent to the whole toolset.
@@ -2309,7 +2548,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 23);
+        assert_eq!(names.len(), 24);
         for expected in [
             "query_graph",
             "get_node",
@@ -2329,6 +2568,7 @@ mod tests {
             "triage_prs",
             "working_changes_impact",
             "structural_search",
+            "describe_node",
             "time_travel_diff",
             "plan_rename",
             "predict_impact",

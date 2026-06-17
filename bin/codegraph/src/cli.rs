@@ -483,6 +483,17 @@ pub(crate) enum EvalAction {
         #[arg(long)]
         json: bool,
     },
+    /// Calibrate the cross-language edge layer (FFI/subprocess/HTTP/gRPC/pyo3)
+    /// over a built graph: per-relation counts plus two precision proxies
+    /// (service-boundary connectivity and subprocess-invocation resolution).
+    CrossLanguage {
+        /// Path to graph.json (default: codegraph-out/graph.json).
+        #[arg(long, default_value = "codegraph-out/graph.json")]
+        graph: PathBuf,
+        /// Emit the report as JSON to stdout.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]

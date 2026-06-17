@@ -167,6 +167,68 @@ fn local_subgraph_member_is_federated() {
 }
 
 #[test]
+fn cross_repo_parameterized_route_connects() {
+    // Two repos: a server with a parameterized Flask route + handler, and a client
+    // calling the concrete path. After federation, the concrete client route is
+    // matched to the server's template, and the cross-repo calls_service edge is
+    // flagged. Exercises the finalize() cross-repo route pass.
+    let dir = tempfile::tempdir().unwrap();
+    let server = dir.path().join("server");
+    write(
+        &server,
+        "app.py",
+        "from flask import Flask\napp = Flask(__name__)\n\n@app.get(\"/users/<int:uid>\")\ndef get_user(uid):\n    return {}\n",
+    );
+    let client = dir.path().join("client");
+    write(
+        &client,
+        "main.py",
+        "import requests\n\ndef load():\n    return requests.get(\"http://svc/users/42\").json()\n",
+    );
+
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    write_manifest(
+        &ws,
+        &manifest_with(vec![
+            RepoMember {
+                name: "server".into(),
+                git: None,
+                rev: None,
+                subgraph: None,
+                path: Some(fwd(&server)),
+            },
+            RepoMember {
+                name: "client".into(),
+                git: None,
+                rev: None,
+                subgraph: None,
+                path: Some(fwd(&client)),
+            },
+        ]),
+    )
+    .unwrap();
+
+    let build = build_workspace(&ws, &WorkspaceBuildOptions::default()).unwrap();
+    let nodes: Vec<_> = build.federated.nodes().collect();
+    assert!(
+        nodes.iter().any(|n| n.label == "/users/<int:uid>"),
+        "server's template route survives federation"
+    );
+    assert!(
+        !nodes.iter().any(|n| n.label == "/users/42"),
+        "concrete client route merged into the server's template"
+    );
+    assert!(
+        build
+            .federated
+            .edges()
+            .any(|e| e.relation == "calls_service" && e.cross_repo),
+        "the client -> route edge spans repos and is flagged cross_repo"
+    );
+}
+
+#[test]
 fn remote_subgraph_blocked_ip_is_rejected_by_the_ssrf_guard() {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path().join("ws");

@@ -66,6 +66,21 @@ fn extract_then_query_roundtrip() {
         "expected run_analysis() node, got {labels:?}"
     );
     assert!(labels.iter().any(|l| l == "compute_score()"));
+    // Function signatures flow end-to-end into graph.json (Track A): the
+    // compute_score(data) node carries its parameter.
+    let compute = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["label"] == "compute_score()")
+        .expect("compute_score node");
+    let params = compute["signature"]["params"]
+        .as_array()
+        .expect("signature params present in graph.json");
+    assert_eq!(
+        params[0]["name"], "data",
+        "captured parameter name reaches graph.json"
+    );
     // The intra-file call edge must be present.
     let calls = graph["links"]
         .as_array()
@@ -671,6 +686,489 @@ fn serve_answers_mcp_over_stdio() {
     );
     assert!(stdout.contains("query_graph"), "tools/list reply: {stdout}");
     assert!(stdout.contains("nodes"), "graph_stats reply: {stdout}");
+}
+
+#[test]
+fn cgo_binds_native_edge_reaches_graph_json() {
+    // Cross-language (FFI) edge: a cgo `C.sqrt()` call must survive the build into
+    // graph.json as a `binds_native` edge to a native target stub.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "main.go",
+        "package main\n\n// #include <math.h>\nimport \"C\"\n\nfunc Compute() float64 {\n\treturn float64(C.sqrt(4))\n}\n",
+    );
+
+    Command::cargo_bin("codegraph")
+        .unwrap()
+        .arg("extract")
+        .arg(root)
+        .assert()
+        .success();
+
+    let graph: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("codegraph-out/graph.json")).unwrap()).unwrap();
+    assert!(
+        graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["label"] == "C.sqrt"),
+        "native target node missing: {:?}",
+        graph["nodes"]
+    );
+    let has = graph["links"].as_array().unwrap().iter().any(|e| {
+        e["relation"] == "binds_native" && e["confidence"] == "INFERRED" && e["context"] == "cgo"
+    });
+    assert!(
+        has,
+        "expected a binds_native edge in graph.json; links: {:?}",
+        graph["links"]
+    );
+}
+
+#[test]
+fn http_client_connects_to_route_handler() {
+    // A client call and a server handler in different files meet at a shared,
+    // path-keyed route node, so impact traverses the HTTP boundary.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "server.py",
+        "from flask import Flask\napp = Flask(__name__)\n\n@app.get(\"/api/users\")\ndef list_users():\n    return []\n",
+    );
+    write(
+        root,
+        "client.py",
+        "import requests\n\ndef load():\n    return requests.get(\"http://svc/api/users\").json()\n",
+    );
+
+    Command::cargo_bin("codegraph")
+        .unwrap()
+        .arg("extract")
+        .arg(root)
+        .assert()
+        .success();
+
+    let graph: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("codegraph-out/graph.json")).unwrap()).unwrap();
+    let id_of = |label: &str| -> String {
+        graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["label"] == label)
+            .map(|n| n["id"].as_str().unwrap().to_string())
+            .unwrap_or_default()
+    };
+    let route = id_of("/api/users");
+    assert!(!route.is_empty(), "shared route node present");
+    let links = graph["links"].as_array().unwrap();
+    // route -> handler (handled_by) and client -> route (calls_service): the
+    // dependency chain client -> route -> handler.
+    let handled_by = links.iter().any(|e| {
+        e["relation"] == "handled_by"
+            && e["source"] == serde_json::json!(route)
+            && e["target"] == serde_json::json!(id_of("list_users()"))
+    });
+    let calls = links.iter().any(|e| {
+        e["relation"] == "calls_service"
+            && e["source"] == serde_json::json!(id_of("load()"))
+            && e["target"] == serde_json::json!(route)
+    });
+    assert!(handled_by, "route -> handler edge; links: {links:?}");
+    assert!(calls, "client -> route edge; links: {links:?}");
+
+    // Reverse-impact crosses the HTTP boundary: changing the handler reaches the
+    // client through route -> handler + client -> route.
+    let aff = Command::cargo_bin("codegraph")
+        .unwrap()
+        .current_dir(root)
+        .args(["affected", "list_users"])
+        .assert()
+        .success();
+    let aff_out = String::from_utf8_lossy(&aff.get_output().stdout).into_owned();
+    assert!(
+        aff_out.contains("load()"),
+        "affected(handler) should reach the HTTP client load(): {aff_out}"
+    );
+}
+
+#[test]
+fn eval_cross_language_calibrates_a_built_graph() {
+    // A two-sided HTTP route (server + client) should calibrate as one fully
+    // connected service boundary.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "server.py",
+        "from flask import Flask\napp = Flask(__name__)\n\n@app.get(\"/api/users\")\ndef list_users():\n    return []\n",
+    );
+    write(
+        root,
+        "client.py",
+        "import requests\n\ndef load():\n    return requests.get(\"http://svc/api/users\").json()\n",
+    );
+
+    Command::cargo_bin("codegraph")
+        .unwrap()
+        .arg("extract")
+        .arg(root)
+        .assert()
+        .success();
+
+    let out = Command::cargo_bin("codegraph")
+        .unwrap()
+        .current_dir(root)
+        .args(["eval", "cross-language", "--json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON report");
+    assert!(
+        report["total_edges"].as_u64().unwrap() >= 2,
+        "report: {report}"
+    );
+    assert_eq!(report["service_boundaries"], 1, "report: {report}");
+    assert_eq!(
+        report["service_two_sided"], 1,
+        "the /api/users route is two-sided: {report}"
+    );
+}
+
+#[test]
+fn axum_handler_resolved_across_files() {
+    // The router in app.rs references a handler by a qualified name; the handler is
+    // defined in handlers.rs. The cross-file resolver links the route to the
+    // handler, so a client calling the path reaches it across the file boundary.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "src/handlers.rs",
+        "pub async fn serve() -> String {\n    String::new()\n}\n",
+    );
+    write(
+        root,
+        "src/app.rs",
+        "use axum::routing::get;\nmod handlers;\nfn app() -> Router {\n    Router::new().route(\"/api/x\", get(handlers::serve))\n}\n",
+    );
+    write(
+        root,
+        "client.py",
+        "import requests\n\ndef call():\n    return requests.get(\"http://svc/api/x\").json()\n",
+    );
+
+    Command::cargo_bin("codegraph")
+        .unwrap()
+        .arg("extract")
+        .arg(root)
+        .assert()
+        .success();
+
+    let graph: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("codegraph-out/graph.json")).unwrap()).unwrap();
+    let id_of = |label: &str| -> String {
+        graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["label"] == label)
+            .map(|n| n["id"].as_str().unwrap().to_string())
+            .unwrap_or_default()
+    };
+    let route = id_of("/api/x");
+    let serve = id_of("serve()");
+    assert!(
+        !route.is_empty() && !serve.is_empty(),
+        "route + handler nodes"
+    );
+    let linked = graph["links"].as_array().unwrap().iter().any(|e| {
+        e["relation"] == "handled_by"
+            && e["source"] == serde_json::json!(route)
+            && e["target"] == serde_json::json!(serve)
+    });
+    assert!(
+        linked,
+        "route -> cross-file handler edge; links: {:?}",
+        graph["links"]
+    );
+
+    // Impact crosses both boundaries: serve <- route <- client call().
+    let aff = Command::cargo_bin("codegraph")
+        .unwrap()
+        .current_dir(root)
+        .args(["affected", "serve"])
+        .assert()
+        .success();
+    let aff_out = String::from_utf8_lossy(&aff.get_output().stdout).into_owned();
+    assert!(
+        aff_out.contains("call()"),
+        "affected(serve) reaches the client across files: {aff_out}"
+    );
+}
+
+#[test]
+fn pyo3_cross_file_module_connects_to_python_importer() {
+    // The #[pyfunction] lives in ops.rs; the #[pymodule] that registers it (by a
+    // qualified `wrap_pyfunction!(ops::add, ..)`) lives in lib.rs; a Python file
+    // imports the module. The graph-level stitch links the module boundary to the
+    // cross-file function, so impact crosses from the Rust impl all the way to the
+    // Python importer.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "src/ops.rs",
+        "use pyo3::prelude::*;\n\n#[pyfunction]\npub fn add(a: i64, b: i64) -> i64 {\n    a + b\n}\n",
+    );
+    write(
+        root,
+        "src/lib.rs",
+        "use pyo3::prelude::*;\nmod ops;\n\n#[pymodule]\nfn mathmod(_py: Python<'_>, m: &PyModule) -> PyResult<()> {\n    m.add_function(wrap_pyfunction!(ops::add, m)?)?;\n    Ok(())\n}\n",
+    );
+    write(
+        root,
+        "app.py",
+        "import mathmod\n\ndef run():\n    return mathmod.add(1, 2)\n",
+    );
+
+    Command::cargo_bin("codegraph")
+        .unwrap()
+        .arg("extract")
+        .arg(root)
+        .assert()
+        .success();
+
+    let graph: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("codegraph-out/graph.json")).unwrap()).unwrap();
+    assert!(
+        graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["label"] == "pyo3:mathmod"),
+        "module boundary present"
+    );
+
+    let aff = Command::cargo_bin("codegraph")
+        .unwrap()
+        .current_dir(root)
+        .args(["affected", "add"])
+        .assert()
+        .success();
+    let aff_out = String::from_utf8_lossy(&aff.get_output().stdout).into_owned();
+    assert!(
+        aff_out.contains("app.py"),
+        "affected(add) reaches the Python importer across files: {aff_out}"
+    );
+}
+
+#[test]
+fn pyo3_export_connects_to_python_importer() {
+    // A Rust #[pymodule]/#[pyfunction] and a Python file importing that module
+    // connect at graph build, so impact crosses from the Rust impl to the Python
+    // file that depends on it.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "src/lib.rs",
+        "use pyo3::prelude::*;\n\n#[pyfunction]\nfn add(a: i64, b: i64) -> i64 {\n    a + b\n}\n\n#[pymodule]\nfn mathmod(_py: Python<'_>, m: &PyModule) -> PyResult<()> {\n    m.add_function(wrap_pyfunction!(add, m)?)?;\n    Ok(())\n}\n",
+    );
+    write(
+        root,
+        "app.py",
+        "import mathmod\n\ndef run():\n    return mathmod.add(1, 2)\n",
+    );
+
+    Command::cargo_bin("codegraph")
+        .unwrap()
+        .arg("extract")
+        .arg(root)
+        .assert()
+        .success();
+
+    let graph: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("codegraph-out/graph.json")).unwrap()).unwrap();
+    assert!(
+        graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["label"] == "pyo3:mathmod"),
+        "pyo3 module boundary present"
+    );
+
+    // Reverse-impact from the Rust export reaches the importing Python file:
+    // boundary handled_by add, importer calls_service boundary.
+    let aff = Command::cargo_bin("codegraph")
+        .unwrap()
+        .current_dir(root)
+        .args(["affected", "add"])
+        .assert()
+        .success();
+    let aff_out = String::from_utf8_lossy(&aff.get_output().stdout).into_owned();
+    assert!(
+        aff_out.contains("app.py"),
+        "affected(add) should reach the Python importer app.py: {aff_out}"
+    );
+}
+
+#[test]
+fn parameterized_route_connects_concrete_client_call() {
+    // A server route template /users/<int:uid> and a client call to the concrete
+    // /users/42 are merged at graph build, so impact crosses the HTTP boundary
+    // despite the path-parameter mismatch.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "server.py",
+        "from flask import Flask\napp = Flask(__name__)\n\n@app.get(\"/users/<int:uid>\")\ndef get_user(uid):\n    return {}\n",
+    );
+    write(
+        root,
+        "client.py",
+        "import requests\n\ndef load():\n    return requests.get(\"http://svc/users/42\").json()\n",
+    );
+
+    Command::cargo_bin("codegraph")
+        .unwrap()
+        .arg("extract")
+        .arg(root)
+        .assert()
+        .success();
+
+    let graph: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("codegraph-out/graph.json")).unwrap()).unwrap();
+    let nodes = graph["nodes"].as_array().unwrap();
+    assert!(
+        nodes.iter().any(|n| n["label"] == "/users/<int:uid>"),
+        "template route present"
+    );
+    assert!(
+        !nodes.iter().any(|n| n["label"] == "/users/42"),
+        "concrete client route merged into the template"
+    );
+
+    // Reverse-impact crosses the boundary: the concrete client call was retargeted
+    // to the template route, which is handled_by the parameterized handler.
+    let aff = Command::cargo_bin("codegraph")
+        .unwrap()
+        .current_dir(root)
+        .args(["affected", "get_user"])
+        .assert()
+        .success();
+    let aff_out = String::from_utf8_lossy(&aff.get_output().stdout).into_owned();
+    assert!(
+        aff_out.contains("load()"),
+        "affected(handler) should reach the client via the merged route: {aff_out}"
+    );
+}
+
+#[test]
+fn update_resolves_subprocess_command_incrementally() {
+    // The command-resolution pass must run on the incremental `update` path too,
+    // not only one-shot `extract`, so the headline edge does not degrade.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "deploy.py", "def deploy():\n    return 1\n");
+    write(root, "src/bin/tool.rs", "fn main() {}\n");
+
+    Command::cargo_bin("codegraph")
+        .unwrap()
+        .arg("extract")
+        .arg(root)
+        .assert()
+        .success();
+
+    // Add a subprocess call, then update just that file.
+    write(
+        root,
+        "deploy.py",
+        "import subprocess\n\ndef deploy():\n    subprocess.run([\"tool\"])\n",
+    );
+    Command::cargo_bin("codegraph")
+        .unwrap()
+        .current_dir(root)
+        .args(["update", "deploy.py"])
+        .assert()
+        .success();
+
+    let graph: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("codegraph-out/graph.json")).unwrap()).unwrap();
+    let tool_id = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["label"] == "tool.rs")
+        .map(|n| n["id"].as_str().unwrap().to_string())
+        .unwrap_or_default();
+    assert!(!tool_id.is_empty(), "rust binary file node present");
+    let resolved = graph["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["relation"] == "invokes" && e["target"].as_str() == Some(tool_id.as_str()));
+    assert!(
+        resolved,
+        "after `update`, subprocess command should resolve to tool.rs; links: {:?}",
+        graph["links"]
+    );
+}
+
+#[test]
+fn python_subprocess_resolves_to_rust_binary() {
+    // The headline cross-language case: a Python script invoking a Rust binary by
+    // name resolves to that binary's source file via an `invokes` edge.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "deploy.py",
+        "import subprocess\n\ndef deploy():\n    subprocess.run([\"mybinary\", \"--release\"])\n",
+    );
+    write(
+        root,
+        "src/bin/mybinary.rs",
+        "fn main() {\n    println!(\"hi\");\n}\n",
+    );
+
+    Command::cargo_bin("codegraph")
+        .unwrap()
+        .arg("extract")
+        .arg(root)
+        .assert()
+        .success();
+
+    let graph: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("codegraph-out/graph.json")).unwrap()).unwrap();
+    let id_of = |label: &str| -> String {
+        graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["label"] == label)
+            .map(|n| n["id"].as_str().unwrap().to_string())
+            .unwrap_or_default()
+    };
+    let bin_id = id_of("mybinary.rs");
+    assert!(!bin_id.is_empty(), "rust binary file node present");
+    // The command stub was resolved away to the real binary source file.
+    let resolved = graph["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["relation"] == "invokes" && e["target"].as_str() == Some(bin_id.as_str()));
+    assert!(
+        resolved,
+        "expected a cross-language invokes edge to mybinary.rs; links: {:?}",
+        graph["links"]
+    );
 }
 
 #[test]

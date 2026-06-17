@@ -532,6 +532,30 @@ mod tests {
     }
 
     #[test]
+    fn node_views_expose_signature_and_kind() {
+        use codegraph_core::{Param, Signature};
+        let mut greet = node("greet", "greet()", NodeKind::Function, 3);
+        greet.set_signature(Signature {
+            params: vec![Param {
+                name: "name".into(),
+                type_ref: Some("str".into()),
+            }],
+            return_type: Some("str".into()),
+            raw: "def greet(name: str) -> str".into(),
+        });
+        let kg = graph(vec![greet], vec![]);
+        let res = run_query(&kg, &parse("MATCH (f:function) RETURN f").unwrap());
+        let views = res.node_views(&kg);
+        assert_eq!(views.len(), 1, "one matched row");
+        let v = &views[0][0];
+        assert_eq!(v.label, "greet()");
+        assert_eq!(v.kind.as_deref(), Some("function"));
+        let sig = v.signature.as_ref().expect("signature present in view");
+        assert_eq!(sig.params[0].name, "name");
+        assert_eq!(sig.return_type.as_deref(), Some("str"));
+    }
+
+    #[test]
     fn property_filter_loc_and_kind() {
         let mut big = node("big", "Big", NodeKind::Class, 600);
         big.set_visibility(Visibility::Public);

@@ -12,9 +12,12 @@ pub mod eval;
 pub mod lexer;
 pub mod parser;
 pub mod patterns;
+pub mod view;
 
 use codegraph_core::NodeId;
 use codegraph_graph::KnowledgeGraph;
+
+pub use view::NodeView;
 
 /// A parse or evaluation error.
 #[derive(Debug, thiserror::Error)]

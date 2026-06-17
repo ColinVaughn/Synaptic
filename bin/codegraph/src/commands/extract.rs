@@ -8,8 +8,9 @@ use codegraph_extract::{
 };
 use codegraph_graph::{
     ambiguous_concept_pairs, analyze, apply_communities, build_from_parts, cluster,
-    deduplicate_entities, deterministic_tiebreak, merge_pairs, resolve_symbols, BuildOptions,
-    ClusterOptions, KnowledgeGraph,
+    deduplicate_entities, deterministic_tiebreak, merge_pairs, resolve_command_invocations,
+    resolve_parameterized_routes, resolve_pyo3_imports, resolve_pyo3_modules,
+    resolve_route_handlers, resolve_symbols, BuildOptions, ClusterOptions, KnowledgeGraph,
 };
 use codegraph_llm::{
     build_client, default_concurrency, estimate_cost, resolve_backend, LlmClient, SemanticCache,
@@ -238,6 +239,57 @@ pub(crate) fn run_extract(
         edges2.extend(resolved);
         kg = build_from_parts(nodes2, edges2, vec![], &opts);
         println!("Resolved {n} cross-file call edge(s)");
+    }
+
+    // Cross-language: retarget subprocess command stubs to a matching in-repo file
+    // node (e.g. Python subprocess.run("tool") -> the Rust binary src/bin/tool.rs).
+    let before_cmd = kg.node_count();
+    let (cn, ce) =
+        resolve_command_invocations(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
+    if cn.len() < before_cmd {
+        let n = before_cmd - cn.len();
+        kg = build_from_parts(cn, ce, vec![], &opts);
+        println!("Resolved {n} command invocation(s) to in-repo targets");
+    }
+
+    // Cross-language: resolve named route handlers (axum `.route("/p", get(h))`)
+    // to the handler fn when it is defined in another file. Runs before the
+    // parameterized-route merge so a cross-file-resolved server route is not
+    // mistaken for a client route.
+    let before_edges = kg.edges().count();
+    let (hn, he) =
+        resolve_route_handlers(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
+    if he.len() > before_edges {
+        let n = he.len() - before_edges;
+        kg = build_from_parts(hn, he, vec![], &opts);
+        println!("Resolved {n} cross-file route handler(s)");
+    }
+
+    // Cross-language: merge concrete client route paths into the parameterized
+    // server route they match (/users/7 -> /users/{id}), so a client call connects
+    // to the route's handler.
+    let before_routes = kg.node_count();
+    let (rn, re) =
+        resolve_parameterized_routes(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
+    if rn.len() < before_routes {
+        let n = before_routes - rn.len();
+        kg = build_from_parts(rn, re, vec![], &opts);
+        println!("Resolved {n} parameterized route(s)");
+    }
+
+    // Cross-language pyo3: first stitch each #[pymodule] boundary to the
+    // #[pyfunction]/#[pyclass] definitions it registers (matched by name, across
+    // files), then connect Python importers of the module to that boundary -- so
+    // impact crosses from the Rust impl to the Python caller even when the module
+    // and the function are in different files.
+    let before_edges = kg.edges().count();
+    let (pn, pe) =
+        resolve_pyo3_modules(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
+    let (pn, pe) = resolve_pyo3_imports(pn, pe);
+    if pe.len() > before_edges {
+        let n = pe.len() - before_edges;
+        kg = build_from_parts(pn, pe, vec![], &opts);
+        println!("Connected {n} pyo3 edge(s) (module exports + imports)");
     }
 
     // Merge near-duplicate non-code entities (documents/concepts). A no-op on a

@@ -6,10 +6,13 @@ use std::path::Path;
 
 pub mod cache;
 pub mod config;
+#[cfg(feature = "cross-language")]
+pub mod crosslang;
 pub mod paths;
 pub mod python;
 pub mod resolve;
 pub mod result;
+pub mod signature;
 pub mod tsconfig;
 pub mod walker;
 
@@ -131,7 +134,8 @@ pub use python::{extract_python_file, extract_python_source};
 )]
 pub fn extract_source(path: &str, source: &[u8]) -> Option<ExtractionResult> {
     let ext = Path::new(path).extension().and_then(|e| e.to_str())?;
-    match ext {
+    #[allow(unused_mut)]
+    let mut result = (match ext {
         #[cfg(feature = "lang-python")]
         "py" => Some(python::extract_python_source(path, source)),
         #[cfg(feature = "lang-javascript")]
@@ -215,7 +219,10 @@ pub fn extract_source(path: &str, source: &[u8]) -> Option<ExtractionResult> {
         #[cfg(feature = "lang-razor")]
         "razor" | "cshtml" => Some(razor::extract_razor_source(path, source)),
         _ => None,
-    }
+    })?;
+    #[cfg(feature = "cross-language")]
+    crosslang::augment(path, source, &mut result);
+    Some(result)
 }
 
 /// Extract a file from disk by extension. `Ok(None)` for unsupported extensions.

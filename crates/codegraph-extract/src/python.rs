@@ -233,4 +233,32 @@ mod tests {
             "docstrings <= 20 chars are not rationale"
         );
     }
+
+    #[test]
+    fn captures_function_signature_with_params_and_return() {
+        let r = extract_python_source(
+            "m.py",
+            b"def greet(name: str, count: int = 1) -> str:\n    return name\n",
+        );
+        let f = r.nodes.iter().find(|n| n.label == "greet()").unwrap();
+        let sig = f.signature().expect("function node carries a signature");
+        let names: Vec<&str> = sig.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["name", "count"]);
+        assert_eq!(sig.params[0].type_ref.as_deref(), Some("str"));
+        assert_eq!(sig.params[1].type_ref.as_deref(), Some("int"));
+        assert_eq!(sig.return_type.as_deref(), Some("str"));
+        // raw is the verbatim header, always present.
+        assert!(sig.raw.contains("greet(name: str"));
+    }
+
+    #[test]
+    fn untyped_params_keep_names_without_types() {
+        let r = extract_python_source("m.py", b"def add(a, b):\n    return a + b\n");
+        let f = r.nodes.iter().find(|n| n.label == "add()").unwrap();
+        let sig = f.signature().expect("signature present");
+        let names: Vec<&str> = sig.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"]);
+        assert!(sig.params.iter().all(|p| p.type_ref.is_none()));
+        assert!(sig.return_type.is_none());
+    }
 }

@@ -22,6 +22,8 @@ office = ["codegraph-ingest/office"]
 gws = ["codegraph-ingest/gws"]
 # Live Neo4j/FalkorDB push for `codegraph export neo4j|falkordb --push` (off by default).
 push = ["codegraph-output/push"]
+# Store the per-file AST cache as MessagePack instead of JSON (off by default).
+cache-binary = ["codegraph-extract/cache-binary"]
 
 [dependencies]
 codegraph-core = { workspace = true }

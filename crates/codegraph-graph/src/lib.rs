@@ -5,6 +5,7 @@ pub mod betweenness;
 pub mod build;
 pub mod cluster;
 mod community;
+pub mod cross_language;
 pub mod dedup;
 pub mod error;
 pub mod graph;
@@ -21,6 +22,10 @@ pub use build::{build_from_parts, guard_shrink, BuildOptions};
 pub use cluster::{
     apply_communities, cluster, cohesion_score, remap_communities_to_previous, Algorithm,
     ClusterOptions,
+};
+pub use cross_language::{
+    mark_cross_repo_edges, resolve_command_invocations, resolve_parameterized_routes,
+    resolve_pyo3_imports, resolve_pyo3_modules, resolve_route_handlers,
 };
 pub use dedup::{
     ambiguous_concept_pairs, deduplicate_entities, deterministic_tiebreak, merge_pairs,

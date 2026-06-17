@@ -141,7 +141,7 @@ exposure.
 
 ## MCP tools
 
-`tools/list` reports 23 tools by default (24 with `--allow-exec`, which adds
+`tools/list` reports 24 tools by default (25 with `--allow-exec`, which adds
 `speculate`). Every tool documents its parameters in its input schema, and every
 tool carries annotations so a host knows how safe it is to run:
 
@@ -149,7 +149,7 @@ tool carries annotations so a host knows how safe it is to run:
 "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": <bool> }
 ```
 
-All 23 default tools are `readOnlyHint: true`. `openWorldHint` is `true` only for
+All 24 default tools are `readOnlyHint: true`. `openWorldHint` is `true` only for
 the tools that reach outside the graph by shelling out (`list_prs`,
 `get_pr_impact`, `triage_prs`, `working_changes_impact`, `predict_impact`,
 `affected_tests`, and `time_travel_diff`); it is `false` for the rest, including
@@ -163,7 +163,7 @@ annotated honestly as `readOnlyHint: false, openWorldHint: true`. The default
 server never advertises or runs it, preserving the strictly read-only surface.
 
 Each tool returns a text content block (the load-bearing, purpose-formatted
-output). Four tools additionally declare an `outputSchema` and return a typed
+output). Six tools additionally declare an `outputSchema` and return a typed
 `structuredContent` object alongside the text (a 2025-06-18 feature) -- see
 [Structured output](#structured-output).
 
@@ -303,7 +303,10 @@ Parameters:
 - `relations` (array of strings) -- edge relations to follow. Defaults to the
   structural-impact set (`calls`, `references`, `imports`, `imports_from`,
   `re_exports`, `inherits`, `extends`, `implements`, `uses`, `mixes_in`,
-  `embeds`, `depends_on`, `reads_from`).
+  `embeds`, `depends_on`, `reads_from`) **plus the cross-language relations**
+  `invokes`, `binds_native`, `calls_service`, and `handled_by`, so the blast
+  radius spans subprocess, FFI, and HTTP/gRPC boundaries (see
+  [Cross-Language-Edges](Cross-Language-Edges)).
 
 Returns `<n> nodes depend on <seed> (<= <depth> hops):` and, per hit, the hop
 count, the relation it was reached through, and the label, plus a
@@ -445,7 +448,29 @@ Parameters:
 - `limit` (integer) -- max rows to return. Default 50.
 
 Returns the matched rows (one node per line: label, kind/visibility, source
-location), or the parse error if the query is malformed.
+location), or the parse error if the query is malformed. It also returns a
+`structuredContent` mirror: one object per matched node with its `id`, `label`,
+`kind`, `visibility`, `file`, `line`, `loc`, and captured **signature** (params
+with optional types, return type, and the raw header), so an agent can route on
+a function's shape without reading source. Aggregate queries (`count(...)`,
+projections) return scalar `groups` instead.
+
+### describe_node
+
+A compact "takes X, returns Y, calls Z" description of a symbol, composed from
+its captured [signature](Extraction#node-metadata-kind-visibility-span-signature)
+and outgoing call edges. Graph-only (no source read), built for generating
+tool/function descriptions or quickly grasping a function's shape. The "calls"
+clause includes cross-language `invokes` and `calls_service` targets.
+
+Parameters:
+- `label` (string, required) -- the symbol to describe (bare name, full label,
+  node id, or source file).
+
+Returns the one-line summary, then a `Signature:` line and a `Calls (<n>): ...`
+line when present, plus a `structuredContent` mirror
+(`{ found, id, label, kind, summary, callees, signature }`). Returns
+`No node matches '<label>'.` when nothing resolves.
 
 ### time_travel_diff
 
@@ -479,7 +504,7 @@ to review, <n> affected`, or an error string if the symbol is not found.
 
 ### Structured output
 
-Four tools declare an `outputSchema` and return a `structuredContent` object
+Six tools declare an `outputSchema` and return a `structuredContent` object
 beside the text content, so a client can parse the result instead of scraping the
 formatted text:
 
@@ -489,6 +514,8 @@ formatted text:
 | `god_nodes` | `{ god_nodes: [{ label, degree, id }] }` |
 | `affected` | `{ seed, affected: [{ label, depth, via_relation }] }` |
 | `query_graph` | `{ nodes: [{ label, file_type, source_file }], edges: [{ source, relation, target }] }` |
+| `structural_search` | `{ columns, results: [[{ id, label, kind, visibility, file, line, loc, signature }]] }` (or `groups` for aggregates) |
+| `describe_node` | `{ found, id, label, kind, summary, callees, signature }` |
 
 The other tools return text only.
 

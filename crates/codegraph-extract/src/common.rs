@@ -77,6 +77,7 @@ impl Builder {
         node: tree_sitter::Node,
         kind: codegraph_core::NodeKind,
         visibility: Option<codegraph_core::Visibility>,
+        signature: Option<codegraph_core::Signature>,
     ) {
         let s = node.start_position();
         let e = node.end_position();
@@ -102,6 +103,9 @@ impl Builder {
             if let Some(v) = visibility {
                 n.set_visibility(v);
             }
+            if let Some(sig) = signature {
+                n.set_signature(sig);
+            }
             self.nodes.push(n);
         } else if let Some(n) = self.nodes.iter_mut().find(|n| n.id == id) {
             // Enrich a previously-added plain stub in place (e.g. a Go receiver
@@ -112,6 +116,9 @@ impl Builder {
                 n.set_span(span);
                 if let Some(v) = visibility {
                     n.set_visibility(v);
+                }
+                if let Some(sig) = signature {
+                    n.set_signature(sig);
                 }
             }
         }
@@ -150,6 +157,34 @@ impl Builder {
             source_file: self.path.clone(),
             source_location: Some(format!("L{line}")),
             confidence_score: None,
+            weight: 1.0,
+            context: context.map(str::to_string),
+            cross_repo: false,
+            extra: Map::new(),
+        });
+    }
+
+    /// Add an INFERRED edge: a heuristic link (e.g. a cross-language binding)
+    /// that is observed in source but whose target is not verified to resolve.
+    // Used by cgo (go.rs); dead in single-language builds that exclude go but
+    // still compile the shared Builder (e.g. lang-rust only).
+    #[allow(dead_code)]
+    pub fn add_inferred_edge(
+        &mut self,
+        source: NodeId,
+        target: NodeId,
+        relation: &str,
+        line: usize,
+        context: Option<&str>,
+    ) {
+        self.edges.push(Edge {
+            source,
+            target,
+            relation: relation.to_string(),
+            confidence: Confidence::Inferred,
+            source_file: self.path.clone(),
+            source_location: Some(format!("L{line}")),
+            confidence_score: Some(Confidence::Inferred.default_score()),
             weight: 1.0,
             context: context.map(str::to_string),
             cross_repo: false,
