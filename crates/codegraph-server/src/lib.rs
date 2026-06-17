@@ -708,6 +708,83 @@ impl Server {
         }
     }
 
+    // structured (typed) tool output, mirroring the text for outputSchema tools
+
+    fn stats_json(&self) -> Value {
+        let s = &self.stats;
+        json!({
+            "nodes": s.nodes, "edges": s.edges, "communities": s.communities,
+            "extracted": s.extracted, "inferred": s.inferred, "ambiguous": s.ambiguous
+        })
+    }
+
+    fn god_nodes_json(&self, top_n: usize) -> Value {
+        let take = self.god_nodes_all.len().min(top_n.max(1));
+        let arr: Vec<Value> = self.god_nodes_all[..take]
+            .iter()
+            .map(|g| {
+                json!({
+                    "label": sanitize_label(&g.label),
+                    "degree": g.degree,
+                    "id": sanitize_label(&g.id.0)
+                })
+            })
+            .collect();
+        json!({ "god_nodes": arr })
+    }
+
+    fn affected_json(&self, label: &str, depth: usize, relations: &[String]) -> Value {
+        let Some(id) = resolve_seed(&self.kg, label) else {
+            return json!({ "seed": sanitize_label(label), "affected": [] });
+        };
+        let rels: Vec<&str> = if relations.is_empty() {
+            DEFAULT_AFFECTED_RELATIONS.to_vec()
+        } else {
+            relations.iter().map(String::as_str).collect()
+        };
+        let hits = affected_nodes(&self.kg, &id, &rels, depth.clamp(1, 16));
+        let arr: Vec<Value> = hits
+            .iter()
+            .map(|h| {
+                json!({
+                    "label": sanitize_label(&self.label_of(&h.node_id)),
+                    "depth": h.depth,
+                    "via_relation": sanitize_label(&h.via_relation)
+                })
+            })
+            .collect();
+        json!({ "seed": sanitize_label(&self.label_of(&id)), "affected": arr })
+    }
+
+    fn query_graph_json(&self, question: &str, mode: TraversalMode, token_budget: usize) -> Value {
+        let max_nodes = (token_budget / 40).clamp(10, 400);
+        let r = self.query_index.query(&self.kg, question, max_nodes, mode);
+        let nodes: Vec<Value> = r
+            .nodes
+            .iter()
+            .filter_map(|id| self.kg.node(id))
+            .map(|n| {
+                json!({
+                    "label": sanitize_label(&n.label),
+                    "file_type": file_type_str(&n.file_type),
+                    "source_file": sanitize_label(&n.source_file)
+                })
+            })
+            .collect();
+        let edges: Vec<Value> = r
+            .edges
+            .iter()
+            .map(|e| {
+                json!({
+                    "source": sanitize_label(&self.label_of(&e.source)),
+                    "relation": sanitize_label(&e.relation),
+                    "target": sanitize_label(&self.label_of(&e.target))
+                })
+            })
+            .collect();
+        json!({ "nodes": nodes, "edges": edges })
+    }
+
     // resources
 
     fn resource_report(&self) -> String {
@@ -898,7 +975,38 @@ impl Server {
                 }))
             }
         };
-        Ok(json!({ "content": [{ "type": "text", "text": text }], "isError": false }))
+
+        // Typed mirror of the text, for the tools that declare an outputSchema.
+        let structured: Option<Value> = match name {
+            "graph_stats" => Some(self.stats_json()),
+            "god_nodes" => Some(self.god_nodes_json(u("top_n", 10) as usize)),
+            "affected" => {
+                let rels: Vec<String> = args
+                    .get("relations")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some(self.affected_json(&s("label"), u("depth", 3) as usize, &rels))
+            }
+            "query_graph" => {
+                let mode = match args.get("mode").and_then(Value::as_str) {
+                    Some("dfs") => TraversalMode::Dfs,
+                    _ => TraversalMode::Bfs,
+                };
+                Some(self.query_graph_json(&s("question"), mode, u("token_budget", 2000) as usize))
+            }
+            _ => None,
+        };
+
+        let mut result = json!({ "content": [{ "type": "text", "text": text }], "isError": false });
+        if let Some(sc) = structured {
+            result["structuredContent"] = sc;
+        }
+        Ok(result)
     }
 
     fn dispatch_resource(&self, params: &Value) -> Result<Value, (i64, String)> {
@@ -1053,7 +1161,13 @@ fn tools_list() -> Value {
                     "context_filter": { "type": "array", "items": { "type": "string" }, "description": "Optional source-file path substrings; keeps only nodes whose file matches one (e.g. ['src/auth','login']). Use to scope a question to a subsystem." }
                 },
                 "required": ["question"]
-            }
+            },
+            "outputSchema": { "type": "object", "properties": {
+                "nodes": { "type": "array", "items": { "type": "object", "properties": {
+                    "label": {"type":"string"}, "file_type": {"type":"string"}, "source_file": {"type":"string"} } } },
+                "edges": { "type": "array", "items": { "type": "object", "properties": {
+                    "source": {"type":"string"}, "relation": {"type":"string"}, "target": {"type":"string"} } } }
+            }, "required": ["nodes", "edges"] }
         },
         { "name": "get_node", "description": "Show one node's metadata (type, source file, community, degree). Use after query_graph to inspect a specific symbol.",
           "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name (e.g. 'login_user', 'AuthService'); resolved leniently." } }, "required": ["label"] } },
@@ -1067,9 +1181,17 @@ fn tools_list() -> Value {
         { "name": "get_community", "description": "List the members of a community: a cluster of densely-connected nodes, roughly a module or subsystem. Use to see what belongs together.",
           "inputSchema": { "type": "object", "properties": { "community_id": { "type": "integer", "description": "Community id, as reported by graph_stats, god_nodes, or a node's 'Community' field." } }, "required": ["community_id"] } },
         { "name": "god_nodes", "description": "The most-connected nodes ('god nodes' = high-degree hubs, the structurally central symbols). Use to orient in an unfamiliar codebase.",
-          "inputSchema": { "type": "object", "properties": { "top_n": { "type": "integer", "description": "How many hubs to return (default is a small list)." } } } },
+          "inputSchema": { "type": "object", "properties": { "top_n": { "type": "integer", "description": "How many hubs to return (default is a small list)." } } },
+          "outputSchema": { "type": "object", "properties": {
+              "god_nodes": { "type": "array", "items": { "type": "object", "properties": {
+                  "label": {"type":"string"}, "degree": {"type":"integer"}, "id": {"type":"string"} } } }
+          }, "required": ["god_nodes"] } },
         { "name": "graph_stats", "description": "Graph size and health: node/edge/community counts and the EXTRACTED/INFERRED/AMBIGUOUS edge-confidence breakdown. Good first call to confirm a graph is loaded and how large it is.",
-          "inputSchema": { "type": "object", "properties": {} } },
+          "inputSchema": { "type": "object", "properties": {} },
+          "outputSchema": { "type": "object", "properties": {
+              "nodes": {"type":"integer"}, "edges": {"type":"integer"}, "communities": {"type":"integer"},
+              "extracted": {"type":"integer"}, "inferred": {"type":"integer"}, "ambiguous": {"type":"integer"}
+          }, "required": ["nodes","edges","communities"] } },
         { "name": "list_repos", "description": "For a federated (multi-repo) graph, list member repos (tags) with node/edge counts; empty for a single repo. Use before scoping a query to one repo.",
           "inputSchema": { "type": "object", "properties": {} } },
         { "name": "repo_stats", "description": "Node/edge counts for one federated member repo.",
@@ -1081,7 +1203,12 @@ fn tools_list() -> Value {
               "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." },
               "depth": { "type": "integer", "description": "Max hops to walk backward (default 3, max 16)." },
               "relations": { "type": "array", "items": { "type": "string" }, "description": "Optional edge relations to follow; defaults to the structural-impact set (calls, imports, inherits, implements, uses, references, depends_on, reads_from)." }
-          }, "required": ["label"] } },
+          }, "required": ["label"] },
+          "outputSchema": { "type": "object", "properties": {
+              "seed": {"type":"string"},
+              "affected": { "type": "array", "items": { "type": "object", "properties": {
+                  "label": {"type":"string"}, "depth": {"type":"integer"}, "via_relation": {"type":"string"} } } }
+          }, "required": ["seed","affected"] } },
         { "name": "find_callers", "description": "List the nodes that call, use, or reference this symbol (incoming edges only). Answers 'who calls X'.",
           "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." } }, "required": ["label"] } },
         { "name": "find_callees", "description": "List the nodes this symbol calls, uses, or references (outgoing edges only). Answers 'what does X call'.",
@@ -1383,6 +1510,39 @@ mod tests {
         let mut s = server(); // no source root
         let out = call_tool(&mut s, "get_source", json!({"label": "AuthService"}));
         assert!(out.contains("Source not available"), "{out}");
+    }
+
+    #[test]
+    fn graph_stats_returns_structured_content() {
+        let mut s = server();
+        let resp = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":"graph_stats","arguments":{}}
+            }))
+            .unwrap();
+        let sc = &resp["result"]["structuredContent"];
+        assert_eq!(sc["nodes"], json!(3));
+        assert_eq!(sc["edges"], json!(2));
+        // Text content is still present for display.
+        assert!(resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("3 nodes"));
+    }
+
+    #[test]
+    fn structured_tools_declare_output_schema() {
+        let tools = tools_list();
+        for name in ["graph_stats", "query_graph", "affected", "god_nodes"] {
+            let t = tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap();
+            assert!(t.get("outputSchema").is_some(), "{name} needs an outputSchema");
+        }
     }
 
     #[test]
