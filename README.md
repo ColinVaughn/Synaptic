@@ -11,7 +11,7 @@ MCP server so an AI coding assistant can consult the graph before grepping or re
 
 ---
 
-## Token economy (measured)
+## Token economy
 
 The whole point is to **read a small answer instead of the codebase**. Measured on
 CodeGraph's own source (199 Rust files, 56,408 lines, **510,966** `cl100k` tokens), one
@@ -46,7 +46,7 @@ the result's nodes live in (whole files, the conservative grep-then-read case; i
 count the dead-end files you would open without the graph). Run `codegraph extract .` on any
 repo and compare for yourself.
 
-## Advanced-tool performance (measured)
+## Advanced-tool performance
 
 The analysis tools answer in milliseconds because they run over the in-memory graph, not the
 source. Criterion micro-benchmarks (dev machine; run `cargo bench -p codegraph-cgql -p codegraph-refactor`):
