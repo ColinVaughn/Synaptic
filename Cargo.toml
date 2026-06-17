@@ -4,7 +4,7 @@ members = ["crates/*", "bin/*"]
 
 [workspace.package]
 edition = "2021"
-version = "0.2.1"
+version = "0.2.2"
 license = "AGPL-3.0-or-later"
 rust-version = "1.95"
 
@@ -38,6 +38,9 @@ codegraph-workspace = { path = "crates/codegraph-workspace" }
 codegraph-history = { path = "crates/codegraph-history" }
 codegraph-cgql = { path = "crates/codegraph-cgql" }
 codegraph-refactor = { path = "crates/codegraph-refactor" }
+codegraph-predict = { path = "crates/codegraph-predict" }
+codegraph-sandbox = { path = "crates/codegraph-sandbox" }
+codegraph-eval = { path = "crates/codegraph-eval" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 rayon = "1"

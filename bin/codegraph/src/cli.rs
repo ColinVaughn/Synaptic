@@ -168,6 +168,11 @@ pub(crate) enum Cmd {
         /// (default: the directory above codegraph-out/, i.e. the repo root).
         #[arg(long)]
         source_root: Option<PathBuf>,
+        /// Expose the command-running `speculate` tool (applies a change in a
+        /// throwaway worktree and runs tests/build). OFF by default: this makes
+        /// the server no longer read-only, so enable it only for trusted clients.
+        #[arg(long)]
+        allow_exec: bool,
     },
     /// Ingest an external source into the graph (cargo workspace, MCP config) or
     /// fetch a URL into codegraph-out/ingested/ for the next extract.
@@ -333,6 +338,150 @@ pub(crate) enum Cmd {
     Refactor {
         #[command(subcommand)]
         action: RefactorAction,
+    },
+    /// Forecast the consequences of a change before applying it: the graph nodes
+    /// it touches, the reverse-impact blast radius, public APIs at risk, and (vs a
+    /// base revision) new import cycles, removed APIs, and dependency deltas.
+    /// CodeGraph does not edit source; the forecast is data an agent reads first.
+    Predict {
+        /// Changed files (repo-relative). Empty = `git diff --name-only <base>`.
+        paths: Vec<PathBuf>,
+        /// Base revision to measure the change against (used for the changed-file
+        /// diff and the time-travel diff). Default: the detected default branch.
+        #[arg(long)]
+        base: Option<String>,
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        /// Repo root for the time-travel diff (default: current directory).
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Reverse-impact hop bound.
+        #[arg(long, default_value_t = 3)]
+        depth: usize,
+        /// Cap on blast-radius dependents reported.
+        #[arg(long, default_value_t = 200)]
+        max_hits: usize,
+        /// Skip the git/worktree time-travel diff (faster; no cycle / removed-API detection).
+        #[arg(long)]
+        no_diff: bool,
+        /// Exit non-zero if the change introduces a new import cycle or removes a
+        /// public API (a pre-commit / CI quality gate). Forces the time-travel diff.
+        #[arg(long)]
+        gate: bool,
+        /// Analytic mode: forecast a DESCRIBED edit instead of a file diff, before
+        /// any code is written. Format "<kind>:<symbol>" with kind one of
+        /// delete|signature|visibility (e.g. --edit "delete:Service"). If the name
+        /// is shared by several files, qualify it as "<kind>:<name>@<file-substring>"
+        /// (e.g. "delete:announce@core/foo.ts"). Reports the predicted graph delta
+        /// and which dependents break. Ignores --base/--gate.
+        #[arg(long)]
+        edit: Option<String>,
+        /// Output directory for forecast.json + forecast.md (default: codegraph-out/predict).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Scope to one federated member (its `repo` tag).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Emit the forecast as JSON to stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Speculatively execute a proposed change for real: apply it in a throwaway
+    /// git worktree, run the forecast's at-risk tests plus a build/type-check,
+    /// and report the actual pass/fail outcome. Disposable and opt-in -- it never
+    /// touches your working tree and is never exposed as an MCP tool (it runs
+    /// commands, which would break the server's read-only invariant).
+    Speculate {
+        /// Changed files (repo-relative). Empty = derive from the patch, else
+        /// from `git diff --name-only <base>`. Explicit paths also scope the
+        /// applied working-tree diff to those files.
+        paths: Vec<PathBuf>,
+        /// Base revision to apply onto and diff against. Default: HEAD with
+        /// --patch, else the detected default branch.
+        #[arg(long)]
+        base: Option<String>,
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        /// Repo root (default: current directory).
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Apply this unified-diff file instead of the current working-tree changes.
+        #[arg(long)]
+        patch: Option<PathBuf>,
+        /// Test command template; `{files}` expands to the at-risk test files
+        /// (run per file). With no placeholder it runs once as a whole suite.
+        #[arg(long)]
+        test_cmd: Option<String>,
+        /// Build / type-check command, run once before the tests.
+        #[arg(long)]
+        check_cmd: Option<String>,
+        /// Do not auto-detect commands from project markers (Cargo.toml, go.mod,
+        /// pyproject.toml, package.json).
+        #[arg(long)]
+        no_detect: bool,
+        /// Reverse-impact hop bound for selecting at-risk tests.
+        #[arg(long, default_value_t = 3)]
+        depth: usize,
+        /// Per-command wall-clock budget in seconds.
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
+        /// Cap on the number of at-risk test files run.
+        #[arg(long, default_value_t = 20)]
+        max_tests: usize,
+        /// Stop after the first failing test.
+        #[arg(long)]
+        fail_fast: bool,
+        /// Output directory for report.json + report.md (default: codegraph-out/speculate).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Scope to one federated member (its `repo` tag).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Emit the report as JSON to stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Evaluate forecast quality by replaying history: re-predict each commit
+    /// from its parent-state graph and score the prediction against git ground
+    /// truth (the tests actually edited, the public APIs actually removed).
+    Eval {
+        #[command(subcommand)]
+        action: EvalAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum EvalAction {
+    /// Replay <from>..HEAD: report predictive-test-selection recall/precision,
+    /// removed-API recall, and blast-radius selectivity. Builds a graph per
+    /// revision in a throwaway worktree (cached per commit), so it is slow on a
+    /// cold repo.
+    Replay {
+        /// Replay the commits after this revision (e.g. HEAD~20, a branch, a SHA).
+        #[arg(default_value = "HEAD~10")]
+        from: String,
+        /// Repo root (default: current directory).
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Reverse-impact hop bound for each forecast.
+        #[arg(long, default_value_t = 3)]
+        depth: usize,
+        /// Cap on the number of commits replayed.
+        #[arg(long, default_value_t = 50)]
+        max_commits: usize,
+        /// Build directed graphs for each revision.
+        #[arg(long)]
+        directed: bool,
+        /// CI gate: exit non-zero if predictive-test-selection recall is below
+        /// this percentage.
+        #[arg(long)]
+        min_test_recall: Option<u8>,
+        /// Output directory for report.json + report.md (default: codegraph-out/eval).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Emit the report as JSON to stdout.
+        #[arg(long)]
+        json: bool,
     },
 }
 

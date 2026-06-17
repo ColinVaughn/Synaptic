@@ -18,6 +18,7 @@ pub mod node_kind;
 pub mod raw_call;
 pub mod sanitize;
 pub mod span;
+pub mod test_path;
 pub mod validate;
 
 pub use confidence::Confidence;
@@ -32,4 +33,5 @@ pub use node_kind::{NodeKind, Visibility};
 pub use raw_call::{ImportRecord, RawCall};
 pub use sanitize::{sanitize_label, sanitize_metadata, sanitize_metadata_value};
 pub use span::Span;
+pub use test_path::is_test_path;
 pub use validate::{assert_valid, validate_extraction};

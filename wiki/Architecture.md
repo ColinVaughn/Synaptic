@@ -1,6 +1,6 @@
 # Architecture
 
-CodeGraph is a Rust workspace: **15 library crates** under `crates/*` plus the `codegraph`
+CodeGraph is a Rust workspace: **21 library crates** under `crates/*` plus the `codegraph`
 CLI under `bin/`. The workspace uses edition 2021 and a pinned Rust 1.95 toolchain, with
 dependencies centralized in the root `Cargo.toml`.
 
@@ -49,6 +49,12 @@ and [MCP Server](MCP-Server).
 | `codegraph-incremental` | Changed-files rebuild engine plus git integration (hooks, merge driver, watch, concurrency lock) |
 | `codegraph-workspace` | Multi-repo / monorepo federation: member discovery, namespacing, cross-repo resolution, global store, `merge-graphs` |
 | `codegraph-skillgen` | Generates and installs the host-assistant integration: the Claude skill file + `.claude/settings.json` hooks, the always-on instruction blocks (`AGENTS.md`/`GEMINI.md`/etc.), and the Codex MCP server + `SessionStart` hook config (project `.codex/` or global `~/.codex/`) |
+| `codegraph-cgql` | The CGQL query engine: a small Cypher-inspired language over the graph (kind/visibility/loc/fan-in-out, variable-length paths, `count(...)`), used by `codegraph search` and the `structural_search` tool |
+| `codegraph-history` | Time-travel diff: builds the graph at a git revision in a throwaway worktree (cached per commit) and diffs two revisions (`codegraph diff`, `time_travel_diff`) |
+| `codegraph-refactor` | Safe-refactor plans (rename/move/extract) for an agent to apply, plus post-edit graph-invariant verification |
+| `codegraph-predict` | Change forecasting: blast radius, at-risk tests, public-API risk, change-risk score, co-change, and the analytic edit forecast (`codegraph predict`) |
+| `codegraph-sandbox` | Speculative execution: apply a change in a throwaway worktree and run the at-risk tests + a build/type-check (`codegraph speculate`) |
+| `codegraph-eval` | Forecast evaluation: the prediction ledger and the replay calibration harness (`codegraph eval replay`) |
 | `bin/codegraph` | The CLI that wires the crates into commands |
 
 ## Data model

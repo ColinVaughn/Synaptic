@@ -1,0 +1,23 @@
+[package]
+name = "codegraph-predict"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Change forecasting for CodeGraph: predict the blast radius, public-API risk, and graph drift of a code change before applying it."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+codegraph-core = { workspace = true }
+codegraph-graph = { workspace = true }
+codegraph-query = { workspace = true }
+codegraph-history = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "predict"
+harness = false

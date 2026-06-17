@@ -18,6 +18,7 @@ Most read commands operate on `codegraph-out/graph.json` by default; build it fi
 | [`watch`](#watch) | Watch the working tree and rebuild on change (debounced). |
 | [`affected`](#affected) | Nodes that transitively depend on a node (reverse-impact). |
 | [`diff`](#diff) | Time-travel: diff the graph between two git revisions (dependencies, removed APIs, drift, cycles, hotspots). |
+| [`predict`](#predict) | Forecast a change before applying it: blast radius, public APIs at risk, new cycles, and a verify checklist. |
 | [`hook`](#hook) | Manage git hooks and the `graph.json` merge driver. |
 | [`serve`](#serve) | Run the MCP server (stdio or HTTP). |
 | [`ingest`](#ingest) | Ingest an external source into the graph, or fetch a URL for the next extract. |
@@ -393,6 +394,132 @@ codegraph diff --since 2026-01-01 --html drift.html
 
 See [Analysis-and-Reports](Analysis-and-Reports) and [Incremental-Updates](Incremental-Updates).
 
+## predict
+
+Forecast the consequences of a change before applying it. Maps the changed files to the graph nodes they define, walks the reverse-impact blast radius that depends on them, flags which edited symbols are public API, and (against a base revision) folds in a time-travel diff for new import cycles, removed APIs, and dependency deltas. Writes `forecast.json` + an agent-readable `forecast.md`. CodeGraph never edits source; the forecast is data an agent reads first.
+
+Syntax:
+
+```sh
+codegraph predict [PATHS]... [--base <REV>] [--graph <PATH>] [--root <DIR>] [--depth <N>] [--max-hits <N>] [--no-diff] [--gate] [--edit <KIND:SYMBOL>] [--out <DIR>] [--repo <NAME>] [--json]
+```
+
+| Name | Default | Description |
+| --- | --- | --- |
+| `PATHS` | `git diff --name-only <base>` | Repo-relative changed files to forecast. When omitted, derived from the working-tree diff vs `--base`. |
+| `--base` | `HEAD` | Base revision the change is measured against (used for the changed-file diff and the time-travel diff). |
+| `--graph` | `codegraph-out/graph.json` | Source graph. |
+| `--root` | `.` | Repo root for the time-travel diff. |
+| `--depth` | `3` | Reverse-impact hop bound. |
+| `--max-hits` | `200` | Cap on blast-radius dependents reported. |
+| `--no-diff` | off | Skip the git/worktree time-travel diff (faster; no cycle / removed-API detection). |
+| `--gate` | off | Exit non-zero if the change introduces a new import cycle or removes a public API (a pre-commit / CI quality gate). Forces the time-travel diff. |
+| `--edit` | none | Analytic mode: forecast a *described* edit `<kind>:<symbol>` (kind = `delete`, `signature`, or `visibility`) before any code is written. If the name is shared by several files, qualify it as `<kind>:<name>@<file-substring>` (e.g. `delete:announce@core/foo.ts`). Pure-graph, no git. Writes `editforecast.json` + `editforecast.md` and ignores `--base`/`--gate`. |
+| `--out` | `codegraph-out/predict` | Output directory for `forecast.json` + `forecast.md`. |
+| `--repo` | none | Scope to one federated member (its `repo` tag). |
+| `--json` | off | Print the forecast as JSON to stdout (no files written). |
+
+The forecast has these parts:
+
+- **Change risk** — a heuristic 0..100 score (low / medium / high) from diffusion (blast-radius size), size (git churn), public-API changes, and how often the touched files change in history, with the contributing factors named. Advisory and uncalibrated.
+- **Changed nodes** — graph nodes defined in the changed files (what the change edits).
+- **Blast radius** — nodes that transitively depend on the changed nodes, deduped to the shallowest hop and labelled with the relation they were reached through.
+- **Tests at risk** — the test subset of the blast radius (tests detected by path convention); the tests to run for this change. Predictive test selection on the static graph.
+- **Public API at risk** — changed nodes that are public; editing them can break callers outside their file or module.
+- **New import cycles / Removed APIs / Dependency delta** — from the time-travel diff of the base against the working tree (omitted with `--no-diff`).
+- **Co-change suggestions** — files that historically change together with the changed files (mined from recent git history, ranked by confidence). Catches coupling static analysis misses. Requires a git repo.
+- **Verify checklist** — concrete commands to run before and after the change.
+
+The time-travel diff builds the base revision in a throwaway `git worktree` (like [`diff`](#diff)); pass `--no-diff` for a fast, pure-graph forecast that needs no git.
+
+Example:
+
+```sh
+codegraph predict src/auth.rs --no-diff
+codegraph predict --base main --json
+codegraph predict src/config.rs src/db.rs --depth 4
+codegraph predict --edit "delete:Service" --json
+```
+
+In `--edit` mode the forecast is the predicted graph delta of the described edit: whether the symbol's node disappears, how many edges that severs, whether it removes a public API from external view, and which dependents will break vs need review. It is the analytic, pre-code counterpart to [`speculate`](#speculate) (which confirms a change empirically).
+
+See [`affected`](#affected), [`diff`](#diff), [`speculate`](#speculate), and [MCP-Server](MCP-Server) (the `predict_impact` tool).
+
+## speculate
+
+Speculatively execute a proposed change for real. Applies the change in a throwaway `git worktree`, runs the forecast's at-risk tests plus a build/type-check, and reports the actual pass/fail outcome — the ground-truth half of prediction (the graph narrows *what to check*, the sandbox *confirms* it). The worktree is disposable and your real working tree is never touched. This is an opt-in CLI command and is deliberately **not** an MCP tool (it runs commands, which would break the server's read-only invariant).
+
+Syntax:
+
+```sh
+codegraph speculate [PATHS]... [--base <REV>] [--patch <FILE>] [--test-cmd <TMPL>] [--check-cmd <CMD>] [--no-detect] [--depth <N>] [--timeout <SECS>] [--max-tests <N>] [--fail-fast] [--graph <PATH>] [--root <DIR>] [--out <DIR>] [--repo <NAME>] [--json]
+```
+
+| Name | Default | Description |
+| --- | --- | --- |
+| `PATHS` | derived | Repo-relative changed files. Empty: derived from `--patch`, else from `git diff --name-only <base>`. Explicit paths also scope the applied working-tree diff. |
+| `--base` | `HEAD` with `--patch`, else the detected default branch | Revision to apply onto and diff against. |
+| `--graph` | `codegraph-out/graph.json` | Source graph used to select the at-risk tests. |
+| `--patch` | none | Apply this unified-diff file instead of the current working-tree changes (can include new files). |
+| `--test-cmd` | auto-detected | Test command template; `{files}` expands to the at-risk test files (run per file). With no placeholder it runs once as a whole suite. |
+| `--check-cmd` | auto-detected | Build / type-check command, run once before the tests. |
+| `--no-detect` | off | Do not auto-detect commands from project markers (`Cargo.toml`, `go.mod`, `pyproject.toml`, `package.json`). |
+| `--depth` | `3` | Reverse-impact hop bound for selecting at-risk tests. |
+| `--timeout` | `300` | Per-command wall-clock budget in seconds. |
+| `--max-tests` | `20` | Cap on the number of at-risk test files run. |
+| `--fail-fast` | off | Stop after the first failing test. |
+| `--out` | `codegraph-out/speculate` | Output directory for `report.json` + `report.md`. |
+| `--repo` | none | Scope to one federated member (its `repo` tag). |
+| `--json` | off | Print the report as JSON to stdout (no files written). |
+
+The command exits non-zero when the change breaks the build or an at-risk test (so it can gate CI or an agent loop); a clean run or a no-op change exits 0. When no test/build command is detected and none is given, it reports the run as inconclusive rather than guessing. Working-tree mode captures the change with `git diff`, which omits untracked files — use `--patch` to speculate a change that adds new files.
+
+The throwaway worktree is a clean checkout, so it has no installed dependencies of its own. Because the worktree lives inside the repo, Node tooling (`npm`, `npx tsc`) resolves `node_modules` upward and finds the parent repo's installed packages, so it works without an install step. Ecosystems that do not resolve dependencies upward (a Python virtualenv, etc.) still need their environment on `PATH` — point `--test-cmd`/`--check-cmd` at it, or run the project's own activation in the command.
+
+Example:
+
+```sh
+codegraph speculate src/auth.rs
+codegraph speculate --patch change.diff --test-cmd "pytest {files}"
+codegraph speculate --base main --max-tests 5 --json
+```
+
+See [`predict`](#predict) (forecast the same change without running it) and [`diff`](#diff).
+
+## eval
+
+Measure forecast quality by replaying history. For each commit in a range, CodeGraph re-predicts the change from the **parent**-state graph (built in a throwaway worktree) and scores the prediction against git ground truth: the tests co-edited in the commit (that already existed at the parent) and the public APIs the time-travel diff reports as removed. It reports pooled recall/precision and blast-radius selectivity, and can gate CI on a recall floor. This turns prediction quality into a regression-testable metric.
+
+### eval replay
+
+Syntax:
+
+```sh
+codegraph eval replay [FROM] [--root <DIR>] [--depth <N>] [--max-commits <N>] [--directed] [--min-test-recall <PCT>] [--out <DIR>] [--json]
+```
+
+| Name | Default | Description |
+| --- | --- | --- |
+| `FROM` | `HEAD~10` | Replay the commits after this revision (e.g. `HEAD~20`, a branch, a SHA); evaluates `FROM..HEAD`. |
+| `--root` | `.` | Repo root. |
+| `--depth` | `3` | Reverse-impact hop bound for each forecast. |
+| `--max-commits` | `50` | Cap on the number of commits replayed. |
+| `--directed` | off | Build directed graphs for each revision. |
+| `--min-test-recall` | none | CI gate: exit non-zero if co-edited test recall is below this percentage. |
+| `--out` | `codegraph-out/eval` | Output directory for `report.json` + `report.md`. |
+| `--json` | off | Print the report as JSON to stdout (no files written). |
+
+Ground truth is a deterministic proxy (not CI logs or sandbox runs): a co-edited test stands in for a relevant test (co-edited is not the same as failed), and tests **added** in a commit are excluded from the recall denominator because they cannot be predicted from the parent graph. Removed-API recall has signal only on languages whose extractor records visibility, so it is reported as a lower bound and is not used by the gate. Each replayed commit is built in a throwaway `git worktree` (cached per commit), so the first run on a cold repo is slow.
+
+Example:
+
+```sh
+codegraph eval replay HEAD~20 --json
+codegraph eval replay main --min-test-recall 60   # a CI gate
+```
+
+See [`predict`](#predict), [`speculate`](#speculate), and [`diff`](#diff).
+
 ## refactor
 
 Safe refactor: plan a single-symbol rename and verify the graph after an AI agent applies it. CodeGraph never edits source itself; it produces an execution plan for the agent (Claude / Codex / Cursor) and then checks invariants.
@@ -415,6 +542,8 @@ codegraph refactor rename <NAME> --to <NEWNAME> [--id <NODEID>] [--file <SUBSTR>
 | `--graph` | `codegraph-out/graph.json` | Graph to plan against. |
 | `--out` | `codegraph-out/refactor` | Output directory for the plan. |
 | `--min-confidence` | `0.8` | Minimum per-site confidence score `[0,1]` to land in `edits` vs `review`. |
+| `--no-text-scan` | off | Skip the whole-word textual scan for references the graph does not record as edges (type uses, enum-variant paths). |
+| `--max-text-sites` | `200` | Cap on textual occurrences enumerated by the text scan. |
 | `--json` | off | Emit the plan as JSON to stdout. |
 
 The symbol is resolved to a definition node. If the name matches several definitions the command lists the candidates (with `--id` hints) and exits — ambiguity is surfaced, never silently guessed. The plan recovers concrete edit sites: the definition plus every resolved reference. Call sites get a column-accurate span from the AST cache (member calls fall back to line-only); other references (inherits/implements/uses) use the edge line and are flagged for the agent to locate the token. A whole-word textual scan additionally enumerates references the conservative graph does not record as edges (type annotations, enum-variant paths); these land in `review` (disable with `--no-text-scan`). Sites carry a `repo` tag on a federated graph, so a cross-repo rename is surfaced (verify is single-repo in v1).
@@ -505,7 +634,7 @@ Run the MCP server exposing read-only graph tools (and PR tools) to an AI assist
 Syntax:
 
 ```sh
-codegraph serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root <DIR>]
+codegraph serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root <DIR>] [--allow-exec]
 ```
 
 | Name | Default | Description |
@@ -514,8 +643,9 @@ codegraph serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-roo
 | `--http` | none (stdio) | Serve over HTTP at this address (for example `127.0.0.1:8765`) instead of stdio. The MCP endpoint is `/mcp`. |
 | `--api-key` | none | Require this API key for HTTP requests (or set `CODEGRAPH_API_KEY`). |
 | `--source-root` | dir above `codegraph-out/` | Trusted root for resolving a node's source file in the `get_source` tool (path-traversal jailed). |
+| `--allow-exec` | off | Expose the command-running `speculate` tool (the 24th tool). This makes the server no longer read-only, so enable it only for trusted clients. See [MCP Server](MCP-Server). |
 
-Defaults to stdio transport. The MCP server reports protocol `2025-06-18` and exposes 17 read-only tools, prompts, completions, resource templates/subscriptions, and structured tool output. When serving HTTP on a wildcard address with no API key, it prints a warning.
+Defaults to stdio transport. The MCP server reports protocol `2025-06-18` and exposes 23 read-only tools (24 with `--allow-exec`, which adds the command-running `speculate` tool), prompts, completions, resource templates/subscriptions, and structured tool output. When serving HTTP on a wildcard address with no API key, it prints a warning.
 
 Example:
 

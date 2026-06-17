@@ -10,6 +10,7 @@ pub(crate) fn run_serve(
     http: Option<String>,
     api_key: Option<String>,
     source_root: Option<PathBuf>,
+    allow_exec: bool,
 ) -> Result<()> {
     let path = default_graph_path(graph);
     let mut server = Server::load(path.clone()).with_context(|| {
@@ -19,7 +20,12 @@ pub(crate) fn run_serve(
         )
     })?;
     let root = source_root.unwrap_or_else(|| default_source_root(&path));
-    server = server.with_source_root(root);
+    server = server.with_source_root(root).with_allow_exec(allow_exec);
+    if allow_exec {
+        eprintln!(
+            "[codegraph] WARNING: --allow-exec enabled; the `speculate` tool can run this project's test/build commands"
+        );
+    }
     match http {
         Some(addr_str) => {
             let addr: std::net::SocketAddr = addr_str

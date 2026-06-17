@@ -15,6 +15,8 @@ codegraph-prs = { workspace = true }
 codegraph-cgql = { workspace = true }
 codegraph-history = { workspace = true }
 codegraph-refactor = { workspace = true }
+codegraph-predict = { workspace = true }
+codegraph-sandbox = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true, features = ["net", "time"] }
 futures-util = { workspace = true }

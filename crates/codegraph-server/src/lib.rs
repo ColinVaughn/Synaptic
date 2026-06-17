@@ -32,14 +32,18 @@ use codegraph_graph::{
     god_nodes, graph_stats, suggest_questions, surprising_connections, GodNode, GraphStats,
     KnowledgeGraph,
 };
+use codegraph_predict::{assess_edit, forecast_changes_with_index, EditKind, ForecastOptions};
 use codegraph_prs::{
     compute_pr_impact, detect_default_branch, fetch_pr, fetch_pr_files, fetch_prs, fetch_worktrees,
     format_pr_detail, format_prs_text, today_epoch_days, CommandRunner, ImpactIndex, PrInfo,
     Status, SystemCommands,
 };
 use codegraph_query::{
-    affected_nodes, explain, resolve_seed, shortest_path, QueryIndex, TraversalMode,
-    DEFAULT_AFFECTED_RELATIONS,
+    affected_nodes, explain, resolve_seed, shortest_path, QueryIndex, ReverseImpactIndex,
+    TraversalMode, DEFAULT_AFFECTED_RELATIONS,
+};
+use codegraph_sandbox::{
+    render_markdown as render_speculate_md, speculate, Change, SpeculateOptions,
 };
 use serde_json::{json, Value};
 
@@ -68,6 +72,10 @@ pub struct Server {
     /// IDF + adjacency index for `query_graph`, built once at load/reload so
     /// queries don't rebuild it per request (H1).
     query_index: QueryIndex,
+    /// Reverse-impact adjacency over `DEFAULT_AFFECTED_RELATIONS`, built once at
+    /// load/reload so the predict tools (`predict_impact`, `affected_tests`,
+    /// `speculate`) walk the blast radius without rebuilding it per request.
+    affected_index: ReverseImpactIndex,
     /// Headline stats, computed once at load/reload (H3).
     stats: GraphStats,
     /// Full degree-ranked god-node list, computed once at load/reload; tools
@@ -84,6 +92,11 @@ pub struct Server {
     /// Trusted root for resolving repo-relative `source_file` paths to real
     /// files (the code-retrieval tools). `None` disables source reading.
     source_root: Option<PathBuf>,
+    /// Whether the command-running `speculate` tool is exposed. OFF by default so
+    /// the server stays strictly read-only; enabled only by an explicit operator
+    /// opt-in (`serve --allow-exec`). When off, `speculate` is neither advertised
+    /// in tools/list nor runnable.
+    allow_exec: bool,
 }
 
 fn reload_key_for(path: &Path) -> Option<(u64, u64)> {
@@ -113,6 +126,7 @@ impl Server {
         let kg = KnowledgeGraph::from_graph_data(gd);
         let communities = communities_of(&kg);
         let query_index = QueryIndex::build(&kg);
+        let affected_index = ReverseImpactIndex::build(&kg, DEFAULT_AFFECTED_RELATIONS);
         let stats = graph_stats(&kg);
         let god_nodes_all = god_nodes(&kg, usize::MAX);
         let reload_key = graph_path.as_deref().and_then(reload_key_for);
@@ -120,6 +134,7 @@ impl Server {
             kg,
             communities,
             query_index,
+            affected_index,
             stats,
             god_nodes_all,
             graph_path,
@@ -127,6 +142,7 @@ impl Server {
             runner: Box::new(SystemCommands),
             log_path: query_log_path(),
             source_root: None,
+            allow_exec: false,
         }
     }
 
@@ -148,6 +164,15 @@ impl Server {
     /// tools). Stored as-is; resolution canonicalizes per request.
     pub fn with_source_root(mut self, root: PathBuf) -> Server {
         self.source_root = Some(root);
+        self
+    }
+
+    /// Opt in to the command-running `speculate` tool. OFF by default; turning it
+    /// on means the server can execute the project's test/build commands in a
+    /// throwaway worktree, which is no longer read-only -- the caller is asserting
+    /// that is acceptable for this deployment.
+    pub fn with_allow_exec(mut self, allow: bool) -> Server {
+        self.allow_exec = allow;
         self
     }
 
@@ -175,6 +200,7 @@ impl Server {
                 self.kg = KnowledgeGraph::from_graph_data(gd);
                 self.communities = communities_of(&self.kg);
                 self.query_index = QueryIndex::build(&self.kg);
+                self.affected_index = ReverseImpactIndex::build(&self.kg, DEFAULT_AFFECTED_RELATIONS);
                 self.stats = graph_stats(&self.kg);
                 self.god_nodes_all = god_nodes(&self.kg, usize::MAX);
                 self.reload_key = Some(key);
@@ -674,6 +700,260 @@ impl Server {
         out
     }
 
+    /// `predict_impact` - forecast the consequences of a change before applying
+    /// it. Given `files` (or the working-tree diff vs `base`), maps them to graph
+    /// nodes, walks the reverse-impact blast radius, and flags public APIs at
+    /// risk plus a verify checklist. Pure-graph and read-only; use
+    /// `time_travel_diff` or the `codegraph predict` CLI for cycle / removed-API
+    /// detection (those build worktrees).
+    /// The changed-file set for the predict tools: explicit `files`, else the
+    /// working-tree diff vs `base` (the detected default branch by default).
+    fn changed_from_args(&self, files: &[String], base: Option<&str>) -> Vec<String> {
+        if !files.is_empty() {
+            return files.to_vec();
+        }
+        let base = self.resolve_base(base, None);
+        self.runner
+            .run("git", &["diff", "--name-only", &base])
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    pub fn tool_predict_impact(
+        &self,
+        files: &[String],
+        base: Option<&str>,
+        depth: usize,
+    ) -> String {
+        let changed = self.changed_from_args(files, base);
+        if changed.is_empty() {
+            return "No changed files to forecast (pass `files`, or run on a branch with a diff vs the base)."
+                .to_string();
+        }
+        let opts = ForecastOptions {
+            depth: depth.clamp(1, 16),
+            ..Default::default()
+        };
+        let f = forecast_changes_with_index(&self.kg, &self.affected_index, &changed, &opts);
+        let mut out = format!("Forecast: {}", sanitize_label(&f.summary));
+        if let Some(r) = &f.risk {
+            out.push_str(&format!("\nChange risk: {} ({}/100)", r.level, r.score));
+            for factor in &r.factors {
+                out.push_str(&format!("\n  - {}", sanitize_label(factor)));
+            }
+        }
+        if !f.changed_nodes.is_empty() {
+            out.push_str(&format!("\nChanged nodes ({}):", f.changed_nodes.len()));
+            for n in &f.changed_nodes {
+                out.push_str(&format!(
+                    "\n  {} ({})",
+                    sanitize_label(&n.label),
+                    sanitize_label(&n.file)
+                ));
+            }
+        }
+        if !f.public_api_breaks.is_empty() {
+            out.push_str(&format!(
+                "\nPublic API at risk ({}):",
+                f.public_api_breaks.len()
+            ));
+            for n in &f.public_api_breaks {
+                out.push_str(&format!(
+                    "\n  {} ({})",
+                    sanitize_label(&n.label),
+                    sanitize_label(&n.file)
+                ));
+            }
+        }
+        if !f.at_risk_tests.is_empty() {
+            out.push_str(&format!("\nTests at risk ({}):", f.at_risk_tests.len()));
+            for h in &f.at_risk_tests {
+                out.push_str(&format!(
+                    "\n  {} ({})",
+                    sanitize_label(&h.label),
+                    sanitize_label(&h.file)
+                ));
+            }
+        }
+        out.push_str(&format!(
+            "\nBlast radius ({} at-risk dependent(s)):",
+            f.blast_radius.len()
+        ));
+        for h in &f.blast_radius {
+            out.push_str(&format!(
+                "\n  [{}h via {}] {} ({})",
+                h.depth,
+                sanitize_label(&h.via_relation),
+                sanitize_label(&h.label),
+                sanitize_label(&h.file)
+            ));
+        }
+        if !f.verify_checklist.is_empty() {
+            out.push_str("\nVerify checklist:");
+            for step in &f.verify_checklist {
+                out.push_str(&format!(
+                    "\n  - {}\n    {}",
+                    sanitize_label(&step.description),
+                    sanitize_label(&step.command)
+                ));
+            }
+        }
+        out
+    }
+
+    /// The command-running speculative-execution tool (only reachable when the
+    /// server was started with `--allow-exec`). Applies the change in a throwaway
+    /// worktree under the source root and runs the forecast's at-risk tests plus a
+    /// build/type-check, reporting real pass/fail. NOT read-only.
+    // The parameters map 1:1 to the MCP input schema; a wrapper struct would only
+    // add indirection over what is a thin dispatch shim.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tool_speculate(
+        &self,
+        files: &[String],
+        base: Option<&str>,
+        test_cmd: Option<&str>,
+        check_cmd: Option<&str>,
+        depth: usize,
+        timeout_secs: u64,
+        max_tests: usize,
+    ) -> String {
+        let Some(root) = self.source_root.clone() else {
+            return "Speculative execution needs a source root; start the server with --source-root <repo>.".to_string();
+        };
+        let changed = self.changed_from_args(files, base);
+        if changed.is_empty() {
+            return "No changed files to speculate (pass `files`, or run on a branch with a diff vs the base).".to_string();
+        }
+        let opts = ForecastOptions {
+            depth: depth.clamp(1, 16),
+            ..Default::default()
+        };
+        let forecast = forecast_changes_with_index(&self.kg, &self.affected_index, &changed, &opts);
+        let mut seen = std::collections::HashSet::new();
+        let mut test_files = Vec::new();
+        for h in &forecast.at_risk_tests {
+            if seen.insert(h.file.clone()) {
+                test_files.push(h.file.clone());
+            }
+        }
+        // Explicit `files` scope both the at-risk tests and the applied diff;
+        // omitting them speculates the whole working-tree change vs the base.
+        let paths = if files.is_empty() {
+            Vec::new()
+        } else {
+            changed.clone()
+        };
+        let change = Change::WorkingTree {
+            base: self.resolve_base(base, None),
+            paths,
+        };
+        let sopts = SpeculateOptions {
+            test_cmd: test_cmd.map(str::to_string),
+            check_cmd: check_cmd.map(str::to_string),
+            test_files,
+            auto_detect: true,
+            timeout: std::time::Duration::from_secs(timeout_secs.clamp(1, 3600)),
+            max_tests,
+            fail_fast: false,
+            ..Default::default()
+        };
+        match speculate(&root, &change, &sopts) {
+            Ok(report) => render_speculate_md(&report),
+            Err(e) => format!(
+                "Speculation could not run: {}",
+                sanitize_label(&e.to_string())
+            ),
+        }
+    }
+
+    /// `affected_tests` - the tests that exercise the changed code (predictive
+    /// test selection): walk the reverse-impact set from the changed files and
+    /// keep the test nodes. The focused "what should I run for this change" view.
+    pub fn tool_affected_tests(
+        &self,
+        files: &[String],
+        base: Option<&str>,
+        depth: usize,
+    ) -> String {
+        let changed = self.changed_from_args(files, base);
+        if changed.is_empty() {
+            return "No changed files (pass `files`, or run on a branch with a diff vs the base)."
+                .to_string();
+        }
+        let opts = ForecastOptions {
+            depth: depth.clamp(1, 16),
+            ..Default::default()
+        };
+        let f = forecast_changes_with_index(&self.kg, &self.affected_index, &changed, &opts);
+        if f.at_risk_tests.is_empty() {
+            return "No tests in the graph exercise the changed code (within the impact depth)."
+                .to_string();
+        }
+        let mut out = format!(
+            "{} test(s) exercise the changed code:",
+            f.at_risk_tests.len()
+        );
+        for h in &f.at_risk_tests {
+            out.push_str(&format!(
+                "\n  [{}h via {}] {} ({})",
+                h.depth,
+                sanitize_label(&h.via_relation),
+                sanitize_label(&h.label),
+                sanitize_label(&h.file)
+            ));
+        }
+        out
+    }
+
+    /// `predict_edit` - what breaks if you delete / change the signature of /
+    /// narrow the visibility of a symbol. Classifies dependents into "will break"
+    /// and "to review". Pure-graph and read-only (no edit plan is produced).
+    pub fn tool_predict_edit(&self, symbol: &str, kind: &str, depth: usize) -> String {
+        let Some(kind_enum) = EditKind::parse(kind) else {
+            return format!(
+                "Unknown edit kind '{}'. Use: delete, signature, visibility.",
+                sanitize_label(kind)
+            );
+        };
+        let Some(impact) = assess_edit(&self.kg, symbol, kind_enum, depth.clamp(1, 16)) else {
+            return format!(
+                "No unique node matches '{}'. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts'), or pass a node id.",
+                sanitize_label(symbol)
+            );
+        };
+        let line = |d: &codegraph_predict::EditDependent| {
+            format!(
+                "\n  [{}h via {}] {} ({}) - {}",
+                d.depth,
+                sanitize_label(&d.via_relation),
+                sanitize_label(&d.label),
+                sanitize_label(&d.file),
+                sanitize_label(&d.reason)
+            )
+        };
+        let mut out = sanitize_label(&impact.summary);
+        if !impact.breaks.is_empty() {
+            out.push_str(&format!("\nWill break ({}):", impact.breaks.len()));
+            for d in &impact.breaks {
+                out.push_str(&line(d));
+            }
+        }
+        if !impact.review.is_empty() {
+            out.push_str(&format!("\nReview ({}):", impact.review.len()));
+            for d in &impact.review {
+                out.push_str(&line(d));
+            }
+        }
+        if impact.breaks.is_empty() && impact.review.is_empty() {
+            out.push_str("\nNo dependents affected.");
+        }
+        out
+    }
+
     /// `list_prs` — open PRs targeting the base, as text.
     pub fn tool_list_prs(&self, base: Option<&str>, repo: Option<&str>) -> String {
         let resolved = self.resolve_base(base, repo);
@@ -967,7 +1247,7 @@ impl Server {
                 }))
             }
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tools_list() })),
+            "tools/list" => Ok(json!({ "tools": tools_list(self.allow_exec) })),
             "prompts/list" => Ok(json!({ "prompts": prompts::prompts_list() })),
             "prompts/get" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
@@ -1189,6 +1469,39 @@ impl Server {
             }));
         }
 
+        // The only command-running tool. Gated: it is advertised in tools/list and
+        // runnable ONLY when the operator started the server with --allow-exec.
+        if name == "speculate" {
+            if !self.allow_exec {
+                return Ok(json!({
+                    "content": [{ "type": "text", "text": "Speculative execution is disabled. Restart the server with --allow-exec to enable the speculate tool." }],
+                    "isError": true
+                }));
+            }
+            let files: Vec<String> = args
+                .get("files")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let text = self.tool_speculate(
+                &files,
+                opt("base"),
+                opt("test_cmd"),
+                opt("check_cmd"),
+                u("depth", 3) as usize,
+                u("timeout", 300),
+                u("max_tests", 20) as usize,
+            );
+            return Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "isError": false
+            }));
+        }
+
         let text = match name {
             "get_node" => self.tool_get_node(&s("label")),
             "get_source" => self.tool_get_source(&s("label"), u("context_lines", 40) as usize),
@@ -1226,6 +1539,33 @@ impl Server {
             "get_pr_impact" => self.tool_get_pr_impact(u("pr_number", 0), opt("repo")),
             "triage_prs" => self.tool_triage_prs(opt("base"), opt("repo")),
             "working_changes_impact" => self.tool_working_changes_impact(opt("base")),
+            "predict_impact" => {
+                let files: Vec<String> = args
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.tool_predict_impact(&files, opt("base"), u("depth", 3) as usize)
+            }
+            "affected_tests" => {
+                let files: Vec<String> = args
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.tool_affected_tests(&files, opt("base"), u("depth", 3) as usize)
+            }
+            "predict_edit" => {
+                self.tool_predict_edit(&s("symbol"), &s("kind"), u("depth", 3) as usize)
+            }
             "structural_search" => {
                 self.tool_structural_search(opt("query"), opt("pattern"), u("limit", 50) as usize)
             }
@@ -1509,7 +1849,7 @@ cluster of densely-connected nodes (roughly a module); edge confidence is EXTRAC
 /// The MCP `tools/list` payload. Descriptions and per-parameter docs make the
 /// implicit domain knowledge explicit so an agent uses each tool correctly
 /// (graph jargon, the lenient label resolution, the relation vocabulary).
-fn tools_list() -> Value {
+fn tools_list(allow_exec: bool) -> Value {
     let mut tools = json!([
         {
             "name": "query_graph",
@@ -1608,26 +1948,74 @@ fn tools_list() -> Value {
               "to": { "type": "string", "description": "The new name." },
               "id": { "type": "string", "description": "Disambiguate by node id when several definitions share the name." },
               "file": { "type": "string", "description": "Disambiguate by file-path substring." }
-          }, "required": ["name", "to"] } }
+          }, "required": ["name", "to"] } },
+        { "name": "predict_impact", "description": "Forecast the consequences of a change BEFORE editing: which graph nodes the changed files define, the reverse-impact blast radius that depends on them, which edited symbols are public API (callers outside the file/module may break), and a verify checklist. Pure-graph and read-only; use time_travel_diff or the `codegraph predict` CLI for new-cycle / removed-API detection.",
+          "inputSchema": { "type": "object", "properties": {
+              "files": { "type": "array", "items": { "type": "string" }, "description": "Repo-relative changed files to forecast. Omit to use the working-tree diff vs `base`." },
+              "base": { "type": "string", "description": "Base branch to diff against when `files` is omitted (default: the repo's default branch)." },
+              "depth": { "type": "integer", "description": "Reverse-impact hop bound (default 3, max 16)." }
+          } } },
+        { "name": "affected_tests", "description": "Predictive test selection: the tests that exercise the changed code, found by walking the reverse-impact set from the changed files and keeping the test nodes (detected by path convention). The focused 'which tests should I run for this change' view.",
+          "inputSchema": { "type": "object", "properties": {
+              "files": { "type": "array", "items": { "type": "string" }, "description": "Repo-relative changed files. Omit to use the working-tree diff vs `base`." },
+              "base": { "type": "string", "description": "Base branch to diff against when `files` is omitted (default: the repo's default branch)." },
+              "depth": { "type": "integer", "description": "Reverse-impact hop bound (default 3, max 16)." }
+          } } },
+        { "name": "predict_edit", "description": "What breaks if you make a specific kind of edit to a symbol, classified into 'will break' vs 'to review'. kind=delete (every dependent breaks), signature (callers/type-users break, bare imports go to review), or visibility (references from other files break when narrowing to private). Pure-graph; complements plan_rename (which is rename-only).",
+          "inputSchema": { "type": "object", "properties": {
+              "symbol": { "type": "string", "description": "The symbol to edit: its name, bare name, or a node id. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." },
+              "kind": { "type": "string", "description": "The edit kind: delete, signature, or visibility." },
+              "depth": { "type": "integer", "description": "Reverse-impact hop bound (default 3, max 16)." }
+          }, "required": ["symbol", "kind"] } }
     ]);
-    // Every tool is a pure read; the PR tools and time_travel_diff additionally
-    // reach the environment (gh / git worktrees), so they carry openWorldHint.
-    // Merged here to keep the entries above focused on schema.
+    // The single command-running tool, exposed only when the operator opted in
+    // with --allow-exec. It is NOT read-only (it executes the project's tests /
+    // build in a throwaway worktree), so it is annotated honestly below and kept
+    // out of the default, strictly-read-only tool surface.
+    if allow_exec {
+        tools.as_array_mut().unwrap().push(json!({
+            "name": "speculate",
+            "description": "Run a proposed change for real: apply it in a throwaway git worktree and run the forecast's at-risk tests plus a build/type-check, reporting actual pass/fail. NOT read-only (it executes commands); available only because the server was started with --allow-exec. Use predict_impact/affected_tests first to forecast; use this to confirm.",
+            "inputSchema": { "type": "object", "properties": {
+                "files": { "type": "array", "items": { "type": "string" }, "description": "Repo-relative changed files. Omit to use the working-tree diff vs `base`. Explicit files also scope the applied diff." },
+                "base": { "type": "string", "description": "Base branch to apply onto and diff against (default: the repo's default branch)." },
+                "test_cmd": { "type": "string", "description": "Test command template; `{files}` expands to the at-risk test files. Omit to auto-detect (cargo/go/pytest/npm)." },
+                "check_cmd": { "type": "string", "description": "Build / type-check command, run before the tests. Omit to auto-detect." },
+                "depth": { "type": "integer", "description": "Reverse-impact hop bound for selecting at-risk tests (default 3, max 16)." },
+                "timeout": { "type": "integer", "description": "Per-command wall-clock budget in seconds (default 300, max 3600)." },
+                "max_tests": { "type": "integer", "description": "Cap on the number of at-risk test files run (default 20)." }
+            } }
+        }));
+    }
+    // Every read tool is a pure read; the PR tools and time_travel_diff
+    // additionally reach the environment (gh / git worktrees), so they carry
+    // openWorldHint. `speculate` is the lone non-read-only, open-world exception.
     let open_world = [
         "list_prs",
         "get_pr_impact",
         "triage_prs",
         "working_changes_impact",
+        "predict_impact",
+        "affected_tests",
         "time_travel_diff",
     ];
     for t in tools.as_array_mut().unwrap() {
         let name = t["name"].as_str().unwrap_or("").to_string();
-        t["annotations"] = json!({
-            "readOnlyHint": true,
-            "destructiveHint": false,
-            "idempotentHint": true,
-            "openWorldHint": open_world.contains(&name.as_str()),
-        });
+        if name == "speculate" {
+            t["annotations"] = json!({
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": true,
+            });
+        } else {
+            t["annotations"] = json!({
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": open_world.contains(&name.as_str()),
+            });
+        }
     }
     tools
 }
@@ -1720,7 +2108,9 @@ mod tests {
     fn every_tool_and_param_is_documented() {
         // Findings #1/#3: each tool needs a substantive description, and every
         // input-schema property needs its own description so agents use it right.
-        let tools = tools_list();
+        // Use the full surface (incl. the opt-in speculate tool) so its schema is
+        // documented too.
+        let tools = tools_list(true);
         for t in tools.as_array().unwrap() {
             let name = t["name"].as_str().unwrap();
             assert!(
@@ -1750,7 +2140,7 @@ mod tests {
         // The instructions + tool descriptions are agent-facing output; keep them
         // free of em-dashes / smart quotes / arrows (AI tells).
         let mut text = SERVER_INSTRUCTIONS.to_string();
-        text.push_str(&tools_list().to_string());
+        text.push_str(&tools_list(true).to_string());
         for t in [
             '\u{2014}', '\u{2013}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2192}',
         ] {
@@ -1800,6 +2190,107 @@ mod tests {
     }
 
     #[test]
+    fn predict_impact_reports_blast_radius_for_changed_files() {
+        // auth calls login, so changing login.py puts AuthService in the blast
+        // radius. login_user is the changed node.
+        let mut s = server();
+        let out = call_tool(&mut s, "predict_impact", json!({"files": ["login.py"]}));
+        assert!(out.contains("login_user"), "changed node listed: {out}");
+        assert!(
+            out.contains("AuthService"),
+            "dependent in blast radius: {out}"
+        );
+    }
+
+    #[test]
+    fn predict_impact_flags_public_api_and_sanitizes_output() {
+        let mut svc = node("svc", "Service", Some(0));
+        svc.set_visibility(codegraph_core::Visibility::Public);
+        // A label carrying a control char must be stripped before it reaches the LLM.
+        let evil = node("evil", "ev\u{0}il", Some(0));
+        let gd = GraphData {
+            nodes: vec![svc, evil],
+            links: vec![edge("evil", "svc", "calls")],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        let out = call_tool(&mut s, "predict_impact", json!({"files": ["svc.py"]}));
+        assert!(
+            out.contains("Public API at risk"),
+            "public-api section: {out}"
+        );
+        assert!(out.contains("Service"), "{out}");
+        // `evil` depends on svc -> blast radius, with its control char stripped.
+        assert!(
+            out.contains("evil") && !out.contains('\u{0}'),
+            "output sanitized: {out:?}"
+        );
+    }
+
+    #[test]
+    fn affected_tests_selects_only_test_dependents() {
+        // prod_caller and test_login both call login; only the test is selected.
+        let login = node("login", "login", Some(0));
+        let mut test_node = node("t", "test_login", Some(0));
+        test_node.source_file = "tests/test_login.py".into();
+        let prod = node("prod", "prod_caller", Some(0));
+        let gd = GraphData {
+            nodes: vec![login, test_node, prod],
+            links: vec![edge("t", "login", "calls"), edge("prod", "login", "calls")],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        let out = call_tool(&mut s, "affected_tests", json!({"files": ["login.py"]}));
+        assert!(out.contains("test_login"), "test selected: {out}");
+        assert!(!out.contains("prod_caller"), "prod caller excluded: {out}");
+    }
+
+    #[test]
+    fn predict_edit_classifies_by_kind() {
+        // auth calls login_user, so deleting login_user breaks AuthService.
+        let mut s = server();
+        let del = call_tool(
+            &mut s,
+            "predict_edit",
+            json!({"symbol": "login_user", "kind": "delete"}),
+        );
+        assert!(
+            del.contains("Will break"),
+            "delete breaks dependents: {del}"
+        );
+        assert!(del.contains("AuthService"), "the caller is named: {del}");
+        // An unknown kind is reported, not silently accepted.
+        let bad = call_tool(
+            &mut s,
+            "predict_edit",
+            json!({"symbol": "login_user", "kind": "frobnicate"}),
+        );
+        assert!(bad.contains("Unknown edit kind"), "{bad}");
+        // An unknown symbol is reported.
+        let miss = call_tool(
+            &mut s,
+            "predict_edit",
+            json!({"symbol": "Nope", "kind": "delete"}),
+        );
+        assert!(miss.contains("No unique node matches"), "{miss}");
+    }
+
+    #[test]
+    fn predict_impact_clamps_depth_and_handles_no_changes() {
+        let mut s = server();
+        // depth 0 is clamped to 1 (still returns the direct dependent).
+        let out = call_tool(
+            &mut s,
+            "predict_impact",
+            json!({"files": ["login.py"], "depth": 0}),
+        );
+        assert!(out.contains("AuthService"), "depth clamped to >=1: {out}");
+        // A file with no graph nodes yields an empty forecast, not an error.
+        let none = call_tool(&mut s, "predict_impact", json!({"files": ["nope.py"]}));
+        assert!(none.contains("0 changed node(s)"), "{none}");
+    }
+
+    #[test]
     fn initialize_and_tools_list() {
         let mut s = server();
         let init = s
@@ -1817,7 +2308,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 20);
+        assert_eq!(names.len(), 23);
         for expected in [
             "query_graph",
             "get_node",
@@ -1839,6 +2330,9 @@ mod tests {
             "structural_search",
             "time_travel_diff",
             "plan_rename",
+            "predict_impact",
+            "affected_tests",
+            "predict_edit",
         ] {
             assert!(names.contains(&expected), "missing tool {expected}");
         }
@@ -2199,7 +2693,7 @@ mod tests {
 
     #[test]
     fn structured_tools_declare_output_schema() {
-        let tools = tools_list();
+        let tools = tools_list(false);
         for name in ["graph_stats", "query_graph", "affected", "god_nodes"] {
             let t = tools
                 .as_array()
@@ -2238,7 +2732,8 @@ mod tests {
 
     #[test]
     fn every_tool_is_annotated_read_only() {
-        let tools = tools_list();
+        // The DEFAULT tool surface (no --allow-exec) must be strictly read-only.
+        let tools = tools_list(false);
         for t in tools.as_array().unwrap() {
             let name = t["name"].as_str().unwrap();
             let ann = &t["annotations"];
@@ -2249,12 +2744,15 @@ mod tests {
             );
             // PR + working-tree tools reach outside the graph (gh/git), and
             // time_travel_diff builds revisions in a worktree -> open world.
+            // predict_impact shells out to `git diff` when `files` is omitted.
             let open = matches!(
                 name,
                 "list_prs"
                     | "get_pr_impact"
                     | "triage_prs"
                     | "working_changes_impact"
+                    | "predict_impact"
+                    | "affected_tests"
                     | "time_travel_diff"
             );
             assert_eq!(
@@ -2263,6 +2761,131 @@ mod tests {
                 "tool {name} openWorldHint"
             );
         }
+    }
+
+    #[test]
+    fn speculate_tool_is_gated_behind_allow_exec() {
+        // Hidden on the default surface; present (and honestly annotated as a
+        // non-read-only, open-world tool) only when the operator opted in.
+        let default = tools_list(false);
+        assert!(
+            !default
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "speculate"),
+            "speculate must be absent from the default read-only surface"
+        );
+        let exec = tools_list(true);
+        let spec = exec
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "speculate")
+            .expect("speculate present with --allow-exec");
+        assert_eq!(
+            spec["annotations"]["readOnlyHint"],
+            json!(false),
+            "speculate is not read-only"
+        );
+        assert_eq!(
+            spec["annotations"]["openWorldHint"],
+            json!(true),
+            "speculate reaches the environment"
+        );
+        assert_eq!(
+            default.as_array().unwrap().len() + 1,
+            exec.as_array().unwrap().len(),
+            "--allow-exec adds exactly one tool"
+        );
+    }
+
+    #[test]
+    fn speculate_call_is_refused_without_allow_exec() {
+        // A default server must refuse to run commands even if asked directly.
+        let mut s = server();
+        let r = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":"speculate","arguments":{"files":["src/x.rs"]}}
+            }))
+            .unwrap();
+        let result = &r["result"];
+        assert_eq!(result["isError"], json!(true), "refused: {result}");
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            text.contains("--allow-exec"),
+            "explains how to enable: {text}"
+        );
+    }
+
+    #[test]
+    fn speculate_runs_the_at_risk_tests_with_allow_exec() {
+        use std::process::Command;
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@e")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@e")
+                .output()
+                .expect("git")
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        if !git(root, &["init", "-q"]).status.success() {
+            return; // git unavailable
+        }
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(root.join("src/helper.py"), b"def helper():\n    return 1\n").unwrap();
+        std::fs::write(root.join("tests/test_helper.py"), b"# exercises helper\n").unwrap();
+        git(root, &["add", "-A"]);
+        assert!(git(root, &["commit", "-q", "-m", "init", "--no-gpg-sign"])
+            .status
+            .success());
+        // An uncommitted edit is the change to speculate.
+        std::fs::write(root.join("src/helper.py"), b"def helper():\n    return 2\n").unwrap();
+
+        // tests/test_helper (a test path) calls src/helper, so editing helper puts
+        // the test in the at-risk set the sandbox runs.
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![
+                node("src/helper", "helper", Some(0)),
+                node("tests/test_helper", "test_helper", Some(0)),
+            ],
+            links: vec![edge("tests/test_helper", "src/helper", "calls")],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let mut s = Server::from_graph_data(gd, None)
+            .with_source_root(root.to_path_buf())
+            .with_allow_exec(true);
+
+        let r = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":"speculate","arguments":{
+                    "files":["src/helper.py"],
+                    "base":"HEAD",
+                    "test_cmd":"git ls-files --error-unmatch {files}"
+                }}
+            }))
+            .unwrap();
+        let result = &r["result"];
+        assert_eq!(result["isError"], json!(false), "ran: {result}");
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("PASSED"), "outcome passed: {text}");
+        assert!(
+            text.contains("tests/test_helper.py"),
+            "ran the at-risk test: {text}"
+        );
     }
 
     #[test]

@@ -479,6 +479,174 @@ pub fn affected_nodes(
     hits
 }
 
+/// Reverse-impact from MULTIPLE seeds in a single pass. Builds the reverse
+/// adjacency once (borrowing the graph, so the build allocates nothing) and runs
+/// one multi-source BFS, so the cost is O(edges + reached) instead of
+/// O(seeds * edges) (what calling [`affected_nodes`] per seed would cost). Each
+/// reached node records the shallowest hop from any seed and, among the edges
+/// reaching it at that hop, the lexicographically smallest relation -- so the
+/// result is independent of seed order. Seeds are excluded; output is sorted by
+/// (depth, id).
+///
+/// This rebuilds the adjacency on every call. A caller that runs many walks
+/// against one static graph (e.g. a long-lived server) should instead build a
+/// [`ReverseImpactIndex`] once and call [`ReverseImpactIndex::affected_multi`].
+pub fn affected_nodes_multi(
+    kg: &KnowledgeGraph,
+    seeds: &[NodeId],
+    relations: &[&str],
+    depth: usize,
+) -> Vec<AffectedHit> {
+    let relation_set: HashSet<&str> = relations.iter().copied().collect();
+    let seed_set: HashSet<&NodeId> = seeds.iter().filter(|s| kg.contains_node(s)).collect();
+    if seed_set.is_empty() {
+        return Vec::new();
+    }
+    // Reverse adjacency over impact relations, built ONCE: target -> [(source, relation)].
+    let mut rev: HashMap<&NodeId, Vec<(&NodeId, &str)>> = HashMap::new();
+    for e in kg.edges() {
+        if e.source == e.target || !relation_set.contains(e.relation.as_str()) {
+            continue;
+        }
+        rev.entry(&e.target)
+            .or_default()
+            .push((&e.source, e.relation.as_str()));
+    }
+
+    // Multi-source BFS. BFS processes a full depth layer before the next, so a
+    // node's first visit is its min depth and all its min-depth in-edges are seen
+    // during that layer; the explicit (min depth, smallest relation) comparison
+    // then makes the result independent of seed/edge order.
+    let mut best: HashMap<NodeId, (usize, String)> = HashMap::new();
+    let mut seen: HashSet<NodeId> = seed_set.iter().map(|s| (*s).clone()).collect();
+    let mut queue: VecDeque<(NodeId, usize)> = seed_set.iter().map(|s| ((*s).clone(), 0)).collect();
+    while let Some((cur, d)) = queue.pop_front() {
+        if d >= depth {
+            continue;
+        }
+        let Some(adj) = rev.get(&cur) else {
+            continue;
+        };
+        for (src, rel) in adj {
+            let nd = d + 1;
+            let entry = best
+                .entry((*src).clone())
+                .or_insert((usize::MAX, String::new()));
+            if nd < entry.0 || (nd == entry.0 && *rel < entry.1.as_str()) {
+                *entry = (nd, (*rel).to_string());
+            }
+            if seen.insert((*src).clone()) {
+                queue.push_back(((*src).clone(), nd));
+            }
+        }
+    }
+
+    // A seed reached as another seed's dependent must not appear in the result.
+    let mut hits: Vec<AffectedHit> = best
+        .into_iter()
+        .filter(|(id, _)| !seed_set.contains(id))
+        .map(|(node_id, (depth, via_relation))| AffectedHit {
+            node_id,
+            depth,
+            via_relation,
+        })
+        .collect();
+    hits.sort_by(|a, b| {
+        a.depth
+            .cmp(&b.depth)
+            .then_with(|| a.node_id.cmp(&b.node_id))
+    });
+    hits
+}
+
+/// Reverse-impact adjacency built once and reused across many `affected_multi`
+/// queries against the same graph. Building it is O(edges); each subsequent walk
+/// is then O(reached) instead of O(edges + reached), so a long-lived server that
+/// forecasts many changes against a static graph can build it once per graph load
+/// rather than per request. The relation set is fixed at build time; rebuild the
+/// index whenever the graph or the relation set changes.
+pub struct ReverseImpactIndex {
+    /// target -> [(source, relation)] over the chosen impact relations.
+    rev: HashMap<NodeId, Vec<(NodeId, String)>>,
+}
+
+impl ReverseImpactIndex {
+    /// Build the reverse adjacency over `relations` (e.g.
+    /// [`DEFAULT_AFFECTED_RELATIONS`]). Self-loops and edges whose relation is not
+    /// in the set are skipped.
+    pub fn build(kg: &KnowledgeGraph, relations: &[&str]) -> Self {
+        let relation_set: HashSet<&str> = relations.iter().copied().collect();
+        let mut rev: HashMap<NodeId, Vec<(NodeId, String)>> = HashMap::new();
+        for e in kg.edges() {
+            if e.source == e.target || !relation_set.contains(e.relation.as_str()) {
+                continue;
+            }
+            rev.entry(e.target.clone())
+                .or_default()
+                .push((e.source.clone(), e.relation.clone()));
+        }
+        ReverseImpactIndex { rev }
+    }
+
+    /// Multi-source reverse-impact walk using the prebuilt adjacency. Semantics
+    /// are identical to [`affected_nodes_multi`]; only the adjacency is reused
+    /// instead of rebuilt. `kg` is still passed so seeds are validated against the
+    /// current graph.
+    pub fn affected_multi(
+        &self,
+        kg: &KnowledgeGraph,
+        seeds: &[NodeId],
+        depth: usize,
+    ) -> Vec<AffectedHit> {
+        let seed_set: HashSet<&NodeId> = seeds.iter().filter(|s| kg.contains_node(s)).collect();
+        if seed_set.is_empty() {
+            return Vec::new();
+        }
+
+        // Multi-source BFS. BFS processes a full depth layer before the next, so a
+        // node's first visit is its min depth and all its min-depth in-edges are
+        // seen during that layer; the explicit (min depth, smallest relation)
+        // comparison then makes the result independent of seed/edge order.
+        let mut best: HashMap<NodeId, (usize, String)> = HashMap::new();
+        let mut seen: HashSet<NodeId> = seed_set.iter().map(|s| (*s).clone()).collect();
+        let mut queue: VecDeque<(NodeId, usize)> =
+            seed_set.iter().map(|s| ((*s).clone(), 0)).collect();
+        while let Some((cur, d)) = queue.pop_front() {
+            if d >= depth {
+                continue;
+            }
+            let Some(adj) = self.rev.get(&cur) else {
+                continue;
+            };
+            for (src, rel) in adj {
+                let nd = d + 1;
+                let entry = best
+                    .entry(src.clone())
+                    .or_insert((usize::MAX, String::new()));
+                if nd < entry.0 || (nd == entry.0 && rel.as_str() < entry.1.as_str()) {
+                    *entry = (nd, rel.clone());
+                }
+                if seen.insert(src.clone()) {
+                    queue.push_back((src.clone(), nd));
+                }
+            }
+        }
+
+        // A seed reached as another seed's dependent must not appear in the result.
+        let mut hits: Vec<AffectedHit> = best
+            .into_iter()
+            .filter(|(id, _)| !seed_set.contains(id))
+            .map(|(node_id, (depth, via_relation))| AffectedHit {
+                node_id,
+                depth,
+                via_relation,
+            })
+            .collect();
+        hits.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.node_id.cmp(&b.node_id)));
+        hits
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,6 +830,103 @@ mod tests {
         let aff = affected_nodes(&kg, &NodeId("a".into()), DEFAULT_AFFECTED_RELATIONS, 5);
         let ids: Vec<&str> = aff.iter().map(|h| h.node_id.0.as_str()).collect();
         assert_eq!(ids, vec!["c"], "containment edge does not propagate impact");
+    }
+
+    #[test]
+    fn affected_multi_matches_single_seed_for_one_seed() {
+        // c -> b -> a, and d -> a. From {a}: b@1, c@2, d@1.
+        let kg = build(
+            &[("a", "A"), ("b", "B"), ("c", "C"), ("d", "D")],
+            &[
+                ("b", "a", "calls"),
+                ("c", "b", "calls"),
+                ("d", "a", "calls"),
+            ],
+        );
+        let multi = affected_nodes_multi(&kg, &[NodeId("a".into())], DEFAULT_AFFECTED_RELATIONS, 5);
+        let mut got: Vec<(String, usize)> = multi
+            .iter()
+            .map(|h| (h.node_id.0.clone(), h.depth))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("b".to_string(), 1),
+                ("c".to_string(), 2),
+                ("d".to_string(), 1)
+            ]
+        );
+        assert!(
+            !multi.iter().any(|h| h.node_id.0 == "a"),
+            "a is never its own dependent"
+        );
+    }
+
+    #[test]
+    fn affected_multi_takes_min_depth_and_smallest_relation_across_seeds() {
+        // m depends on both x (via calls) and y (via references); n depends on m.
+        // Seeding {x, y}: m at depth 1 via the smallest relation (calls); n at 2.
+        let kg = build(
+            &[("x", "X"), ("y", "Y"), ("m", "M"), ("n", "N")],
+            &[
+                ("m", "x", "calls"),
+                ("m", "y", "references"),
+                ("n", "m", "calls"),
+            ],
+        );
+        let hits = affected_nodes_multi(
+            &kg,
+            &[NodeId("x".into()), NodeId("y".into())],
+            DEFAULT_AFFECTED_RELATIONS,
+            5,
+        );
+        let m = hits.iter().find(|h| h.node_id.0 == "m").unwrap();
+        assert_eq!(m.depth, 1);
+        assert_eq!(m.via_relation, "calls", "smallest relation at min depth");
+        assert_eq!(hits.iter().find(|h| h.node_id.0 == "n").unwrap().depth, 2);
+        assert!(
+            !hits
+                .iter()
+                .any(|h| h.node_id.0 == "x" || h.node_id.0 == "y"),
+            "seeds excluded"
+        );
+    }
+
+    #[test]
+    fn prebuilt_index_matches_oneshot_across_reuse() {
+        // A prebuilt index queried for several different seed sets must return
+        // exactly what building a throwaway index per call (affected_nodes_multi)
+        // returns -- proving the cache changes cost, not results.
+        let kg = build(
+            &[
+                ("x", "X"),
+                ("y", "Y"),
+                ("m", "M"),
+                ("n", "N"),
+                ("z", "Z"),
+            ],
+            &[
+                ("m", "x", "calls"),
+                ("m", "y", "references"),
+                ("n", "m", "calls"),
+                ("z", "n", "imports"),
+            ],
+        );
+        let index = ReverseImpactIndex::build(&kg, DEFAULT_AFFECTED_RELATIONS);
+        for seeds in [
+            vec![NodeId("x".into())],
+            vec![NodeId("x".into()), NodeId("y".into())],
+            vec![NodeId("m".into())],
+            vec![NodeId("missing".into())], // unknown seed -> empty
+        ] {
+            for depth in [1usize, 2, 5] {
+                let cached = index.affected_multi(&kg, &seeds, depth);
+                let oneshot =
+                    affected_nodes_multi(&kg, &seeds, DEFAULT_AFFECTED_RELATIONS, depth);
+                assert_eq!(cached, oneshot, "seeds={seeds:?} depth={depth}");
+            }
+        }
     }
 
     #[test]

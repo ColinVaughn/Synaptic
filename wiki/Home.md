@@ -40,7 +40,19 @@ get the binary.
   APIs, architectural drift, new cycles, and change hotspots ([Commands](Commands)).
 - Safe refactor: confidence-scored `rename`/`move`/`extract` plans for an agent to
   apply, with a graph-invariant `verify` afterwards ([Commands](Commands)).
-- An MCP server (20 read-only tools) and one-command assistant integration
+- Change forecasting: `codegraph predict` reports a change's blast radius, public
+  APIs at risk, the tests that exercise it, new cycles, and a verify checklist
+  before you edit; `--edit "<kind>:<symbol>"` forecasts a described edit before any
+  code is written ([Commands](Commands)).
+- Speculative execution: `codegraph speculate` applies a pending change in a
+  throwaway git worktree and actually runs the at-risk tests plus a build/type-
+  check, reporting real pass/fail (the ground-truth half of prediction; CLI-only
+  by default, exposed over MCP only with `serve --allow-exec`) ([Commands](Commands)).
+- Forecast evaluation: `codegraph eval replay` replays history, re-predicts each
+  commit from its parent state, and scores the prediction against git ground
+  truth (co-edited tests, removed APIs) so forecast quality is regression-testable
+  and CI-gateable ([Commands](Commands)).
+- An MCP server (23 read-only tools) and one-command assistant integration
   ([MCP Server](MCP-Server), [Assistant Integration](Assistant-Integration)).
 - Multi-repo federation with real cross-repo edge resolution
   ([Workspaces and Federation](Workspaces-and-Federation)).

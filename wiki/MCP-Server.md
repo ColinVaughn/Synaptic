@@ -40,7 +40,7 @@ edge confidence mean).
 ## Running the server
 
 ```
-codegraph serve [--graph <path>] [--http <addr>] [--api-key <key>] [--source-root <dir>]
+codegraph serve [--graph <path>] [--http <addr>] [--api-key <key>] [--source-root <dir>] [--allow-exec]
 ```
 
 - `--graph <path>` selects the `graph.json` to load. Default is the standard
@@ -54,6 +54,10 @@ codegraph serve [--graph <path>] [--http <addr>] [--api-key <key>] [--source-roo
 - `--source-root <dir>`: the trusted root for resolving a node's source file in
   `get_source`. Default is the directory above `codegraph-out/` (the repo root);
   it falls back to the current directory when that cannot be derived.
+- `--allow-exec`: expose the command-running `speculate` tool (off by default).
+  This makes the server **no longer read-only** — `speculate` executes the
+  project's test/build commands in a throwaway worktree — so enable it only for
+  trusted clients. Without it the tool is neither advertised nor runnable.
 
 ### stdio transport
 
@@ -137,17 +141,26 @@ exposure.
 
 ## MCP tools
 
-`tools/list` reports 20 tools. Every tool documents its parameters in its input
-schema, and every tool carries annotations so a host knows how safe it is to run:
+`tools/list` reports 23 tools by default (24 with `--allow-exec`, which adds
+`speculate`). Every tool documents its parameters in its input schema, and every
+tool carries annotations so a host knows how safe it is to run:
 
 ```json
 "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": <bool> }
 ```
 
-All 20 tools are `readOnlyHint: true`. `openWorldHint` is `true` only for the
-tools that reach outside the graph by shelling out (`list_prs`, `get_pr_impact`,
-`triage_prs`, `working_changes_impact`, and `time_travel_diff`); it is `false`
-for the rest. `plan_rename` is plan-only and never edits source.
+All 23 default tools are `readOnlyHint: true`. `openWorldHint` is `true` only for
+the tools that reach outside the graph by shelling out (`list_prs`,
+`get_pr_impact`, `triage_prs`, `working_changes_impact`, `predict_impact`,
+`affected_tests`, and `time_travel_diff`); it is `false` for the rest, including
+`predict_edit` (a pure in-memory graph query). `plan_rename` is plan-only and
+never edits source.
+
+The lone exception is the opt-in **`speculate`** tool, present only when the
+server is started with `--allow-exec`. It runs the project's test/build commands
+in a throwaway worktree (the empirical counterpart to `predict_impact`), so it is
+annotated honestly as `readOnlyHint: false, openWorldHint: true`. The default
+server never advertises or runs it, preserving the strictly read-only surface.
 
 Each tool returns a text content block (the load-bearing, purpose-formatted
 output). Four tools additionally declare an `outputSchema` and return a typed
@@ -183,8 +196,9 @@ Show a node's metadata and degree.
 Parameters:
 - `label` (string, required) -- a label/keyword that resolves to a node.
 
-Returns: node label, id, source file, type, community, and degree. If nothing
-resolves, returns `No node matches '<label>'.`
+Returns: node label, id, source file, type, community, and degree, plus kind,
+visibility, and LOC when the node carries them (added by the enrichment pass). If
+nothing resolves, returns `No node matches '<label>'.`
 
 ### get_source
 
@@ -354,6 +368,67 @@ Parameters:
 
 Returns `Working changes vs <base>: <n> files, <n> graph nodes, <n> communities
 touched` and the changed files, or `No changes vs <base> (or git unavailable).`
+
+### predict_impact
+
+Forecast the consequences of a change before editing: which graph nodes the
+changed files define, the reverse-impact blast radius that depends on them, which
+edited symbols are public API (callers outside the file or module may break), and
+a verify checklist. Pure-graph and read-only; for new-cycle / removed-API
+detection use `time_travel_diff` or the `codegraph predict` CLI (those build
+worktrees). `openWorldHint: true` (shells out to `git diff` when `files` is
+omitted).
+
+Parameters:
+- `files` (array of strings) -- repo-relative changed files to forecast. Omit to
+  use the working-tree diff against `base`.
+- `base` (string) -- base branch to diff against when `files` is omitted; defaults
+  to the detected default branch.
+- `depth` (integer) -- reverse-impact hop bound. Default 3, max 16.
+
+Returns the forecast summary, a heuristic change-risk score (low/medium/high
+with its drivers), the changed nodes, the public APIs at risk, the tests at risk,
+the blast radius (one dependent per line: hop count, relation, label, file), and
+the verify checklist.
+
+### affected_tests
+
+Predictive test selection: the tests that exercise the code you are about to
+change. Walks the reverse-impact set from the changed files and keeps the test
+nodes (detected by path convention: a `test`/`tests`/`__tests__`/`testing`
+directory, or a `test_*` / `*_test` / `*_spec` / `*.test.*` / `*.spec.*` /
+`*Test` / `conftest` filename; a `spec/` directory alone is not treated as a test
+tree). The focused
+"which tests should I run for this change" view. `openWorldHint: true` (shells out
+to `git diff` when `files` is omitted).
+
+Parameters:
+- `files` (array of strings) -- repo-relative changed files. Omit to use the
+  working-tree diff against `base`.
+- `base` (string) -- base branch to diff against when `files` is omitted; defaults
+  to the detected default branch.
+- `depth` (integer) -- reverse-impact hop bound. Default 3, max 16.
+
+Returns one test per line (hop count, relation, label, file), or a note when no
+test in the graph reaches the change. Inline unit tests not under a test path
+(e.g. Rust `#[cfg(test)]`) are not detected.
+
+### predict_edit
+
+What breaks if you make a specific kind of edit to a symbol, classified into
+"will break" and "to review". Complements `plan_rename` (which is rename-only).
+Pure in-memory graph query; `openWorldHint: false`.
+
+Parameters:
+- `symbol` (string, required) -- the symbol to edit (name, bare name, or node id).
+- `kind` (string, required) -- `delete` (every dependent breaks), `signature`
+  (callers and type users break; bare imports go to review), or `visibility`
+  (references from other files break when narrowing to private).
+- `depth` (integer) -- reverse-impact hop bound. Default 3, max 16.
+
+Returns the summary plus the "will break" and "review" dependents (each with hop
+count, relation, label, file, and the reason), or a note if the symbol or kind is
+not recognized.
 
 ### structural_search
 

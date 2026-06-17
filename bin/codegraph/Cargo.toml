@@ -42,6 +42,9 @@ codegraph-workspace = { workspace = true }
 codegraph-history = { workspace = true }
 codegraph-cgql = { workspace = true }
 codegraph-refactor = { workspace = true }
+codegraph-predict = { workspace = true }
+codegraph-sandbox = { workspace = true }
+codegraph-eval = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 rayon = { workspace = true }

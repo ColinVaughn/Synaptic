@@ -1,0 +1,24 @@
+[package]
+name = "codegraph-eval"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Evaluation and calibration for CodeGraph's change forecasts: a prediction ledger and a replay harness that scores predicted impact against git-history ground truth."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+codegraph-core = { workspace = true }
+codegraph-graph = { workspace = true }
+codegraph-history = { workspace = true }
+codegraph-predict = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "eval"
+harness = false

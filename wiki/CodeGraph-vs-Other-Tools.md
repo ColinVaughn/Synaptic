@@ -16,7 +16,7 @@ claim could not be confirmed from a primary source, it is not made here.
 
 | Tool | What it is for | How it models code | Languages | Runs where | AI / LLM role | License |
 |---|---|---|---|---|---|---|
-| **CodeGraph** | Persistent code knowledge graph you query, diff across git history, and refactor against, instead of re-reading source | Symbols + typed edges, clustered into communities; every edge tagged `Extracted` / `Inferred` / `Ambiguous`; nodes carry kind/visibility/line-spans | tree-sitter, 30+ languages | Single static binary, local, offline by default | MCP server (20 read-only tools) over the graph, incl. structural search, time-travel diff, and plan-only rename | AGPL-3.0, open source |
+| **CodeGraph** | Persistent code knowledge graph you query, diff across git history, and refactor against, instead of re-reading source | Symbols + typed edges, clustered into communities; every edge tagged `Extracted` / `Inferred` / `Ambiguous`; nodes carry kind/visibility/line-spans | tree-sitter, 30+ languages | Single static binary, local, offline by default | MCP server (23 read-only tools) over the graph, incl. change forecasting, predictive test selection, edit-impact prediction, structural search, time-travel diff, and plan-only rename | AGPL-3.0, open source |
 | **Sourcegraph / Cody** | Org-scale code search and navigation; Cody is its AI assistant | Search index, plus precise navigation from uploaded SCIP indexes (opt-in) [2][3] | Search works broadly; precise nav has SCIP indexers for ~8 languages [11] | Self-hosted (Kubernetes / Docker) or Sourcegraph Cloud [4] | Cody answers and edits using search + code-graph context [7] | Main product not open source; enterprise pricing [5][9] |
 | **CodeQL** | Semantic analysis to find security vulnerabilities and their variants [12] | Relational "CodeQL database" queried with the QL language [13] | C/C++, C#, Go, Java, Kotlin, JS, TS, Python, Ruby, Rust, Swift, GitHub Actions [14] | CLI; compiled languages need a build observed during extraction [13] | None; it is a query engine (powers GitHub code scanning) [12] | Free on open-source/public code; paid for private code [15][16] |
 | **Joern** | Static analysis for vulnerability discovery via code property graphs [17] | Code Property Graph (AST + control-flow + data-flow in one graph), Scala-based query language [18] | C/C++, Java, JS, Python, Kotlin, PHP, Go, Ruby, Swift, C#, JVM bytecode, x86/x64 [17] | Local shell/CLI; imports code even without a working build [17] | None | Apache-2.0, open source [19] |
@@ -199,7 +199,7 @@ push and first-class Obsidian Canvas and Mermaid call-flow outputs. [26]
 
 **Where CodeGraph differs.** CodeGraph ships as a single static Rust binary with no
 interpreter or dependency tree to install; graphify is a Python package that needs Python
-3.10+ and its libraries. [26] CodeGraph's MCP server is larger (20 read-only tools versus
+3.10+ and its libraries. [26] CodeGraph's MCP server is larger (23 read-only tools versus
 graphify's 10 tools plus 6 resources) and implements the 2025-06-18 protocol revision with
 prompts, completions, resource subscriptions, and structured tool output
 ([MCP Server](MCP-Server)). [26] Its cross-repo federation resolves references across

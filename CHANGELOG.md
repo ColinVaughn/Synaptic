@@ -6,6 +6,44 @@ All notable changes to CodeGraph are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-02
+
+### Added
+- **Change forecasting (`codegraph predict`):** new `codegraph-predict` crate. Given the files a
+  change touches (or a `git diff`), it composes the existing graph primitives into a single
+  forecast: the graph nodes the change defines, the reverse-impact blast radius that depends on
+  them, the at-risk tests that exercise the changed code, which edited symbols are public API,
+  new import cycles / removed public APIs / dependency deltas (from a time-travel diff), a
+  heuristic change-risk score, and a verify checklist. Exposed as the `predict_impact` and
+  `affected_tests` MCP tools.
+- **Predictive test selection (`affected_tests`):** the tests that exercise the changed code,
+  found by walking the reverse-impact set from the changed files and keeping the test nodes
+  (detected by path convention). The focused "which tests should I run for this change" view.
+- **Co-change mining (evolutionary coupling):** mines git history for files that historically
+  change together with the changed files, catching coupling that static analysis misses (e.g. a
+  schema and its serializer that share no import but always change together).
+- **Edit-impact prediction (`codegraph predict --edit <symbol>`, `predict_edit` MCP tool):** an
+  analytic forecast of one symbol edit, classified into "will break" vs "to review". `kind=delete`
+  (every dependent breaks), `signature` (callers/type-users break, bare imports go to review), or
+  `visibility` (cross-file references break when narrowing to private). Complements `plan_rename`.
+- **Speculative execution (`codegraph speculate`):** new `codegraph-sandbox` crate. Applies a
+  change in a throwaway git worktree and runs a build/type-check plus the forecast's at-risk tests
+  (auto-detecting cargo/go/pytest/npm), reporting real pass/fail. Exposed as a gated `speculate`
+  MCP tool: a default server stays strictly read-only with 23 tools, and `serve --allow-exec` adds
+  `speculate` as the 24th, non-read-only tool.
+- **Forecast evaluation and calibration (`codegraph eval replay`):** new `codegraph-eval` crate.
+  Replays `from..HEAD`, re-predicting each non-merge commit from its parent-state graph (built in a
+  worktree, cached per SHA) and scoring the prediction against git ground truth: co-edited
+  test-selection recall/precision, removed-API detection, and blast-radius selectivity. Writes a
+  Markdown/JSON report, records a prediction ledger, and gates CI with `--min-test-recall`.
+
+### Performance
+- **The predict MCP tools reuse a cached reverse-impact index.** The server now builds the
+  reverse-adjacency once per graph load/reload (next to the query index) instead of rebuilding it
+  on every `predict_impact` / `affected_tests` / `speculate` request. Per-request forecast on a
+  5k-node graph drops from roughly 1.84ms to 0.92ms; the one-shot CLI path keeps its borrowed
+  build and is unchanged. Equivalence tests assert the cached path returns identical results.
+
 ## [0.2.1] - 2026-07-01
 
 ### Fixed

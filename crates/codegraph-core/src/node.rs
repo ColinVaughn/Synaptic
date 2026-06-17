@@ -89,6 +89,12 @@ impl Node {
     pub fn loc(&self) -> Option<u32> {
         self.span().map(|s| s.line_count())
     }
+
+    /// True if this node lives in test code (heuristic, by its source path; see
+    /// [`crate::is_test_path`]).
+    pub fn is_test(&self) -> bool {
+        crate::is_test_path(&self.source_file)
+    }
 }
 
 #[cfg(test)]
@@ -159,6 +165,14 @@ mod tests {
         assert_eq!(back.kind(), Some(NodeKind::Class));
         assert_eq!(back.visibility(), Some(Visibility::Public));
         assert_eq!(back.loc(), Some(9));
+    }
+
+    #[test]
+    fn is_test_reflects_the_source_path() {
+        let mut n = sample();
+        assert!(!n.is_test(), "src/auth.py is production code");
+        n.source_file = "tests/test_auth.py".into();
+        assert!(n.is_test(), "a path under tests/ is test code");
     }
 
     #[test]

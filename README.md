@@ -99,10 +99,20 @@ commits returns immediately and only the working-tree side is rebuilt.
   execution plan (`plan.json` + `plan.md`) for an AI agent to apply, then `refactor verify`
   rebuilds and checks the graph held (the definition moved/renamed, no references lost, no new
   cycles). CodeGraph never edits source itself.
-- **MCP server** (protocol 2025-06-18) exposing 20 read-only tools over stdio or HTTP:
-  subgraph search, source reading, reverse-impact, PR/working-tree blast radius, structural
-  search, time-travel diff, and plan-only rename, plus prompts, completions, resource
-  subscriptions, and structured tool output. See
+- **Change forecasting and speculative execution**: `codegraph predict` forecasts a change's
+  blast radius, public APIs at risk, at-risk tests, new cycles, risk score, and a verify
+  checklist before you edit (`--edit "<kind>:<symbol>"` forecasts a described edit before any
+  code is written); `codegraph speculate` then applies the change in a throwaway git worktree
+  and actually runs the at-risk tests plus a build/type-check, reporting real pass/fail — the
+  ground-truth half of prediction; and `codegraph eval replay` replays history to score forecast
+  quality against git ground truth (co-edited tests, removed APIs), turning prediction accuracy into
+  a CI-gateable metric. See
+  [Commands](https://github.com/ColinVaughn/CodeGraph/wiki/Commands).
+- **MCP server** (protocol 2025-06-18) exposing 23 read-only tools over stdio or HTTP:
+  subgraph search, source reading, reverse-impact, PR/working-tree blast radius, change
+  forecasting, predictive test selection, edit-impact prediction, structural search, time-travel
+  diff, and plan-only rename, plus prompts, completions, resource subscriptions, and structured
+  tool output. See
   [MCP Server](https://github.com/ColinVaughn/CodeGraph/wiki/MCP-Server).
 - **Incremental rebuilds**, file watching, and git hooks keep the graph current. See
   [Incremental Updates](https://github.com/ColinVaughn/CodeGraph/wiki/Incremental-Updates).
@@ -176,6 +186,9 @@ A code-only corpus runs fully offline; the optional LLM semantic pass over docs 
 | `search [cgql]` | Structural search via CGQL or a named `--pattern`. Flags: `--explain`, `--save`/`--saved`, `--json` |
 | `diff <rev1> [rev2]` | Time-travel graph diff between two git revisions. Flags: `--since`, `--report`, `--html`, `--scope` |
 | `refactor <action>` | Plan a safe `rename`/`move`/`extract` for an agent, then `verify` the graph (never edits source) |
+| `predict [paths...]` | Forecast a change before applying it: blast radius, at-risk tests, risk, removed APIs, cycles. Flags: `--base`, `--edit "<kind>:<symbol>"`, `--gate` |
+| `speculate [paths...]` | Run a change for real in a throwaway worktree: at-risk tests + a build/type-check, reporting pass/fail. Flags: `--patch`, `--test-cmd`, `--check-cmd` |
+| `eval replay [from]` | Replay history to score forecast quality against git ground truth (CI-gateable). Flag: `--min-test-recall` |
 | `update [paths...]` | Incrementally rebuild after files change (`--full` for a full rebuild) |
 | `watch` | Rebuild automatically as files change |
 | `serve` | Run the MCP server (stdio, or `--http <addr> --api-key <key>`) |
@@ -198,12 +211,12 @@ codegraph serve                                                        # stdio M
 codegraph serve --http 127.0.0.1:8765 --api-key "$CODEGRAPH_API_KEY"   # HTTP server
 ```
 
-The server exposes 20 read-only tools: graph navigation (`query_graph`, `get_node`,
+The server exposes 23 read-only tools: graph navigation (`query_graph`, `get_node`,
 `get_source`, `get_neighbors`, `get_community`, `god_nodes`, `graph_stats`, `shortest_path`),
-impact analysis (`affected`, `find_callers`, `find_callees`), federation (`list_repos`,
-`repo_stats`), change/PR review (`working_changes_impact`, `list_prs`, `get_pr_impact`,
-`triage_prs`), and the advanced trio (`structural_search`, `time_travel_diff`, plan-only
-`plan_rename`). It also serves MCP prompts, argument completions, resource templates and
+impact analysis (`affected`, `find_callers`, `find_callees`, `predict_impact`, `affected_tests`,
+`predict_edit`), federation (`list_repos`, `repo_stats`), change/PR review (`working_changes_impact`,
+`list_prs`, `get_pr_impact`, `triage_prs`), and the advanced trio (`structural_search`,
+`time_travel_diff`, plan-only `plan_rename`). It also serves MCP prompts, argument completions, resource templates and
 subscriptions, and a small REST surface (`/api/stats`, `/api/query`, ...) for non-MCP
 clients. `codegraph install` wires the graph into a host assistant (a `PreToolUse` hook for
 Claude; a native MCP server for Codex, with `codegraph install codex --global` for the Codex
@@ -240,7 +253,7 @@ cargo fmt --all --check                            # formatting (enforced in CI)
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-The codebase is 15 library crates (`crates/*`) plus the `codegraph` binary (`bin/`). CI
+The codebase is 21 library crates (`crates/*`) plus the `codegraph` binary (`bin/`). CI
 builds each language grammar in isolation so a grammar bump that silently drops nodes/edges
 fails on its own. See [Development](https://github.com/ColinVaughn/CodeGraph/wiki/Development) and [Architecture](https://github.com/ColinVaughn/CodeGraph/wiki/Architecture).
 
