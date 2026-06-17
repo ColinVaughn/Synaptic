@@ -490,6 +490,45 @@ impl Server {
         }
     }
 
+    /// `find_callers` — who calls/uses this node (incoming call-like edges).
+    pub fn tool_find_callers(&self, label: &str) -> String {
+        self.directional("Callers", label, "in")
+    }
+
+    /// `find_callees` — what this node calls/uses (outgoing call-like edges).
+    pub fn tool_find_callees(&self, label: &str) -> String {
+        self.directional("Callees", label, "out")
+    }
+
+    fn directional(&self, title: &str, label: &str, dir: &str) -> String {
+        let Some(id) = resolve_seed(&self.kg, label) else {
+            return format!("No node matches '{}'.", sanitize_label(label));
+        };
+        let Some(ex) = explain(&self.kg, &id) else {
+            return format!("No node matches '{}'.", sanitize_label(label));
+        };
+        let mut out = format!("{title} of {}:", sanitize_label(&ex.label));
+        let mut any = false;
+        for nb in &ex.neighbors {
+            // Call-like relations only; direction filtered.
+            let rel = nb.relation.to_lowercase();
+            let call_like =
+                rel.contains("call") || rel.contains("use") || rel.contains("reference");
+            if nb.direction == dir && call_like {
+                any = true;
+                out.push_str(&format!(
+                    "\n  {} [{}]",
+                    sanitize_label(&nb.label),
+                    sanitize_label(&nb.relation)
+                ));
+            }
+        }
+        if !any {
+            out.push_str("\n  (none)");
+        }
+        out
+    }
+
     /// `affected` — the nodes that transitively depend on `label`, found by
     /// walking impact edges backward up to `depth` hops. Empty `relations`
     /// uses the default structural-impact set.
@@ -829,6 +868,8 @@ impl Server {
                     .unwrap_or_default();
                 self.tool_affected(&s("label"), u("depth", 3) as usize, &rels)
             }
+            "find_callers" => self.tool_find_callers(&s("label")),
+            "find_callees" => self.tool_find_callees(&s("label")),
             "list_prs" => self.tool_list_prs(opt("base"), opt("repo")),
             "get_pr_impact" => self.tool_get_pr_impact(u("pr_number", 0), opt("repo")),
             "triage_prs" => self.tool_triage_prs(opt("base"), opt("repo")),
@@ -1025,6 +1066,10 @@ fn tools_list() -> Value {
               "depth": { "type": "integer", "description": "Max hops to walk backward (default 3, max 16)." },
               "relations": { "type": "array", "items": { "type": "string" }, "description": "Optional edge relations to follow; defaults to the structural-impact set (calls, imports, inherits, implements, uses, references, depends_on, reads_from)." }
           }, "required": ["label"] } },
+        { "name": "find_callers", "description": "List the nodes that call, use, or reference this symbol (incoming edges only). Answers 'who calls X'.",
+          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." } }, "required": ["label"] } },
+        { "name": "find_callees", "description": "List the nodes this symbol calls, uses, or references (outgoing edges only). Answers 'what does X call'.",
+          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." } }, "required": ["label"] } },
         { "name": "list_prs", "description": "Open pull requests targeting the base branch with their CI/review state. Requires the `gh` CLI authenticated for the repo.",
           "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch to filter to (default: the repo's default branch)." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } } } },
         { "name": "get_pr_impact", "description": "One PR's detail plus its graph blast radius: which graph nodes and communities its changed files touch. Requires the `gh` CLI.",
@@ -1208,7 +1253,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 14);
+        assert_eq!(names.len(), 16);
         for expected in [
             "query_graph",
             "get_node",
@@ -1221,6 +1266,8 @@ mod tests {
             "repo_stats",
             "shortest_path",
             "affected",
+            "find_callers",
+            "find_callees",
             "list_prs",
             "get_pr_impact",
             "triage_prs",
@@ -1306,6 +1353,29 @@ mod tests {
         let mut s = server(); // no source root
         let out = call_tool(&mut s, "get_source", json!({"label": "AuthService"}));
         assert!(out.contains("Source not available"), "{out}");
+    }
+
+    #[test]
+    fn find_callers_and_callees_split_by_direction() {
+        let gd = GraphData {
+            nodes: vec![
+                node("auth", "AuthService", Some(0)),
+                node("login", "login_user", Some(0)),
+                node("db", "Database", Some(0)),
+            ],
+            // AuthService calls login_user; login_user calls Database.
+            links: vec![edge("auth", "login", "calls"), edge("login", "db", "calls")],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None);
+
+        let callers = call_tool(&mut s, "find_callers", json!({"label": "login_user"}));
+        assert!(callers.contains("AuthService"), "{callers}");
+        assert!(!callers.contains("Database"), "callees must not appear: {callers}");
+
+        let callees = call_tool(&mut s, "find_callees", json!({"label": "login_user"}));
+        assert!(callees.contains("Database"), "{callees}");
+        assert!(!callees.contains("AuthService"), "callers must not appear: {callees}");
     }
 
     #[test]
