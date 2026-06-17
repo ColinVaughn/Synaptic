@@ -200,7 +200,8 @@ impl Server {
                 self.kg = KnowledgeGraph::from_graph_data(gd);
                 self.communities = communities_of(&self.kg);
                 self.query_index = QueryIndex::build(&self.kg);
-                self.affected_index = ReverseImpactIndex::build(&self.kg, DEFAULT_AFFECTED_RELATIONS);
+                self.affected_index =
+                    ReverseImpactIndex::build(&self.kg, DEFAULT_AFFECTED_RELATIONS);
                 self.stats = graph_stats(&self.kg);
                 self.god_nodes_all = god_nodes(&self.kg, usize::MAX);
                 self.reload_key = Some(key);

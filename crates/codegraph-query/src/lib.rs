@@ -642,7 +642,11 @@ impl ReverseImpactIndex {
                 via_relation,
             })
             .collect();
-        hits.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.node_id.cmp(&b.node_id)));
+        hits.sort_by(|a, b| {
+            a.depth
+                .cmp(&b.depth)
+                .then_with(|| a.node_id.cmp(&b.node_id))
+        });
         hits
     }
 }
@@ -899,13 +903,7 @@ mod tests {
         // exactly what building a throwaway index per call (affected_nodes_multi)
         // returns -- proving the cache changes cost, not results.
         let kg = build(
-            &[
-                ("x", "X"),
-                ("y", "Y"),
-                ("m", "M"),
-                ("n", "N"),
-                ("z", "Z"),
-            ],
+            &[("x", "X"), ("y", "Y"), ("m", "M"), ("n", "N"), ("z", "Z")],
             &[
                 ("m", "x", "calls"),
                 ("m", "y", "references"),
@@ -922,8 +920,7 @@ mod tests {
         ] {
             for depth in [1usize, 2, 5] {
                 let cached = index.affected_multi(&kg, &seeds, depth);
-                let oneshot =
-                    affected_nodes_multi(&kg, &seeds, DEFAULT_AFFECTED_RELATIONS, depth);
+                let oneshot = affected_nodes_multi(&kg, &seeds, DEFAULT_AFFECTED_RELATIONS, depth);
                 assert_eq!(cached, oneshot, "seeds={seeds:?} depth={depth}");
             }
         }
