@@ -194,28 +194,29 @@ impl Server {
 
     // tools
 
-    /// `query_graph` — IDF-seeded subgraph as text, bounded by a token budget.
-    /// `context_filter` keeps only nodes whose source_file contains one of the
-    /// given substrings (a lightweight path filter).
-    pub fn tool_query_graph(
+    /// Retrieve the subgraph for `question` and apply `context_filter`, returning
+    /// the raw result plus the indices into `r.nodes` that survived the filter.
+    /// Shared by the text and structured renderers so a request runs the index
+    /// query once (not once per output shape).
+    fn query_filtered(
         &self,
         question: &str,
         mode: TraversalMode,
         token_budget: usize,
         context_filter: &[String],
-    ) -> String {
-        // Map a token budget to a node cap (heuristic) then truncate the rendered
-        // text to ~token_budget*4 chars. Exact token accounting is deferred.
+    ) -> (codegraph_query::QueryResult, Vec<usize>) {
+        // Map a token budget to a node cap (heuristic); the text render is later
+        // truncated to the budget by truncate_to_tokens.
         let max_nodes = (token_budget / 40).clamp(10, 400);
         let r = self.query_index.query(&self.kg, question, max_nodes, mode);
-        let included: Vec<&NodeId> = r
+        let keep: Vec<usize> = r
             .nodes
             .iter()
-            .filter(|id| {
+            .enumerate()
+            .filter(|(_, id)| {
                 if context_filter.is_empty() {
                     return true;
                 }
-                // Borrow the source_file rather than clone it per candidate (M5).
                 let sf = self
                     .kg
                     .node(id)
@@ -223,9 +224,20 @@ impl Server {
                     .unwrap_or("");
                 context_filter.iter().any(|f| sf.contains(f.as_str()))
             })
+            .map(|(i, _)| i)
             .collect();
-        let in_set: std::collections::HashSet<&NodeId> = included.iter().copied().collect();
+        (r, keep)
+    }
 
+    fn render_query_text(
+        &self,
+        r: &codegraph_query::QueryResult,
+        keep: &[usize],
+        mode: TraversalMode,
+        token_budget: usize,
+    ) -> String {
+        let in_set: std::collections::HashSet<&NodeId> =
+            keep.iter().map(|&i| &r.nodes[i]).collect();
         let mode_str = match mode {
             TraversalMode::Bfs => "bfs",
             TraversalMode::Dfs => "dfs",
@@ -238,10 +250,10 @@ impl Server {
         let mut out = format!(
             "Traversal: {mode_str} | Start: [{}] | {} nodes found\n",
             seeds.join(", "),
-            included.len()
+            keep.len()
         );
-        for id in &included {
-            if let Some(n) = self.kg.node(id) {
+        for &i in keep {
+            if let Some(n) = self.kg.node(&r.nodes[i]) {
                 out.push_str(&format!(
                     "NODE {} [{}] {}\n",
                     sanitize_label(&n.label),
@@ -261,6 +273,20 @@ impl Server {
             }
         }
         truncate_to_tokens(out, token_budget)
+    }
+
+    /// `query_graph` text render. The MCP `tools/call` path renders text and
+    /// structured output from a single [`query_filtered`] retrieval; this stays
+    /// for the REST surface and direct callers.
+    pub fn tool_query_graph(
+        &self,
+        question: &str,
+        mode: TraversalMode,
+        token_budget: usize,
+        context_filter: &[String],
+    ) -> String {
+        let (r, keep) = self.query_filtered(question, mode, token_budget, context_filter);
+        self.render_query_text(&r, &keep, mode, token_budget)
     }
 
     /// `get_node` — metadata + degree for the node matching `label`.
@@ -756,37 +782,15 @@ impl Server {
         json!({ "seed": sanitize_label(&self.label_of(&id)), "affected": arr })
     }
 
-    /// Typed mirror of `tool_query_graph`. Re-runs retrieval (the index query is
-    /// cheap on a low-QPS server) and applies the same `context_filter` so the
-    /// structuredContent stays consistent with the rendered text.
-    fn query_graph_json(
-        &self,
-        question: &str,
-        mode: TraversalMode,
-        token_budget: usize,
-        context_filter: &[String],
-    ) -> Value {
-        let max_nodes = (token_budget / 40).clamp(10, 400);
-        let r = self.query_index.query(&self.kg, question, max_nodes, mode);
-        let included: Vec<&NodeId> = r
-            .nodes
+    /// Typed mirror of [`render_query_text`](Server::render_query_text) over the
+    /// same filtered retrieval, so structuredContent stays consistent with the
+    /// rendered text without re-querying.
+    fn render_query_json(&self, r: &codegraph_query::QueryResult, keep: &[usize]) -> Value {
+        let in_set: std::collections::HashSet<&NodeId> =
+            keep.iter().map(|&i| &r.nodes[i]).collect();
+        let nodes: Vec<Value> = keep
             .iter()
-            .filter(|id| {
-                if context_filter.is_empty() {
-                    return true;
-                }
-                let sf = self
-                    .kg
-                    .node(id)
-                    .map(|n| n.source_file.as_str())
-                    .unwrap_or("");
-                context_filter.iter().any(|f| sf.contains(f.as_str()))
-            })
-            .collect();
-        let in_set: std::collections::HashSet<&NodeId> = included.iter().copied().collect();
-        let nodes: Vec<Value> = included
-            .iter()
-            .filter_map(|id| self.kg.node(id))
+            .filter_map(|&i| self.kg.node(&r.nodes[i]))
             .map(|n| {
                 json!({
                     "label": sanitize_label(&n.label),
@@ -937,29 +941,38 @@ impl Server {
         let u = |k: &str, d: u64| args.get(k).and_then(Value::as_u64).unwrap_or(d);
         let opt = |k: &str| args.get(k).and_then(Value::as_str);
 
+        // query_graph renders both text and structuredContent from a SINGLE
+        // retrieval. The index query is O(graph); rendering both shapes from one
+        // result avoids paying it twice per request.
+        if name == "query_graph" {
+            let mode = match args.get("mode").and_then(Value::as_str) {
+                Some("dfs") => TraversalMode::Dfs,
+                _ => TraversalMode::Bfs,
+            };
+            let ctx: Vec<String> = args
+                .get("context_filter")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let question = s("question");
+            let budget = u("token_budget", 2000) as usize;
+            let (r, keep) = self.query_filtered(&question, mode, budget, &ctx);
+            let text = self.render_query_text(&r, &keep, mode, budget);
+            // Log the "<n> nodes found" count from the header.
+            self.log_query(&question, nodes_found(&text));
+            let structured = self.render_query_json(&r, &keep);
+            return Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": structured,
+                "isError": false
+            }));
+        }
+
         let text = match name {
-            "query_graph" => {
-                let mode = match args.get("mode").and_then(Value::as_str) {
-                    Some("dfs") => TraversalMode::Dfs,
-                    _ => TraversalMode::Bfs,
-                };
-                let ctx: Vec<String> = args
-                    .get("context_filter")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let question = s("question");
-                let text =
-                    self.tool_query_graph(&question, mode, u("token_budget", 2000) as usize, &ctx);
-                // Log the "<n> nodes found" count from the header (the number
-                // actually found), not the post-truncation NODE lines.
-                self.log_query(&question, nodes_found(&text));
-                text
-            }
             "get_node" => self.tool_get_node(&s("label")),
             "get_source" => self.tool_get_source(&s("label"), u("context_lines", 40) as usize),
             "get_neighbors" => {
@@ -1016,27 +1029,6 @@ impl Server {
                     })
                     .unwrap_or_default();
                 Some(self.affected_json(&s("label"), u("depth", 3) as usize, &rels))
-            }
-            "query_graph" => {
-                let mode = match args.get("mode").and_then(Value::as_str) {
-                    Some("dfs") => TraversalMode::Dfs,
-                    _ => TraversalMode::Bfs,
-                };
-                let ctx: Vec<String> = args
-                    .get("context_filter")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                Some(self.query_graph_json(
-                    &s("question"),
-                    mode,
-                    u("token_budget", 2000) as usize,
-                    &ctx,
-                ))
             }
             _ => None,
         };
