@@ -18,14 +18,7 @@ pub(crate) fn run_serve(
             path.display()
         )
     })?;
-    // Default: graph is at <root>/codegraph-out/graph.json, so the repo root is
-    // two levels up. Fall back to the current dir when that is unavailable.
-    let root = source_root.unwrap_or_else(|| {
-        path.parent()
-            .and_then(|p| p.parent())
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."))
-    });
+    let root = source_root.unwrap_or_else(|| default_source_root(&path));
     server = server.with_source_root(root);
     match http {
         Some(addr_str) => {
@@ -48,4 +41,39 @@ pub(crate) fn run_serve(
         }
     }
     Ok(())
+}
+
+/// Default source root from the graph path: the repo root is the directory
+/// above codegraph-out/. `Path::parent` yields `Some("")` (not `None`) for a
+/// relative default path run from the repo root, so an empty result falls back
+/// to the current directory rather than an unresolvable empty path.
+fn default_source_root(graph_path: &Path) -> PathBuf {
+    match graph_path.parent().and_then(Path::parent) {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_source_root_handles_relative_and_absolute() {
+        // Relative default path run from the repo root -> current dir.
+        assert_eq!(
+            default_source_root(Path::new("codegraph-out/graph.json")),
+            PathBuf::from(".")
+        );
+        // A bare filename -> current dir.
+        assert_eq!(
+            default_source_root(Path::new("graph.json")),
+            PathBuf::from(".")
+        );
+        // A nested absolute path -> two levels up (the repo root).
+        assert_eq!(
+            default_source_root(Path::new("/proj/codegraph-out/graph.json")),
+            PathBuf::from("/proj")
+        );
+    }
 }

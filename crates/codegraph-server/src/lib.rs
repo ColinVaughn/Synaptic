@@ -756,11 +756,35 @@ impl Server {
         json!({ "seed": sanitize_label(&self.label_of(&id)), "affected": arr })
     }
 
-    fn query_graph_json(&self, question: &str, mode: TraversalMode, token_budget: usize) -> Value {
+    /// Typed mirror of `tool_query_graph`. Re-runs retrieval (the index query is
+    /// cheap on a low-QPS server) and applies the same `context_filter` so the
+    /// structuredContent stays consistent with the rendered text.
+    fn query_graph_json(
+        &self,
+        question: &str,
+        mode: TraversalMode,
+        token_budget: usize,
+        context_filter: &[String],
+    ) -> Value {
         let max_nodes = (token_budget / 40).clamp(10, 400);
         let r = self.query_index.query(&self.kg, question, max_nodes, mode);
-        let nodes: Vec<Value> = r
+        let included: Vec<&NodeId> = r
             .nodes
+            .iter()
+            .filter(|id| {
+                if context_filter.is_empty() {
+                    return true;
+                }
+                let sf = self
+                    .kg
+                    .node(id)
+                    .map(|n| n.source_file.as_str())
+                    .unwrap_or("");
+                context_filter.iter().any(|f| sf.contains(f.as_str()))
+            })
+            .collect();
+        let in_set: std::collections::HashSet<&NodeId> = included.iter().copied().collect();
+        let nodes: Vec<Value> = included
             .iter()
             .filter_map(|id| self.kg.node(id))
             .map(|n| {
@@ -774,6 +798,7 @@ impl Server {
         let edges: Vec<Value> = r
             .edges
             .iter()
+            .filter(|e| in_set.contains(&e.source) && in_set.contains(&e.target))
             .map(|e| {
                 json!({
                     "source": sanitize_label(&self.label_of(&e.source)),
@@ -997,7 +1022,21 @@ impl Server {
                     Some("dfs") => TraversalMode::Dfs,
                     _ => TraversalMode::Bfs,
                 };
-                Some(self.query_graph_json(&s("question"), mode, u("token_budget", 2000) as usize))
+                let ctx: Vec<String> = args
+                    .get("context_filter")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some(self.query_graph_json(
+                    &s("question"),
+                    mode,
+                    u("token_budget", 2000) as usize,
+                    &ctx,
+                ))
             }
             _ => None,
         };
@@ -1501,8 +1540,14 @@ mod tests {
             "get_source",
             json!({"label": "login_user", "context_lines": 2}),
         );
-        assert!(out.contains("def login_user(u):"), "should include the body: {out}");
-        assert!(out.contains("src/auth.py:L1"), "header names the file+line: {out}");
+        assert!(
+            out.contains("def login_user(u):"),
+            "should include the body: {out}"
+        );
+        assert!(
+            out.contains("src/auth.py:L1"),
+            "header names the file+line: {out}"
+        );
     }
 
     #[test]
@@ -1532,6 +1577,34 @@ mod tests {
     }
 
     #[test]
+    fn query_graph_structured_respects_context_filter() {
+        // structuredContent must apply context_filter just like the text path,
+        // or the two diverge. Filter to auth.py; login.py/db.py must drop out.
+        let mut s = server();
+        let resp = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":"query_graph","arguments":{
+                    "question":"auth login database","context_filter":["auth.py"]}}
+            }))
+            .unwrap();
+        let files: Vec<String> = resp["result"]["structuredContent"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["source_file"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            !files.is_empty(),
+            "expected at least the auth node: {files:?}"
+        );
+        assert!(
+            files.iter().all(|f| f.contains("auth.py")),
+            "structured nodes must honor context_filter: {files:?}"
+        );
+    }
+
+    #[test]
     fn structured_tools_declare_output_schema() {
         let tools = tools_list();
         for name in ["graph_stats", "query_graph", "affected", "god_nodes"] {
@@ -1541,7 +1614,10 @@ mod tests {
                 .iter()
                 .find(|t| t["name"] == name)
                 .unwrap();
-            assert!(t.get("outputSchema").is_some(), "{name} needs an outputSchema");
+            assert!(
+                t.get("outputSchema").is_some(),
+                "{name} needs an outputSchema"
+            );
         }
     }
 
@@ -1573,10 +1649,18 @@ mod tests {
         for t in tools.as_array().unwrap() {
             let name = t["name"].as_str().unwrap();
             let ann = &t["annotations"];
-            assert_eq!(ann["readOnlyHint"], json!(true), "tool {name} must be read-only");
+            assert_eq!(
+                ann["readOnlyHint"],
+                json!(true),
+                "tool {name} must be read-only"
+            );
             // PR tools reach the network (gh) -> openWorldHint true.
             let open = matches!(name, "list_prs" | "get_pr_impact" | "triage_prs");
-            assert_eq!(ann["openWorldHint"], json!(open), "tool {name} openWorldHint");
+            assert_eq!(
+                ann["openWorldHint"],
+                json!(open),
+                "tool {name} openWorldHint"
+            );
         }
     }
 
@@ -1596,11 +1680,17 @@ mod tests {
 
         let callers = call_tool(&mut s, "find_callers", json!({"label": "login_user"}));
         assert!(callers.contains("AuthService"), "{callers}");
-        assert!(!callers.contains("Database"), "callees must not appear: {callers}");
+        assert!(
+            !callers.contains("Database"),
+            "callees must not appear: {callers}"
+        );
 
         let callees = call_tool(&mut s, "find_callees", json!({"label": "login_user"}));
         assert!(callees.contains("Database"), "{callees}");
-        assert!(!callees.contains("AuthService"), "callers must not appear: {callees}");
+        assert!(
+            !callees.contains("AuthService"),
+            "callers must not appear: {callees}"
+        );
     }
 
     #[test]
