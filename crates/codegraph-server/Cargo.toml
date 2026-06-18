@@ -21,3 +21,8 @@ getrandom = { workspace = true }
 tower = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "server"
+harness = false
