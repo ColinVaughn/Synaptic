@@ -17,6 +17,7 @@
 #![forbid(unsafe_code)]
 
 mod http;
+mod prompts;
 pub mod session;
 mod source;
 pub use http::serve_http;
@@ -895,13 +896,22 @@ impl Server {
                 let requested = params.get("protocolVersion").and_then(Value::as_str);
                 Ok(json!({
                     "protocolVersion": negotiate_protocol(requested),
-                    "capabilities": { "tools": {}, "resources": {} },
+                    "capabilities": { "tools": {}, "resources": {}, "prompts": {} },
                     "serverInfo": { "name": "codegraph", "version": env!("CARGO_PKG_VERSION") },
                     "instructions": SERVER_INSTRUCTIONS,
                 }))
             }
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": tools_list() })),
+            "prompts/list" => Ok(json!({ "prompts": prompts::prompts_list() })),
+            "prompts/get" => {
+                let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+                let pargs = params.get("arguments").cloned().unwrap_or(Value::Null);
+                match prompts::prompts_get(name, &pargs) {
+                    Some(v) => Ok(v),
+                    None => Err((-32602, format!("Unknown prompt: {name}"))),
+                }
+            }
             "resources/list" => Ok(json!({ "resources": resources_list() })),
             "tools/call" => self.dispatch_tool(&params),
             "resources/read" => self.dispatch_resource(&params),
@@ -1547,6 +1557,41 @@ mod tests {
         let mut s = server(); // no source root
         let out = call_tool(&mut s, "get_source", json!({"label": "AuthService"}));
         assert!(out.contains("Source not available"), "{out}");
+    }
+
+    #[test]
+    fn prompts_list_and_get() {
+        let mut s = server();
+        let list = s
+            .handle_request(&json!({"jsonrpc":"2.0","id":1,"method":"prompts/list"}))
+            .unwrap();
+        let names: Vec<&str> = list["result"]["prompts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"onboard"));
+        assert!(names.contains(&"explain_subsystem"));
+
+        let got = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":2,"method":"prompts/get",
+                "params":{"name":"explain_subsystem","arguments":{"topic":"authentication"}}
+            }))
+            .unwrap();
+        let text = got["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("authentication"), "arg interpolated: {text}");
+
+        // Unknown prompt -> JSON-RPC error.
+        let err = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":3,"method":"prompts/get","params":{"name":"nope"}
+            }))
+            .unwrap();
+        assert_eq!(err["error"]["code"], -32602);
     }
 
     #[test]
