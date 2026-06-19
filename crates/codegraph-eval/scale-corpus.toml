@@ -27,3 +27,9 @@ url = "https://github.com/spf13/cobra"
 sha = "ad460ea8f249db69c943a365fb84f3a59042d54e"
 family = "go"
 tier = "medium"
+
+[[repo]]
+url = "https://github.com/tokio-rs/axum"
+sha = "485c603dddcee45bb4bc40aab492b47576e2a2f8"
+family = "systems-rust"
+tier = "large"
