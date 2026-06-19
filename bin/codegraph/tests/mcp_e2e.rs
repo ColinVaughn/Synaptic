@@ -70,13 +70,14 @@ fn mcp_stdio_conformance_over_the_real_binary() {
     let mut stdin = child.stdin.take().unwrap();
     let mut out = BufReader::new(child.stdout.take().unwrap());
 
-    // initialize: negotiated version + the full 2025-06-18 capability set.
+    // initialize: with no requested version the server returns its latest, and
+    // advertises the full 2025-11-25 capability set.
     send(
         &mut stdin,
-        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}),
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
     );
     let init = recv(&mut out);
-    assert_eq!(init["result"]["protocolVersion"], "2025-06-18", "{init}");
+    assert_eq!(init["result"]["protocolVersion"], "2025-11-25", "{init}");
     let caps = &init["result"]["capabilities"];
     assert_eq!(
         caps["resources"]["subscribe"], true,
@@ -85,6 +86,13 @@ fn mcp_stdio_conformance_over_the_real_binary() {
     assert!(caps["prompts"].is_object(), "prompts cap: {caps}");
     assert!(caps["completions"].is_object(), "completions cap: {caps}");
     assert!(caps["logging"].is_object(), "logging cap: {caps}");
+
+    // Back-compat: an explicit legacy version request is still echoed.
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":99,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}),
+    );
+    assert_eq!(recv(&mut out)["result"]["protocolVersion"], "2025-06-18");
 
     // tools/list: every tool annotated read-only.
     send(
