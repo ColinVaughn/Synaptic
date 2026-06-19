@@ -554,6 +554,20 @@ pub(crate) enum EvalAction {
         #[arg(long)]
         json: bool,
     },
+    /// Score CodeGraph against the hand-labeled accuracy corpus: call-edge
+    /// precision/recall/F1, affected-test recall, blast-radius false-negative
+    /// rate, and cross-language relationship accuracy, per fixture and pooled.
+    Corpus {
+        /// Corpus root holding manifest.toml (default: the in-tree corpus).
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Output directory for report.json + report.md (default: codegraph-out/eval/corpus).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Emit the report as JSON to stdout.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]

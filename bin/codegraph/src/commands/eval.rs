@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use codegraph_eval::{calibrate_cross_language, replay, ReplayOptions, ReplayReport};
+use codegraph_eval::{
+    calibrate_cross_language, replay, run_corpus, CorpusReport, ReplayOptions, ReplayReport,
+};
 
 use crate::cli::EvalAction;
 
@@ -33,7 +35,86 @@ pub(crate) fn run_eval(action: EvalAction) -> Result<()> {
             json,
         }),
         EvalAction::CrossLanguage { graph, json } => run_cross_language(graph, json),
+        EvalAction::Corpus { root, out, json } => run_corpus_cmd(root, out, json),
     }
+}
+
+/// Default corpus root: the in-tree corpus, located relative to this crate at
+/// compile time. An installed binary run outside the repo must pass `--root`.
+fn default_corpus_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/codegraph-eval/corpus")
+}
+
+fn run_corpus_cmd(root: Option<PathBuf>, out: Option<PathBuf>, json: bool) -> Result<()> {
+    let root = root.unwrap_or_else(default_corpus_root);
+    if !root.join("manifest.toml").exists() {
+        bail!(
+            "no manifest.toml under {} (pass --root to point at the corpus)",
+            root.display()
+        );
+    }
+    let report = run_corpus(&root).map_err(|e| anyhow!("scoring corpus: {e}"))?;
+    let md = corpus_markdown(&report);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        let out_dir = out.unwrap_or_else(|| PathBuf::from("codegraph-out/eval/corpus"));
+        std::fs::create_dir_all(&out_dir)
+            .with_context(|| format!("creating {}", out_dir.display()))?;
+        std::fs::write(out_dir.join("report.json"), serde_json::to_string_pretty(&report)?)?;
+        std::fs::write(out_dir.join("report.md"), &md)?;
+        print!("{md}");
+        println!("  report: {}", out_dir.join("report.json").display());
+    }
+    Ok(())
+}
+
+fn corpus_markdown(report: &CorpusReport) -> String {
+    let mut s = String::from("# Accuracy corpus\n\n");
+    s.push_str("Exact set-comparison against hand-labeled ground truth. Call/cross P/R/F1 are percentages; blast FN is the percent of truly-affected nodes missed (lower is better).\n\n");
+    s.push_str("| Fixture | Family | Call P/R/F1 | Aff-test recall | Blast FN | Cross P/R/F1 |\n");
+    s.push_str("|---|---|---|---|---|---|\n");
+    // A metric with no labels in a fixture renders "n/a" rather than a vacuous
+    // 100%, so an empty set is never mistaken for a perfect score.
+    let prf1 = |p: &codegraph_eval::PrF1| {
+        if p.true_positive + p.false_positive + p.false_negative == 0 {
+            "n/a".to_string()
+        } else {
+            format!("{}/{}/{}", p.precision_pct(), p.recall_pct(), p.f1_pct())
+        }
+    };
+    let recall = |p: &codegraph_eval::PrF1| {
+        if p.true_positive + p.false_negative == 0 {
+            "n/a".to_string()
+        } else {
+            format!("{}%", p.recall_pct())
+        }
+    };
+    for f in &report.fixtures {
+        let blast = if f.blast.expected == 0 {
+            "n/a".to_string()
+        } else {
+            format!("{}%", f.blast.false_negative_pct())
+        };
+        s.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} |\n",
+            f.dir,
+            f.family,
+            prf1(&f.call_edges),
+            recall(&f.affected_tests),
+            blast,
+            prf1(&f.cross_edges),
+        ));
+    }
+    let pooled = report.pooled_call_edges();
+    s.push_str(&format!(
+        "\nPooled call-edge: precision {}% / recall {}% / F1 {}% over {} labeled call edge(s).\n",
+        pooled.precision_pct(),
+        pooled.recall_pct(),
+        pooled.f1_pct(),
+        pooled.true_positive + pooled.false_negative,
+    ));
+    s
 }
 
 /// Calibrate the cross-language edge layer over a built graph.json.
