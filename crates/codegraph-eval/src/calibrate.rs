@@ -25,11 +25,22 @@ pub struct Bin {
     pub observed_hit_rate: f64,
 }
 
-/// Reliability table plus the overall Brier score.
+/// Reliability table plus summary calibration statistics.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CalibrationReport {
     pub bins: Vec<Bin>,
+    /// Mean squared error of the probability (0 perfect, 1 worst).
     pub brier: f64,
+    /// Brier of the trivial predictor that always guesses the base rate.
+    pub brier_baseline: f64,
+    /// Brier skill score vs that baseline: `1 - brier/brier_baseline`. Positive
+    /// means better-than-base-rate; <= 0 means no better than guessing.
+    pub brier_skill_score: f64,
+    /// Expected calibration error: count-weighted mean gap between a bin's mean
+    /// confidence and its observed hit rate (0 perfect).
+    pub ece: f64,
+    /// Overall observed hit rate (the base rate the skill score compares against).
+    pub base_rate: f64,
     pub n: usize,
 }
 
@@ -80,10 +91,40 @@ pub fn reliability(samples: &[Sample], n_bins: usize) -> CalibrationReport {
             b.observed_hit_rate = hit_sum[i] / b.count as f64;
         }
     }
+
+    let n = samples.len();
+    let base_rate = if n == 0 {
+        0.0
+    } else {
+        samples.iter().filter(|s| s.hit).count() as f64 / n as f64
+    };
+    // Baseline Brier of "always predict the base rate" = p*(1-p) for binary
+    // outcomes; the skill score is the relative improvement over it.
+    let brier_baseline = base_rate * (1.0 - base_rate);
+    let brier_now = brier(samples);
+    let brier_skill_score = if brier_baseline > 0.0 {
+        1.0 - brier_now / brier_baseline
+    } else {
+        0.0
+    };
+    // ECE: count-weighted mean |confidence - observed| across non-empty bins.
+    let ece = if n == 0 {
+        0.0
+    } else {
+        bins.iter()
+            .filter(|b| b.count > 0)
+            .map(|b| (b.count as f64 / n as f64) * (b.mean_confidence - b.observed_hit_rate).abs())
+            .sum()
+    };
+
     CalibrationReport {
         bins,
-        brier: brier(samples),
-        n: samples.len(),
+        brier: brier_now,
+        brier_baseline,
+        brier_skill_score,
+        ece,
+        base_rate,
+        n,
     }
 }
 
@@ -94,10 +135,12 @@ use std::process::Command;
 /// Turn commit history into calibration samples by leave-one-out co-change.
 ///
 /// `transactions` is the full history oldest-first, each commit the list of
-/// files it touched. For every commit index in `eval`, we take one of its files
-/// as the seed, ask the co-change predictor (trained ONLY on the commits before
-/// it) which other files should change with the seed, and record each
-/// suggestion's confidence against whether that file actually changed in the
+/// files it touched. For every commit index in `eval`, EACH file in the commit
+/// is used as a seed in turn (so the sample is not biased toward any particular
+/// filename); the co-change predictor, trained ONLY on the commits before this
+/// one, suggests other files, and each suggestion's confidence is recorded
+/// against whether that file actually changed in the commit. To avoid one huge
+/// commit dominating, a seed only contributes suggestions for OTHER files in the
 /// commit. Pure: no git, fully unit-testable.
 pub fn samples_from_history(
     transactions: &[Vec<String>],
@@ -119,14 +162,16 @@ pub fn samples_from_history(
             continue; // need a seed plus at least one other file to predict
         }
         let actual: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
-        // Deterministic seed: the lexicographically smallest file.
-        let seed = files.iter().min().expect("non-empty");
         let history = &transactions[..i];
-        for sug in co_change(history, std::slice::from_ref(seed), &opts) {
-            samples.push(Sample {
-                confidence: sug.confidence_pct as f64 / 100.0,
-                hit: actual.contains(sug.file.as_str()),
-            });
+        for seed in files {
+            for sug in co_change(history, std::slice::from_ref(seed), &opts) {
+                // The seed itself is excluded by co_change; a suggestion that is
+                // the seed's own commit-mate is the prediction target.
+                samples.push(Sample {
+                    confidence: sug.confidence_pct as f64 / 100.0,
+                    hit: actual.contains(sug.file.as_str()),
+                });
+            }
         }
     }
     samples

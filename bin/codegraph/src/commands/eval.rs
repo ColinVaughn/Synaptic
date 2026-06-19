@@ -174,14 +174,27 @@ fn run_calibrate_cmd(
 
 fn calibrate_markdown(r: &CalibrationReport) -> String {
     let mut s = String::from("# Prediction calibration (co-change)\n\n");
-    s.push_str(&format!(
-        "Brier score: **{:.3}** over {} prediction(s). 0 is perfect; lower is better.\n\n",
-        r.brier, r.n
-    ));
     if r.n == 0 {
         s.push_str("No multi-file commits in range, so there is nothing to calibrate.\n");
         return s;
     }
+    s.push_str(&format!(
+        "Over {} prediction(s); base rate {:.0}%.\n\n",
+        r.n,
+        r.base_rate * 100.0
+    ));
+    s.push_str(&format!(
+        "- Brier score: **{:.3}** (0 perfect; baseline-at-base-rate is {:.3}).\n",
+        r.brier, r.brier_baseline
+    ));
+    s.push_str(&format!(
+        "- Brier skill score: **{:+.3}** vs always-guess-base-rate (>0 is better than guessing).\n",
+        r.brier_skill_score
+    ));
+    s.push_str(&format!(
+        "- Expected calibration error: **{:.3}** (0 means confidence matches reality).\n\n",
+        r.ece
+    ));
     s.push_str("| Confidence bin | Predicted (mean) | Observed hit rate | Count |\n");
     s.push_str("|---|--:|--:|--:|\n");
     for b in &r.bins {
