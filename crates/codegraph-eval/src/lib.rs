@@ -11,6 +11,7 @@
 //! Calibration is advisory: the harness measures, it does not silently retune.
 #![forbid(unsafe_code)]
 
+mod calibrate;
 mod corpus;
 mod cross_language;
 pub mod groundtruth;
@@ -18,6 +19,7 @@ mod ledger;
 mod replay;
 mod scoring;
 
+pub use calibrate::{brier, reliability, Bin, CalibrationReport, Sample};
 pub use corpus::{
     build_fixture, run_corpus, score_fixture, BlastScore, CorpusReport, FixtureReport, PrF1,
 };
