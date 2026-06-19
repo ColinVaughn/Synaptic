@@ -84,7 +84,10 @@ fn run_scale_cmd(
         let out_dir = out.unwrap_or_else(|| PathBuf::from("codegraph-out/eval/scale"));
         std::fs::create_dir_all(&out_dir)
             .with_context(|| format!("creating {}", out_dir.display()))?;
-        std::fs::write(out_dir.join("report.json"), serde_json::to_string_pretty(&report)?)?;
+        std::fs::write(
+            out_dir.join("report.json"),
+            serde_json::to_string_pretty(&report)?,
+        )?;
         std::fs::write(out_dir.join("report.md"), &md)?;
         print!("{md}");
         println!("  report: {}", out_dir.join("report.json").display());
@@ -164,7 +167,10 @@ fn run_calibrate_cmd(
         let out_dir = out.unwrap_or_else(|| PathBuf::from("codegraph-out/eval/calibrate"));
         std::fs::create_dir_all(&out_dir)
             .with_context(|| format!("creating {}", out_dir.display()))?;
-        std::fs::write(out_dir.join("report.json"), serde_json::to_string_pretty(&report)?)?;
+        std::fs::write(
+            out_dir.join("report.json"),
+            serde_json::to_string_pretty(&report)?,
+        )?;
         std::fs::write(out_dir.join("report.md"), &md)?;
         print!("{md}");
         println!("  report: {}", out_dir.join("report.json").display());
@@ -235,7 +241,10 @@ fn run_corpus_cmd(root: Option<PathBuf>, out: Option<PathBuf>, json: bool) -> Re
         let out_dir = out.unwrap_or_else(|| PathBuf::from("codegraph-out/eval/corpus"));
         std::fs::create_dir_all(&out_dir)
             .with_context(|| format!("creating {}", out_dir.display()))?;
-        std::fs::write(out_dir.join("report.json"), serde_json::to_string_pretty(&report)?)?;
+        std::fs::write(
+            out_dir.join("report.json"),
+            serde_json::to_string_pretty(&report)?,
+        )?;
         std::fs::write(out_dir.join("report.md"), &md)?;
         print!("{md}");
         println!("  report: {}", out_dir.join("report.json").display());
@@ -289,7 +298,9 @@ fn corpus_markdown(report: &CorpusReport) -> String {
         }
     ));
     s.push_str("Exact set-comparison against hand-labeled ground truth. Call P/R/F1 over `calls` edges; affected-test recall over labeled test linkage; blast columns are recall / distractor-exclusion / avg impact-set size; cross P/R/F1 needs labeled non-couplings for precision (else recall only).\n\n");
-    s.push_str("| Fixture | Family | Call P/R/F1 | Aff-test rec | Blast rec/excl/size | Cross P/R/F1 |\n");
+    s.push_str(
+        "| Fixture | Family | Call P/R/F1 | Aff-test rec | Blast rec/excl/size | Cross P/R/F1 |\n",
+    );
     s.push_str("|---|---|---|---|---|---|\n");
     for f in &report.fixtures {
         let blast = if f.blast.expected == 0 && f.blast.distractors_total == 0 {

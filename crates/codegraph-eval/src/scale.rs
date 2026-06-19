@@ -177,7 +177,13 @@ fn ensure_checkout(cache_dir: &Path, repo: &ScaleRepo) -> Result<PathBuf, String
     let dir = cache_dir.join(repo_name(&repo.url));
     if !dir.join(".git").exists() {
         git(
-            &["clone", "--quiet", "--filter=blob:none", &repo.url, dir.to_str().unwrap()],
+            &[
+                "clone",
+                "--quiet",
+                "--filter=blob:none",
+                &repo.url,
+                dir.to_str().unwrap(),
+            ],
             None,
         )?;
     }
@@ -298,10 +304,9 @@ pub fn run_scale(
     tier_filter: Option<&str>,
     reps: usize,
 ) -> Result<ScaleReport, String> {
-    let manifest = ScaleManifest::parse(
-        &std::fs::read_to_string(manifest_path).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
+    let manifest =
+        ScaleManifest::parse(&std::fs::read_to_string(manifest_path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
     let mut results = Vec::new();
     let mut skipped = Vec::new();
     for repo in &manifest.repos {
@@ -349,7 +354,10 @@ tier = "small"
     #[test]
     fn repo_name_is_last_segment() {
         assert_eq!(repo_name("https://github.com/BurntSushi/memchr"), "memchr");
-        assert_eq!(repo_name("https://github.com/BurntSushi/memchr.git"), "memchr");
+        assert_eq!(
+            repo_name("https://github.com/BurntSushi/memchr.git"),
+            "memchr"
+        );
         assert_eq!(repo_name("https://github.com/a/b/"), "b");
     }
 

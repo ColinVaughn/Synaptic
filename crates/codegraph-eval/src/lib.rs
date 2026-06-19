@@ -31,7 +31,7 @@ pub use cross_language::{calibrate_cross_language, CrossLanguageReport};
 pub use groundtruth::{GroundTruth, Manifest};
 pub use ledger::{Ledger, PredictionRecord};
 pub use replay::{replay, score_commit, CommitEval, ReplayOptions, ReplayReport};
-pub use scale::{run_scale, ScaleEnv, ScaleManifest, ScaleReport, ScaleRepo, ScaleResult, Skip};
+pub use scale::{run_scale, ScaleEnv, ScaleManifest, ScaleRepo, ScaleReport, ScaleResult, Skip};
 pub use scoring::{aggregate, score_sets, Scores};
 
 /// Errors the evaluation pipeline can surface.

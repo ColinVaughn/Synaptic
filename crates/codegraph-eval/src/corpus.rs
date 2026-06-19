@@ -105,7 +105,9 @@ pub fn resolution_coverage(gd: &GraphData, gt: &GroundTruth) -> ResolutionReport
 pub fn score_call_edges(gd: &GraphData, gt: &GroundTruth) -> PrF1 {
     let expected = resolved_pairs(
         gd,
-        gt.call_edges.iter().map(|c| (c.from.as_str(), c.to.as_str())),
+        gt.call_edges
+            .iter()
+            .map(|c| (c.from.as_str(), c.to.as_str())),
     );
     let extracted: HashSet<(String, String)> = gd
         .links
@@ -246,7 +248,9 @@ impl BlastScore {
     /// radius; vacuously 100 when no distractors were labeled.
     pub fn distractor_exclusion_pct(&self) -> u8 {
         let kept_out = self.distractors_total - self.distractors_hit;
-        (kept_out * 100).checked_div(self.distractors_total).unwrap_or(100) as u8
+        (kept_out * 100)
+            .checked_div(self.distractors_total)
+            .unwrap_or(100) as u8
     }
 
     /// Average reported impact-set size per seed (the noise dimension; compare to
@@ -467,7 +471,11 @@ mod tests {
         // is full (no spurious calls). Update intentionally if extraction
         // improves cross-file call resolution.
         assert_eq!(pr.true_positive, 1, "intra-file call must be found: {pr:?}");
-        assert_eq!(pr.recall_pct(), 50, "cross-file call is a known miss: {pr:?}");
+        assert_eq!(
+            pr.recall_pct(),
+            50,
+            "cross-file call is a known miss: {pr:?}"
+        );
         assert_eq!(pr.precision_pct(), 100, "no spurious call edges: {pr:?}");
     }
 
@@ -514,7 +522,10 @@ mod tests {
         // And the coverage count is non-trivial, so the preflight is actually
         // exercising labels rather than passing vacuously.
         let total: usize = report.fixtures.iter().map(|f| f.resolution.total).sum();
-        assert!(total >= 12, "expected a meaningful label count, got {total}");
+        assert!(
+            total >= 12,
+            "expected a meaningful label count, got {total}"
+        );
     }
 
     /// Per-fixture baselines measured 2026-06-19. These lock in current
@@ -568,8 +579,15 @@ mod tests {
         }
         // Pooled precision stays perfect; pooled recall stays at/above today's value.
         let pooled = report.pooled_call_edges();
-        assert_eq!(pooled.precision_pct(), 100, "pooled call precision regressed");
-        assert!(pooled.recall_pct() >= 88, "pooled call recall regressed: {pooled:?}");
+        assert_eq!(
+            pooled.precision_pct(),
+            100,
+            "pooled call precision regressed"
+        );
+        assert!(
+            pooled.recall_pct() >= 88,
+            "pooled call recall regressed: {pooled:?}"
+        );
 
         // The TS->Rust HTTP coupling is connected end to end, and the labeled
         // distractors (look-alike path, wrong handler) are NOT coupled -- so the
