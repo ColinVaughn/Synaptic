@@ -131,6 +131,37 @@ near-instant, and the cost is building each revision in a throwaway git worktree
 graphs are cached per commit SHA under `codegraph-out/history/`, so a repeat diff of the same
 commits returns immediately and only the working-tree side is rebuilt.
 
+## Accuracy
+
+The token study above is a smoke test on one repo. The relationships CodeGraph extracts are
+validated separately, against a small **hand-labeled corpus** of mini-repos (one per language
+family) whose true call edges, test linkages, blast radii, and cross-language couplings are
+written out by hand in a `ground_truth.toml`. Every number below is exact set-comparison
+against those labels, reproducible with `codegraph eval corpus`:
+
+| Fixture | Family | Call P/R/F1 | Aff-test recall | Blast FN | Cross P/R/F1 |
+|---|---|---|---|---|---|
+| systems-rust | systems-rust | 100/50/66 | — | 0% | — |
+| scripting-python | scripting-python | 100/100/100 | 100% | 0% | — |
+| web-ts | web-ts | 100/100/100 | — | 0% | — |
+| oo-java | oo-java | 100/100/100 | — | 0% | — |
+| cross-lang-ts-rust | cross-lang | — | — | — | 100/100/100 |
+
+Pooled call edges: **precision 100% / recall 88% / F1 93%** over 9 labeled edges; blast-radius
+false-negative rate **0%** across the corpus. Reading the numbers honestly:
+
+- **Precision is 100%** everywhere: CodeGraph does not invent call edges.
+- **Recall is 100%** for Python/TypeScript/Java, which resolve cross-file calls through
+  imports. The **50%** on Rust is real and expected: Rust call resolution is intra-file, so a
+  module-qualified cross-file call is a true miss. (Cross-file *reachability* is still
+  preserved through `imports` edges, which is why the blast-radius false-negative rate is 0%.)
+- **Cross-language** accuracy is measured by whether a TypeScript `fetch("/session")` connects
+  to the Rust axum handler that serves it — through the path-keyed route node — and it does.
+
+The corpus is intentionally small and hand-verified (5 fixtures, 5 language families); it
+validates extraction *correctness*, not internet-scale coverage. See
+[BENCHMARKS.md](BENCHMARKS.md) for methodology and the ground-truth format.
+
 ## Install
 
 CodeGraph builds with a stable Rust toolchain (pinned to 1.95 via

@@ -17,3 +17,7 @@ family = "web-ts"
 [[fixture]]
 dir = "oo-java"
 family = "oo-java"
+
+[[fixture]]
+dir = "cross-lang-ts-rust"
+family = "cross-lang"

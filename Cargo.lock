@@ -578,12 +578,15 @@ dependencies = [
  "codegraph-core",
  "codegraph-graph",
  "codegraph-history",
+ "codegraph-incremental",
  "codegraph-predict",
+ "codegraph-query",
  "criterion",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
+ "toml",
 ]
 
 [[package]]

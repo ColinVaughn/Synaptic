@@ -100,9 +100,54 @@ pub fn score_call_edges(gd: &GraphData, gt: &GroundTruth) -> PrF1 {
     score_sets(&expected, &extracted)
 }
 
-/// Score extracted cross-language edges against the labeled cross-edge set.
-/// Cross-language edges use several relation names, so a labeled (from,to) pair
-/// counts as found regardless of the relation string.
+/// The relations that carry a cross-language coupling. A client call connects to
+/// a server handler through a path-keyed route node (`calls_service` then
+/// `handled_by`); FFI/subprocess couplings use the others. Reachability over
+/// this set, not a single direct edge, is what links the two language sides.
+const CROSS_LANGUAGE_RELATIONS: &[&str] = &[
+    "calls_service",
+    "handled_by",
+    "invokes",
+    "binds_native",
+    "calls_native",
+];
+
+/// Can `to` be reached from `from` by following cross-language relations forward
+/// (bounded depth)? This is the question a cross-language coupling answers: does
+/// the client side connect to the server/native side.
+fn cross_reachable(
+    fwd: &std::collections::HashMap<&str, Vec<&str>>,
+    from: &str,
+    to: &str,
+    depth: usize,
+) -> bool {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut frontier = vec![from];
+    seen.insert(from);
+    for _ in 0..depth {
+        let mut next = Vec::new();
+        for node in frontier.drain(..) {
+            for &t in fwd.get(node).into_iter().flatten() {
+                if t == to {
+                    return true;
+                }
+                if seen.insert(t) {
+                    next.push(t);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    false
+}
+
+/// Score labeled cross-language couplings by forward reachability over the
+/// cross-language relations. Recall = labeled couplings the graph connects;
+/// there is no false-positive notion here (we ask only whether each labeled
+/// coupling is realized).
 pub fn score_cross_edges(gd: &GraphData, gt: &GroundTruth) -> PrF1 {
     let expected = resolved_pairs(
         gd,
@@ -111,22 +156,24 @@ pub fn score_cross_edges(gd: &GraphData, gt: &GroundTruth) -> PrF1 {
     if expected.is_empty() {
         return PrF1::default();
     }
-    // Restrict the extracted set to edges between the labeled endpoints so an
-    // unrelated `contains` edge is never counted as a cross-language hit; the
-    // metric here is recall of the labeled cross-language couplings.
-    let endpoints: HashSet<&String> = expected.iter().flat_map(|(a, b)| [a, b]).collect();
-    let extracted: HashSet<(String, String)> = gd
-        .links
-        .iter()
-        .filter(|e| endpoints.contains(&e.source.0) && endpoints.contains(&e.target.0))
-        .map(|e| (e.source.0.clone(), e.target.0.clone()))
-        .collect();
-    let found = expected.intersection(&extracted).count();
-    PrF1 {
-        true_positive: found,
-        false_positive: 0,
-        false_negative: expected.len() - found,
+    let allow: HashSet<&str> = CROSS_LANGUAGE_RELATIONS.iter().copied().collect();
+    let mut fwd: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
+    for e in &gd.links {
+        if allow.contains(e.relation.as_str()) {
+            fwd.entry(e.source.0.as_str())
+                .or_default()
+                .push(e.target.0.as_str());
+        }
     }
+    let mut pr = PrF1::default();
+    for (from, to) in &expected {
+        if cross_reachable(&fwd, from, to, 6) {
+            pr.true_positive += 1;
+        } else {
+            pr.false_negative += 1;
+        }
+    }
+    pr
 }
 
 /// Result of the blast-radius checks across a fixture: how many labeled
@@ -347,6 +394,10 @@ mod tests {
                 "scripting-python" => (100, 100),
                 "web-ts" => (100, 100),
                 "oo-java" => (100, 100),
+                // The cross-lang fixture labels only cross-language couplings, so
+                // it has no call edges (vacuous 100/100); its real assertion is
+                // the cross-edge recall check below.
+                "cross-lang-ts-rust" => (100, 100),
                 other => panic!("no baseline recorded for fixture {other}"),
             }
         };
@@ -372,5 +423,18 @@ mod tests {
         let pooled = report.pooled_call_edges();
         assert_eq!(pooled.precision_pct(), 100, "pooled call precision regressed");
         assert!(pooled.recall_pct() >= 88, "pooled call recall regressed: {pooled:?}");
+
+        // The TS->Rust HTTP coupling is connected end to end.
+        let xlang = report
+            .fixtures
+            .iter()
+            .find(|f| f.dir == "cross-lang-ts-rust")
+            .expect("cross-lang fixture scored");
+        assert_eq!(
+            xlang.cross_edges.recall_pct(),
+            100,
+            "cross-language coupling not connected: {:?}",
+            xlang.cross_edges
+        );
     }
 }

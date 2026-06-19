@@ -1,0 +1,7 @@
+# Hand-verified ground truth for the cross-language fixture. The TS client calls
+# POST /session; the Rust axum backend serves it with create_session. CodeGraph
+# connects them through a path-keyed route node (calls_service -> handled_by).
+
+[[cross_edge]]
+from = "web/src/api.ts::createSession"
+to = "src/routes.rs::create_session"
