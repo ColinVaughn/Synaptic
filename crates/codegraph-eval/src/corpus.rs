@@ -8,8 +8,10 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use codegraph_core::GraphData;
+use codegraph_core::{GraphData, NodeId};
+use codegraph_graph::KnowledgeGraph;
 use codegraph_incremental::{rebuild, ChangeSet, RebuildOptions};
+use codegraph_query::{affected_nodes, DEFAULT_AFFECTED_RELATIONS};
 
 use crate::groundtruth::{resolve_label, GroundTruth};
 
@@ -127,6 +129,82 @@ pub fn score_cross_edges(gd: &GraphData, gt: &GroundTruth) -> PrF1 {
     }
 }
 
+/// Result of the blast-radius checks across a fixture: how many labeled
+/// affected nodes the reverse-impact analysis missed (the false-negative rate).
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct BlastScore {
+    pub expected: usize,
+    pub found: usize,
+    pub missed: usize,
+}
+
+impl BlastScore {
+    /// Percent of truly-affected nodes the analysis MISSED. Lower is better;
+    /// vacuously 0 when nothing was expected.
+    pub fn false_negative_pct(&self) -> u8 {
+        if self.expected == 0 {
+            0
+        } else {
+            ((self.missed * 100) / self.expected) as u8
+        }
+    }
+}
+
+/// For each labeled blast seed, run reverse-impact and measure how many labeled
+/// affected nodes were missed. Depth is generous so reachability, not hop count,
+/// is what is tested.
+pub fn score_blast_radius(gd: &GraphData, gt: &GroundTruth) -> BlastScore {
+    let kg = KnowledgeGraph::from_graph_data(gd.clone());
+    let mut score = BlastScore::default();
+    for b in &gt.blasts {
+        let Some(seed) = resolve_label(gd, &b.seed) else {
+            continue;
+        };
+        let reached: HashSet<String> = affected_nodes(&kg, &seed, DEFAULT_AFFECTED_RELATIONS, 64)
+            .into_iter()
+            .map(|h| h.node_id.0)
+            .collect();
+        for label in &b.affects {
+            score.expected += 1;
+            match resolve_label(gd, label) {
+                Some(NodeId(id)) if reached.contains(&id) => score.found += 1,
+                _ => score.missed += 1,
+            }
+        }
+    }
+    score
+}
+
+/// Recall of test->code linkage: of the tests labeled as covering a changed
+/// symbol, how many does CodeGraph's reverse-impact surface from that symbol.
+/// Reported as a PrF1 (true_positive = surfaced, false_negative = missed); there
+/// is no false-positive notion here since we only ask whether each labeled test
+/// is reachable from the code it covers.
+pub fn score_affected_tests(gd: &GraphData, gt: &GroundTruth) -> PrF1 {
+    let kg = KnowledgeGraph::from_graph_data(gd.clone());
+    let mut pr = PrF1::default();
+    for tl in &gt.test_links {
+        let Some(test_id) = resolve_label(gd, &tl.test) else {
+            continue;
+        };
+        for covered in &tl.covers {
+            let Some(seed) = resolve_label(gd, covered) else {
+                continue;
+            };
+            let reached: HashSet<String> = affected_nodes(&kg, &seed, DEFAULT_AFFECTED_RELATIONS, 64)
+                .into_iter()
+                .map(|h| h.node_id.0)
+                .collect();
+            if reached.contains(&test_id.0) {
+                pr.true_positive += 1;
+            } else {
+                pr.false_negative += 1;
+            }
+        }
+    }
+    pr
+}
+
 /// Generic precision/recall over an expected and an extracted set.
 fn score_sets(expected: &HashSet<(String, String)>, extracted: &HashSet<(String, String)>) -> PrF1 {
     let tp = expected.intersection(extracted).count();
@@ -165,5 +243,19 @@ mod tests {
         assert_eq!(pr.true_positive, 1, "intra-file call must be found: {pr:?}");
         assert_eq!(pr.recall_pct(), 50, "cross-file call is a known miss: {pr:?}");
         assert_eq!(pr.precision_pct(), 100, "no spurious call edges: {pr:?}");
+    }
+
+    #[test]
+    fn systems_rust_blast_radius_no_false_negatives() {
+        let (gd, gt) = fixture("systems-rust");
+        let score = score_blast_radius(&gd, &gt);
+        // The labeled caller is reachable from the seed via the intra-file call
+        // edge, so reverse-impact misses nothing here.
+        assert!(score.expected > 0, "blast labels must resolve: {score:?}");
+        assert_eq!(
+            score.false_negative_pct(),
+            0,
+            "labeled caller must be in the blast radius: {score:?}"
+        );
     }
 }
