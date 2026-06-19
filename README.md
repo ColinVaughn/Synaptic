@@ -176,6 +176,24 @@ commit habits, so run it on yours. (Run against this repo's own squash-heavy syn
 it scores ~0.35, with high-confidence bins over-confident — exactly the kind of signal the
 reliability table is meant to expose.) Methodology in [BENCHMARKS.md](BENCHMARKS.md).
 
+## Scale
+
+Extraction throughput across real OSS repositories spanning size tiers and language families,
+each cloned at a pinned SHA (`codegraph eval scale`; network + git, opt-in). Cold is the first
+build; warm is a rebuild with the AST cache hot:
+
+| Repo | Family | Tier | Files | Nodes | Edges | Cold (s) | Warm (s) | Files/s |
+|---|---|---|--:|--:|--:|--:|--:|--:|
+| memchr | systems-rust | small | 75 | 3,849 | 13,592 | 14.3 | 7.0 | 11 |
+| click | scripting-python | medium | 112 | 2,189 | 3,475 | 11.1 | 4.2 | 27 |
+| p-map | web-ts | small | 10 | 85 | 83 | 0.8 | 0.1 | 103 |
+| cobra | go | medium | 55 | 846 | 2,362 | 2.8 | 0.6 | 86 |
+
+The numbers are machine-dependent (measured on a dev laptop) — what matters is the shape: the
+warm build is **~2-8x faster** than cold because the Rust AST cache eliminates re-parsing, so
+re-running on a working repo is cheap. The pinned SHAs make a run reproducible; refresh them
+deliberately. Full method and the manifest are in [BENCHMARKS.md](BENCHMARKS.md).
+
 ## Install
 
 CodeGraph builds with a stable Rust toolchain (pinned to 1.95 via

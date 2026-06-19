@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 
 use codegraph_eval::{
-    calibrate_cross_language, calibrate_history, replay, run_corpus, CalibrationReport,
-    CorpusReport, ReplayOptions, ReplayReport,
+    calibrate_cross_language, calibrate_history, replay, run_corpus, run_scale, CalibrationReport,
+    CorpusReport, ReplayOptions, ReplayReport, ScaleResult,
 };
 
 use crate::cli::EvalAction;
@@ -44,7 +44,76 @@ pub(crate) fn run_eval(action: EvalAction) -> Result<()> {
             out,
             json,
         } => run_calibrate_cmd(root, max_commits, bins, out, json),
+        EvalAction::Scale {
+            manifest,
+            tier,
+            cache,
+            out,
+            json,
+        } => run_scale_cmd(manifest, tier, cache, out, json),
     }
+}
+
+fn default_scale_manifest() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/codegraph-eval/scale-corpus.toml")
+}
+
+fn run_scale_cmd(
+    manifest: Option<PathBuf>,
+    tier: Option<String>,
+    cache: Option<PathBuf>,
+    out: Option<PathBuf>,
+    json: bool,
+) -> Result<()> {
+    let manifest = manifest.unwrap_or_else(default_scale_manifest);
+    if !manifest.exists() {
+        bail!(
+            "no scale manifest at {} (pass --manifest)",
+            manifest.display()
+        );
+    }
+    let cache = cache.unwrap_or_else(|| PathBuf::from("codegraph-out/bench"));
+    let results =
+        run_scale(&manifest, &cache, tier.as_deref()).map_err(|e| anyhow!("scale run: {e}"))?;
+    let md = scale_markdown(&results);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&results)?);
+    } else {
+        let out_dir = out.unwrap_or_else(|| PathBuf::from("codegraph-out/eval/scale"));
+        std::fs::create_dir_all(&out_dir)
+            .with_context(|| format!("creating {}", out_dir.display()))?;
+        std::fs::write(out_dir.join("report.json"), serde_json::to_string_pretty(&results)?)?;
+        std::fs::write(out_dir.join("report.md"), &md)?;
+        print!("{md}");
+        println!("  report: {}", out_dir.join("report.json").display());
+    }
+    Ok(())
+}
+
+fn scale_markdown(results: &[ScaleResult]) -> String {
+    let mut s = String::from("# Extraction scale\n\n");
+    if results.is_empty() {
+        s.push_str("No repositories measured (all skipped or filtered).\n");
+        return s;
+    }
+    s.push_str("Cold = first build; warm = AST cache hot. Throughput is warm files/sec.\n\n");
+    s.push_str("| Repo | Family | Tier | Files | Nodes | Edges | Cold (s) | Warm (s) | Files/s |\n");
+    s.push_str("|---|---|---|--:|--:|--:|--:|--:|--:|\n");
+    for r in results {
+        s.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {:.2} | {:.2} | {:.0} |\n",
+            r.name,
+            r.family,
+            r.tier,
+            r.files,
+            r.nodes,
+            r.edges,
+            r.cold_secs,
+            r.warm_secs,
+            r.warm_files_per_sec(),
+        ));
+    }
+    s
 }
 
 fn run_calibrate_cmd(

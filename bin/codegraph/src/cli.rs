@@ -588,6 +588,26 @@ pub(crate) enum EvalAction {
         #[arg(long)]
         json: bool,
     },
+    /// Measure extraction throughput across pinned external repositories spanning
+    /// size tiers and language families. Clones each repo at its pinned SHA and
+    /// times a cold and a warm (AST-cache-hot) build. Network + git required.
+    Scale {
+        /// Manifest of pinned repos (default: the in-tree scale-corpus.toml).
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// Restrict to one tier (small|medium|large).
+        #[arg(long)]
+        tier: Option<String>,
+        /// Clone cache directory (default: codegraph-out/bench).
+        #[arg(long)]
+        cache: Option<PathBuf>,
+        /// Output directory for report.json + report.md (default: codegraph-out/eval/scale).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Emit the report as JSON to stdout.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]

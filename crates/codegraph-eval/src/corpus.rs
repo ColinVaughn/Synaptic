@@ -28,30 +28,18 @@ impl PrF1 {
     /// was extracted and nothing was expected.
     pub fn precision_pct(&self) -> u8 {
         let denom = self.true_positive + self.false_positive;
-        if denom == 0 {
-            100
-        } else {
-            ((self.true_positive * 100) / denom) as u8
-        }
+        (self.true_positive * 100).checked_div(denom).unwrap_or(100) as u8
     }
 
     /// Percent of expected items that were found.
     pub fn recall_pct(&self) -> u8 {
         let denom = self.true_positive + self.false_negative;
-        if denom == 0 {
-            100
-        } else {
-            ((self.true_positive * 100) / denom) as u8
-        }
+        (self.true_positive * 100).checked_div(denom).unwrap_or(100) as u8
     }
 
     pub fn f1_pct(&self) -> u8 {
         let (p, r) = (self.precision_pct() as u32, self.recall_pct() as u32);
-        if p + r == 0 {
-            0
-        } else {
-            ((2 * p * r) / (p + r)) as u8
-        }
+        (2 * p * r).checked_div(p + r).unwrap_or(0) as u8
     }
 }
 
@@ -189,11 +177,7 @@ impl BlastScore {
     /// Percent of truly-affected nodes the analysis MISSED. Lower is better;
     /// vacuously 0 when nothing was expected.
     pub fn false_negative_pct(&self) -> u8 {
-        if self.expected == 0 {
-            0
-        } else {
-            ((self.missed * 100) / self.expected) as u8
-        }
+        (self.missed * 100).checked_div(self.expected).unwrap_or(0) as u8
     }
 }
 
