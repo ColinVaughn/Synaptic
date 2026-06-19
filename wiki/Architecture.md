@@ -1,6 +1,6 @@
 # Architecture
 
-CodeGraph is a Rust workspace: **21 library crates** under `crates/*` plus the `codegraph`
+CodeGraph is a Rust workspace: **22 library crates** under `crates/*` plus the `codegraph`
 CLI under `bin/`. The workspace uses edition 2021 and a pinned Rust 1.95 toolchain, with
 dependencies centralized in the root `Cargo.toml`.
 
@@ -55,6 +55,7 @@ and [MCP Server](MCP-Server).
 | `codegraph-predict` | Change forecasting: blast radius, at-risk tests, public-API risk, change-risk score, co-change, and the analytic edit forecast (`codegraph predict`) |
 | `codegraph-sandbox` | Speculative execution: apply a change in a throwaway worktree and run the at-risk tests + a build/type-check (`codegraph speculate`) |
 | `codegraph-eval` | Forecast evaluation: the prediction ledger and the replay calibration harness (`codegraph eval replay`) |
+| `codegraph-sqlaudit` | SQL performance & security auditor: a rule engine over a SQL-aware graph (columns, indexes, RLS policies, grants, code-to-SQL edges) powering `codegraph sql audit`/`advise` and the `audit_sql` / `advise_sql` MCP tools |
 | `bin/codegraph` | The CLI that wires the crates into commands |
 
 ## Data model
