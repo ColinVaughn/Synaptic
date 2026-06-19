@@ -50,8 +50,8 @@ use codegraph_sandbox::{
 };
 use serde_json::{json, Value};
 
-const SUPPORTED_PROTOCOLS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
-const LATEST_PROTOCOL: &str = "2025-06-18";
+const SUPPORTED_PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+const LATEST_PROTOCOL: &str = "2025-11-25";
 
 /// Echo the client's requested protocol when we support it, else our latest.
 fn negotiate_protocol(requested: Option<&str>) -> &'static str {
@@ -2649,7 +2649,7 @@ mod tests {
             .handle_request(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
             .unwrap();
         assert_eq!(init["result"]["serverInfo"]["name"], "codegraph");
-        assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+        assert_eq!(init["result"]["protocolVersion"], "2025-11-25");
 
         let tl = s
             .handle_request(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}))
@@ -3066,7 +3066,7 @@ mod tests {
     #[test]
     fn initialize_echoes_supported_protocol_else_latest() {
         let mut s = server();
-        // Client asks for a supported version -> echoed back.
+        // Client asks for a still-supported legacy version -> echoed back.
         let r = s
             .handle_request(&json!({
                 "jsonrpc":"2.0","id":1,"method":"initialize",
@@ -3075,14 +3075,23 @@ mod tests {
             .unwrap();
         assert_eq!(r["result"]["protocolVersion"], "2025-06-18");
 
-        // Unknown version -> server returns its latest supported.
+        // Client asks for the new revision -> echoed back.
         let r = s
             .handle_request(&json!({
                 "jsonrpc":"2.0","id":2,"method":"initialize",
+                "params":{"protocolVersion":"2025-11-25"}
+            }))
+            .unwrap();
+        assert_eq!(r["result"]["protocolVersion"], "2025-11-25");
+
+        // Unknown version -> server returns its latest supported.
+        let r = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":3,"method":"initialize",
                 "params":{"protocolVersion":"1999-01-01"}
             }))
             .unwrap();
-        assert_eq!(r["result"]["protocolVersion"], "2025-06-18");
+        assert_eq!(r["result"]["protocolVersion"], "2025-11-25");
     }
 
     #[test]
