@@ -1,0 +1,37 @@
+# Multi-hop fixture: base <- middle <- top <- test_top (a 3-layer call chain),
+# plus an unrelated leaf+test that must stay out of every result. Exercises
+# indirect blast recall, blast distractor exclusion, multi-hop affected-test
+# recall, and affected-test precision (a negative linkage).
+
+[[call_edge]]
+from = "mid.py::middle"
+to = "core.py::base"
+
+[[call_edge]]
+from = "top.py::entry"
+to = "mid.py::middle"
+
+[[call_edge]]
+from = "test_top.py::test_entry"
+to = "top.py::entry"
+
+[[call_edge]]
+from = "test_unrelated.py::test_lonely"
+to = "unrelated.py::lonely"
+
+# Changing the leaf must reach every layer above it AND its top-level test,
+# but never the unrelated leaf or its test.
+[[blast]]
+seed = "core.py::base"
+affects = ["mid.py::middle", "top.py::entry", "test_top.py::test_entry"]
+not_affected = ["unrelated.py::lonely", "test_unrelated.py::test_lonely"]
+
+# Multi-hop test selection: changing base (3 hops down) must select test_entry.
+[[test_link]]
+test = "test_top.py::test_entry"
+covers = ["core.py::base"]
+
+# Precision: changing base must NOT select the unrelated test.
+[[test_nonlink]]
+test = "test_unrelated.py::test_lonely"
+covers = ["core.py::base"]

@@ -52,6 +52,11 @@ pub struct GroundTruth {
     pub call_edges: Vec<CallEdge>,
     #[serde(default, rename = "test_link")]
     pub test_links: Vec<TestLink>,
+    /// Test linkages that must NOT hold: changing `covers` must NOT select
+    /// `test`. A selected non-link is a false positive for affected-test
+    /// precision (selecting every test gives perfect recall but no speed-up).
+    #[serde(default, rename = "test_nonlink")]
+    pub test_nonlinks: Vec<TestLink>,
     #[serde(default, rename = "blast")]
     pub blasts: Vec<Blast>,
     #[serde(default, rename = "cross_edge")]
@@ -79,7 +84,7 @@ impl GroundTruth {
             push(&c.from);
             push(&c.to);
         }
-        for t in &self.test_links {
+        for t in self.test_links.iter().chain(&self.test_nonlinks) {
             push(&t.test);
             for c in &t.covers {
                 push(c);
@@ -157,9 +162,19 @@ pub fn resolve_label(gd: &GraphData, label: &str) -> Option<NodeId> {
         .find(|n| {
             let file = n.source_file.replace('\\', "/");
             let sym = node_symbol(&n.label);
-            file.ends_with(path_part) && (sym == symbol || sym == symbol_last)
+            path_matches(&file, path_part) && (sym == symbol || sym == symbol_last)
         })
         .map(|n| n.id.clone())
+}
+
+/// Does `file` end with `path_part` on a path-segment boundary? A plain
+/// `ends_with` would let `top.py` match `test_top.py`; the path part must be the
+/// whole file or be preceded by a `/`.
+fn path_matches(file: &str, path_part: &str) -> bool {
+    file == path_part
+        || file
+            .strip_suffix(path_part)
+            .is_some_and(|prefix| prefix.ends_with('/'))
 }
 
 #[cfg(test)]

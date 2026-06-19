@@ -11,7 +11,9 @@ to = "src/lib.rs::validate"
 from = "src/lib.rs::handle_request"
 to = "src/router.rs::route"
 
-# Reverse-impact from validate reaches its intra-file caller.
+# Reverse-impact from validate reaches its intra-file caller, but not the
+# unrelated route function.
 [[blast]]
 seed = "src/lib.rs::validate"
 affects = ["src/lib.rs::handle_request"]
+not_affected = ["src/router.rs::route"]

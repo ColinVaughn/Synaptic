@@ -311,22 +311,40 @@ pub fn score_blast_radius(gd: &GraphData, gt: &GroundTruth) -> BlastScore {
 /// is reachable from the code it covers.
 pub fn score_affected_tests(gd: &GraphData, gt: &GroundTruth) -> PrF1 {
     let kg = KnowledgeGraph::from_graph_data(gd.clone());
+    // Cache the reverse-impact set per covered symbol (a label may appear in both
+    // positive and negative linkages).
+    let reached_from = |covered: &str| -> HashSet<String> {
+        match resolve_label(gd, covered) {
+            Some(seed) => affected_nodes(&kg, &seed, DEFAULT_AFFECTED_RELATIONS, 64)
+                .into_iter()
+                .map(|h| h.node_id.0)
+                .collect(),
+            None => HashSet::new(),
+        }
+    };
     let mut pr = PrF1::default();
+    // Positives: each labeled (test, covered) MUST be selected; unresolved or
+    // unreached counts as a miss (false negative) -> recall.
     for tl in &gt.test_links {
         let test_id = resolve_label(gd, &tl.test);
         for covered in &tl.covers {
-            // Every labeled (test, covered) pair is an expectation; an unresolved
-            // test or covered symbol counts as a miss, not a skipped sample.
-            let reached: HashSet<String> = match resolve_label(gd, covered) {
-                Some(seed) => affected_nodes(&kg, &seed, DEFAULT_AFFECTED_RELATIONS, 64)
-                    .into_iter()
-                    .map(|h| h.node_id.0)
-                    .collect(),
-                None => HashSet::new(),
-            };
+            let reached = reached_from(covered);
             match &test_id {
                 Some(t) if reached.contains(&t.0) => pr.true_positive += 1,
                 _ => pr.false_negative += 1,
+            }
+        }
+    }
+    // Negatives: each labeled (test, covered) must NOT be selected; a selected
+    // non-link is a false positive -> precision.
+    for tl in &gt.test_nonlinks {
+        let test_id = resolve_label(gd, &tl.test);
+        for covered in &tl.covers {
+            let reached = reached_from(covered);
+            if let Some(t) = &test_id {
+                if reached.contains(&t.0) {
+                    pr.false_positive += 1;
+                }
             }
         }
     }
@@ -513,6 +531,8 @@ mod tests {
                 "scripting-python" => (100, 100),
                 "web-ts" => (100, 100),
                 "oo-java" => (100, 100),
+                "systems-go" => (100, 100),
+                "deep-python" => (100, 100),
                 // The cross-lang fixture labels only cross-language couplings, so
                 // it has no call edges (vacuous 100/100); its real assertion is
                 // the cross-edge recall check below.
@@ -529,11 +549,19 @@ mod tests {
                 f.dir,
                 f.call_edges
             );
-            // No labeled affected node is ever missed across the corpus.
+            // No labeled affected node is ever missed, and no labeled distractor
+            // ever leaks into the blast radius.
             assert_eq!(
                 f.blast.false_negative_pct(),
                 0,
-                "{} blast radius regressed: {:?}",
+                "{} blast radius regressed (a true affected node was missed): {:?}",
+                f.dir,
+                f.blast
+            );
+            assert_eq!(
+                f.blast.distractor_exclusion_pct(),
+                100,
+                "{} blast radius leaked a distractor: {:?}",
                 f.dir,
                 f.blast
             );
@@ -567,6 +595,25 @@ mod tests {
             100,
             "cross-language precision regressed: {:?}",
             xlang.cross_edges
+        );
+
+        // Multi-hop affected-test selection: the 3-layer fixture selects the
+        // related test (recall) and excludes the unrelated one (precision).
+        let deep = report
+            .fixtures
+            .iter()
+            .find(|f| f.dir == "deep-python")
+            .expect("deep-python scored");
+        assert_eq!(
+            deep.affected_tests.recall_pct(),
+            100,
+            "multi-hop test selection missed the related test: {:?}",
+            deep.affected_tests
+        );
+        assert_eq!(
+            deep.affected_tests.false_positive, 0,
+            "multi-hop test selection picked an unrelated test: {:?}",
+            deep.affected_tests
         );
 
         // Whole-corpus preflight: every labeled symbol resolves.

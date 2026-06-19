@@ -19,7 +19,8 @@ to = "router.py::route"
 test = "test_router.py::test_route"
 covers = ["router.py::route"]
 
-# Changing route affects its caller and its test.
+# Changing route affects its caller and its test, but not the unrelated validate.
 [[blast]]
 seed = "router.py::route"
 affects = ["app.py::handle_request", "test_router.py::test_route"]
+not_affected = ["app.py::validate"]

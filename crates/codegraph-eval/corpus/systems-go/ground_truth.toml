@@ -1,0 +1,16 @@
+# Go resolves same-package cross-file calls, so HandleRequest -> Route (different
+# file) is captured alongside the intra-file HandleRequest -> validate.
+
+[[call_edge]]
+from = "server.go::HandleRequest"
+to = "router.go::Route"
+
+[[call_edge]]
+from = "server.go::HandleRequest"
+to = "server.go::validate"
+
+# Changing Route reaches its caller but not the unrelated validate.
+[[blast]]
+seed = "router.go::Route"
+affects = ["server.go::HandleRequest"]
+not_affected = ["server.go::validate"]

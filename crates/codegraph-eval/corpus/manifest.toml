@@ -19,5 +19,13 @@ dir = "oo-java"
 family = "oo-java"
 
 [[fixture]]
+dir = "systems-go"
+family = "systems-go"
+
+[[fixture]]
+dir = "deep-python"
+family = "scripting-python"
+
+[[fixture]]
 dir = "cross-lang-ts-rust"
 family = "cross-lang"

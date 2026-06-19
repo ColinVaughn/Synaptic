@@ -12,3 +12,4 @@ to = "Router.java::route"
 [[blast]]
 seed = "Router.java::route"
 affects = ["Server.java::handleRequest"]
+not_affected = ["Server.java::validate"]

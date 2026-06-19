@@ -13,3 +13,4 @@ to = "router.ts::route"
 [[blast]]
 seed = "router.ts::route"
 affects = ["app.ts::handleRequest"]
+not_affected = ["app.ts::validate"]
