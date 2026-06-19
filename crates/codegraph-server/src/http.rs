@@ -321,7 +321,7 @@ async fn rest_god_nodes(
         .unwrap_or(10usize);
     let server = st.server.clone();
     let Ok(text) =
-        tokio::task::spawn_blocking(move || read_server(&server).tool_god_nodes(top_n)).await
+        tokio::task::spawn_blocking(move || read_server(&server).tool_god_nodes(top_n, 0)).await
     else {
         return internal_error();
     };
