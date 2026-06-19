@@ -598,6 +598,9 @@ pub(crate) enum EvalAction {
         /// Restrict to one tier (small|medium|large).
         #[arg(long)]
         tier: Option<String>,
+        /// Repetitions per repo (median + p95 are reported over these).
+        #[arg(long, default_value_t = 3)]
+        reps: usize,
         /// Clone cache directory (default: codegraph-out/bench).
         #[arg(long)]
         cache: Option<PathBuf>,

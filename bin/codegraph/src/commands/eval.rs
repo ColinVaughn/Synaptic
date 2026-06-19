@@ -9,7 +9,7 @@ use anyhow::{anyhow, bail, Context, Result};
 
 use codegraph_eval::{
     calibrate_cross_language, calibrate_history, replay, run_corpus, run_scale, CalibrationReport,
-    CorpusReport, ReplayOptions, ReplayReport, ScaleResult,
+    CorpusReport, ReplayOptions, ReplayReport, ScaleReport,
 };
 
 use crate::cli::EvalAction;
@@ -47,10 +47,11 @@ pub(crate) fn run_eval(action: EvalAction) -> Result<()> {
         EvalAction::Scale {
             manifest,
             tier,
+            reps,
             cache,
             out,
             json,
-        } => run_scale_cmd(manifest, tier, cache, out, json),
+        } => run_scale_cmd(manifest, tier, reps, cache, out, json),
     }
 }
 
@@ -61,6 +62,7 @@ fn default_scale_manifest() -> PathBuf {
 fn run_scale_cmd(
     manifest: Option<PathBuf>,
     tier: Option<String>,
+    reps: usize,
     cache: Option<PathBuf>,
     out: Option<PathBuf>,
     json: bool,
@@ -73,45 +75,75 @@ fn run_scale_cmd(
         );
     }
     let cache = cache.unwrap_or_else(|| PathBuf::from("codegraph-out/bench"));
-    let results =
-        run_scale(&manifest, &cache, tier.as_deref()).map_err(|e| anyhow!("scale run: {e}"))?;
-    let md = scale_markdown(&results);
+    let report = run_scale(&manifest, &cache, tier.as_deref(), reps)
+        .map_err(|e| anyhow!("scale run: {e}"))?;
+    let md = scale_markdown(&report);
     if json {
-        println!("{}", serde_json::to_string_pretty(&results)?);
+        println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         let out_dir = out.unwrap_or_else(|| PathBuf::from("codegraph-out/eval/scale"));
         std::fs::create_dir_all(&out_dir)
             .with_context(|| format!("creating {}", out_dir.display()))?;
-        std::fs::write(out_dir.join("report.json"), serde_json::to_string_pretty(&results)?)?;
+        std::fs::write(out_dir.join("report.json"), serde_json::to_string_pretty(&report)?)?;
         std::fs::write(out_dir.join("report.md"), &md)?;
         print!("{md}");
         println!("  report: {}", out_dir.join("report.json").display());
     }
+    if !report.skipped.is_empty() {
+        for s in &report.skipped {
+            eprintln!("SKIPPED {}: {}", s.url, s.reason);
+        }
+        eprintln!(
+            "warning: {} repo(s) skipped; scale results are partial",
+            report.skipped.len()
+        );
+    }
     Ok(())
 }
 
-fn scale_markdown(results: &[ScaleResult]) -> String {
+fn scale_markdown(report: &ScaleReport) -> String {
     let mut s = String::from("# Extraction scale\n\n");
-    if results.is_empty() {
+    let e = &report.env;
+    s.push_str(&format!(
+        "Environment: {} / {} / {} logical CPUs / codegraph {}. Median over {} rep(s); cold clears the AST cache first, warm is cache-hot, incremental re-extracts one file.\n\n",
+        e.os,
+        e.arch,
+        e.logical_cpus,
+        e.codegraph_version,
+        report.results.first().map(|r| r.reps).unwrap_or(0),
+    ));
+    if report.results.is_empty() {
         s.push_str("No repositories measured (all skipped or filtered).\n");
-        return s;
+    } else {
+        s.push_str("| Repo | Family | Tier | Files | LOC | Nodes | Edges | Cold med/p95 (s) | Warm med/p95 (s) | Incr (s) | Files/s |\n");
+        s.push_str("|---|---|---|--:|--:|--:|--:|--:|--:|--:|--:|\n");
+        for r in &report.results {
+            s.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {} | {:.2}/{:.2} | {:.2}/{:.2} | {:.3} | {:.0} |\n",
+                r.name,
+                r.family,
+                r.tier,
+                r.files,
+                r.lines,
+                r.nodes,
+                r.edges,
+                r.cold_secs_median,
+                r.cold_secs_p95,
+                r.warm_secs_median,
+                r.warm_secs_p95,
+                r.incremental_secs_median,
+                r.warm_files_per_sec(),
+            ));
+        }
     }
-    s.push_str("Cold = first build; warm = AST cache hot. Throughput is warm files/sec.\n\n");
-    s.push_str("| Repo | Family | Tier | Files | Nodes | Edges | Cold (s) | Warm (s) | Files/s |\n");
-    s.push_str("|---|---|---|--:|--:|--:|--:|--:|--:|\n");
-    for r in results {
+    if !report.skipped.is_empty() {
         s.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {:.2} | {:.2} | {:.0} |\n",
-            r.name,
-            r.family,
-            r.tier,
-            r.files,
-            r.nodes,
-            r.edges,
-            r.cold_secs,
-            r.warm_secs,
-            r.warm_files_per_sec(),
+            "\n**{} repo(s) skipped** (results partial):\n",
+            report.skipped.len()
         ));
+        for sk in &report.skipped {
+            s.push_str(&format!("- {}: {}\n", sk.url, sk.reason));
+        }
     }
     s
 }
