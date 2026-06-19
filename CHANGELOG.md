@@ -6,6 +6,59 @@ All notable changes to CodeGraph are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-06-19
+
+### Added
+- **SQL performance & security auditor (`codegraph sql audit`):** new `codegraph-sqlaudit` crate
+  that runs a rule engine over a SQL-aware graph and reports findings by severity, each with a
+  location, the offending object/query, a remediation, a confidence score, and the graph evidence
+  that triggered it. 18 static rules across security (row-level-security gaps, RLS not `FORCE`d,
+  `USING`-without-`WITH CHECK`, views without `security_invoker`, SQL Server security-policy
+  coverage, over-broad grants, secret-looking columns, string-concatenation injection),
+  performance (unindexed foreign-key and RLS-filter columns, `SELECT *`, non-sargable predicates,
+  `UPDATE`/`DELETE` with no `WHERE`, `ORDER BY RAND()`, N+1 in a loop, many-join queries), and
+  design (missing primary key, implied-but-missing foreign key, positional `INSERT`).
+- **`codegraph sql advise --query "<sql>"`:** critiques a candidate query before it is written,
+  cross-referenced against the graph's tables, indexes, and RLS.
+- **Live `EXPLAIN` (optional `live-explain` feature):** `sql audit --explain --db-url <url>` runs
+  `EXPLAIN` (never `EXPLAIN ANALYZE`) to confirm real sequential scans, raising `PERF-PLAN-001`.
+- **SQL-aware extraction:** `.sql` now produces `table` / `view` / `column` / `index` / `trigger` /
+  `procedure` / `policy` / `role` nodes and `has_column` / `has_index` / `indexes` / `references` /
+  `protected_by` / `grants` / `reads_from` edges, and a cross-language pass links application code to
+  the tables it touches (`queries` / `writes_to` / `calls_proc`). A dedicated regex path recovers
+  columns, primary/foreign keys (inline and via `ALTER TABLE ADD CONSTRAINT`), and indexes from the
+  bracketed T-SQL / SQL Server DDL that the multi-dialect parser cannot read.
+- **`audit_sql` and `advise_sql` MCP tools** (read-only), bringing the default MCP tool set to 26.
+- **CGQL SQL properties:** tables expose `rls_enabled` and `dialect`, so the SQL layer is queryable
+  with `codegraph search` (e.g. every table with row-level security disabled).
+- **`extract --no-columns`:** skip SQL column and index nodes for a smaller `graph.json` on
+  column-heavy schemas (the table / RLS / policy / grant / view facts are kept).
+- **3D viewer "Spread" slider:** scales the force simulation's repulsion and link distance and
+  reheats the layout live, so a dense central cluster can be expanded outward for a clearer view.
+
+### Changed
+- **The 2D, 3D, and SVG visualizations are now SQL- and cross-language-aware:** nodes are shaped by
+  their real kind (table, column, view, index, procedure, trigger, policy) and edges are colored by
+  relation, so the SQL layer and code-to-SQL bridges stand apart from generic calls. The interactive
+  viewers add color-by-kind, per-kind filters (a schema/layer view), a show-columns toggle, a
+  bridges-only toggle, and SQL facts (dialect, type, PK/FK, RLS) in tooltips and the details panel.
+  On large column-heavy graphs the SVG keeps structural nodes and drops columns first rather than
+  taking an arbitrary cut.
+- **MessagePack AST cache is now the default** (`cache-binary`): the per-file extraction cache is
+  stored as MessagePack instead of JSON — faster to decode and smaller on disk, which helps most on
+  column-heavy SQL schemas. Build with `--no-default-features` to fall back to JSON.
+- Documentation: a new "SQL Auditing" wiki page, updated visualization / output / extraction /
+  commands / MCP / querying / languages pages, and a README that leads with the full capability set.
+
+### Fixed
+- SQL extraction was blind on real T-SQL / SQL Server schemas — bracketed identifiers collapsed a
+  whole schema to a single node and produced zero columns; the dedicated T-SQL path fixes object
+  naming and recovers columns, keys, and indexes from `ALTER TABLE` and `CREATE INDEX`.
+- Auditor false positives found on a real Postgres application: schema-qualified views were wrongly
+  flagged for a missing `security_invoker`, and table-level foreign keys produced spurious
+  implied-foreign-key findings. Both are corrected (the FK rule now keys off a column-level
+  `fk_target` and a key-typed `*_id` column that is not the primary key).
+
 ## [0.2.4] - 2026-06-17
 
 ### Added
@@ -209,7 +262,8 @@ All notable changes to CodeGraph are documented here. The format is based on
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.4...v0.2.5
 [0.2.1]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/ColinVaughn/CodeGraph/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/ColinVaughn/CodeGraph/releases/tag/v0.1.1

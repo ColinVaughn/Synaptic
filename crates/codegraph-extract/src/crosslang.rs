@@ -35,6 +35,7 @@ pub fn augment(path: &str, source: &[u8], result: &mut ExtractionResult) {
     scan_ffi_bindings(ext, path, text, result);
     scan_http(ext, path, text, result);
     scan_grpc(ext, path, text, result);
+    scan_sql(ext, path, text, result);
 }
 
 // --- comment / docstring masking ---
@@ -1524,4 +1525,140 @@ fn enclosing_function(result: &ExtractionResult, line: u32) -> Option<NodeId> {
         }
     }
     best.map(|(id, _)| id.clone())
+}
+
+// --- SQL string-literal detector ---
+
+/// No-op when SQL parsing is unavailable (single-language builds without lang-sql).
+#[cfg(not(feature = "lang-sql"))]
+fn scan_sql(_ext: &str, _path: &str, _text: &str, _result: &mut ExtractionResult) {}
+
+/// Detect SQL string literals in application code, parse/classify them, and link
+/// the enclosing function to the referenced table stubs. INFERRED, best-effort:
+/// only string literals whose first keyword is a SQL verb are considered.
+#[cfg(feature = "lang-sql")]
+fn scan_sql(ext: &str, path: &str, text: &str, result: &mut ExtractionResult) {
+    if !matches!(
+        ext,
+        "py" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "go" | "rs" | "java" | "cs"
+    ) {
+        return;
+    }
+    for (lit, start) in string_literals(text) {
+        let trimmed = lit.trim_start();
+        let verb = trimmed
+            .split(|c: char| c.is_whitespace() || c == '(')
+            .next()
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        let relation = match verb.as_str() {
+            "SELECT" => "queries",
+            // A CTE (`WITH ...`) can wrap a read or a write; classify by whether a
+            // write keyword follows the CTE definitions.
+            "WITH" => {
+                let up = lit.to_ascii_uppercase();
+                if up.contains(" INSERT ")
+                    || up.contains(" UPDATE ")
+                    || up.contains(" DELETE ")
+                    || up.contains(" MERGE ")
+                {
+                    "writes_to"
+                } else {
+                    "queries"
+                }
+            }
+            "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "UPSERT" => "writes_to",
+            "CALL" | "EXEC" | "EXECUTE" => "calls_proc",
+            _ => continue,
+        };
+        let line = line_of(text, start);
+        for table in referenced_tables(&lit) {
+            let table_lower = table.to_lowercase();
+            let id = NodeId(make_id(&["sql", &table_lower]));
+            ensure_target(result, &id, &table, "table");
+            link(result, path, line, id, relation, "sql_query");
+            // Attach the normalized, truncated query text to the edge link() just
+            // pushed, so the auditor can inspect the SQL without re-reading source.
+            if let Some(edge) = result.edges.last_mut() {
+                let snippet: String = lit.split_whitespace().collect::<Vec<_>>().join(" ");
+                edge.extra.insert(
+                    "sql".to_string(),
+                    json!(snippet.chars().take(400).collect::<String>()),
+                );
+            }
+        }
+    }
+}
+
+/// Table names referenced by a single SQL string. SELECT statements are walked
+/// via the sqlparser AST (handles FROM + JOIN); for INSERT/UPDATE/DELETE/CALL and
+/// any parse failure, fall back to a regex over FROM/JOIN/INTO/UPDATE/TABLE so
+/// write-statement table names are captured without dialect-specific AST shapes.
+#[cfg(feature = "lang-sql")]
+fn referenced_tables(sql: &str) -> Vec<String> {
+    use sqlparser::ast::{SetExpr, Statement, TableFactor};
+    use sqlparser::dialect::GenericDialect;
+    use sqlparser::parser::Parser;
+
+    let mut out: Vec<String> = Vec::new();
+    let clean = |raw: &str| {
+        raw.trim_matches(|c| c == '"' || c == '`' || c == '[' || c == ']')
+            .to_string()
+    };
+    let last_ident = |qualified: &str| clean(qualified.rsplit('.').next().unwrap_or(qualified));
+
+    if let Ok(stmts) = Parser::parse_sql(&GenericDialect {}, sql) {
+        for stmt in stmts {
+            if let Statement::Query(q) = stmt {
+                if let SetExpr::Select(select) = *q.body {
+                    for twj in select.from {
+                        if let TableFactor::Table { name, .. } = twj.relation {
+                            if let Some(p) = name.0.last() {
+                                out.push(last_ident(&p.to_string()));
+                            }
+                        }
+                        for j in twj.joins {
+                            if let TableFactor::Table { name, .. } = j.relation {
+                                if let Some(p) = name.0.last() {
+                                    out.push(last_ident(&p.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Regex fallback / write-statement coverage: any FROM/JOIN/INTO/UPDATE/TABLE
+    // target name. Deduped against what the AST already found.
+    static TBL_RE: OnceLock<Regex> = OnceLock::new();
+    let re = TBL_RE.get_or_init(|| {
+        Regex::new(r#"(?is)\b(?:from|join|into|update|table)\s+[`"\[]?([\w.]+)"#)
+            .expect("table regex")
+    });
+    for caps in re.captures_iter(sql) {
+        let name = last_ident(&caps[1]);
+        if !name.is_empty() && !out.iter().any(|t| t.eq_ignore_ascii_case(&name)) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// Yield (contents, byte_offset) for each quoted string literal in `text`
+/// (single, double, backtick). Comments are already masked by `augment`.
+#[cfg_attr(not(feature = "lang-sql"), allow(dead_code))]
+fn string_literals(text: &str) -> Vec<(String, usize)> {
+    static LITS: OnceLock<Regex> = OnceLock::new();
+    let re = LITS.get_or_init(|| {
+        Regex::new(r#"(?s)"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|`([^`]*)`"#)
+            .expect("string literal regex")
+    });
+    re.captures_iter(text)
+        .filter_map(|c| {
+            let m = c.get(1).or_else(|| c.get(2)).or_else(|| c.get(3))?;
+            Some((m.as_str().to_string(), m.start()))
+        })
+        .collect()
 }

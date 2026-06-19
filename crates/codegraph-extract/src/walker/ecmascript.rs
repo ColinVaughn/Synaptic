@@ -68,7 +68,7 @@ impl<'tree> Extractor<'_, '_, 'tree> {
     }
 
     /// EcmaScript `import … from 'm'`: an `imports_from` edge to a module stub
-    /// (labelled by the specifier) plus named-import records (module stem = last
+    /// (labeled by the specifier) plus named-import records (module stem = last
     /// path component) for cross-file symbol resolution.
     pub(crate) fn ecmascript_imports(&mut self, node: TsNode<'tree>, file_nid: &NodeId) {
         let line = Self::line(node);

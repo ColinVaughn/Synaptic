@@ -134,7 +134,7 @@ fn neutralise_sentinels(text: &str) -> String {
         .into_owned()
 }
 
-/// Wrap one file's content in a labelled, hash-stamped untrusted block. The
+/// Wrap one file's content in a labeled, hash-stamped untrusted block. The
 /// system prompt instructs the model to treat everything inside as inert data.
 pub fn wrap_untrusted(rel: &str, content: &str) -> String {
     // Truncate to FILE_CHAR_CAP chars before hashing and sending, so the bytes
@@ -149,7 +149,7 @@ pub fn wrap_untrusted(rel: &str, content: &str) -> String {
 /// The cl100k_base BPE tokenizer (GPT-4 family), built once. `None` only if the
 /// embedded tables fail to load (should not happen — they ship in the crate).
 /// cl100k_base serves as a cross-model proxy: Kimi's tokenizer is tiktoken-based
-/// with near-identical BPE behaviour and Claude/Gemini have a comparable
+/// with near-identical BPE behavior and Claude/Gemini have a comparable
 /// token-to-char ratio for prose/code; estimates need only be within a few
 /// percent, not exact.
 static CL100K: LazyLock<Option<tiktoken_rs::CoreBPE>> =

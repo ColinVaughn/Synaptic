@@ -34,7 +34,8 @@ use codegraph_graph::{
     apply_communities, build_from_parts, cluster, deduplicate_entities, guard_shrink,
     norm_source_file, remap_communities_to_previous, resolve_command_invocations,
     resolve_parameterized_routes, resolve_pyo3_imports, resolve_pyo3_modules,
-    resolve_route_handlers, resolve_symbols, BuildOptions, ClusterOptions, KnowledgeGraph,
+    resolve_route_handlers, resolve_sql_queries, resolve_symbols, BuildOptions, ClusterOptions,
+    KnowledgeGraph,
 };
 use rayon::prelude::*;
 
@@ -344,6 +345,16 @@ pub fn rebuild(
         resolve_route_handlers(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
     if he.len() > before_edges {
         kg = build_from_parts(hn, he, hyper, &build_opts);
+    }
+
+    // Cross-language: collapse SQL table stubs into real table nodes, matching the
+    // one-shot `extract` path.
+    let before_sql = kg.node_count();
+    let hyper = kg.hyperedges.clone();
+    let (sn, se) =
+        resolve_sql_queries(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
+    if sn.len() < before_sql {
+        kg = build_from_parts(sn, se, hyper, &build_opts);
     }
 
     // Cross-language: merge concrete client route paths into the parameterized

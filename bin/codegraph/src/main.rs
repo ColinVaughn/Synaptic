@@ -34,7 +34,7 @@ fn main() -> Result<()> {
     // graph for a large repo recurses deeper than that (worse in debug, where
     // frames are larger), so the CLI would overflow on Windows while running
     // fine on the 8 MB Linux/macOS default. Run the work on a worker thread with
-    // a generous stack so behaviour is identical across platforms.
+    // a generous stack so behavior is identical across platforms.
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(run)
@@ -52,7 +52,8 @@ fn run() -> Result<()> {
             obsidian,
             wiki,
             semantic,
-        } => run_extract(&path, directed, obsidian, wiki, semantic),
+            no_columns,
+        } => run_extract(&path, directed, obsidian, wiki, semantic, no_columns),
         Cmd::Query {
             text,
             graph,
@@ -241,5 +242,6 @@ fn run() -> Result<()> {
             json,
         }),
         Cmd::Eval { action } => run_eval(action),
+        Cmd::Sql { action } => commands::sql::run_sql(action),
     }
 }

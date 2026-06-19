@@ -114,7 +114,7 @@ pub(crate) fn run_ingest_media(_out_dir: &Path, _file: &Path) -> Result<()> {
 }
 
 /// Introspect a live Postgres database and merge its schema into the graph.
-/// Only compiled with real behaviour under `--features pg`; otherwise it errors
+/// Only compiled with real behavior under `--features pg`; otherwise it errors
 /// with a clear rebuild hint (the subcommand stays visible in `--help`).
 #[cfg(feature = "pg")]
 pub(crate) fn run_ingest_pg(out_dir: &Path, dsn: String) -> Result<()> {

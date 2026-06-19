@@ -16,7 +16,6 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use codegraph_core::Confidence;
 use codegraph_graph::KnowledgeGraph;
 use serde_json::json;
 
@@ -44,20 +43,6 @@ const FORCE_GRAPH_CDN: &str = concat!(
 /// `pkg@version` segment can't be mangled into "[email protected]" by an obfuscator.
 const THREE_ESM: &str = concat!("https://esm.sh/three", "@", "0.179.1");
 
-/// Coarse node kind from its label, for the details panel: `.x()` → method,
-/// `x()` → function, otherwise a type/class/other symbol.
-fn node_kind(label: &str) -> &'static str {
-    if label.ends_with("()") {
-        if label.starts_with('.') {
-            "method"
-        } else {
-            "function"
-        }
-    } else {
-        "type"
-    }
-}
-
 /// Serialize `value` to compact JSON and escape it for embedding inside a
 /// single-quoted JavaScript string literal handed to `JSON.parse`. Escapes the
 /// literal's own delimiters (`\` then `'`) and rewrites `</` to `<\/` so an
@@ -82,21 +67,39 @@ pub fn to_force3d_html(kg: &KnowledgeGraph) -> String {
     let nodes: Vec<_> = kg
         .nodes()
         .map(|n| {
-            // Non-code (asset) nodes carry `asset_kind`; it drives both the
-            // displayed kind and the per-kind 3D shape (`assetKind`).
+            // The real NodeKind (table/column/function/...) drives shape, the
+            // "color by kind" mode, the legend, and the kind filters, so the SQL
+            // and cross-language layers are visible — not just "code".
             let asset_kind = n.extra.get("asset_kind").and_then(|v| v.as_str());
+            let kind = crate::common::visual_kind(n);
             let mut v = json!({
                 "id": n.id.0,
                 "name": n.label,
-                "kind": asset_kind
-                    .map(str::to_string)
-                    .unwrap_or_else(|| node_kind(&n.label).to_string()),
+                "kind": kind,
+                "kindColor": crate::common::kind_color(kind),
                 "assetKind": asset_kind,
                 "val": deg.get(&n.id).copied().unwrap_or(1).max(1),
                 "community": n.community.unwrap_or(0),
                 "color": community_color(n.community.unwrap_or(0) as usize),
                 "file": n.source_file,
             });
+            // SQL facts for the details panel (only the keys that are set).
+            let mut sql = serde_json::Map::new();
+            for k in ["dialect", "data_type", "fk_target"] {
+                if let Some(s) = n.extra.get(k).and_then(|x| x.as_str()) {
+                    sql.insert(k.into(), json!(s));
+                }
+            }
+            for k in ["pk", "rls_enabled", "rls_forced", "security_invoker"] {
+                if n.extra.get(k).and_then(|x| x.as_bool()) == Some(true) {
+                    sql.insert(k.into(), json!(true));
+                }
+            }
+            if !sql.is_empty() {
+                v.as_object_mut()
+                    .expect("json object")
+                    .insert("sql".into(), json!(sql));
+            }
             // Federation fields are added ONLY for federated graphs, so single-repo
             // output (and its generation cost) stays identical to a non-federated
             // build.
@@ -121,12 +124,16 @@ pub fn to_force3d_html(kg: &KnowledgeGraph) -> String {
     let links: Vec<_> = kg
         .edges()
         .map(|e| {
-            let color = match e.confidence {
-                Confidence::Extracted => "#4caf50",
-                Confidence::Inferred => "#ff9800",
-                Confidence::Ambiguous => "#f44336",
-            };
-            let mut v = json!({ "source": e.source.0, "target": e.target.0, "relation": e.relation, "color": color });
+            // Color by relation so SQL structure and code->SQL bridges read at a
+            // glance; `bridge` powers the "bridges only" cross-language filter.
+            let color = crate::common::relation_color(&e.relation);
+            let mut v = json!({
+                "source": e.source.0,
+                "target": e.target.0,
+                "relation": e.relation,
+                "color": color,
+                "bridge": crate::common::is_bridge_relation(&e.relation),
+            });
             if federated && e.cross_repo {
                 v.as_object_mut()
                     .expect("json object")
@@ -155,6 +162,44 @@ pub fn to_force3d_html(kg: &KnowledgeGraph) -> String {
         })
         .collect();
 
+    // Kinds present drive the kind filters (= a schema/layer view) and the legend;
+    // a color swatch in each row doubles as the color-by-kind key.
+    let mut kinds: BTreeSet<&str> = BTreeSet::new();
+    let mut has_columns = false;
+    for n in kg.nodes() {
+        let k = crate::common::visual_kind(n);
+        kinds.insert(k);
+        has_columns |= k == "column";
+    }
+    let kind_checkboxes: String = kinds
+        .iter()
+        .map(|k| {
+            let e = xml_escape(k);
+            format!(
+                "<label><input type=\"checkbox\" data-kind=\"{e}\" checked><span class=\"sw\" style=\"background:{}\"></span>{e}</label>",
+                crate::common::kind_color(k)
+            )
+        })
+        .collect();
+    let has_bridges = kg
+        .edges()
+        .any(|e| crate::common::is_bridge_relation(&e.relation));
+    let colorby_options = if federated {
+        "<option value=\"community\">community</option><option value=\"kind\">kind</option><option value=\"repo\">repo</option>"
+    } else {
+        "<option value=\"community\">community</option><option value=\"kind\">kind</option>"
+    };
+    let column_toggle = if has_columns {
+        "<label class=\"asset-toggle\"><input type=\"checkbox\" id=\"show-columns\" checked> Show SQL columns</label>"
+    } else {
+        ""
+    };
+    let bridge_toggle = if has_bridges {
+        "<label class=\"asset-toggle\"><input type=\"checkbox\" id=\"bridges-only\"> Code\u{2194}SQL bridges only</label>"
+    } else {
+        ""
+    };
+
     // Federation controls (color-by-repo toggle, cross-repo filter, repo legend),
     // only when the graph carries repo tags.
     let repo_controls = if repos.is_empty() {
@@ -172,7 +217,6 @@ pub fn to_force3d_html(kg: &KnowledgeGraph) -> String {
         }
         format!(
             "<div class=\"sec\">Repos</div>\
-             <label class=\"asset-toggle\">Color by <select id=\"colorby\"><option value=\"community\">community</option><option value=\"repo\">repo</option></select></label>\
              <label class=\"asset-toggle\"><input type=\"checkbox\" id=\"cross-only\"> cross-repo edges only</label>\
              <div id=\"repolegend\" class=\"muted\">{sw}</div>"
         )
@@ -185,6 +229,10 @@ pub fn to_force3d_html(kg: &KnowledgeGraph) -> String {
         .replace("__EDGE_COUNT__", &kg.edge_count().to_string())
         .replace("__MAX_DEG__", &max_deg.to_string())
         .replace("__RELATIONS__", &relation_checkboxes)
+        .replace("__KINDS__", &kind_checkboxes)
+        .replace("__COLORBY_OPTIONS__", colorby_options)
+        .replace("__COLUMN_TOGGLE__", column_toggle)
+        .replace("__BRIDGE_TOGGLE__", bridge_toggle)
         .replace("__REPO_CONTROLS__", &repo_controls)
         .replace("__CROSS_COLOR__", crate::common::CROSS_REPO_COLOR)
         .replace("__NODES__", &nodes_json)
@@ -210,9 +258,11 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
   #search { width: 100%; box-sizing: border-box; margin-top: 8px; padding: 5px 8px;
             border-radius: 4px; border: 1px solid #444; background: #222; color: #eee; }
   .sec { margin-top: 12px; font-weight: 600; opacity: 0.9; }
-  #relations { display: flex; flex-direction: column; gap: 2px; max-height: 168px; overflow: auto; margin-top: 4px; }
-  #relations label { display: flex; gap: 6px; align-items: center; font-size: 12px; cursor: pointer; }
-  #degree { width: 100%; margin-top: 6px; }
+  #relations, #kinds { display: flex; flex-direction: column; gap: 2px; max-height: 148px; overflow: auto; margin-top: 4px; }
+  #relations label, #kinds label { display: flex; gap: 6px; align-items: center; font-size: 12px; cursor: pointer; }
+  #kinds .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; flex: 0 0 auto; }
+  #colorby { background: #2a2a44; color: #eee; border: 1px solid #555; border-radius: 4px; }
+  #degree, #spread { width: 100%; margin-top: 6px; }
   .asset-toggle { display: flex; gap: 6px; align-items: center; margin-top: 10px; font-size: 12px; cursor: pointer; }
   #legend { margin-top: 6px; line-height: 1.7; }
   #reset { margin-top: 10px; padding: 4px 10px; border-radius: 4px; border: 1px solid #555; background: #2a2a44; color: #eee; cursor: pointer; }
@@ -234,14 +284,20 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
   <div class="muted">__NODE_COUNT__ nodes &middot; __EDGE_COUNT__ edges</div>
   <input id="search" type="text" placeholder="search label&hellip;" autocomplete="off">
   <div id="results" class="muted"></div>
+  <label class="asset-toggle">Color by <select id="colorby">__COLORBY_OPTIONS__</select></label>
+  __BRIDGE_TOGGLE__
+  <div class="sec">Kinds</div>
+  <div id="kinds">__KINDS__</div>
+  __COLUMN_TOGGLE__
   <div class="sec">Relations</div>
   <div id="relations">__RELATIONS__</div>
   <div class="sec">Min connections: <span id="degval">0</span></div>
   <input id="degree" type="range" min="0" max="__MAX_DEG__" value="0">
+  <div class="sec">Spread: <span id="spreadval">1x</span></div>
+  <input id="spread" type="range" min="1" max="10" value="1" step="0.5">
   <label class="asset-toggle"><input type="checkbox" id="show-assets" checked> Show assets (css/json/img)</label>
   <div id="legend" class="muted">
-    <div>&#9679; code &middot; &#9632; stylesheet &middot; &#9670; data</div>
-    <div>&#9650; image &middot; &#11041; font &middot; &#9899; media</div>
+    &#9670; table &middot; &bull; column &middot; &#9650; view &middot; &#9632; index/class &middot; &#11042; proc &middot; &#9733; trigger &middot; &#9679; code
   </div>
   __REPO_CONTROLS__
   <div><button id="reset">reset view</button></div>
@@ -265,47 +321,61 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
   });
 
   let hlNodes = new Set(), hlLinks = new Set(), selected = null, minDeg = 0, showAssets = true;
-  let colorBy = 'community', crossOnly = false;
-  const relEnabled = {};
+  let colorBy = 'community', crossOnly = false, showColumns = true, bridgesOnly = false;
+  const relEnabled = {}, kindEnabled = {};
   const CROSS = '__CROSS_COLOR__';
-  const baseColor = n => colorBy === 'repo' ? (n.repoColor || '#888888') : n.color;
+  // SQL schema objects get a distinct 3D mesh; columns and code stay spheres (of
+  // which there can be tens of thousands — the structural objects are few).
+  const STRUCT_KINDS = new Set(['table','view','index','procedure','trigger','policy','role']);
+  const meshKind = n => n.assetKind || (STRUCT_KINDS.has(n.kind) ? n.kind : null);
+  const baseColor = n => colorBy === 'kind' ? (n.kindColor || '#b0bec5')
+                       : colorBy === 'repo' ? (n.repoColor || '#888888') : n.color;
   // Shared node-visibility predicate: the degree slider and the show-assets toggle
   // both hide nodes, and search must honour the same rules so it never flies the
   // camera to (and "highlights") a node that's currently filtered out of view.
-  function nodeVisible(n) { return (showAssets || !n.assetKind) && n.val >= minDeg; }
+  function nodeVisible(n) { return (showAssets || !n.assetKind) && (showColumns || n.kind !== 'column') && kindEnabled[n.kind] !== false && n.val >= minDeg; }
 
   // Non-code (asset) nodes render as a distinct shape per kind, taking their
-  // colour from baseColor (community, or repo under the color-by toggle). THREE is
+  // color from baseColor (community, or repo under the color-by toggle). THREE is
   // loaded lazily (see the dynamic import at the end) as a progressive
   // enhancement: until/unless it arrives, assetMesh returns null and the nodes are
   // default spheres, so the graph always renders. Geometries are cached per kind
-  // and materials per colour, so even thousands of asset nodes allocate only a
+  // and materials per color, so even thousands of asset nodes allocate only a
   // handful of GPU objects.
   let THREE = null;
   const _geo = {}, _mat = {};
   function shapeGeo(kind) {
     switch (kind) {
+      // assets
       case 'stylesheet': return new THREE.BoxGeometry(7, 7, 7);
       case 'data':       return new THREE.OctahedronGeometry(5);
       case 'image':      return new THREE.TetrahedronGeometry(6.5);
       case 'font':       return new THREE.CylinderGeometry(4, 4, 8, 12);
       case 'media':      return new THREE.TorusGeometry(4, 1.5, 8, 16);
+      // SQL schema objects
+      case 'table':      return new THREE.OctahedronGeometry(6);
+      case 'view':       return new THREE.ConeGeometry(5, 9, 4);
+      case 'index':      return new THREE.BoxGeometry(6, 6, 6);
+      case 'procedure':  return new THREE.CylinderGeometry(4.5, 4.5, 8, 6);
+      case 'trigger':    return new THREE.TorusKnotGeometry(3, 1, 48, 6);
+      case 'policy':     return new THREE.ConeGeometry(5, 9, 3);
+      case 'role':       return new THREE.DodecahedronGeometry(5);
       default:           return new THREE.DodecahedronGeometry(5);
     }
   }
-  // Colour for an asset/external custom mesh. The library applies its nodeColor
-  // (highlight white / dim grey / base) only to its OWN generated spheres, NOT to
+  // Color for an asset/external custom mesh. The library applies its nodeColor
+  // (highlight white / dim gray / base) only to its OWN generated spheres, NOT to
   // custom nodeThreeObject meshes — so we mirror that logic here and repaint the
   // meshes ourselves (paintCustom). Routing through baseColor also makes assets
   // follow the color-by-repo toggle like every other node, instead of being
-  // pinned to their community colour.
+  // pinned to their community color.
   function customColor(n) {
     if (hlNodes.size) return hlNodes.has(n) ? (n === selected ? '#ffffff' : baseColor(n)) : '#2b2b3c';
     return baseColor(n);
   }
-  // Material for a custom mesh, cached so nodes sharing a (transparency, colour)
+  // Material for a custom mesh, cached so nodes sharing a (transparency, color)
   // pair share one material — the dim ('#2b2b3c') and selected ('#ffffff') states
-  // collapse to one shared material each, like the per-colour base ones, so even
+  // collapse to one shared material each, like the per-color base ones, so even
   // thousands of asset nodes still allocate only a handful of materials.
   function customMat(n) {
     const col = customColor(n), ext = !!n.external, key = (ext ? '__ext' : '') + col;
@@ -314,11 +384,11 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
   }
   function assetMesh(n) {
     if (!THREE) return null;
-    const k = n.assetKind || 'asset';
+    const k = meshKind(n) || 'asset';
     const g = _geo[k] || (_geo[k] = shapeGeo(k));
     const mesh = new THREE.Mesh(g, customMat(n));
     mesh.userData.node = n; // tag for the PERF-mode custom raycast picker
-    n.__mesh = mesh;        // so paintCustom() can recolour it on highlight changes
+    n.__mesh = mesh;        // so paintCustom() can recolor it on highlight changes
     return mesh;
   }
   // External-package stubs render as a translucent sphere — the 3D analog of the
@@ -329,14 +399,14 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
     const mesh = new THREE.Mesh(g, customMat(n));
     mesh.scale.setScalar(Math.cbrt(n.val) * 3 + 2);
     mesh.userData.node = n; // tag for the PERF-mode custom raycast picker
-    n.__mesh = mesh;        // so paintCustom() can recolour it on highlight changes
+    n.__mesh = mesh;        // so paintCustom() can recolor it on highlight changes
     return mesh;
   }
-  // Asset/external nodes render as custom meshes the library won't recolour, so we
-  // repaint them ourselves on every highlight/colour change (focus, search, the
+  // Asset/external nodes render as custom meshes the library won't recolor, so we
+  // repaint them ourselves on every highlight/color change (focus, search, the
   // color-by toggle, reset). No-op until THREE has built the meshes; before that
   // the nodes are library spheres which the library's nodeColor already dims.
-  const customNodes = data.nodes.filter(n => n.assetKind || n.external);
+  const customNodes = data.nodes.filter(n => meshKind(n) || n.external);
   function paintCustom() {
     if (!THREE) return;
     for (const n of customNodes) if (n.__mesh) n.__mesh.material = customMat(n);
@@ -382,16 +452,16 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
     .nodeVal('val')
     .nodeColor(n => hlNodes.size ? (hlNodes.has(n) ? (n === selected ? '#ffffff' : baseColor(n)) : '#2b2b3c') : baseColor(n))
     .nodeOpacity(0.92)
-    .nodeThreeObject(n => n.assetKind ? assetMesh(n) : (n.external ? externalMesh(n) : ((PERF && THREE) ? new THREE.Object3D() : null)))
+    .nodeThreeObject(n => meshKind(n) ? assetMesh(n) : (n.external ? externalMesh(n) : ((PERF && THREE) ? new THREE.Object3D() : null)))
     .linkColor(l => hlLinks.has(l) ? '#ffffff' : (l.crossRepo ? CROSS : l.color))
-    .linkWidth(l => hlLinks.has(l) ? 1.5 : (l.crossRepo ? 1.2 : (PERF ? 0 : 0.4)))
+    .linkWidth(l => hlLinks.has(l) ? 1.5 : (l.crossRepo ? 1.2 : (l.bridge ? 0.9 : (PERF ? 0 : 0.4))))
     // GL lines render brighter (constant 1px) than the thin cylinders they
     // replace, so on a dense graph the majority "extracted" (green) edges wash
     // everything out. A lower opacity in PERF mode keeps the link mesh readable
     // and lets the nodes / other-confidence edges show through.
     .linkOpacity(PERF ? 0.15 : 0.3)
     .nodeVisibility(nodeVisible)
-    .linkVisibility(l => { const [s, t] = ends(l); return relEnabled[l.relation] !== false && s.val >= minDeg && t.val >= minDeg && (showAssets || (!s.assetKind && !t.assetKind)) && (!crossOnly || l.crossRepo); })
+    .linkVisibility(l => { const [s, t] = ends(l); return relEnabled[l.relation] !== false && (!crossOnly || l.crossRepo) && (!bridgesOnly || l.bridge) && nodeVisible(s) && nodeVisible(t); })
     .onNodeClick(n => focusNode(n))
     .onBackgroundClick(() => clearFocus())
     // Keep the instanced node cloud (PERF mode) in sync with the live layout,
@@ -420,7 +490,7 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
   // small minority). Instanced nodes are not library objects, so the library
   // can't hover/pick them; once instancing is live we disable its pointer layer
   // and raycast the instanced mesh (+ the asset/external meshes) ourselves for
-  // both click-to-focus and hover tooltips. Positions/colours are synced from
+  // both click-to-focus and hover tooltips. Positions/colors are synced from
   // the live layout each tick and frozen on stop, so steady-state rotation does
   // no extra per-frame work.
   let instMesh = null, instNodes = [], pickObjs = [], _ray = null, _hovEv = null, _hovPending = false, _downPt = null;
@@ -449,7 +519,7 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
   }
   function buildInstances() {
     if (!THREE || instMesh) return;
-    instNodes = data.nodes.filter(n => !n.assetKind && !n.external);
+    instNodes = data.nodes.filter(n => !meshKind(n) && !n.external);
     if (!instNodes.length) return;
     const r = PERF ? 6 : 8;
     const geo = new THREE.SphereGeometry(1, r, r);
@@ -545,9 +615,13 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
   function showDetails(node) {
     const d = document.getElementById('details');
     const nb = [...(adjNodes.get(node.id) || [])].sort((a, b) => b.val - a.val);
+    const sql = node.sql ? '<div class="muted" style="margin-top:4px">'
+      + Object.entries(node.sql).map(([k, v]) => v === true ? k : (k + ': ' + esc(v))).join(' &middot; ')
+      + '</div>' : '';
     d.innerHTML = '<h3>' + esc(node.name) + '</h3>'
       + '<div class="muted">' + esc(node.kind) + ' &middot; ' + node.val + ' links &middot; community ' + node.community + '</div>'
       + '<div class="muted">' + esc(node.file) + '</div>'
+      + sql
       + '<div class="sec">Connected (' + nb.length + ')</div>'
       + '<div class="nb">' + nb.slice(0, 50).map(n => '<a data-id="' + esc(n.id) + '">' + esc(n.name) + '</a>').join('') + '</div>';
     d.style.display = 'block';
@@ -571,12 +645,40 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
     relEnabled[cb.getAttribute('data-relation')] = cb.checked;
     cb.addEventListener('change', () => { relEnabled[cb.getAttribute('data-relation')] = cb.checked; applyFilters(); });
   });
+  // Kind filters double as a schema/layer view: uncheck everything but table +
+  // column to see just the schema, or but the code kinds to see just the code.
+  document.querySelectorAll('input[data-kind]').forEach(cb => {
+    kindEnabled[cb.getAttribute('data-kind')] = cb.checked;
+    cb.addEventListener('change', () => { kindEnabled[cb.getAttribute('data-kind')] = cb.checked; applyFilters(); });
+  });
 
   const degree = document.getElementById('degree'), degval = document.getElementById('degval');
   degree.addEventListener('input', () => { minDeg = +degree.value; degval.textContent = minDeg; applyFilters(); });
 
+  // Spread slider: scale the many-body (charge) repulsion and the link distance so
+  // a dense central clump expands outward, then reheat the live sim to re-space.
+  // d3-force-3d defaults are charge strength -30 and link distance 30, so 1x leaves
+  // the layout untouched. This is layout-only: no node is hidden (that's what the
+  // degree slider does). Works in PERF mode too — onEngineTick re-syncs the
+  // instanced node cloud as the reheated layout settles.
+  const CHARGE_BASE = -30, LINK_BASE = 30;
+  let spreadFactor = 1;
+  const spread = document.getElementById('spread'), spreadval = document.getElementById('spreadval');
+  function applySpread() {
+    spreadFactor = +spread.value;
+    spreadval.textContent = spreadFactor + 'x';
+    const ch = Graph.d3Force('charge'); if (ch && ch.strength) ch.strength(CHARGE_BASE * spreadFactor);
+    const lk = Graph.d3Force('link'); if (lk && lk.distance) lk.distance(LINK_BASE * spreadFactor);
+    Graph.d3ReheatSimulation();
+  }
+  spread.addEventListener('input', applySpread);
+
   const showAssetsCb = document.getElementById('show-assets');
   showAssetsCb.addEventListener('change', () => { showAssets = showAssetsCb.checked; applyFilters(); });
+  const showColsCb = document.getElementById('show-columns');
+  if (showColsCb) showColsCb.addEventListener('change', () => { showColumns = showColsCb.checked; applyFilters(); });
+  const bridgesCb = document.getElementById('bridges-only');
+  if (bridgesCb) bridgesCb.addEventListener('change', () => { bridgesOnly = bridgesCb.checked; applyFilters(); });
 
   // Federation controls (present only when the graph carries repo tags).
   const colorby = document.getElementById('colorby');
@@ -587,8 +689,12 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
   document.getElementById('reset').addEventListener('click', () => {
     search.value = ''; results.textContent = ''; matches = [];
     degree.value = 0; minDeg = 0; degval.textContent = '0';
+    if (spreadFactor !== 1) { spread.value = 1; applySpread(); } // only reheat if it was changed
     showAssets = true; showAssetsCb.checked = true;
+    showColumns = true; if (showColsCb) showColsCb.checked = true;
+    bridgesOnly = false; if (bridgesCb) bridgesCb.checked = false;
     document.querySelectorAll('input[data-relation]').forEach(cb => { cb.checked = true; relEnabled[cb.getAttribute('data-relation')] = true; });
+    document.querySelectorAll('input[data-kind]').forEach(cb => { cb.checked = true; kindEnabled[cb.getAttribute('data-kind')] = true; });
     if (colorby) { colorby.value = 'community'; colorBy = 'community'; }
     if (crossCb) { crossCb.checked = false; crossOnly = false; }
     Graph.nodeColor(Graph.nodeColor()).nodeThreeObject(Graph.nodeThreeObject());
@@ -603,7 +709,7 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
   // library spheres (with library picking), and everything else is unaffected.
   // Once it lands, build the InstancedMesh (PERF) and re-trigger nodeThreeObject
   // so regular nodes become empty placeholders and assets pick up their shape.
-  if (PERF || data.nodes.some(n => n.assetKind || n.external)) {
+  if (PERF || data.nodes.some(n => meshKind(n) || n.external)) {
     import('__THREE_ESM__')
       .then(m => {
         THREE = m;
@@ -630,13 +736,6 @@ pub fn to_force3d(kg: &KnowledgeGraph, path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::tests_support::{kg_with_asset, kg_with_label, sample_kg};
-
-    #[test]
-    fn node_kind_classifies_by_label() {
-        assert_eq!(node_kind("parse()"), "function");
-        assert_eq!(node_kind(".visit()"), "method");
-        assert_eq!(node_kind("KnowledgeGraph"), "type");
-    }
 
     #[test]
     fn force3d_html_embeds_graph_with_pinned_cdn() {
@@ -684,9 +783,64 @@ mod tests {
     #[test]
     fn force3d_single_repo_omits_repo_controls() {
         let html = to_force3d_html(&sample_kg());
+        // Color-by is always present (community/kind), but the repo option and the
+        // repo-only controls/legend are absent for a single-repo graph.
+        assert!(html.contains("id=\"colorby\""), "color-by selector present");
         assert!(
-            !html.contains("id=\"colorby\""),
-            "no repo UI when single-repo"
+            html.contains(">kind</option>") && !html.contains(">repo</option>"),
+            "kind color option present, repo option only when federated"
+        );
+        assert!(
+            !html.contains("id=\"cross-only\""),
+            "no cross-repo filter when single-repo"
+        );
+        assert!(!html.contains("Repos"), "no repo legend when single-repo");
+    }
+
+    #[test]
+    fn force3d_is_kind_aware() {
+        let gd: codegraph_core::GraphData = serde_json::from_value(serde_json::json!({
+            "nodes": [
+                {"id":"app.f","label":"f()","file_type":"code","source_file":"a.py","community":0},
+                {"id":"sql:orders","label":"orders","file_type":"code","source_file":"s.sql","kind":"table","community":0,"dialect":"sqlserver","rls_enabled":true},
+                {"id":"sql:orders:col:total","label":"total","file_type":"code","source_file":"s.sql","kind":"column","community":0,"data_type":"int"}
+            ],
+            "links": [
+                {"source":"app.f","target":"sql:orders","relation":"queries","confidence":"INFERRED","source_file":"a.py"},
+                {"source":"sql:orders","target":"sql:orders:col:total","relation":"has_column","confidence":"EXTRACTED","source_file":"s.sql"}
+            ]
+        }))
+        .unwrap();
+        let html = to_force3d_html(&KnowledgeGraph::from_graph_data(gd));
+        assert!(
+            html.contains("data-kind=\"table\""),
+            "kind filter for table"
+        );
+        assert!(
+            html.contains("data-kind=\"column\""),
+            "kind filter for column"
+        );
+        assert!(
+            html.contains("Show SQL columns"),
+            "hide-columns toggle present"
+        );
+        assert!(
+            html.contains("bridges-only"),
+            "code<->SQL bridges toggle present"
+        );
+        // the queries bridge edge is colored by relation and flagged bridge:true.
+        assert!(
+            html.contains(crate::common::relation_color("queries")),
+            "bridge edge uses the relation color"
+        );
+        assert!(
+            html.contains("\"bridge\":true"),
+            "bridge flag on cross-language edge"
+        );
+        // SQL facts ride along for the details panel.
+        assert!(
+            html.contains("sqlserver") && html.contains("rls_enabled"),
+            "node SQL metadata embedded"
         );
     }
 
@@ -712,6 +866,25 @@ mod tests {
         assert!(html.contains("nodeVisibility"), "degree filter");
         assert!(html.contains("linkVisibility"), "relation filter");
         assert!(html.contains("cameraPosition"), "fly-to camera");
+    }
+
+    #[test]
+    fn force3d_has_spread_control() {
+        // A "Spread" slider expands a dense central clump: it scales the many-body
+        // (charge) repulsion and the link distance, then reheats the live sim so the
+        // layout re-spaces. This is layout-only (no node is hidden), unlike the
+        // degree slider.
+        let html = to_force3d_html(&sample_kg());
+        assert!(html.contains("id=\"spread\""), "spread slider present");
+        assert!(html.contains("id=\"spreadval\""), "spread readout present");
+        assert!(
+            html.contains("d3Force('charge')"),
+            "spread scales the many-body repulsion"
+        );
+        assert!(
+            html.contains("d3ReheatSimulation"),
+            "changing spread reheats the layout so it re-spaces"
+        );
     }
 
     #[test]
@@ -836,7 +1009,7 @@ mod tests {
         assert!(html.contains("buildInstances"), "instanced cloud builder");
         assert!(
             html.contains("setColorAt"),
-            "per-instance node colours (highlight/dim/community)"
+            "per-instance node colors (highlight/dim/community)"
         );
         assert!(
             html.contains("enablePointerInteraction(false)"),

@@ -15,6 +15,7 @@
 - [Extraction](Extraction)
 - [Querying](Querying)
 - [Cross-Language Edges](Cross-Language-Edges)
+- [SQL Auditing](SQL-Auditing)
 - [Analysis and Reports](Analysis-and-Reports)
 - [Output Formats](Output-Formats)
 - [Visualizations](Visualizations)

@@ -45,7 +45,7 @@ fn lang_of(file: &str) -> Option<String> {
 
 /// The bare symbol name for matching: a node label without the trailing `()`
 /// the extractor appends to callables. So `f.name = "announce"` matches a node
-/// labelled `announce()`, and `.name` is consistent across kinds (a class label
+/// labeled `announce()`, and `.name` is consistent across kinds (a class label
 /// is already bare). Only an exact trailing `()` is removed, so a label like
 /// `Setup (Windows)` is left intact. Partial matches use the `=~` regex operator.
 fn bare_name(label: &str) -> &str {
@@ -80,6 +80,23 @@ fn prop(kg: &KnowledgeGraph, id: &NodeId, field: Field) -> Val {
         Field::Community => node
             .and_then(|n| n.community)
             .map(|c| Val::N(c as f64))
+            .unwrap_or(Val::Null),
+        // SQL security posture, read from node extra. rls_enabled is a JSON bool
+        // rendered to the string "true"/"false" so the string comparator works
+        // (e.g. WHERE t.rls_enabled = "false"). dialect/operation are strings.
+        Field::RlsEnabled => node
+            .and_then(|n| n.extra.get("rls_enabled"))
+            .map(|v| Val::S(v.to_string()))
+            .unwrap_or(Val::Null),
+        Field::Dialect => node
+            .and_then(|n| n.extra.get("dialect"))
+            .and_then(|v| v.as_str())
+            .map(|s| Val::S(s.to_string()))
+            .unwrap_or(Val::Null),
+        Field::Operation => node
+            .and_then(|n| n.extra.get("operation"))
+            .and_then(|v| v.as_str())
+            .map(|s| Val::S(s.to_string()))
             .unwrap_or(Val::Null),
     }
 }
@@ -529,6 +546,22 @@ mod tests {
     fn run(kg: &KnowledgeGraph, q: &str) -> Vec<String> {
         let res = run_query(kg, &parse(q).unwrap());
         res.rows.iter().map(|r| r[0].0.clone()).collect()
+    }
+
+    #[test]
+    fn filters_tables_by_rls_enabled() {
+        use serde_json::json;
+        let mut secure = node("secure", "secure", NodeKind::Table, 1);
+        secure.extra.insert("rls_enabled".into(), json!(true));
+        let mut leaky = node("leaky", "leaky", NodeKind::Table, 1);
+        leaky.extra.insert("rls_enabled".into(), json!(false));
+        let kg = graph(vec![secure, leaky], vec![]);
+        let rows = run(
+            &kg,
+            r#"MATCH (t:table) WHERE t.rls_enabled = "false" RETURN t"#,
+        );
+        assert!(rows.contains(&"leaky".to_string()), "rows: {rows:?}");
+        assert!(!rows.contains(&"secure".to_string()), "rows: {rows:?}");
     }
 
     #[test]

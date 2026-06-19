@@ -28,22 +28,41 @@ use crate::paths::file_node_id;
 use crate::result::ExtractionResult;
 
 // Regex-recovery patterns, compiled once process-wide (not per `.sql` file). M1.
+// A possibly-schema-qualified, optionally-bracketed/quoted object name as one
+// capture group (handles T-SQL `[schema].[name]`, MySQL backticks, plain). Callers
+// reduce it to the last segment via `last_segment`.
+#[cfg(feature = "lang-sql")]
+const QNAME: &str =
+    r#"((?:\[[^\]]+\]|"[^"]+"|`[^`]+`|\w+)(?:\.(?:\[[^\]]+\]|"[^"]+"|`[^`]+`|\w+))*)"#;
 #[cfg(feature = "lang-sql")]
 static CREATE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?is)\bcreate\s+(?:or\s+replace\s+)?(?:global\s+|temp\w*\s+)?(table|view|function|procedure|trigger)\s+(?:if\s+not\s+exists\s+)?[`"\[]?(\w+)"#,
-    )
+    Regex::new(&format!(
+        r#"(?is)\bcreate\s+(?:or\s+replace\s+)?(?:global\s+|temp\w*\s+)?(table|view|function|procedure|trigger)\s+(?:if\s+not\s+exists\s+)?{QNAME}"#
+    ))
     .expect("create regex")
 });
 #[cfg(feature = "lang-sql")]
 static ON_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"(?is)\bon\s+[`"\[]?(\w+)"#).expect("on regex"));
+    LazyLock::new(|| Regex::new(&format!(r#"(?is)\bon\s+{QNAME}"#)).expect("on regex"));
 #[cfg(feature = "lang-sql")]
 static REFERENCES_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"(?is)\breferences\s+[`"\[]?(\w+)"#).expect("ref regex"));
+    LazyLock::new(|| Regex::new(&format!(r#"(?is)\breferences\s+{QNAME}"#)).expect("ref regex"));
 #[cfg(feature = "lang-sql")]
-static FROM_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"(?is)\b(?:from|join)\s+[`"\[]?(\w+)"#).expect("from regex"));
+static FROM_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(r#"(?is)\b(?:from|join)\s+{QNAME}"#)).expect("from regex")
+});
+
+/// The last identifier of a possibly-qualified, possibly-bracketed name
+/// (`[schema].[name]` -> `name`, `dbo.t` -> `t`).
+#[cfg(feature = "lang-sql")]
+fn last_segment(qualified: &str) -> String {
+    qualified
+        .rsplit('.')
+        .next()
+        .unwrap_or(qualified)
+        .trim_matches(|c| c == '[' || c == ']' || c == '`' || c == '"' || c == ' ')
+        .to_string()
+}
 
 /// Extract a SQL file already in memory.
 #[cfg(feature = "lang-sql")]
@@ -121,7 +140,10 @@ pub fn extract_sql_source(path: &str, source: &[u8]) -> ExtractionResult {
         &mut emitted,
     );
 
-    b.into_result()
+    let mut result = b.into_result();
+    let emit_columns = crate::sql_semantic::emit_sql_columns();
+    crate::sql_semantic::enrich(path, source, emit_columns, &mut result);
+    result
 }
 
 /// Read and extract a SQL file from disk.
@@ -273,7 +295,7 @@ impl Sql<'_> {
                 continue;
             };
             let kind = caps[1].to_lowercase();
-            let name = caps[2].to_string();
+            let name = last_segment(&caps[2]);
             let name_l = name.to_lowercase();
             if name_l.is_empty() {
                 continue;
@@ -322,7 +344,7 @@ impl Sql<'_> {
         ids: &HashMap<String, NodeId>,
         emitted: &mut HashSet<(String, String, String)>,
     ) {
-        let tgt = self.resolve(b, ids, name);
+        let tgt = self.resolve(b, ids, &last_segment(name));
         if obj == &tgt {
             return;
         }
@@ -362,6 +384,73 @@ mod tests {
         assert!(labels.contains(&"users".to_string()), "{labels:?}");
         assert!(labels.contains(&"orders".to_string()));
         assert!(labels.contains(&"recent".to_string()));
+    }
+
+    // Real T-SQL table DDL: bracketed schema-qualified name, bracketed types,
+    // IDENTITY, CLUSTERED PK, ON [PRIMARY], wrapped in IF/BEGIN/END with GO and
+    // no semicolons.
+    const TSQL_TABLE: &[u8] = b"SET ANSI_NULLS ON\nGO\nIF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[Analytics].[AgentJob]') AND type in (N'U'))\nBEGIN\nCREATE TABLE [Analytics].[AgentJob](\n\t[AgentJobId] [int] IDENTITY(1,1) NOT NULL,\n\t[JobId] [uniqueidentifier] NOT NULL,\n\t[Name] [nvarchar](256) NOT NULL,\n\t[PasswordHash] [nvarchar](max) NULL,\n CONSTRAINT [PK_AgentJob] PRIMARY KEY CLUSTERED ([AgentJobId] ASC)\n) ON [PRIMARY]\nEND\nGO\n";
+
+    #[test]
+    fn tsql_bracketed_table_name_is_last_segment() {
+        let r = extract_sql_source("dbo.AgentJob.sql", TSQL_TABLE);
+        let table_labels: Vec<_> = r
+            .nodes
+            .iter()
+            .filter(|n| n.kind() == Some(codegraph_core::NodeKind::Table))
+            .map(|n| n.label.clone())
+            .collect();
+        assert!(
+            table_labels.contains(&"AgentJob".to_string()),
+            "table should be named AgentJob, got: {table_labels:?}"
+        );
+        assert!(
+            !table_labels.contains(&"Analytics".to_string()),
+            "must not name the table after its schema"
+        );
+    }
+
+    #[test]
+    fn tsql_bracketed_columns_and_pk_extracted() {
+        use codegraph_core::NodeKind;
+        let r = extract_sql_source("dbo.AgentJob.sql", TSQL_TABLE);
+        let cols: Vec<_> = r
+            .nodes
+            .iter()
+            .filter(|n| n.kind() == Some(NodeKind::Column))
+            .map(|n| n.label.clone())
+            .collect();
+        for want in ["AgentJobId", "JobId", "Name", "PasswordHash"] {
+            assert!(
+                cols.iter().any(|c| c == want),
+                "missing T-SQL column {want}; got {cols:?}"
+            );
+        }
+        // PK comes from the CLUSTERED PRIMARY KEY constraint.
+        let pk = r
+            .nodes
+            .iter()
+            .find(|n| n.kind() == Some(NodeKind::Column) && n.label == "AgentJobId")
+            .unwrap();
+        assert_eq!(pk.extra.get("pk").and_then(|v| v.as_bool()), Some(true));
+        // a non-pk column reflects nullability.
+        let pw = r
+            .nodes
+            .iter()
+            .find(|n| n.kind() == Some(NodeKind::Column) && n.label == "PasswordHash")
+            .unwrap();
+        assert_eq!(
+            pw.extra.get("nullable").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert!(
+            r.edges
+                .iter()
+                .filter(|e| e.relation == "has_column")
+                .count()
+                >= 4,
+            "expected has_column edges"
+        );
     }
 
     #[test]

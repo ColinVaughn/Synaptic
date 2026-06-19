@@ -146,7 +146,7 @@ fn match_pattern(pattern: &str, replacements: &[String], spec: &str) -> Option<V
     }
 }
 
-/// Join path fragments and normalise `.`/`..`/empty components (posix). `None` if
+/// Join path fragments and normalize `.`/`..`/empty components (posix). `None` if
 /// it climbs above the root.
 fn normalize_join(parts: &[&str]) -> Option<String> {
     let mut comps: Vec<&str> = Vec::new();

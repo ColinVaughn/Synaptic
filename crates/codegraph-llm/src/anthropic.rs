@@ -92,7 +92,7 @@ impl Anthropic {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        // Normalise Anthropic's `stop_reason` to the OpenAI-compat `finish_reason`
+        // Normalize Anthropic's `stop_reason` to the OpenAI-compat `finish_reason`
         // vocabulary so the adaptive-retry layer is backend-agnostic.
         let finish_reason = match v.get("stop_reason").and_then(Value::as_str) {
             Some("max_tokens") => "length",

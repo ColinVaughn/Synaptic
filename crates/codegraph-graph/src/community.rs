@@ -83,9 +83,9 @@ const EPS: f64 = 1e-12;
 /// well-connected (≥2-node) pieces, so refining it is wasted work.
 const MIN_REFINE_SIZE: usize = 4;
 
-/// Modularity of a labelling (resolution-weighted), undirected convention. Used
+/// Modularity of a labeling (resolution-weighted), undirected convention. Used
 /// by [`leiden`] to guarantee the refined partition never scores below the
-/// baseline, and by tests to validate optimisation quality.
+/// baseline, and by tests to validate optimization quality.
 pub(crate) fn modularity(wg: &WGraph, labels: &[usize], resolution: f64) -> f64 {
     if wg.m == 0.0 {
         return 0.0;
@@ -112,7 +112,7 @@ pub(crate) fn modularity(wg: &WGraph, labels: &[usize], resolution: f64) -> f64 
     q
 }
 
-/// One Louvain local-moving optimisation pass set (to convergence). Mutates
+/// One Louvain local-moving optimization pass set (to convergence). Mutates
 /// `labels` in place; deterministic (node index order, sorted candidates).
 fn local_move(wg: &WGraph, labels: &mut [usize], resolution: f64) {
     if wg.m == 0.0 {
@@ -385,11 +385,11 @@ fn refine_within_communities(wg: &WGraph, labels: &[usize], resolution: f64) -> 
     sub.iter().map(|c| remap[c]).collect()
 }
 
-/// Leiden community detection: Louvain optimisation, then refinement.
+/// Leiden community detection: Louvain optimization, then refinement.
 ///
-/// The baseline pipeline (prior behaviour) is connected-component refinement, a
+/// The baseline pipeline (prior behavior) is connected-component refinement, a
 /// re-merge pass, then a final component split. `local_move` can pull an
-/// articulation node out of its community (it optimises modularity over the
+/// articulation node out of its community (it optimizes modularity over the
 /// *destination*, never the source it leaves), so the final `refine_connected`
 /// is what actually guarantees every community is connected.
 ///
@@ -669,7 +669,7 @@ mod tests {
 
     #[test]
     fn refine_connected_splits_disconnected_community() {
-        // Two disjoint edges a-b and c-d, but all labelled the same community.
+        // Two disjoint edges a-b and c-d, but all labeled the same community.
         let kg = kg_from(&["a", "b", "c", "d"], &[("a", "b"), ("c", "d")]);
         let wg = build_wgraph(&kg, &ids(&["a", "b", "c", "d"]));
         let refined = refine_connected(&wg, &[0, 0, 0, 0]);
@@ -700,7 +700,7 @@ mod tests {
     fn leiden_communities_always_connected_even_with_articulation_vertex() {
         // Bowtie: triangles {a,b,c} and {c,d,e} sharing the articulation vertex c,
         // plus a pendant magnet community {m0..m3} (K4) that pulls on c via an edge.
-        // Whatever the optimiser does, the FINAL refinement guarantees every
+        // Whatever the optimizer does, the FINAL refinement guarantees every
         // returned community is internally connected.
         let mut edges: Vec<(String, String)> = vec![
             ("a".into(), "b".into()),
@@ -767,7 +767,7 @@ mod tests {
 
     #[test]
     fn refine_within_splits_a_poorly_knit_single_community() {
-        // Both K4 cliques are labelled the SAME community. They're connected (the
+        // Both K4 cliques are labeled the SAME community. They're connected (the
         // bridge), so connected-component refinement would keep them as one, but
         // Leiden's within-community refinement splits the weakly-bridged cliques
         // into two well-connected sub-communities.

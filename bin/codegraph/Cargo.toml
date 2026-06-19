@@ -22,8 +22,11 @@ office = ["codegraph-ingest/office"]
 gws = ["codegraph-ingest/gws"]
 # Live Neo4j/FalkorDB push for `codegraph export neo4j|falkordb --push` (off by default).
 push = ["codegraph-output/push"]
-# Store the per-file AST cache as MessagePack instead of JSON (off by default).
+# Store the per-file AST cache as MessagePack instead of JSON. On by default via
+# codegraph-extract's default features (this flag is the explicit re-enable knob).
 cache-binary = ["codegraph-extract/cache-binary"]
+# Live database EXPLAIN for `sql audit --explain` (sqlx; off by default).
+live-explain = ["codegraph-sqlaudit/live-explain"]
 
 [dependencies]
 codegraph-core = { workspace = true }
@@ -47,6 +50,7 @@ codegraph-refactor = { workspace = true }
 codegraph-predict = { workspace = true }
 codegraph-sandbox = { workspace = true }
 codegraph-eval = { workspace = true }
+codegraph-sqlaudit = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 rayon = { workspace = true }

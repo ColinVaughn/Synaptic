@@ -51,6 +51,9 @@ pub enum Field {
     FanOut,
     Degree,
     Community,
+    RlsEnabled,
+    Dialect,
+    Operation,
 }
 
 impl Field {
@@ -67,13 +70,16 @@ impl Field {
             "fan_out" => Field::FanOut,
             "degree" => Field::Degree,
             "community" => Field::Community,
+            "rls_enabled" => Field::RlsEnabled,
+            "dialect" => Field::Dialect,
+            "operation" => Field::Operation,
             _ => return None,
         })
     }
 
     /// All valid field names, for error messages.
     pub fn valid_names() -> &'static str {
-        "kind, name, file, lang, visibility, loc, fan_in, fan_out, degree, community"
+        "kind, name, file, lang, visibility, loc, fan_in, fan_out, degree, community, rls_enabled, dialect, operation"
     }
 }
 
@@ -158,6 +164,9 @@ pub fn field_name(f: Field) -> &'static str {
         Field::FanOut => "fan_out",
         Field::Degree => "degree",
         Field::Community => "community",
+        Field::RlsEnabled => "rls_enabled",
+        Field::Dialect => "dialect",
+        Field::Operation => "operation",
     }
 }
 

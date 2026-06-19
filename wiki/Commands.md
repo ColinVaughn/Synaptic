@@ -19,6 +19,7 @@ Most read commands operate on `codegraph-out/graph.json` by default; build it fi
 | [`affected`](#affected) | Nodes that transitively depend on a node (reverse-impact). |
 | [`diff`](#diff) | Time-travel: diff the graph between two git revisions (dependencies, removed APIs, drift, cycles, hotspots). |
 | [`predict`](#predict) | Forecast a change before applying it: blast radius, public APIs at risk, new cycles, and a verify checklist. |
+| [`sql`](#sql) | Audit SQL for performance + security over the SQL-aware graph, or advise on a candidate query before writing it. |
 | [`hook`](#hook) | Manage git hooks and the `graph.json` merge driver. |
 | [`serve`](#serve) | Run the MCP server (stdio or HTTP). |
 | [`ingest`](#ingest) | Ingest an external source into the graph, or fetch a URL for the next extract. |
@@ -40,7 +41,7 @@ Scan a directory, build the knowledge graph, and write the artifact set to `code
 Syntax:
 
 ```sh
-codegraph extract [PATH] [--directed] [--obsidian] [--wiki] [--semantic]
+codegraph extract [PATH] [--directed] [--obsidian] [--wiki] [--semantic] [--no-columns]
 ```
 
 Arguments and flags:
@@ -52,6 +53,7 @@ Arguments and flags:
 | `--obsidian` | off | Also write an Obsidian vault (one note per node) under `codegraph-out/obsidian/`. |
 | `--wiki` | off | Also write a Markdown wiki under `codegraph-out/wiki/`. |
 | `--semantic` | off | Run the LLM semantic pass over documents/papers and enable the LLM dedup tiebreaker. Requires an API key in the environment (for example `OPENAI_API_KEY`). Makes paid API calls. |
+| `--no-columns` | off | Skip SQL column and index nodes. Smaller `graph.json` on column-heavy schemas, at the cost of column-level SQL audit rules. |
 
 The default run is fully offline and needs no API key. It always writes `graph.json`, `graph.html`, `GRAPH_REPORT.md`, `graph.graphml`, `graph.cypher`, `graph.dot`, `callflow.html`, `tree.html`, `graph.svg`, and `graph-3d.html` into `codegraph-out/`. With `--obsidian` and `--wiki` it adds the `obsidian/` and `wiki/` directories. Markdown heading structure is always extracted; the LLM concept pass runs only with `--semantic`.
 
@@ -116,7 +118,7 @@ Arguments and flags:
 | `--repo` | none | Scope to one federated member (its `repo` tag). |
 | `--dfs` | off | Expand the subgraph depth-first instead of breadth-first (favors deep call chains over broad neighbourhoods). |
 
-Prints the matched seed nodes and the resulting subgraph (nodes and labelled edges). If nothing matches, it reports no matches.
+Prints the matched seed nodes and the resulting subgraph (nodes and labeled edges). If nothing matches, it reports no matches.
 
 Example:
 
@@ -423,7 +425,7 @@ The forecast has these parts:
 
 - **Change risk** — a heuristic 0..100 score (low / medium / high) from diffusion (blast-radius size), size (git churn), public-API changes, and how often the touched files change in history, with the contributing factors named. Advisory and uncalibrated.
 - **Changed nodes** — graph nodes defined in the changed files (what the change edits).
-- **Blast radius** — nodes that transitively depend on the changed nodes, deduped to the shallowest hop and labelled with the relation they were reached through.
+- **Blast radius** — nodes that transitively depend on the changed nodes, deduped to the shallowest hop and labeled with the relation they were reached through.
 - **Tests at risk** — the test subset of the blast radius (tests detected by path convention); the tests to run for this change. Predictive test selection on the static graph.
 - **Public API at risk** — changed nodes that are public; editing them can break callers outside their file or module.
 - **New import cycles / Removed APIs / Dependency delta** — from the time-travel diff of the base against the working tree (omitted with `--no-diff`).
@@ -554,6 +556,45 @@ Calibration is advisory: it measures detector precision across releases, it does
 not retune anything.
 
 See [`predict`](#predict), [`speculate`](#speculate), and [`diff`](#diff).
+
+## sql
+
+Audit the SQL in the graph for performance and security problems, or critique a
+candidate query before it is written. See [SQL Auditing](SQL-Auditing) for the
+full rule catalog and the SQL-aware graph model (columns, indexes, RLS policies,
+grants, and the code -> table links the rules read).
+
+### sql audit
+
+Run every rule over the SQL-aware graph and write `codegraph-out/sql/findings.json`
++ `audit.md` (or `--json` to stdout). Findings are sorted by severity, each with a
+location, the offending object/query, a remediation, and a confidence.
+
+Syntax:
+
+```
+codegraph sql audit [--graph <path>] [--root <dir>] [--severity <level>] [--repo <tag>] [--out <dir>] [--json] [--explain --db-url <url>]
+```
+
+- `--severity <critical|high|medium|low|info>` keeps only findings at least that severe.
+- `--root <dir>` (default `.`) lets the N+1 rule read the call-site source for loops.
+- `--explain --db-url <url>` runs a live `EXPLAIN` to confirm sequential scans
+  (requires building with `--features live-explain`). It runs `EXPLAIN` only, never
+  `EXPLAIN ANALYZE`, so it does not execute your queries.
+
+### sql advise
+
+Critique a single candidate query before writing it: the same perf/security
+checks plus a graph cross-reference (does the table exist, is it behind RLS, are
+the filtered columns indexed).
+
+Syntax:
+
+```
+codegraph sql advise --query "<sql>" [--dialect <postgres|mysql|mssql|sqlite>] [--graph <path>] [--repo <tag>] [--json]
+```
+
+The `audit_sql` / `advise_sql` [MCP tools](MCP-Server) expose both to an assistant.
 
 ## refactor
 

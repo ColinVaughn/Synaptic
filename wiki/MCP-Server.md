@@ -141,7 +141,7 @@ exposure.
 
 ## MCP tools
 
-`tools/list` reports 24 tools by default (25 with `--allow-exec`, which adds
+`tools/list` reports 26 tools by default (27 with `--allow-exec`, which adds
 `speculate`). Every tool documents its parameters in its input schema, and every
 tool carries annotations so a host knows how safe it is to run:
 
@@ -149,7 +149,7 @@ tool carries annotations so a host knows how safe it is to run:
 "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": <bool> }
 ```
 
-All 24 default tools are `readOnlyHint: true`. `openWorldHint` is `true` only for
+All 26 default tools are `readOnlyHint: true`. `openWorldHint` is `true` only for
 the tools that reach outside the graph by shelling out (`list_prs`,
 `get_pr_impact`, `triage_prs`, `working_changes_impact`, `predict_impact`,
 `affected_tests`, and `time_travel_diff`); it is `false` for the rest, including
@@ -502,9 +502,36 @@ Parameters:
 Returns `Rename <old> -> <new> [<confidence>], <n> edit(s) across <n> file(s), <n>
 to review, <n> affected`, or an error string if the symbol is not found.
 
+### audit_sql
+
+Audit the codebase's SQL for performance and security problems over the
+SQL-aware graph: row-level-security gaps, over-broad grants, likely SQL
+injection, missing indexes on filter/foreign-key columns, `SELECT *`,
+non-sargable predicates, N+1 patterns, and missing primary keys.
+
+Parameters:
+- `severity` (string) -- only return findings at least this severe
+  (`critical`|`high`|`medium`|`low`|`info`).
+
+Returns a one-line summary plus, in `structuredContent`, the full `AuditReport`.
+See [SQL Auditing](SQL-Auditing).
+
+### advise_sql
+
+Critique a single candidate query before it is written. Runs the same
+performance + security checks on the query text and cross-references the graph:
+whether the referenced tables exist, are behind row-level security, and have
+indexes on the columns you filter on.
+
+Parameters:
+- `query` (string, required) -- the SQL to critique.
+- `dialect` (string) -- optional dialect hint (`postgres`|`mysql`|`mssql`|`sqlite`).
+
+Returns the findings as text + `structuredContent`.
+
 ### Structured output
 
-Six tools declare an `outputSchema` and return a `structuredContent` object
+Eight tools declare an `outputSchema` and return a `structuredContent` object
 beside the text content, so a client can parse the result instead of scraping the
 formatted text:
 
@@ -516,6 +543,7 @@ formatted text:
 | `query_graph` | `{ nodes: [{ label, file_type, source_file }], edges: [{ source, relation, target }] }` |
 | `structural_search` | `{ columns, results: [[{ id, label, kind, visibility, file, line, loc, signature }]] }` (or `groups` for aggregates) |
 | `describe_node` | `{ found, id, label, kind, summary, callees, signature }` |
+| `audit_sql` / `advise_sql` | `{ version, summary, findings: [{ rule_id, severity, category, title, detail, location, remediation, confidence }] }` |
 
 The other tools return text only.
 
@@ -560,7 +588,7 @@ The server advertises `resources.subscribe`. `resources/subscribe` and
 `resources/unsubscribe` are accepted and acknowledged. Over the HTTP transport, a
 session that has opened the `GET /mcp` SSE stream receives a
 `notifications/resources/updated` event (with `params.uri` =
-`codegraph://stats`) when the graph hot-reloads on disk, signalling that resource
+`codegraph://stats`) when the graph hot-reloads on disk, signaling that resource
 contents have changed and should be re-read. (The stdio transport is
 request/response only and does not push.)
 

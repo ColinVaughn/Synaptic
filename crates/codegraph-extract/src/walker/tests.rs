@@ -202,7 +202,7 @@ fn plain_import_creates_imports_edge_and_stub() {
     let file = make_id(&["m.py"]);
     let os = make_id(&["os"]);
     assert!(import_edges(&r).contains(&(file, "imports".into(), os.clone())));
-    // External stub node exists for the module, labelled `os`.
+    // External stub node exists for the module, labeled `os`.
     assert!(r.nodes.iter().any(|n| n.id.0 == os && n.label == "os"));
     // import edges carry EXTRACTED confidence + the `import` context.
     let imp = r.edges.iter().find(|e| e.relation == "imports").unwrap();

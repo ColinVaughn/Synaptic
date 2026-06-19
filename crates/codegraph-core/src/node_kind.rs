@@ -24,6 +24,14 @@ pub enum NodeKind {
     Variable,
     TypeAlias,
     Macro,
+    Table,
+    View,
+    Column,
+    Index,
+    Trigger,
+    Procedure,
+    Policy,
+    Role,
     Other,
 }
 
@@ -51,6 +59,14 @@ impl NodeKind {
             Variable => "variable",
             TypeAlias => "type_alias",
             Macro => "macro",
+            Table => "table",
+            View => "view",
+            Column => "column",
+            Index => "index",
+            Trigger => "trigger",
+            Procedure => "procedure",
+            Policy => "policy",
+            Role => "role",
             Other => "other",
         }
     }
@@ -75,6 +91,41 @@ impl Visibility {
             Visibility::Protected => "protected",
             Visibility::Private => "private",
             Visibility::Internal => "internal",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sql_kinds_have_snake_case_wire_strings() {
+        assert_eq!(NodeKind::Table.as_str(), "table");
+        assert_eq!(NodeKind::View.as_str(), "view");
+        assert_eq!(NodeKind::Column.as_str(), "column");
+        assert_eq!(NodeKind::Index.as_str(), "index");
+        assert_eq!(NodeKind::Trigger.as_str(), "trigger");
+        assert_eq!(NodeKind::Procedure.as_str(), "procedure");
+        assert_eq!(NodeKind::Policy.as_str(), "policy");
+        assert_eq!(NodeKind::Role.as_str(), "role");
+    }
+
+    #[test]
+    fn sql_kinds_roundtrip_through_serde() {
+        for k in [
+            NodeKind::Table,
+            NodeKind::View,
+            NodeKind::Column,
+            NodeKind::Index,
+            NodeKind::Trigger,
+            NodeKind::Procedure,
+            NodeKind::Policy,
+            NodeKind::Role,
+        ] {
+            let json = serde_json::to_string(&k).unwrap();
+            let back: NodeKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, k, "roundtrip {json}");
         }
     }
 }

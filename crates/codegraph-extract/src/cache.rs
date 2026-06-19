@@ -1,6 +1,8 @@
 //! Per-file AST extraction cache. Keyed by `(path, content)` so an unchanged
 //! file on a rebuild skips tree-sitter parsing. The cached value is the
-//! serialized [`ExtractionResult`] under `<cache_dir>/ast/v{version}/<key>.json`.
+//! serialized [`ExtractionResult`] under `<cache_dir>/ast/v{version}/<key>.<ext>`,
+//! where `<ext>` is `mp` (MessagePack, the default `cache-binary` feature) or
+//! `json` when that feature is off -- see [`CACHE_EXT`].
 //! The path is part of the key because node ids and scoping
 //! embed it, so two files with identical bytes at different paths must not share
 //! an entry. Entries are namespaced by [`AST_CACHE_VERSION`] so a release *or* an
@@ -30,6 +32,13 @@ fn cache_key(path: &str, source: &[u8]) -> String {
     h.update(path.as_bytes());
     h.update(&[0]); // separator so (path, content) can't be ambiguous
     h.update(source);
+    // --no-columns changes the SQL output for the same bytes, so it must change
+    // the key. Only perturb in the off (non-default) case, leaving every
+    // existing default-mode entry valid.
+    #[cfg(feature = "lang-sql")]
+    if !crate::sql_semantic::emit_sql_columns() {
+        h.update(b"\x01sql-no-columns");
+    }
     h.finalize().to_hex().to_string()
 }
 
@@ -228,6 +237,74 @@ mod msgpack_format_tests {
         let bytes = encode_result(&original).expect("encode");
         let back = decode_result(&bytes).expect("decode");
         assert_eq!(back, original, "MessagePack round-trip must be lossless");
+    }
+
+    #[test]
+    fn msgpack_roundtrips_sql_metadata() {
+        // SQL extraction stores its facts (dialect, data_type, pk/fk target, RLS
+        // flags) as flattened entries in node.extra -- string values AND bools. This
+        // guards the binary cache for the SQL layer specifically, not just generic
+        // code metadata: a bool that decoded as a string, or a dropped flatten key,
+        // would silently corrupt the SQL audit on a warm cache.
+        let mut table_extra = serde_json::Map::new();
+        table_extra.insert("kind".into(), serde_json::json!("table"));
+        table_extra.insert("dialect".into(), serde_json::json!("sqlserver"));
+        table_extra.insert("rls_enabled".into(), serde_json::json!(true));
+        table_extra.insert("rls_forced".into(), serde_json::json!(false));
+        let table = Node {
+            id: NodeId("sql:orders".into()),
+            label: "orders".into(),
+            file_type: FileType::Code,
+            source_file: "schema.sql".into(),
+            source_location: None,
+            community: Some(0),
+            repo: None,
+            extra: table_extra,
+        };
+
+        let mut col_extra = serde_json::Map::new();
+        col_extra.insert("kind".into(), serde_json::json!("column"));
+        col_extra.insert("data_type".into(), serde_json::json!("uuid"));
+        col_extra.insert("pk".into(), serde_json::json!(true));
+        col_extra.insert("fk_target".into(), serde_json::json!("customers"));
+        let col = Node {
+            id: NodeId("sql:orders:col:id".into()),
+            label: "id".into(),
+            file_type: FileType::Code,
+            source_file: "schema.sql".into(),
+            source_location: None,
+            community: Some(0),
+            repo: None,
+            extra: col_extra,
+        };
+
+        let result = ExtractionResult {
+            nodes: vec![table, col],
+            edges: vec![],
+            raw_calls: vec![],
+            imports: vec![],
+        };
+
+        // Exercise the exact cache encode/decode path.
+        let back = decode_result(&encode_result(&result).expect("encode")).expect("decode");
+        assert_eq!(
+            back, result,
+            "SQL metadata must survive the binary cache round-trip"
+        );
+        // The bool flags must stay bools (not coerce to string/int) so the typed
+        // accessors the SQL audit reads still see them.
+        let t = back.nodes.iter().find(|n| n.label == "orders").unwrap();
+        assert_eq!(t.extra.get("rls_enabled"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            t.extra.get("dialect").and_then(|v| v.as_str()),
+            Some("sqlserver")
+        );
+        let c = back.nodes.iter().find(|n| n.label == "id").unwrap();
+        assert_eq!(c.extra.get("pk"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            c.extra.get("data_type").and_then(|v| v.as_str()),
+            Some("uuid")
+        );
     }
 
     #[test]

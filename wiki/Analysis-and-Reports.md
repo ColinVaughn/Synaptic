@@ -178,7 +178,7 @@ Community detection is in-house, weighted, undirected, and deterministic (no
 randomness; nodes are processed in sorted-id order). Edges are treated as
 undirected with weights summed.
 
-- The default algorithm is Leiden: a multi-level Louvain modularity optimisation,
+- The default algorithm is Leiden: a multi-level Louvain modularity optimization,
   followed by a refinement phase that guarantees every community's induced
   subgraph is internally connected and can split a community that is connected but
   poorly knit (two dense groups joined by one weak edge) into well-connected

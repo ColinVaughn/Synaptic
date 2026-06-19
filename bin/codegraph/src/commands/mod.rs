@@ -19,6 +19,7 @@ pub(crate) mod search;
 pub(crate) mod serve;
 pub(crate) mod skill;
 pub(crate) mod speculate;
+pub(crate) mod sql;
 pub(crate) mod update;
 pub(crate) mod watch;
 pub(crate) mod workspace;

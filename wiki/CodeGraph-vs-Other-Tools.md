@@ -157,7 +157,7 @@ sent with each request; [20] it is a context feature of one assistant. CodeGraph
 *persistent* graph you can query repeatedly, visualize, export, diff incrementally
 ([Incremental Updates](Incremental-Updates)), federate across repos, and expose to any MCP
 client rather than a single tool ([MCP Server](MCP-Server)). The same graph also powers
-analyses a per-request context map does not attempt, time-travel architectural diff and
+analyzes a per-request context map does not attempt, time-travel architectural diff and
 agent-executable refactor plans ([Commands](Commands)).
 
 **Cursor** is an AI code editor whose codebase indexing takes the other approach: semantic

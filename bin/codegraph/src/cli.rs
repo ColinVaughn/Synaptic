@@ -35,6 +35,10 @@ pub(crate) enum Cmd {
         /// paid API calls. Also enables the LLM dedup tiebreaker.
         #[arg(long)]
         semantic: bool,
+        /// Skip SQL column and index nodes. Smaller graph.json on column-heavy
+        /// schemas, at the cost of column-level SQL audit rules.
+        #[arg(long)]
+        no_columns: bool,
     },
     /// Re-emit an output format from an existing graph.json — no re-extraction —
     /// or push the graph live to a database. Formats: json, html, svg, graphml,
@@ -447,6 +451,62 @@ pub(crate) enum Cmd {
     Eval {
         #[command(subcommand)]
         action: EvalAction,
+    },
+    /// Audit SQL for performance + security issues over the SQL-aware graph
+    /// (RLS coverage, grants, injection, missing indexes, anti-patterns), or
+    /// advise on a single candidate query before it is written.
+    Sql {
+        #[command(subcommand)]
+        action: SqlAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum SqlAction {
+    /// Audit the SQL in the graph and report findings (findings.json + audit.md).
+    Audit {
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        /// Repo root, enabling source-reading rules like N+1 (default: .).
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Only report findings at least this severe (critical|high|medium|low|info).
+        #[arg(long)]
+        severity: Option<String>,
+        /// Scope to one federated member (its `repo` tag).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Output directory (default: codegraph-out/sql).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Run EXPLAIN against a live database to corroborate perf findings.
+        /// Requires building with `--features live-explain`.
+        #[arg(long)]
+        explain: bool,
+        /// Database URL for --explain (postgres://, mysql://, sqlite://).
+        #[arg(long)]
+        db_url: Option<String>,
+        /// Emit the report as JSON to stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Critique a single candidate query before writing it: perf + security
+    /// findings, cross-referenced against the graph's tables/indexes/RLS.
+    Advise {
+        /// The SQL query to critique.
+        #[arg(long)]
+        query: String,
+        /// SQL dialect hint (postgres|mysql|mssql|sqlite); advisory.
+        #[arg(long)]
+        dialect: Option<String>,
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        /// Scope to one federated member (its `repo` tag).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Emit the report as JSON to stdout.
+        #[arg(long)]
+        json: bool,
     },
 }
 

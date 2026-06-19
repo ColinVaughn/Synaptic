@@ -25,7 +25,7 @@ const SOURCE_EXTS: &[&str] = &[
 
 /// Normalize a node label into the lookup key: `foo()`→`foo`, `.bar()`→`bar`,
 /// lowercased.
-fn normalise_label(label: &str) -> String {
+fn normalize_label(label: &str) -> String {
     label
         .trim()
         .trim_matches(|c| c == '(' || c == ')')
@@ -50,7 +50,7 @@ fn is_resolvable(n: &Node) -> bool {
     if label.is_empty() || SOURCE_EXTS.iter().any(|e| label.ends_with(e)) {
         return false;
     }
-    !normalise_label(label).is_empty()
+    !normalize_label(label).is_empty()
 }
 
 fn source_stem(source_file: &str) -> String {
@@ -67,7 +67,7 @@ fn build_label_index(kg: &KnowledgeGraph) -> HashMap<String, Vec<NodeId>> {
         if !is_resolvable(n) {
             continue;
         }
-        idx.entry(normalise_label(&n.label))
+        idx.entry(normalize_label(&n.label))
             .or_default()
             .push(n.id.clone());
     }
@@ -86,7 +86,7 @@ fn build_symbol_index(kg: &KnowledgeGraph) -> HashMap<(String, String), Vec<Node
         if stem.is_empty() {
             continue;
         }
-        idx.entry((stem, normalise_label(&n.label)))
+        idx.entry((stem, normalize_label(&n.label)))
             .or_default()
             .push(n.id.clone());
     }
@@ -145,13 +145,13 @@ fn resolve_bash_sources(
     // the `imports_from` target id and a function's owning-file id.
     let file_id = |path: &str| NodeId(codegraph_core::make_id(&[path]));
 
-    // functions_by_file[file_id][normalised label] = bash function node ids.
+    // functions_by_file[file_id][normalized label] = bash function node ids.
     let mut functions_by_file: HashMap<NodeId, HashMap<String, Vec<NodeId>>> = HashMap::new();
     for n in kg.nodes() {
         if !is_bash_file(&n.source_file) || !n.label.trim().ends_with("()") {
             continue;
         }
-        let key = normalise_label(&n.label);
+        let key = normalize_label(&n.label);
         if key.is_empty() {
             continue;
         }
@@ -168,7 +168,7 @@ fn resolve_bash_sources(
         if rc.is_member_call || !is_bash_file(&rc.source_file) {
             continue;
         }
-        let callee = normalise_label(&rc.callee);
+        let callee = normalize_label(&rc.callee);
         if callee.is_empty() {
             continue;
         }

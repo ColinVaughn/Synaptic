@@ -1,5 +1,5 @@
 //! Cross-file pass: bind JS/TS imports to real nodes now that the full file set
-//! is known (the per-file extractor only emits specifier-labelled stubs).
+//! is known (the per-file extractor only emits specifier-labeled stubs).
 //!
 //! Three kinds of import are handled:
 //! - **relative code** (`./foo`, `../bar`) → bound to the in-corpus file node,
@@ -88,7 +88,7 @@ fn classify_asset_ext(ext: &str) -> Option<&'static str> {
 }
 
 /// Resolve a relative specifier against the importer directory (posix),
-/// normalising `.`/`..`. `None` if it climbs above the root.
+/// normalizing `.`/`..`. `None` if it climbs above the root.
 fn join_normalize(dir: &str, spec: &str) -> Option<String> {
     let mut parts: Vec<&str> = if dir.is_empty() {
         Vec::new()
@@ -262,7 +262,7 @@ pub fn resolve_imports(
     stats.asset_nodes = new_nodes.len();
     nodes.append(&mut new_nodes);
 
-    // Drop specifier stubs (relative-labelled, or any we rewired away from) that
+    // Drop specifier stubs (relative-labeled, or any we rewired away from) that
     // are no longer referenced by an edge. Bare-package stubs (`react`) keep
     // their import edge, so they survive.
     if stats.relative_bound + stats.alias_bound + stats.assets > 0 {

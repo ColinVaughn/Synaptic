@@ -18,8 +18,8 @@ Node kinds:
 
 - File nodes (one per source file).
 - Class / type nodes (classes, interfaces, traits, structs, enums, protocols,
-  modules, and similar), labelled by their bare name.
-- Function / method nodes, labelled `name()` for free functions and `.name()`
+  modules, and similar), labeled by their bare name.
+- Function / method nodes, labeled `name()` for free functions and `.name()`
   for methods.
 - External stub nodes for imported packages and referenced symbols defined
   outside the corpus, so edges to them survive the build's dangling-edge drop.
@@ -212,11 +212,16 @@ directory-scoped for cross-file resolution within a module.
 
 ### SQL (`.sql`)
 
-Hybrid tree-sitter plus regex recovery. Nodes for `CREATE TABLE` / `VIEW` /
-`FUNCTION` / `PROCEDURE` / `TRIGGER`. Edges: `contains`, `references` (foreign
-keys via `REFERENCES`), `reads_from` (`FROM` / `JOIN`), and `triggers` (trigger
-to its table). The regex pass recovers procedures and triggers the grammar fails
-to parse.
+Parsed with the multi-dialect [`sqlparser`](https://crates.io/crates/sqlparser)
+crate plus a regex recovery pass. Object nodes for `CREATE TABLE` / `VIEW` /
+`FUNCTION` / `PROCEDURE` / `TRIGGER`, and additionally `column`, `index`,
+`policy` (Postgres `CREATE POLICY` / SQL Server `CREATE SECURITY POLICY`), and
+`role` (`GRANT`) nodes. Edges: `contains`, `references` (foreign keys),
+`reads_from` (`FROM` / `JOIN`), `triggers`, `has_column`, `has_index` /
+`indexes`, `protected_by` (RLS), and `grants`; tables carry `rls_enabled` /
+`rls_forced` state. Application code that runs SQL is linked to the tables it
+touches (`queries` / `writes_to` / `calls_proc`). This SQL-aware graph powers the
+[SQL Auditing](SQL-Auditing) rules (`codegraph sql audit` / `advise`).
 
 ## Regex-based languages
 

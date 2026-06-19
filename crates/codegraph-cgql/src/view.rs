@@ -28,7 +28,7 @@ pub struct NodeView {
 
 impl NodeView {
     /// Resolve a single node id. A dangling id (no node in `kg`) yields a view
-    /// labelled by the id with empty metadata, so output stays total.
+    /// labeled by the id with empty metadata, so output stays total.
     pub fn resolve(kg: &KnowledgeGraph, id: &NodeId) -> NodeView {
         match kg.node(id) {
             Some(n) => NodeView {

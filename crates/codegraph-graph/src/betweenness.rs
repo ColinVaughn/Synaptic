@@ -209,8 +209,8 @@ mod tests {
     }
 
     #[test]
-    fn star_centre_is_one() {
-        // Centre H connects three leaves; nx normalized centre = 1.0.
+    fn star_center_is_one() {
+        // Center H connects three leaves; nx normalized center = 1.0.
         let g = kg(&["H", "A", "B", "C"], &[("H", "A"), ("H", "B"), ("H", "C")]);
         let bw = node_betweenness(&g);
         assert!((bw[&id("H")] - 1.0).abs() < 1e-9, "H={}", bw[&id("H")]);

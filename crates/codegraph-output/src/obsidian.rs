@@ -12,7 +12,7 @@ use codegraph_graph::{cohesion_score, KnowledgeGraph};
 
 use crate::common::file_type_str;
 
-/// Graph-view colour palette (RGB ints) cycled per community in
+/// Graph-view color palette (RGB ints) cycled per community in
 /// `.obsidian/graph.json`.
 const COMMUNITY_RGB: &[u32] = &[
     0x4F_8D_C0, 0xC0_5F_4F, 0x5F_C0_7A, 0xB0_8D_4F, 0x8D_5F_C0, 0x4F_B8_C0, 0xC0_4F_9E, 0x7A_C0_4F,
@@ -42,7 +42,7 @@ fn safe_name(label: &str) -> String {
 }
 
 /// Write an Obsidian vault under `dir`: one note per node, per-community overview
-/// notes (with a Dataview live query), and `.obsidian/graph.json` colouring the
+/// notes (with a Dataview live query), and `.obsidian/graph.json` coloring the
 /// graph view by community. `community_labels` supplies semantic names (empty →
 /// `Community N`). Returns the count of notes written.
 pub fn to_obsidian(
@@ -136,7 +136,7 @@ pub fn to_obsidian(
         written += 1;
     }
 
-    // community overview notes + graph-view colouring
+    // community overview notes + graph-view coloring
     let mut communities: BTreeMap<u32, Vec<NodeId>> = BTreeMap::new();
     let mut node_comm: HashMap<NodeId, u32> = HashMap::new();
     for n in kg.nodes() {
@@ -212,7 +212,7 @@ pub fn to_obsidian(
         written += 1;
     }
 
-    // `.obsidian/graph.json`: colour the graph view by community via a
+    // `.obsidian/graph.json`: color the graph view by community via a
     // frontmatter search on each note's `community:` field.
     let obs_dir = dir.join(".obsidian");
     fs::create_dir_all(&obs_dir)?;
@@ -278,7 +278,7 @@ mod tests {
             cids.iter().map(|c| (*c, format!("Domain-{c}"))).collect();
         to_obsidian(&kg, &labels, dir.path()).unwrap();
 
-        // .obsidian/graph.json colours nodes by community.
+        // .obsidian/graph.json colors nodes by community.
         let gj = fs::read_to_string(dir.path().join(".obsidian/graph.json")).unwrap();
         assert!(gj.contains("colorGroups"), "graph.json: {gj}");
         assert!(gj.contains("community"), "color query by community: {gj}");

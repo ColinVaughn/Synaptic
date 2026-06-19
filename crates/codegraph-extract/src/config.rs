@@ -5,7 +5,7 @@ pub enum ImportStyle {
     /// `import X [as y]` / `from M import …` with relative-import path resolution.
     Python,
     /// `import { x } from 'm'` / `import X from 'm'` / `export { x } from 'm'`:
-    /// `imports_from` / `re_exports` edges to a specifier-labelled module stub,
+    /// `imports_from` / `re_exports` edges to a specifier-labeled module stub,
     /// plus named-import records (module stem = last path component) for B3.
     EcmaScript,
     /// Java `import a.b.C;` (and `import static a.b.C.m;`): an `imports` edge to

@@ -522,7 +522,7 @@ mod tests {
         use std::sync::{Condvar, Mutex as StdMutex};
         use tokio::sync::oneshot;
 
-        // A gh/git runner whose first call blocks until released, signalling once
+        // A gh/git runner whose first call blocks until released, signaling once
         // when it begins blocking (so the test knows the server is now "busy").
         struct GateRunner {
             started: StdMutex<Option<oneshot::Sender<()>>>,

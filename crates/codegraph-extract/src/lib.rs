@@ -100,6 +100,8 @@ pub mod rust;
 pub mod scala;
 #[cfg(feature = "lang-sql")]
 pub mod sql;
+#[cfg(feature = "lang-sql")]
+mod sql_semantic;
 #[cfg(feature = "lang-swift")]
 pub mod swift;
 #[cfg(feature = "lang-verilog")]
@@ -115,6 +117,8 @@ pub use cache::{cached_extract_source, AST_CACHE_VERSION};
 pub use config::{ImportStyle, LanguageConfig, TypeRefStyle};
 pub use resolve::{resolve_imports, resolve_relative_imports, ResolveStats};
 pub use result::{ExtractionResult, ImportRecord, RawCall};
+#[cfg(feature = "lang-sql")]
+pub use sql_semantic::{emit_sql_columns, set_emit_sql_columns};
 pub use tsconfig::{load_alias_resolver, AliasResolver};
 pub use walker::extract_with_config;
 

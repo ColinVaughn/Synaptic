@@ -71,12 +71,57 @@ pub fn to_json(kg: &KnowledgeGraph, path: &Path) -> io::Result<()> {
 }
 
 /// Render an interactive `graph.html` (vis-network from CDN; embeds the graph
-/// JSON). Communities drive node colour; edge colour reflects confidence.
+/// JSON). Communities drive node color; node shape and the hover tooltip reflect
+/// the node kind (table/column/…); edge color reflects the relation.
 /// A simplified explorer — the full WebGL SPA is a future deliverable (§6.1).
 /// Above this node count, `graph.html` renders a community-aggregated view (one
 /// super-node per community) instead of every node, so the browser stays
 /// responsive; the full node-level view stays available in `graph-3d.html`.
 const HTML_AGGREGATE_THRESHOLD: usize = 5000;
+
+/// vis-network shape for a node kind (table → diamond, column → dot, view →
+/// triangle, index/class → square, procedure → hexagon, trigger → star, code →
+/// dot).
+fn vis_shape(kind: &str) -> &'static str {
+    match crate::common::kind_shape(kind) {
+        "diamond" => "diamond",
+        "triangle" => "triangle",
+        "triangle_down" => "triangleDown",
+        "square" => "square",
+        "star" => "star",
+        "hexagon" | "pentagon" => "hexagon",
+        _ => "dot",
+    }
+}
+
+/// vis-network hover title: kind + the SQL facts (dialect, type, PK/FK, RLS) + file.
+fn html_node_title(n: &codegraph_core::Node, kind: &str) -> String {
+    let mut t = format!("{} \u{b7} {kind}", n.label);
+    let s = |k: &str| n.extra.get(k).and_then(|v| v.as_str());
+    let b = |k: &str| n.extra.get(k).and_then(|v| v.as_bool()) == Some(true);
+    if let Some(d) = s("dialect") {
+        t.push_str(&format!(" \u{b7} {d}"));
+    }
+    if let Some(dt) = s("data_type") {
+        t.push_str(&format!(" \u{b7} {dt}"));
+    }
+    if b("pk") {
+        t.push_str(" \u{b7} PK");
+    }
+    if let Some(fk) = s("fk_target") {
+        t.push_str(&format!(" \u{b7} FK->{fk}"));
+    }
+    if b("rls_enabled") {
+        t.push_str(" \u{b7} RLS");
+    }
+    if b("security_invoker") {
+        t.push_str(" \u{b7} security_invoker");
+    }
+    if !n.source_file.is_empty() {
+        t.push_str(&format!(" ({})", n.source_file));
+    }
+    t
+}
 
 pub fn to_html_string(kg: &KnowledgeGraph) -> String {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -97,6 +142,7 @@ pub fn to_html_string(kg: &KnowledgeGraph) -> String {
     let mut relations: BTreeSet<String> = BTreeSet::new();
     let mut communities: BTreeSet<i64> = BTreeSet::new();
     let mut max_deg = 1usize;
+    let mut has_columns = false;
     let notice;
 
     if aggregated {
@@ -152,23 +198,23 @@ pub fn to_html_string(kg: &KnowledgeGraph) -> String {
             max_deg = max_deg.max(d);
             let group = n.community.map(|c| c as i64).unwrap_or(-1);
             communities.insert(group);
+            let kind = crate::common::visual_kind(n);
+            has_columns |= kind == "column";
             vis_nodes.push(serde_json::json!({
                 "id": n.id.0, "label": n.label, "group": group,
-                "value": d + 1, "deg": d,
-                "title": format!("{} ({})", n.label, n.source_file),
+                "value": d + 1, "deg": d, "kind": kind,
+                "shape": vis_shape(kind),
+                "title": html_node_title(n, kind),
             }));
         }
         for (i, e) in gd.links.iter().enumerate() {
             relations.insert(e.relation.clone());
-            let color = match e.confidence {
-                codegraph_core::Confidence::Extracted => "#4caf50",
-                codegraph_core::Confidence::Inferred => "#ff9800",
-                codegraph_core::Confidence::Ambiguous => "#f44336",
-            };
+            // Color by relation so SQL structure and code->SQL bridges stand out.
+            let color = crate::common::relation_color(&e.relation);
             vis_edges.push(serde_json::json!({
                 "id": i, "from": e.source.0, "to": e.target.0,
                 "relation": e.relation, "title": e.relation,
-                "color": { "color": color, "opacity": 0.6 },
+                "color": { "color": color, "opacity": 0.65 },
             }));
         }
         notice = String::new();
@@ -192,6 +238,13 @@ pub fn to_html_string(kg: &KnowledgeGraph) -> String {
         format!(
             "<div style=\"padding:6px 8px;background:#fff8e1;border-bottom:1px solid #f0e0a0;font-size:13px\">{notice}</div>"
         )
+    };
+    // The hide-columns toggle only appears when columns are present (it bounds the
+    // dominant node class in a SQL graph without a re-extract).
+    let column_toggle = if has_columns && !aggregated {
+        "<label><input type=\"checkbox\" id=\"hidecols\"> hide SQL columns</label>"
+    } else {
+        ""
     };
 
     format!(
@@ -218,6 +271,7 @@ pub fn to_html_string(kg: &KnowledgeGraph) -> String {
   <label>min degree <input id="mindeg" type="range" min="0" max="{max_deg}" value="0"><span id="mindegval">0</span></label>
   <select id="community"><option value="">all communities</option>{community_opts}</select>
   <details><summary>relations</summary><div id="relations"></div></details>
+  {column_toggle}
 </div>
 {notice_html}
 <div id="graph"></div>
@@ -246,8 +300,10 @@ pub fn to_html_string(kg: &KnowledgeGraph) -> String {
   function applyFilters() {{
     const minDeg = +document.getElementById('mindeg').value;
     const comm = document.getElementById('community').value;
+    const hc = document.getElementById('hidecols');
+    const hideCols = hc && hc.checked;
     const visible = new Set(allNodes
-      .filter(n => (n.deg || 0) >= minDeg && (comm === '' || String(n.group) === comm))
+      .filter(n => (n.deg || 0) >= minDeg && (comm === '' || String(n.group) === comm) && !(hideCols && n.kind === 'column'))
       .map(n => n.id));
     nodes.update(allNodes.map(n => ({{ id: n.id, hidden: !visible.has(n.id) }})));
     edges.update(allEdges.map(e => ({{
@@ -260,6 +316,8 @@ pub fn to_html_string(kg: &KnowledgeGraph) -> String {
     applyFilters();
   }});
   document.getElementById('community').addEventListener('change', applyFilters);
+  const hcEl = document.getElementById('hidecols');
+  if (hcEl) hcEl.addEventListener('change', applyFilters);
   relDiv.addEventListener('change', ev => {{
     if (ev.target.dataset && ev.target.dataset.rel) {{
       relState[ev.target.dataset.rel] = ev.target.checked;
@@ -282,6 +340,7 @@ pub fn to_html_string(kg: &KnowledgeGraph) -> String {
         max_deg = max_deg,
         community_opts = community_opts,
         notice_html = notice_html,
+        column_toggle = column_toggle,
         nodes_json = nodes_json,
         edges_json = edges_json,
         relations_json = relations_json,
@@ -371,6 +430,36 @@ mod tests {
         for l in obj["links"].as_array().unwrap() {
             assert!(l.get("confidence_score").and_then(Value::as_f64).is_some());
         }
+    }
+
+    #[test]
+    fn html_is_kind_aware() {
+        let gd: GraphData = serde_json::from_value(serde_json::json!({
+            "nodes": [
+                {"id":"app.f","label":"f()","file_type":"code","source_file":"a.py","community":0},
+                {"id":"sql:orders","label":"orders","file_type":"code","source_file":"s.sql","kind":"table","community":0,"dialect":"sqlserver"},
+                {"id":"sql:orders:col:total","label":"total","file_type":"code","source_file":"s.sql","kind":"column","community":0,"data_type":"int"}
+            ],
+            "links": [
+                {"source":"app.f","target":"sql:orders","relation":"queries","confidence":"INFERRED","source_file":"a.py"},
+                {"source":"sql:orders","target":"sql:orders:col:total","relation":"has_column","confidence":"EXTRACTED","source_file":"s.sql"}
+            ]
+        }))
+        .unwrap();
+        let html = to_html_string(&KnowledgeGraph::from_graph_data(gd));
+        assert!(
+            html.contains("\"shape\":\"diamond\""),
+            "table -> diamond shape"
+        );
+        assert!(html.contains("\"kind\":\"column\""), "node carries kind");
+        assert!(
+            html.contains(crate::common::relation_color("queries")),
+            "queries edge colored by relation"
+        );
+        assert!(
+            html.contains("hide SQL columns"),
+            "hide-columns toggle present"
+        );
     }
 
     #[test]

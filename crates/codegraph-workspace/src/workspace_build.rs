@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use codegraph_core::{GraphData, NodeId};
 use codegraph_graph::{
     apply_communities, cluster, mark_cross_repo_edges, resolve_parameterized_routes,
-    resolve_route_handlers, ClusterOptions, KnowledgeGraph,
+    resolve_route_handlers, resolve_sql_queries, ClusterOptions, KnowledgeGraph,
 };
 use codegraph_incremental::{rebuild, ChangeSet, RebuildOptions};
 use std::collections::BTreeMap;
@@ -106,6 +106,7 @@ fn finalize(
     // one repo to a parameterized server route in another (/users/7 -> /users/{id});
     // finally flag the cross-language edges that end up spanning repos.
     let (hn, he) = resolve_route_handlers(resolved.nodes, resolved.links);
+    let (hn, he) = resolve_sql_queries(hn, he);
     let (rn, re) = resolve_parameterized_routes(hn, he);
     resolved.nodes = rn;
     resolved.links = mark_cross_repo_edges(&resolved.nodes, re);

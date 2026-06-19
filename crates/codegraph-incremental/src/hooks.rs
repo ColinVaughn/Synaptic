@@ -68,7 +68,7 @@ pub fn repo_root(start: &Path) -> Result<PathBuf, HookError> {
 }
 
 /// Lexically resolve `.`/`..` without touching the filesystem (so a `..` is
-/// cancelled rather than left as a component the ancestor-walk could bounce off).
+/// canceled rather than left as a component the ancestor-walk could bounce off).
 fn normalize_lexical(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in p.components() {

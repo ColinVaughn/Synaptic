@@ -3,17 +3,47 @@
 //! output is reproducible). Repulsion uses a Barnes–Hut quadtree (O(n log n)),
 //! so the layout scales to a few thousand nodes (`MAX_NODES`); labels are
 //! suppressed past `LABEL_MAX_NODES` to keep large SVGs readable. Node size
-//! scales with degree, colour with community.
+//! scales with degree, color with community.
 
 use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::Path;
 
-use codegraph_core::{Confidence, NodeId};
+use codegraph_core::{Confidence, Node, NodeId};
 use codegraph_graph::KnowledgeGraph;
 
 use crate::common::degrees;
+
+/// Hover tooltip text for a node: kind + the SQL facts that matter (dialect, type,
+/// PK/FK, RLS), then the source file.
+fn node_tooltip(n: &Node, kind: &str) -> String {
+    let mut t = format!("{} \u{b7} {kind}", n.label);
+    let s = |k: &str| n.extra.get(k).and_then(|v| v.as_str());
+    let b = |k: &str| n.extra.get(k).and_then(|v| v.as_bool()) == Some(true);
+    if let Some(d) = s("dialect") {
+        t.push_str(&format!(" \u{b7} {d}"));
+    }
+    if let Some(dt) = s("data_type") {
+        t.push_str(&format!(" \u{b7} {dt}"));
+    }
+    if b("pk") {
+        t.push_str(" \u{b7} PK");
+    }
+    if let Some(fk) = s("fk_target") {
+        t.push_str(&format!(" \u{b7} FK->{fk}"));
+    }
+    if b("rls_enabled") {
+        t.push_str(" \u{b7} RLS");
+    }
+    if b("security_invoker") {
+        t.push_str(" \u{b7} security_invoker");
+    }
+    if !n.source_file.is_empty() {
+        t.push_str(&format!(" ({})", n.source_file));
+    }
+    t
+}
 
 /// Cap on laid-out nodes. Barnes–Hut keeps the layout O(n log n), so this is a
 /// bound on SVG *file size* / browser render cost, not the layout math; larger
@@ -41,7 +71,7 @@ const HYBRID_THRESHOLD: usize = 1000;
 /// One cell of the quadtree. Internal cells have `children`; leaves carry their
 /// points as `(index, x, y)` (normally one; more only at `MAX_DEPTH`).
 struct QNode {
-    /// Cell centre + half-side (square cells).
+    /// Cell center + half-side (square cells).
     cx: f64,
     cy: f64,
     half: f64,
@@ -100,7 +130,7 @@ impl QuadTree {
         QuadTree { arena }
     }
 
-    /// Which child quadrant `(x, y)` falls into, relative to a cell centre.
+    /// Which child quadrant `(x, y)` falls into, relative to a cell center.
     fn quadrant(cx: f64, cy: f64, x: f64, y: f64) -> usize {
         (if x >= cx { 1 } else { 0 }) | (if y >= cy { 2 } else { 0 })
     }
@@ -123,7 +153,7 @@ impl QuadTree {
     }
 
     fn insert(arena: &mut Vec<QNode>, node_idx: usize, p: usize, px: f64, py: f64, depth: usize) {
-        // Fold this point into the cell's aggregate centre of mass.
+        // Fold this point into the cell's aggregate center of mass.
         {
             let n = &mut arena[node_idx];
             let new_mass = n.mass + 1.0;
@@ -172,7 +202,7 @@ impl QuadTree {
     }
 
     /// Net repulsion force on point `i` (at `pos_i`): cells with
-    /// `width / dist < theta` are approximated as a point mass at their centre
+    /// `width / dist < theta` are approximated as a point mass at their center
     /// of mass; otherwise recurse. Leaves contribute exact pairwise force,
     /// skipping self. `k` is the FR ideal edge length.
     fn repulsion(&self, i: usize, pos_i: (f64, f64), k: f64, theta: f64) -> (f64, f64) {
@@ -344,7 +374,7 @@ fn packed_layout(n: usize, edges: &[(usize, usize)]) -> Vec<(f64, f64)> {
 }
 
 /// Scale positions in place to fit `[0,1] × [0,1]`; a degenerate (single point
-/// or coincident) set collapses to the centre.
+/// or coincident) set collapses to the center.
 fn normalize_unit(pos: &mut [(f64, f64)]) {
     let (mut minx, mut miny, mut maxx, mut maxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     for &(x, y) in pos.iter() {
@@ -439,7 +469,19 @@ fn repulsion(pos: &[(f64, f64)], k: f64) -> Vec<(f64, f64)> {
 /// Deterministic FR layout over the first `MAX_NODES` nodes; returns positions
 /// in SVG coordinates plus the node ids that were laid out (graph order).
 fn layout(kg: &KnowledgeGraph) -> (Vec<NodeId>, Vec<(f64, f64)>) {
-    let ids: Vec<NodeId> = kg.nodes().take(MAX_NODES).map(|n| n.id.clone()).collect();
+    // When truncating, keep structural/code nodes over columns: columns dominate
+    // SQL graphs and are the least informative individually, so they should be the
+    // first dropped rather than crowding out tables and call structure.
+    let ids: Vec<NodeId> = if kg.node_count() <= MAX_NODES {
+        kg.nodes().map(|n| n.id.clone()).collect()
+    } else {
+        let mut ns: Vec<&Node> = kg.nodes().collect();
+        ns.sort_by_key(|n| u8::from(crate::common::visual_kind(n) == "column"));
+        ns.into_iter()
+            .take(MAX_NODES)
+            .map(|n| n.id.clone())
+            .collect()
+    };
     let n = ids.len();
     if n == 0 {
         return (ids, vec![]);
@@ -455,7 +497,7 @@ fn layout(kg: &KnowledgeGraph) -> (Vec<NodeId>, Vec<(f64, f64)>) {
     // don't stretch the viewport and crush the main cluster.
     let mut pos = packed_layout(n, &edges);
 
-    // Normalize to the viewport with a single (aspect-preserving) scale, centred,
+    // Normalize to the viewport with a single (aspect-preserving) scale, centerd,
     // so components aren't stretched into ellipses.
     let (mut minx, mut miny, mut maxx, mut maxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     for &(x, y) in &pos {
@@ -475,7 +517,7 @@ fn layout(kg: &KnowledgeGraph) -> (Vec<NodeId>, Vec<(f64, f64)>) {
     (ids, pos)
 }
 
-/// Points of a regular `sides`-gon centred at `(cx, cy)` with circumradius `r`,
+/// Points of a regular `sides`-gon centerd at `(cx, cy)` with circumradius `r`,
 /// rotated by `rot` radians — as an SVG `points` attribute value.
 fn regular_polygon(cx: f64, cy: f64, r: f64, sides: usize, rot: f64) -> String {
     let mut pts = String::new();
@@ -489,10 +531,12 @@ fn regular_polygon(cx: f64, cy: f64, r: f64, sides: usize, rot: f64) -> String {
     pts
 }
 
-/// SVG for a node: a `circle` for code, or a distinct per-`asset_kind` shape
-/// (keeping the community colour) for non-code asset nodes.
+/// SVG for a node, shaped by its [`crate::common::kind_shape`] token (table →
+/// diamond, view → triangle, column → small dot, index/class → square, procedure
+/// → hexagon, trigger → star, policy → inverted triangle, code → circle), keeping
+/// the community color.
 fn node_shape_svg(
-    asset_kind: Option<&str>,
+    shape: &str,
     cx: f64,
     cy: f64,
     r: f64,
@@ -507,54 +551,77 @@ fn node_shape_svg(
             regular_polygon(cx, cy, r, sides, rot)
         )
     };
-    match asset_kind {
-        None => format!("<circle cx=\"{cx:.1}\" cy=\"{cy:.1}\" r=\"{r:.1}\" fill=\"{color}\" opacity=\"{opacity}\"{extra}/>\n"),
-        Some("stylesheet") => format!(
+    let circle = |rr: f64| {
+        format!(
+            "<circle cx=\"{cx:.1}\" cy=\"{cy:.1}\" r=\"{rr:.1}\" fill=\"{color}\" opacity=\"{opacity}\"{extra}/>\n"
+        )
+    };
+    match shape {
+        "dot" => circle(r * 0.6),
+        "square" => format!(
             "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"{color}\" opacity=\"{opacity}\"{extra}/>\n",
             cx - r, cy - r, 2.0 * r, 2.0 * r
         ),
-        Some("data") => poly(4, PI / 4.0),    // diamond
-        Some("image") => poly(3, -PI / 2.0),  // triangle
-        Some("font") => poly(6, 0.0),         // hexagon
-        Some("media") => poly(5, -PI / 2.0),  // pentagon
-        Some(_) => poly(8, PI / 8.0),         // asset: octagon
+        "diamond" => poly(4, PI / 4.0),
+        "triangle" => poly(3, -PI / 2.0),
+        "triangle_down" => poly(3, PI / 2.0),
+        "pentagon" => poly(5, -PI / 2.0),
+        "hexagon" => poly(6, 0.0),
+        "star" => star_svg(cx, cy, r, color, opacity, extra),
+        _ => circle(r),
     }
 }
 
-/// A compact legend (backing panel + one row per node kind) in the lower-left.
-fn legend_svg() -> String {
-    let rows = [
-        ("code", "circle"),
-        ("stylesheet", "square"),
-        ("data", "diamond"),
-        ("image", "triangle"),
-        ("font", "hexagon"),
-        ("media", "pentagon"),
-    ];
+/// A 5-point star polygon (alternating outer/inner radius).
+fn star_svg(cx: f64, cy: f64, r: f64, color: &str, opacity: f64, extra: &str) -> String {
+    use std::f64::consts::PI;
+    let mut pts = String::new();
+    for i in 0..10 {
+        let rr = if i % 2 == 0 { r } else { r * 0.42 };
+        let a = -PI / 2.0 + i as f64 * PI / 5.0;
+        if i > 0 {
+            pts.push(' ');
+        }
+        pts.push_str(&format!(
+            "{:.1},{:.1}",
+            cx + rr * a.cos(),
+            cy + rr * a.sin()
+        ));
+    }
+    format!("<polygon points=\"{pts}\" fill=\"{color}\" opacity=\"{opacity}\"{extra}/>\n")
+}
+
+/// A compact legend (backing panel + one shape row per node kind present) in the
+/// lower-left, so the SQL/code shapes are self-describing.
+fn legend_svg(kinds: &[&str]) -> String {
+    if kinds.is_empty() {
+        return String::new();
+    }
     let sw = "#cfd2ff";
     let x = 16.0;
-    let row_h = 17.0;
-    let top = H - (rows.len() as f64 * row_h) - 22.0;
+    let row_h = 16.0;
+    let shown: Vec<&&str> = kinds.iter().take(14).collect();
+    let top = H - (shown.len() as f64 * row_h) - 22.0;
     let mut s = format!(
-        "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"150\" height=\"{:.1}\" rx=\"6\" fill=\"#14142a\" opacity=\"0.82\"/>\n",
+        "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"140\" height=\"{:.1}\" rx=\"6\" fill=\"#14142a\" opacity=\"0.82\"/>\n",
         x - 8.0,
         top - 8.0,
-        rows.len() as f64 * row_h + 16.0
+        shown.len() as f64 * row_h + 16.0
     );
-    for (i, (label, kind)) in rows.iter().enumerate() {
+    for (i, kind) in shown.iter().enumerate() {
         let cy = top + i as f64 * row_h + 6.0;
         let cx = x + 6.0;
-        let glyph = match *kind {
-            "circle" => None,
-            "square" => Some("stylesheet"),
-            "diamond" => Some("data"),
-            "triangle" => Some("image"),
-            "hexagon" => Some("font"),
-            _ => Some("media"),
-        };
-        s.push_str(&node_shape_svg(glyph, cx, cy, 5.0, sw, 0.9, ""));
+        s.push_str(&node_shape_svg(
+            crate::common::kind_shape(kind),
+            cx,
+            cy,
+            5.0,
+            sw,
+            0.9,
+            "",
+        ));
         s.push_str(&format!(
-            "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"10\" fill=\"#cfd2ff\">{label}</text>\n",
+            "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"10\" fill=\"#cfd2ff\">{kind}</text>\n",
             x + 18.0,
             cy + 3.5
         ));
@@ -562,7 +629,7 @@ fn legend_svg() -> String {
     s
 }
 
-/// A legend panel (lower-right) mapping each repo tag to its ring colour. Only
+/// A legend panel (lower-right) mapping each repo tag to its ring color. Only
 /// emitted for federated graphs.
 fn repo_legend_svg(repos: &std::collections::BTreeMap<String, usize>) -> String {
     let row_h = 17.0;
@@ -605,8 +672,9 @@ pub fn to_svg_string(kg: &KnowledgeGraph) -> String {
     body.push_str(&format!(
         "<rect width=\"{W}\" height=\"{H}\" fill=\"#1a1a2e\"/>\n"
     ));
-    // Edges first (under nodes). Cross-repo edges get an accent colour + extra
-    // width; confidence still reads via the dash.
+    // Edges first (under nodes). Color reads the relation (so SQL structure and
+    // code->SQL bridges stand apart from generic calls); cross-repo edges take an
+    // accent + extra width; confidence still reads via the dash.
     for e in kg.edges() {
         if let (Some(&(x0, y0)), Some(&(x1, y1))) = (pos_of.get(&e.source), pos_of.get(&e.target)) {
             let dash = if e.confidence == Confidence::Extracted {
@@ -614,29 +682,42 @@ pub fn to_svg_string(kg: &KnowledgeGraph) -> String {
             } else {
                 " stroke-dasharray=\"4 3\""
             };
+            let bridge = crate::common::is_bridge_relation(&e.relation);
             let (stroke, width, opacity) = if e.cross_repo {
                 (crate::common::CROSS_REPO_COLOR, 1.6, 0.7)
-            } else if e.confidence == Confidence::Extracted {
-                ("#aaaaaa", 0.8, 0.6)
+            } else if bridge {
+                (crate::common::relation_color(&e.relation), 1.4, 0.85)
             } else {
-                ("#aaaaaa", 0.8, 0.3)
+                (
+                    crate::common::relation_color(&e.relation),
+                    0.8,
+                    if e.confidence == Confidence::Extracted {
+                        0.55
+                    } else {
+                        0.3
+                    },
+                )
             };
             body.push_str(&format!(
                 "<line x1=\"{x0:.1}\" y1=\"{y0:.1}\" x2=\"{x1:.1}\" y2=\"{y1:.1}\" stroke=\"{stroke}\" stroke-width=\"{width}\" opacity=\"{opacity}\"{dash}/>\n"
             ));
         }
     }
-    // Nodes + labels. Fill = community; ring = repo (federated); external-package
-    // stubs render dimmed with a dashed ring.
+    // Nodes + labels. Fill = community; shape = kind (table=diamond, column=dot,
+    // …); ring = repo (federated); external-package stubs render dimmed.
     let repos = crate::common::repo_index(kg);
     let federated = !repos.is_empty();
+    let mut kinds_present: std::collections::BTreeSet<&'static str> =
+        std::collections::BTreeSet::new();
     for n in kg.nodes() {
         let Some(&(x, y)) = pos_of.get(&n.id) else {
             continue;
         };
         let color = crate::common::community_color(n.community.unwrap_or(0) as usize);
         let r = 4.0 + 10.0 * (*deg.get(&n.id).unwrap_or(&1) as f64 / max_deg);
-        let asset_kind = n.extra.get("asset_kind").and_then(|v| v.as_str());
+        let kind = crate::common::visual_kind(n);
+        kinds_present.insert(kind);
+        let shape = crate::common::kind_shape(kind);
         // Federation styling (repo ring + dimmed external stubs) is computed ONLY
         // for federated graphs, so single-repo SVG is identical (and as fast).
         let (extra, opacity) = if federated {
@@ -660,7 +741,13 @@ pub fn to_svg_string(kg: &KnowledgeGraph) -> String {
         } else {
             (String::new(), 0.9)
         };
-        body.push_str(&node_shape_svg(asset_kind, x, y, r, color, opacity, &extra));
+        // Wrap the shape in a <g> with a <title> so hovering shows the kind + SQL
+        // facts (the SVG previously had no tooltip at all).
+        body.push_str(&format!(
+            "<g><title>{}</title>{}</g>\n",
+            crate::common::xml_escape(&node_tooltip(n, kind)),
+            node_shape_svg(shape, x, y, r, color, opacity, &extra)
+        ));
         if show_labels {
             body.push_str(&format!(
                 "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"7\" fill=\"white\">{}</text>\n",
@@ -670,7 +757,8 @@ pub fn to_svg_string(kg: &KnowledgeGraph) -> String {
             ));
         }
     }
-    body.push_str(&legend_svg());
+    let kinds: Vec<&str> = kinds_present.iter().copied().collect();
+    body.push_str(&legend_svg(&kinds));
     if !repos.is_empty() {
         body.push_str(&repo_legend_svg(&repos));
     }
@@ -696,34 +784,57 @@ mod tests {
 
     #[test]
     fn node_shape_svg_picks_shape_by_kind() {
-        assert!(node_shape_svg(None, 0.0, 0.0, 5.0, "#fff", 0.9, "").starts_with("<circle"));
-        assert!(
-            node_shape_svg(Some("stylesheet"), 0.0, 0.0, 5.0, "#fff", 0.9, "").starts_with("<rect")
-        );
-        assert!(
-            node_shape_svg(Some("data"), 0.0, 0.0, 5.0, "#fff", 0.9, "").starts_with("<polygon")
-        );
-        assert!(
-            node_shape_svg(Some("image"), 0.0, 0.0, 5.0, "#fff", 0.9, "").starts_with("<polygon")
-        );
-        // Unknown asset kind falls back to a polygon (octagon), never a circle.
-        assert!(
-            node_shape_svg(Some("weird"), 0.0, 0.0, 5.0, "#fff", 0.9, "").starts_with("<polygon")
-        );
+        assert!(node_shape_svg("circle", 0.0, 0.0, 5.0, "#fff", 0.9, "").starts_with("<circle"));
+        assert!(node_shape_svg("dot", 0.0, 0.0, 5.0, "#fff", 0.9, "").starts_with("<circle"));
+        assert!(node_shape_svg("square", 0.0, 0.0, 5.0, "#fff", 0.9, "").starts_with("<rect"));
+        assert!(node_shape_svg("diamond", 0.0, 0.0, 5.0, "#fff", 0.9, "").starts_with("<polygon"));
+        assert!(node_shape_svg("triangle", 0.0, 0.0, 5.0, "#fff", 0.9, "").starts_with("<polygon"));
+        assert!(node_shape_svg("star", 0.0, 0.0, 5.0, "#fff", 0.9, "").starts_with("<polygon"));
     }
 
     #[test]
     fn asset_graph_renders_legend_and_asset_shape() {
         let svg = to_svg_string(&kg_with_asset());
-        // The stylesheet asset node (community 0, #4caf50) renders as a rect.
+        // The stylesheet asset node (community 0, #4caf50) renders as a square rect.
         assert!(
             svg.contains("<rect x=") && svg.contains("fill=\"#4caf50\""),
-            "asset node should render as a coloured rect"
+            "asset node should render as a colored rect"
         );
         assert!(svg.contains("<circle"), "the code node stays a circle");
-        assert!(svg.contains(">stylesheet<"), "legend lists stylesheet");
-        assert!(svg.contains(">data<"), "legend lists data");
-        assert!(svg.contains("<polygon"), "legend draws polygon glyphs");
+        assert!(
+            svg.contains(">stylesheet<"),
+            "legend lists the present stylesheet kind"
+        );
+    }
+
+    #[test]
+    fn sql_graph_shapes_kinds_tooltips_and_relation_colors() {
+        let gd: codegraph_core::GraphData = serde_json::from_value(serde_json::json!({
+            "nodes": [
+                {"id":"app.f","label":"f()","file_type":"code","source_file":"a.py","community":0},
+                {"id":"sql:orders","label":"orders","file_type":"code","source_file":"s.sql","kind":"table","community":0,"rls_enabled":true},
+                {"id":"sql:orders:col:total","label":"total","file_type":"code","source_file":"s.sql","kind":"column","community":0,"data_type":"int"}
+            ],
+            "links": [
+                {"source":"app.f","target":"sql:orders","relation":"queries","confidence":"INFERRED","source_file":"a.py"},
+                {"source":"sql:orders","target":"sql:orders:col:total","relation":"has_column","confidence":"EXTRACTED","source_file":"s.sql"}
+            ]
+        }))
+        .unwrap();
+        let svg = to_svg_string(&KnowledgeGraph::from_graph_data(gd));
+        assert!(
+            svg.contains("<polygon"),
+            "table renders as a diamond polygon"
+        );
+        assert!(
+            svg.contains(crate::common::relation_color("queries")),
+            "the code->SQL bridge edge uses the bridge color"
+        );
+        assert!(svg.contains("<title>"), "nodes now carry hover tooltips");
+        assert!(
+            svg.contains(">table<") && svg.contains(">column<"),
+            "legend lists the SQL kinds present"
+        );
     }
 
     #[test]
@@ -951,18 +1062,15 @@ mod tests {
 
     #[test]
     fn labels_suppressed_above_threshold() {
-        // The fixed legend has its own <text> rows; node labels are extra.
-        let legend_texts = legend_svg().matches("<text").count();
-        // Small graphs keep node labels (more <text> than just the legend).
-        assert!(to_svg_string(&sample_kg()).matches("<text").count() > legend_texts);
-        // Large graphs drop node labels (unreadable clutter + file bloat); only
-        // the legend text remains.
+        // Below LABEL_MAX_NODES node labels render; above it only the legend's
+        // per-kind text rows remain (less <text> overall), but nodes still draw.
+        let small = to_svg_string(&big_kg(400));
         let big = to_svg_string(&big_kg(600));
-        assert_eq!(
-            big.matches("<text").count(),
-            legend_texts,
-            "node labels suppressed above LABEL_MAX_NODES (legend text remains)"
+        assert!(
+            small.matches("<text").count() > big.matches("<text").count(),
+            "small graph keeps node labels"
         );
+        assert!(big.matches("<text").count() >= 1, "legend text remains");
         assert!(big.contains("<circle"), "but nodes still render");
     }
 

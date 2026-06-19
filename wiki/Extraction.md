@@ -170,8 +170,13 @@ the same way.
 Extraction uses an on-disk per-file cache so an unchanged file skips re-parsing
 on a rebuild.
 
-- **Location:** `codegraph-out/cache/ast/v{version}/<key>.json`. Each entry is
-  the serialized extraction result for one file.
+- **Location:** `codegraph-out/cache/ast/v{version}/<key>.mp`. Each entry is the
+  serialized extraction result for one file, stored as MessagePack (the default
+  `cache-binary` feature; ~36% faster to decode and ~14% smaller than JSON, which
+  matters most on column-heavy SQL schemas). Built with `--no-default-features`
+  and without `cache-binary`, entries are JSON (`<key>.json`) instead. The two
+  formats live on distinct extensions, so a cache written by one build is simply
+  a miss (never a misread) for the other.
 - **Key:** a BLAKE3 hash of `(relative path, file content)`. The path is part of
   the key because node ids embed it, so two files with identical bytes at
   different paths get distinct entries. Any change to a file's bytes is a cache

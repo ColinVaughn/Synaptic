@@ -27,7 +27,7 @@ static CODE_KW_RE: LazyLock<Regex> =
 /// Index of the `}` matching the `{` at `open`, skipping braces inside string/
 /// char literals and `//` / `/* */` comments so a `"}"` or `// }` in the C#
 /// body doesn't close the block early. (C# verbatim/interpolated strings aren't
-/// modelled — a rare edge for `@code`.) `None` if unbalanced.
+/// modeled — a rare edge for `@code`.) `None` if unbalanced.
 #[cfg(feature = "lang-razor")]
 fn match_brace(source: &str, open: usize) -> Option<usize> {
     let bytes = source.as_bytes();

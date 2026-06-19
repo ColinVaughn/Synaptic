@@ -711,3 +711,61 @@ fn url_inside_rust_string_is_not_masked() {
     let r = extract_source("c.rs", src).unwrap();
     assert_eq!(route_labels(&r), vec!["/real".to_string()]);
 }
+
+// --- SQL string literal detection ---
+
+#[cfg(feature = "lang-python")]
+#[cfg(feature = "lang-sql")]
+#[test]
+fn scan_sql_links_python_query_to_table_stub() {
+    let src = br#"
+def list_orders(conn):
+    cur = conn.cursor()
+    cur.execute("SELECT id, total FROM orders WHERE tenant_id = %s", [t])
+    return cur.fetchall()
+"#;
+    let r = extract_source("app.py", src).unwrap();
+    let to_orders = r.edges.iter().any(|e| {
+        (e.relation == "queries" || e.relation == "reads_from")
+            && r.nodes
+                .iter()
+                .any(|n| n.id == e.target && n.label.eq_ignore_ascii_case("orders"))
+    });
+    assert!(
+        to_orders,
+        "expected a code->orders SQL edge; edges: {:?}",
+        r.edges
+    );
+}
+
+#[cfg(feature = "lang-javascript")]
+#[cfg(feature = "lang-sql")]
+#[test]
+fn scan_sql_classifies_write_as_writes_to() {
+    let src = br#"const sql = "UPDATE accounts SET balance = balance - 1 WHERE id = $1";"#;
+    let r = extract_source("app.js", src).unwrap();
+    let writes = r.edges.iter().any(|e| e.relation == "writes_to");
+    assert!(
+        writes,
+        "UPDATE should map to writes_to; edges: {:?}",
+        r.edges
+    );
+}
+
+#[cfg(feature = "lang-python")]
+#[cfg(feature = "lang-sql")]
+#[test]
+fn scan_sql_stores_snippet_on_edge() {
+    let src = br#"q = "SELECT * FROM orders WHERE id = 1""#;
+    let r = extract_source("app.py", src).unwrap();
+    let e = r
+        .edges
+        .iter()
+        .find(|e| e.relation == "queries")
+        .expect("queries edge");
+    let snip = e.extra.get("sql").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        snip.to_ascii_uppercase().starts_with("SELECT"),
+        "snippet: {snip}"
+    );
+}

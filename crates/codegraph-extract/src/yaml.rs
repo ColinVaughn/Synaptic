@@ -71,7 +71,7 @@ pub fn extract_yaml_source(path: &str, source: &[u8]) -> ExtractionResult {
         } else if has("services") {
             ex.extract_dependency_group(&mut b, &file_nid, pairs, "services", "depends_on");
         } else if has("kind") {
-            // Kubernetes manifest: one node labelled by `kind` (+ metadata.name).
+            // Kubernetes manifest: one node labeled by `kind` (+ metadata.name).
             // `idx` disambiguates same-kind/no-name docs within a multi-doc file.
             let kind = ex.value_scalar_for(pairs, "kind").unwrap_or_default();
             if !kind.is_empty() {

@@ -4,7 +4,7 @@ members = ["crates/*", "bin/*"]
 
 [workspace.package]
 edition = "2021"
-version = "0.2.4"
+version = "0.2.5"
 license = "AGPL-3.0-or-later"
 rust-version = "1.95"
 
@@ -41,6 +41,7 @@ codegraph-refactor = { path = "crates/codegraph-refactor" }
 codegraph-predict = { path = "crates/codegraph-predict" }
 codegraph-sandbox = { path = "crates/codegraph-sandbox" }
 codegraph-eval = { path = "crates/codegraph-eval" }
+codegraph-sqlaudit = { path = "crates/codegraph-sqlaudit" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 rayon = "1"
@@ -105,3 +106,4 @@ hmac = "0.12"
 tempfile = "3"
 criterion = "0.5"
 proptest = "1"
+sqlparser = "0.54"

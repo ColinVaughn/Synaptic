@@ -6,8 +6,9 @@ environment variables are read directly from the process environment.
 
 ## Feature flags (build time)
 
-All feature flags are off by default except the language extractors. Enable integrations at
-build time (see [Installation](Installation)):
+The integration features below are off by default; enable them at build time (see
+[Installation](Installation)). The language extractors, `cross-language`, and
+`cache-binary` are **on** by default.
 
 | Feature | Enables | Used by |
 |---|---|---|
@@ -16,6 +17,15 @@ build time (see [Installation](Installation)):
 | `office` | Spreadsheet ingest | `codegraph ingest office` |
 | `gws` | Google-Workspace ingest | `codegraph ingest gws` |
 | `media` | Audio/video transcription and YouTube URL ingest | `codegraph ingest media` |
+| `live-explain` | Live database `EXPLAIN` for sequential-scan detection | `codegraph sql audit --explain` |
+
+Two non-language features are **on by default** and can be turned off with
+`--no-default-features` (then re-list the `lang-*` features you want):
+
+| Feature (default on) | Effect |
+|---|---|
+| `cross-language` | Post-extraction passes that infer cross-language edges (FFI, subprocess, HTTP/RPC, code->SQL). |
+| `cache-binary` | Stores the per-file AST cache as MessagePack instead of JSON — faster to decode and smaller, which helps most on column-heavy SQL schemas. |
 
 Language support is controlled by 38 `lang-*` features, all on by default. To compile a
 single language (used in CI), build with `--no-default-features --features lang-<name>`. See

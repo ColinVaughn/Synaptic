@@ -10,7 +10,8 @@ use codegraph_graph::{
     ambiguous_concept_pairs, analyze, apply_communities, build_from_parts, cluster,
     deduplicate_entities, deterministic_tiebreak, merge_pairs, resolve_command_invocations,
     resolve_parameterized_routes, resolve_pyo3_imports, resolve_pyo3_modules,
-    resolve_route_handlers, resolve_symbols, BuildOptions, ClusterOptions, KnowledgeGraph,
+    resolve_route_handlers, resolve_sql_queries, resolve_symbols, BuildOptions, ClusterOptions,
+    KnowledgeGraph,
 };
 use codegraph_llm::{
     build_client, default_concurrency, estimate_cost, resolve_backend, LlmClient, SemanticCache,
@@ -31,7 +32,13 @@ pub(crate) fn run_extract(
     obsidian: bool,
     wiki: bool,
     semantic: bool,
+    no_columns: bool,
 ) -> Result<()> {
+    // Process-wide SQL extraction switch; set before any file is extracted.
+    if no_columns {
+        codegraph_extract::set_emit_sql_columns(false);
+        println!("note: --no-columns set; SQL column/index nodes will be skipped");
+    }
     let root = root
         .canonicalize()
         .with_context(|| format!("resolving {}", root.display()))?;
@@ -263,6 +270,18 @@ pub(crate) fn run_extract(
         let n = he.len() - before_edges;
         kg = build_from_parts(hn, he, vec![], &opts);
         println!("Resolved {n} cross-file route handler(s)");
+    }
+
+    // Cross-language: collapse SQL table stubs (from scan_sql code-side detection)
+    // into the real table node defined in a .sql file (same id, stub has empty
+    // source_file). Runs after route resolution; edges are unchanged.
+    let before_sql = kg.node_count();
+    let (sn, se) =
+        resolve_sql_queries(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
+    if sn.len() < before_sql {
+        let n = before_sql - sn.len();
+        kg = build_from_parts(sn, se, vec![], &opts);
+        println!("Resolved {n} SQL table stub(s)");
     }
 
     // Cross-language: merge concrete client route paths into the parameterized

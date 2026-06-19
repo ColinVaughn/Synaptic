@@ -15,6 +15,11 @@ and its CGQL query language instead. CGQL is documented in full under
 [Commands](Commands#search); `search` matches on structure rather than on the
 free-text relevance that `query` scores.
 
+The SQL layer is queryable the same way: `MATCH (t:table) WHERE t.rls_enabled =
+"false" RETURN t` finds tables without row-level security, and `(c:column)` /
+`(i:index)` / `(p:policy)` match the SQL objects extraction now models (tables
+also expose `dialect`). See [SQL Auditing](SQL-Auditing).
+
 ## query
 
 ```
@@ -47,7 +52,7 @@ The expansion order is the only difference between the two traversal modes:
 
 - Default (breadth-first): collects nodes in order of distance from the seeds, so
   the result is a broad neighbourhood around the matches.
-- `--dfs`: follows a chain as far as it goes before fanning out, favouring deep
+- `--dfs`: follows a chain as far as it goes before fanning out, favoring deep
   call chains over wide neighbourhoods.
 
 ```
@@ -160,7 +165,7 @@ the first match and never guessing on a tie:
 1. Exact node id.
 2. Unique case-insensitive exact label.
 3. Unique bare name: the label with a trailing `()` removed, matched
-   case-insensitively (so `transform` matches a node labelled `transform()`).
+   case-insensitively (so `transform` matches a node labeled `transform()`).
 4. Unique case-insensitive source file path.
 5. Unique case-insensitive substring of a label.
 

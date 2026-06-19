@@ -11,8 +11,13 @@ description = "Tree-sitter code extraction for CodeGraph (multi-language behind 
 # of JSON. A self-describing format is required: Node/Edge use `#[serde(flatten)]`
 # + `serde_json::Value`, which need `deserialize_any` (rules out bincode/postcard;
 # CBOR works but benched ~58% slower to decode). MessagePack benched ~36% faster
-# to decode than serde_json and ~14% smaller on disk. Off by default; the on-disk
-# format is internal/derived (hash-keyed, never committed) so flipping it is safe.
+# to decode than serde_json and ~14% smaller on disk. On by default: column-heavy
+# SQL schemas produce large per-file results, so the smaller/faster cache helps
+# most there. The on-disk format is internal/derived (hash-keyed under a versioned
+# dir, never committed) and JSON/MessagePack entries live on distinct extensions,
+# so the switch is safe -- a pre-existing JSON entry is a miss, not a misread. To
+# fall back to JSON, build with `--no-default-features` and re-list the desired
+# `lang-*`/`cross-language` features without `cache-binary`.
 cache-binary = ["dep:rmp-serde"]
 # `cross-language`: post-extraction passes that detect cross-language coupling
 # the per-language AST walk does not model (FFI bindings, subprocess invocations,
@@ -20,7 +25,7 @@ cache-binary = ["dep:rmp-serde"]
 # source, so it needs the regex dep. On by default; turn off to drop the extra
 # inferred edges (and the regex build cost on single-language builds).
 cross-language = ["dep:regex"]
-default = ["cross-language", "lang-python", "lang-javascript", "lang-typescript", "lang-go", "lang-rust", "lang-java", "lang-csharp", "lang-kotlin", "lang-swift", "lang-c", "lang-cpp", "lang-json", "lang-yaml", "lang-hcl", "lang-sql", "lang-ruby", "lang-php", "lang-lua", "lang-bash", "lang-powershell", "lang-scala", "lang-dart", "lang-elixir", "lang-julia", "lang-zig", "lang-asp", "lang-groovy", "lang-objc", "lang-verilog", "lang-fortran", "lang-vue", "lang-svelte", "lang-astro", "lang-dotnet", "lang-markdown", "lang-apex", "lang-pascal", "lang-razor"]
+default = ["cache-binary", "cross-language", "lang-python", "lang-javascript", "lang-typescript", "lang-go", "lang-rust", "lang-java", "lang-csharp", "lang-kotlin", "lang-swift", "lang-c", "lang-cpp", "lang-json", "lang-yaml", "lang-hcl", "lang-sql", "lang-ruby", "lang-php", "lang-lua", "lang-bash", "lang-powershell", "lang-scala", "lang-dart", "lang-elixir", "lang-julia", "lang-zig", "lang-asp", "lang-groovy", "lang-objc", "lang-verilog", "lang-fortran", "lang-vue", "lang-svelte", "lang-astro", "lang-dotnet", "lang-markdown", "lang-apex", "lang-pascal", "lang-razor"]
 lang-python = ["dep:tree-sitter-python"]
 lang-javascript = ["dep:tree-sitter-javascript"]
 lang-typescript = ["dep:tree-sitter-typescript"]
@@ -35,7 +40,7 @@ lang-cpp = ["dep:tree-sitter-cpp"]
 lang-json = ["dep:tree-sitter-json"]
 lang-yaml = ["dep:tree-sitter-yaml"]
 lang-hcl = ["dep:tree-sitter-hcl"]
-lang-sql = ["dep:tree-sitter-sequel", "dep:regex"]
+lang-sql = ["dep:tree-sitter-sequel", "dep:regex", "dep:sqlparser"]
 lang-ruby = ["dep:tree-sitter-ruby"]
 lang-php = ["dep:tree-sitter-php"]
 lang-lua = ["dep:tree-sitter-lua"]
@@ -106,6 +111,7 @@ tree-sitter-groovy = { workspace = true, optional = true }
 tree-sitter-objc = { workspace = true, optional = true }
 tree-sitter-verilog = { workspace = true, optional = true }
 tree-sitter-fortran = { workspace = true, optional = true }
+sqlparser = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

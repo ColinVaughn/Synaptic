@@ -441,6 +441,30 @@ pub fn resolve_route_handlers(nodes: Vec<Node>, edges: Vec<Edge>) -> (Vec<Node>,
     (nodes, edges)
 }
 
+/// Collapse SQL table stubs (emitted by the code-side `scan_sql` detector) into
+/// the real table node when a `.sql` file defines it. Stubs have an empty
+/// `source_file`; the real node has the file. Both share the same id, so this
+/// keeps the node that has a source file and drops the duplicate. Code->SQL
+/// edges are unchanged (their target id already matches). Nodes are sorted by id
+/// so graph.json stays byte-stable.
+pub fn resolve_sql_queries(nodes: Vec<Node>, edges: Vec<Edge>) -> (Vec<Node>, Vec<Edge>) {
+    use std::collections::HashMap;
+    let mut best: HashMap<NodeId, Node> = HashMap::new();
+    for n in nodes {
+        match best.get(&n.id) {
+            Some(existing) if !existing.source_file.is_empty() => {
+                // Keep the existing real node; ignore this stub.
+            }
+            _ => {
+                best.insert(n.id.clone(), n);
+            }
+        }
+    }
+    let mut nodes: Vec<Node> = best.into_values().collect();
+    nodes.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+    (nodes, edges)
+}
+
 /// Cross-language relations whose edges represent a real coupling boundary that
 /// can span repositories in a federated graph.
 const CROSS_LANGUAGE_RELATIONS: &[&str] =
@@ -969,5 +993,58 @@ mod tests {
             !edges.iter().any(|e| e.relation == "calls_service"),
             "import of a non-pyo3 module must not connect"
         );
+    }
+
+    // --- sql query resolution ---
+
+    #[test]
+    fn resolve_sql_queries_dedups_stub_into_real_table() {
+        use codegraph_core::{make_id, NodeId};
+        let tid = NodeId(make_id(&["sql", "orders"]));
+        let mut real = Node {
+            id: tid.clone(),
+            label: "orders".into(),
+            file_type: codegraph_core::FileType::Code,
+            source_file: "schema.sql".into(),
+            source_location: Some("L1".into()),
+            community: None,
+            repo: None,
+            extra: serde_json::Map::new(),
+        };
+        real.set_kind(codegraph_core::NodeKind::Table);
+        let stub = Node {
+            id: tid.clone(),
+            label: "orders".into(),
+            file_type: codegraph_core::FileType::Code,
+            source_file: String::new(),
+            source_location: None,
+            community: None,
+            repo: None,
+            extra: serde_json::Map::new(),
+        };
+        let edge = Edge {
+            source: NodeId("app.list".into()),
+            target: tid.clone(),
+            relation: "queries".into(),
+            confidence: codegraph_core::Confidence::Inferred,
+            source_file: "app.py".into(),
+            source_location: Some("L4".into()),
+            confidence_score: Some(0.5),
+            weight: 1.0,
+            context: Some("sql_query".into()),
+            cross_repo: false,
+            extra: serde_json::Map::new(),
+        };
+        let (nodes, edges) = resolve_sql_queries(vec![real, stub], vec![edge]);
+        let orders: Vec<_> = nodes.iter().filter(|n| n.id == tid).collect();
+        assert_eq!(orders.len(), 1, "stub deduped into real node");
+        assert_eq!(orders[0].source_file, "schema.sql");
+        assert_eq!(
+            orders[0].kind(),
+            Some(codegraph_core::NodeKind::Table),
+            "the enriched real node (not the bare stub) survives"
+        );
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target, tid);
     }
 }

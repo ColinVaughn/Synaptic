@@ -25,7 +25,7 @@ pub use cluster::{
 };
 pub use cross_language::{
     mark_cross_repo_edges, resolve_command_invocations, resolve_parameterized_routes,
-    resolve_pyo3_imports, resolve_pyo3_modules, resolve_route_handlers,
+    resolve_pyo3_imports, resolve_pyo3_modules, resolve_route_handlers, resolve_sql_queries,
 };
 pub use dedup::{
     ambiguous_concept_pairs, deduplicate_entities, deterministic_tiebreak, merge_pairs,

@@ -1,22 +1,91 @@
 # CodeGraph
 
-Turn any folder of code into a persistent, queryable **knowledge graph**, then query that
-compact graph instead of re-reading the whole codebase. CodeGraph extracts symbols and
-relationships across 30+ languages with [tree-sitter](https://tree-sitter.github.io/),
-clusters them into communities, surfaces the structurally important pieces, and writes
-both machine-readable graphs and human-readable reports and visualizations.
+Turn any folder of code into a persistent, queryable **knowledge graph**, then work over that
+graph instead of re-reading the codebase. CodeGraph extracts symbols and relationships across
+30+ languages with [tree-sitter](https://tree-sitter.github.io/), clusters them into
+communities, and surfaces the structurally important pieces.
 
-It is a single static Rust binary (`codegraph`) with no runtime and no interpreter, plus an
-MCP server so an AI coding assistant can consult the graph before grepping or reading files.
+On top of the graph it answers structural and architectural queries, traces reverse impact
+("what would this change break?"), forecasts and speculatively runs a change before you make
+it, plans safe refactors, diffs architecture across git history, and audits SQL for
+performance and security. It is a single static Rust binary (`codegraph`) with no runtime and
+no interpreter, writes machine-readable graphs alongside human-readable reports and 2D/3D/SVG
+visualizations, and ships an MCP server so an AI coding assistant can run all of that before
+grepping or reading files.
+
+---
+
+## Why
+
+- **Structural clarity.** God nodes, surprising cross-module connections, import cycles, and
+  community structure are computed for you.
+- **Impact and foresight.** Reverse impact, change forecasting, and speculative test runs
+  answer "what depends on this?" and "what would this change break?" before you touch the code.
+- **Token economy.** Querying a compact graph costs a fraction of feeding raw files to an
+  LLM, so an assistant can answer those questions without loading the repo.
+- **Confidence you can audit.** Every inferred relationship is tagged `EXTRACTED`,
+  `INFERRED`, or `AMBIGUOUS`.
+- **Scales past one repo.** A workspace can federate many repos with real cross-repo edge
+  resolution (export surfaces plus import / tsconfig / module-federation aliases).
+- **Offline by default.** A code-only corpus never makes a network call. The optional
+  semantic pass over docs and papers is the only feature that needs an API key.
+
+## Highlights
+
+- **30+ languages** via tree-sitter, each built and tested in isolation in CI, plus
+  regex-based extractors for a few formats and script extraction for Vue/Svelte/Astro and
+  Razor/Blazor. See [Languages](https://github.com/ColinVaughn/CodeGraph/wiki/Languages).
+- **One command to a full graph** plus 2D, 3D, and SVG visualizations, a Markdown report,
+  and GraphML / Cypher / DOT / Obsidian / wiki exports. See [Output Formats](https://github.com/ColinVaughn/CodeGraph/wiki/Output-Formats).
+- **Graph queries**: relevant-subgraph search, shortest path, node explanation, and
+  reverse-impact ("what depends on this"). See [Querying](https://github.com/ColinVaughn/CodeGraph/wiki/Querying).
+- **Time-travel diff**: `codegraph diff <rev1> [rev2]` (or `--since <date>`) reports how the
+  graph changed between two git revisions, added/removed dependencies, removed APIs,
+  architectural drift, new cycles, and hotspots, with a Markdown or self-contained HTML report.
+- **Architectural search (CGQL)**: `codegraph search` runs a small Cypher-inspired query
+  language over the graph, matching on structure (kind, visibility, LOC, fan-in/out,
+  variable-length paths) with `count(...)` aggregation, `--explain`, saved queries, and a
+  library of named patterns (singleton, factory, observer, service-locator, god-class). Not
+  text search.
+- **Safe refactor**: `codegraph refactor rename` / `move` / `extract` emit a confidence-scored
+  execution plan (`plan.json` + `plan.md`) for an AI agent to apply, then `refactor verify`
+  rebuilds and checks the graph held (the definition moved/renamed, no references lost, no new
+  cycles). CodeGraph never edits source itself.
+- **Change forecasting and speculative execution**: `codegraph predict` forecasts a change's
+  blast radius, public APIs at risk, at-risk tests, new cycles, risk score, and a verify
+  checklist before you edit (`--edit "<kind>:<symbol>"` forecasts a described edit before any
+  code is written); `codegraph speculate` then applies the change in a throwaway git worktree
+  and actually runs the at-risk tests plus a build/type-check, reporting real pass/fail — the
+  ground-truth half of prediction; and `codegraph eval replay` replays history to score forecast
+  quality against git ground truth (co-edited tests, removed APIs), turning prediction accuracy into
+  a CI-gateable metric. See
+  [Commands](https://github.com/ColinVaughn/CodeGraph/wiki/Commands).
+- **SQL performance & security audit**: `codegraph sql audit` flags row-level-security gaps,
+  over-broad grants, likely SQL injection, missing indexes on filter/foreign-key columns,
+  `SELECT *`, non-sargable predicates, N+1 patterns, and missing primary keys over the SQL-aware
+  graph (extraction now models columns, indexes, RLS policies, and grants, and links application
+  queries to the tables they touch). `codegraph sql advise --query "<sql>"` critiques a candidate
+  query before you write it, cross-referenced against the graph's tables/indexes/RLS. See
+  [SQL Auditing](https://github.com/ColinVaughn/CodeGraph/wiki/SQL-Auditing).
+- **MCP server** (protocol 2025-06-18) exposing 26 read-only tools over stdio or HTTP:
+  subgraph search, source reading, reverse-impact, PR/working-tree blast radius, change
+  forecasting, predictive test selection, edit-impact prediction, structural search, time-travel
+  diff, plan-only rename, and SQL audit/advise, plus prompts, completions, resource subscriptions,
+  and structured tool output. See
+  [MCP Server](https://github.com/ColinVaughn/CodeGraph/wiki/MCP-Server).
+- **Incremental rebuilds**, file watching, and git hooks keep the graph current. See
+  [Incremental Updates](https://github.com/ColinVaughn/CodeGraph/wiki/Incremental-Updates).
+- **Graph-aware PR dashboard** with blast radius and merge-order conflict detection. See
+  [PR Dashboard](https://github.com/ColinVaughn/CodeGraph/wiki/PR-Dashboard).
 
 ---
 
 ## Token economy
 
-The whole point is to **read a small answer instead of the codebase**. Measured on
-CodeGraph's own source (199 Rust files, 56,408 lines, **510,966** `cl100k` tokens), one
-`query_graph` answer to a structural question is **~1,950 tokens** (bounded by its token
-budget), versus reading the source files that answer actually touches:
+A core payoff of querying a compact graph is **reading a small answer instead of the whole
+codebase**. Measured on CodeGraph's own source (199 Rust files, 56,408 lines, **510,966**
+`cl100k` tokens), one `query_graph` answer to a structural question is **~1,950 tokens**
+(bounded by its token budget), versus reading the source files that answer actually touches:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/token-economy-dark.svg">
@@ -61,63 +130,6 @@ Time-travel `diff` is build-bound rather than query-bound: the graph delta itsel
 near-instant, and the cost is building each revision in a throwaway git worktree. Built
 graphs are cached per commit SHA under `codegraph-out/history/`, so a repeat diff of the same
 commits returns immediately and only the working-tree side is rebuilt.
-
----
-
-## Why
-
-- **Token economy.** Querying a compact graph costs a fraction of feeding raw files to an
-  LLM, so an assistant can answer "what calls this?" or "what would this change break?"
-  without loading the repo.
-- **Structural clarity.** God nodes, surprising cross-module connections, import cycles, and
-  community structure are computed for you.
-- **Confidence you can audit.** Every inferred relationship is tagged `EXTRACTED`,
-  `INFERRED`, or `AMBIGUOUS`.
-- **Scales past one repo.** A workspace can federate many repos with real cross-repo edge
-  resolution (export surfaces plus import / tsconfig / module-federation aliases).
-- **Offline by default.** A code-only corpus never makes a network call. The optional
-  semantic pass over docs and papers is the only feature that needs an API key.
-
-## Highlights
-
-- **30+ languages** via tree-sitter, each built and tested in isolation in CI, plus
-  regex-based extractors for a few formats and script extraction for Vue/Svelte/Astro and
-  Razor/Blazor. See [Languages](https://github.com/ColinVaughn/CodeGraph/wiki/Languages).
-- **One command to a full graph** plus 2D, 3D, and SVG visualizations, a Markdown report,
-  and GraphML / Cypher / DOT / Obsidian / wiki exports. See [Output Formats](https://github.com/ColinVaughn/CodeGraph/wiki/Output-Formats).
-- **Graph queries**: relevant-subgraph search, shortest path, node explanation, and
-  reverse-impact ("what depends on this"). See [Querying](https://github.com/ColinVaughn/CodeGraph/wiki/Querying).
-- **Time-travel diff**: `codegraph diff <rev1> [rev2]` (or `--since <date>`) reports how the
-  graph changed between two git revisions, added/removed dependencies, removed APIs,
-  architectural drift, new cycles, and hotspots, with a Markdown or self-contained HTML report.
-- **Architectural search (CGQL)**: `codegraph search` runs a small Cypher-inspired query
-  language over the graph, matching on structure (kind, visibility, LOC, fan-in/out,
-  variable-length paths) with `count(...)` aggregation, `--explain`, saved queries, and a
-  library of named patterns (singleton, factory, observer, service-locator, god-class). Not
-  text search.
-- **Safe refactor**: `codegraph refactor rename` / `move` / `extract` emit a confidence-scored
-  execution plan (`plan.json` + `plan.md`) for an AI agent to apply, then `refactor verify`
-  rebuilds and checks the graph held (the definition moved/renamed, no references lost, no new
-  cycles). CodeGraph never edits source itself.
-- **Change forecasting and speculative execution**: `codegraph predict` forecasts a change's
-  blast radius, public APIs at risk, at-risk tests, new cycles, risk score, and a verify
-  checklist before you edit (`--edit "<kind>:<symbol>"` forecasts a described edit before any
-  code is written); `codegraph speculate` then applies the change in a throwaway git worktree
-  and actually runs the at-risk tests plus a build/type-check, reporting real pass/fail — the
-  ground-truth half of prediction; and `codegraph eval replay` replays history to score forecast
-  quality against git ground truth (co-edited tests, removed APIs), turning prediction accuracy into
-  a CI-gateable metric. See
-  [Commands](https://github.com/ColinVaughn/CodeGraph/wiki/Commands).
-- **MCP server** (protocol 2025-06-18) exposing 23 read-only tools over stdio or HTTP:
-  subgraph search, source reading, reverse-impact, PR/working-tree blast radius, change
-  forecasting, predictive test selection, edit-impact prediction, structural search, time-travel
-  diff, and plan-only rename, plus prompts, completions, resource subscriptions, and structured
-  tool output. See
-  [MCP Server](https://github.com/ColinVaughn/CodeGraph/wiki/MCP-Server).
-- **Incremental rebuilds**, file watching, and git hooks keep the graph current. See
-  [Incremental Updates](https://github.com/ColinVaughn/CodeGraph/wiki/Incremental-Updates).
-- **Graph-aware PR dashboard** with blast radius and merge-order conflict detection. See
-  [PR Dashboard](https://github.com/ColinVaughn/CodeGraph/wiki/PR-Dashboard).
 
 ## Install
 
@@ -188,6 +200,7 @@ A code-only corpus runs fully offline; the optional LLM semantic pass over docs 
 | `refactor <action>` | Plan a safe `rename`/`move`/`extract` for an agent, then `verify` the graph (never edits source) |
 | `predict [paths...]` | Forecast a change before applying it: blast radius, at-risk tests, risk, removed APIs, cycles. Flags: `--base`, `--edit "<kind>:<symbol>"`, `--gate` |
 | `speculate [paths...]` | Run a change for real in a throwaway worktree: at-risk tests + a build/type-check, reporting pass/fail. Flags: `--patch`, `--test-cmd`, `--check-cmd` |
+| `sql <action>` | `audit` SQL for performance + security over the SQL-aware graph, or `advise --query "<sql>"` on a candidate query before writing it. Flags: `--severity`, `--explain --db-url` (live EXPLAIN, needs `--features live-explain`) |
 | `eval replay [from]` | Replay history to score forecast quality against git ground truth (CI-gateable). Flag: `--min-test-recall` |
 | `update [paths...]` | Incrementally rebuild after files change (`--full` for a full rebuild) |
 | `watch` | Rebuild automatically as files change |
@@ -211,12 +224,13 @@ codegraph serve                                                        # stdio M
 codegraph serve --http 127.0.0.1:8765 --api-key "$CODEGRAPH_API_KEY"   # HTTP server
 ```
 
-The server exposes 23 read-only tools: graph navigation (`query_graph`, `get_node`,
+The server exposes 26 read-only tools: graph navigation (`query_graph`, `get_node`,
 `get_source`, `get_neighbors`, `get_community`, `god_nodes`, `graph_stats`, `shortest_path`),
 impact analysis (`affected`, `find_callers`, `find_callees`, `predict_impact`, `affected_tests`,
 `predict_edit`), federation (`list_repos`, `repo_stats`), change/PR review (`working_changes_impact`,
-`list_prs`, `get_pr_impact`, `triage_prs`), and the advanced trio (`structural_search`,
-`time_travel_diff`, plan-only `plan_rename`). It also serves MCP prompts, argument completions, resource templates and
+`list_prs`, `get_pr_impact`, `triage_prs`), the advanced trio (`structural_search`,
+`time_travel_diff`, plan-only `plan_rename`), and SQL auditing (`audit_sql`, `advise_sql`).
+It also serves MCP prompts, argument completions, resource templates and
 subscriptions, and a small REST surface (`/api/stats`, `/api/query`, ...) for non-MCP
 clients. `codegraph install` wires the graph into a host assistant (a `PreToolUse` hook for
 Claude; a native MCP server for Codex, with `codegraph install codex --global` for the Codex
@@ -253,7 +267,7 @@ cargo fmt --all --check                            # formatting (enforced in CI)
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-The codebase is 21 library crates (`crates/*`) plus the `codegraph` binary (`bin/`). CI
+The codebase is 22 library crates (`crates/*`) plus the `codegraph` binary (`bin/`). CI
 builds each language grammar in isolation so a grammar bump that silently drops nodes/edges
 fails on its own. See [Development](https://github.com/ColinVaughn/CodeGraph/wiki/Development) and [Architecture](https://github.com/ColinVaughn/CodeGraph/wiki/Architecture).
 

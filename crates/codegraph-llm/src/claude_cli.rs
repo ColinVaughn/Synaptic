@@ -3,7 +3,7 @@
 //! Pro/Max subscribers can run the semantic pass on their plan.
 //!
 //! The CLI invocation is injected as a closure (`runner`) so the envelope-parsing
-//! logic — the part with real behaviour — is unit-testable without the CLI on
+//! logic — the part with real behavior — is unit-testable without the CLI on
 //! PATH. The default runner shells out to `claude`.
 
 use async_trait::async_trait;
@@ -69,12 +69,12 @@ impl LlmClient for ClaudeCli {
 ///
 /// Older CLI versions emit a single envelope object; newer ones (>= ~2.1) emit a
 /// JSON *array* of streamed events ending in a `{"type":"result"}` object. Both
-/// shapes are normalised. `usage` sums the plain + cache-read + cache-creation
+/// shapes are normalized. `usage` sums the plain + cache-read + cache-creation
 /// input tokens.
 pub fn parse_cli_envelope(stdout: &str) -> Result<Completion, LlmError> {
     let parsed: Value = serde_json::from_str(stdout)
         .map_err(|e| LlmError::BadResponse(format!("claude -p produced unparseable JSON: {e}")))?;
-    // Normalise the array shape (stream of events) to the single result object.
+    // Normalize the array shape (stream of events) to the single result object.
     let envelope = match &parsed {
         Value::Array(events) => events
             .iter()

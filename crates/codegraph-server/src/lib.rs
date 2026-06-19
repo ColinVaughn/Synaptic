@@ -1520,6 +1520,41 @@ impl Server {
         o
     }
 
+    /// Audit the loaded graph's SQL for perf + security findings (read-only).
+    /// Graph-only here (no trusted source root for the N+1 source-read rule;
+    /// the CLI `sql audit --root` covers that).
+    fn audit_sql_report(&self, severity: Option<&str>) -> codegraph_sqlaudit::AuditReport {
+        let opts = codegraph_sqlaudit::AuditOptions {
+            root: None,
+            min_severity: severity.and_then(codegraph_sqlaudit::Severity::parse),
+        };
+        codegraph_sqlaudit::audit(&self.kg, &opts)
+    }
+
+    fn advise_sql_report(
+        &self,
+        query: &str,
+        dialect: Option<&str>,
+    ) -> codegraph_sqlaudit::AuditReport {
+        codegraph_sqlaudit::advise(&self.kg, query, dialect)
+    }
+
+    /// Compact text rendering of an audit report for the MCP text channel.
+    fn render_audit_text(&self, r: &codegraph_sqlaudit::AuditReport) -> String {
+        let mut out = sanitize_label(&r.summary);
+        for f in r.findings.iter().take(50) {
+            out.push_str(&format!(
+                "\n[{}] {} ({})\n  {}\n  fix: {}",
+                f.severity.as_str(),
+                sanitize_label(&f.title),
+                sanitize_label(&f.rule_id),
+                sanitize_label(&f.detail),
+                sanitize_label(&f.remediation),
+            ));
+        }
+        out
+    }
+
     fn dispatch_tool(&self, params: &Value) -> Result<Value, (i64, String)> {
         let name = params.get("name").and_then(Value::as_str).unwrap_or("");
         let args = params.get("arguments").cloned().unwrap_or(Value::Null);
@@ -1592,6 +1627,23 @@ impl Server {
             );
             return Ok(json!({
                 "content": [{ "type": "text", "text": text }],
+                "isError": false
+            }));
+        }
+
+        // SQL audit/advise: compute the report once and render to both channels
+        // (mirrors the query_graph compute-once idiom). Both are read-only.
+        if name == "audit_sql" || name == "advise_sql" {
+            let report = if name == "advise_sql" {
+                self.advise_sql_report(&s("query"), opt("dialect"))
+            } else {
+                self.audit_sql_report(opt("severity"))
+            };
+            let text = self.render_audit_text(&report);
+            let structured = serde_json::to_value(&report).unwrap_or(Value::Null);
+            return Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": structured,
                 "isError": false
             }));
         }
@@ -2129,7 +2181,27 @@ fn tools_list(allow_exec: bool) -> Value {
               "symbol": { "type": "string", "description": "The symbol to edit: its name, bare name, or a node id. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." },
               "kind": { "type": "string", "description": "The edit kind: delete, signature, or visibility." },
               "depth": { "type": "integer", "description": "Reverse-impact hop bound (default 3, max 16)." }
-          }, "required": ["symbol", "kind"] } }
+          }, "required": ["symbol", "kind"] } },
+        { "name": "audit_sql", "description": "Audit the codebase's SQL for performance and security problems over the SQL-aware graph: row-level-security gaps, over-broad grants, likely SQL injection, missing indexes on filter/foreign-key columns, SELECT *, non-sargable predicates, N+1 patterns, and missing primary keys. Returns findings with severity, location, and a fix for each.",
+          "inputSchema": { "type": "object", "properties": {
+              "severity": { "type": "string", "enum": ["critical","high","medium","low","info"], "description": "Only return findings at least this severe (default: all)." }
+          } },
+          "outputSchema": { "type": "object", "properties": {
+              "version": {"type":"integer"}, "summary": {"type":"string"},
+              "findings": { "type": "array", "items": { "type": "object", "properties": {
+                  "rule_id": {"type":"string"}, "severity": {"type":"string"}, "category": {"type":"string"},
+                  "title": {"type":"string"}, "detail": {"type":"string"}, "location": {"type":"string"},
+                  "remediation": {"type":"string"}, "confidence": {"type":"number"} } } }
+          }, "required": ["version","summary","findings"] } },
+        { "name": "advise_sql", "description": "Critique a single candidate SQL query BEFORE writing it. Runs the same performance + security checks on the query text and cross-references the graph: whether the referenced tables exist, are behind row-level security, and have indexes on the columns you filter on. Use this while drafting SQL to write fast, safe queries.",
+          "inputSchema": { "type": "object", "properties": {
+              "query": { "type": "string", "description": "The SQL query to critique." },
+              "dialect": { "type": "string", "enum": ["postgres","mysql","mssql","sqlite"], "description": "Optional dialect hint." }
+          }, "required": ["query"] },
+          "outputSchema": { "type": "object", "properties": {
+              "version": {"type":"integer"}, "summary": {"type":"string"},
+              "findings": { "type": "array", "items": { "type": "object" } }
+          }, "required": ["version","summary","findings"] } }
     ]);
     // The single command-running tool, exposed only when the operator opted in
     // with --allow-exec. It is NOT read-only (it executes the project's tests /
@@ -2211,6 +2283,46 @@ mod tests {
     use super::*;
     use codegraph_core::{Confidence, Edge, FileType};
     use serde_json::Map;
+
+    fn sql_graph() -> GraphData {
+        serde_json::from_value(serde_json::json!({
+            "nodes": [
+                {"id":"sql:orders","label":"orders","file_type":"code","source_file":"s.sql","kind":"table","rls_enabled":false},
+                {"id":"sql:orders:col:tenant_id","label":"tenant_id","file_type":"code","source_file":"s.sql","kind":"column"}
+            ],
+            "links": [{"source":"sql:orders","target":"sql:orders:col:tenant_id","relation":"has_column","confidence":"EXTRACTED","source_file":"s.sql"}]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn audit_sql_tool_returns_structured_findings() {
+        let srv = Server::from_graph_data(sql_graph(), None);
+        let res = srv
+            .dispatch_tool(&serde_json::json!({"name":"audit_sql","arguments":{}}))
+            .unwrap();
+        let findings = res["structuredContent"]["findings"].as_array().unwrap();
+        assert!(
+            findings.iter().any(|f| f["rule_id"] == "SEC-RLS-001"),
+            "{res}"
+        );
+    }
+
+    #[test]
+    fn advise_sql_tool_critiques_a_candidate() {
+        let srv = Server::from_graph_data(sql_graph(), None);
+        let res = srv
+            .dispatch_tool(&serde_json::json!({
+                "name":"advise_sql",
+                "arguments":{"query":"SELECT * FROM orders WHERE tenant_id = 1"}
+            }))
+            .unwrap();
+        let findings = res["structuredContent"]["findings"].as_array().unwrap();
+        assert!(
+            findings.iter().any(|f| f["rule_id"] == "PERF-SEL-001"),
+            "{res}"
+        );
+    }
 
     fn node(id: &str, label: &str, community: Option<u32>) -> codegraph_core::Node {
         codegraph_core::Node {
@@ -2548,7 +2660,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 24);
+        assert_eq!(names.len(), 26);
         for expected in [
             "query_graph",
             "get_node",
@@ -2574,6 +2686,8 @@ mod tests {
             "predict_impact",
             "affected_tests",
             "predict_edit",
+            "audit_sql",
+            "advise_sql",
         ] {
             assert!(names.contains(&expected), "missing tool {expected}");
         }

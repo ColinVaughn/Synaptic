@@ -65,8 +65,8 @@ get the binary.
 [CodeGraph vs Other Tools](CodeGraph-vs-Other-Tools)
 
 **Using CodeGraph:** [Commands](Commands) - [Extraction](Extraction) - [Querying](Querying)
-- [Analysis and Reports](Analysis-and-Reports) - [Output Formats](Output-Formats) -
-[Visualizations](Visualizations)
+- [SQL Auditing](SQL-Auditing) - [Analysis and Reports](Analysis-and-Reports) -
+[Output Formats](Output-Formats) - [Visualizations](Visualizations)
 
 **Integrations:** [MCP Server](MCP-Server) - [Assistant Integration](Assistant-Integration)
 - [Ingestion](Ingestion) - [Semantic Analysis](Semantic-Analysis)

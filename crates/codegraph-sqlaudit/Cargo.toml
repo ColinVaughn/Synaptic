@@ -1,0 +1,28 @@
+[package]
+name = "codegraph-sqlaudit"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "SQL performance + security auditor for CodeGraph: rules over the SQL-aware code graph (RLS, grants, injection, indexing, anti-patterns)."
+
+[features]
+default = []
+# Connect to a live database and run EXPLAIN to corroborate static perf findings.
+# Off by default: adds a DB driver + async runtime. Opt in for `sql audit --explain`.
+live-explain = ["dep:sqlx", "dep:tokio"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+regex = { workspace = true }
+sqlparser = { workspace = true }
+codegraph-core = { workspace = true }
+codegraph-graph = { workspace = true }
+codegraph-query = { workspace = true }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "mysql", "sqlite", "any"], optional = true }
+tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

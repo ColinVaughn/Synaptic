@@ -116,7 +116,7 @@ Required keys are always present; optional keys are omitted when unset. Any othe
 - `span` optional source range object (`start_line`, `start_col`, `end_line`, `end_col`); omitted when unknown. Lines-of-code is `end_line - start_line + 1`.
 - `norm_label` lowercased search key, added by the JSON writer on export.
 
-Non-code asset nodes may also carry `asset_kind` (e.g. `stylesheet`, `data`, `image`, `font`, `media`) in `extra`, which the SVG and 3D viewers use to pick a distinct shape. Federated external-package stubs carry `external_package: true`.
+The `kind` (the node's `NodeKind`: `table`/`column`/`view`/`function`/`class`/… ) drives node **shape** and color-by-kind in the SVG, 2D, and 3D viewers, so the SQL and cross-language layers are visible — not just "code". SQL nodes also carry the facts the viewers surface on hover (`dialect`, `data_type`, `pk`, `fk_target`, `rls_enabled`, `security_invoker`). Non-code asset nodes carry `asset_kind` (e.g. `stylesheet`, `data`, `image`, `font`, `media`) for their own shapes; federated external-package stubs carry `external_package: true`.
 
 ### Link (edge) shape
 
@@ -197,7 +197,7 @@ Node ids and all attribute values are emitted as double-quoted DOT strings with 
 
 - One Markdown note per node, with YAML frontmatter (`id`, `file_type`, `community`, `source_file`) and neighbors as `[[wikilinks]]` grouped by relation. Incoming edges are grouped under `<relation> (in)`.
 - One `_Community-<id>.md` overview note per community, with cohesion, a member list, a Dataview live query (`LIST FROM "" WHERE community = N`), and links to related communities by shared-edge count.
-- `.obsidian/graph.json`, which colours the Obsidian graph view by community via a per-note frontmatter search.
+- `.obsidian/graph.json`, which colors the Obsidian graph view by community via a per-note frontmatter search.
 
 Note filenames are sanitized from labels and deduped (colliding labels get a ` (N)` suffix), and wikilinks target the actual deduped filename so they resolve. `community_labels` supply semantic community names; when empty, names fall back to `Community N`. The function returns the count of notes written.
 
