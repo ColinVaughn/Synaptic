@@ -31,4 +31,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
-      - run: cargo audit
+      # RUSTSEC-2023-0071 (Marvin Attack, `rsa` crate) has no patched release. It
+      # enters only via sqlx's optional MySQL driver and only on the client-side
+      # public-key encryption path, never the vulnerable private-key path. Matched
+      # by the `ignore` in deny.toml. Drop this flag once a constant-time `rsa` ships.
+      - run: cargo audit --ignore RUSTSEC-2023-0071
