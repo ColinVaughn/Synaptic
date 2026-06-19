@@ -1,0 +1,17 @@
+# Hand-verified ground truth for the systems-rust fixture.
+# Two real call edges. The intra-file call is resolved by the extractor; the
+# cross-file (module-qualified) call is a known false negative, so call recall
+# here is 50% by construction and the benchmark reports it honestly.
+
+[[call_edge]]
+from = "src/lib.rs::handle_request"
+to = "src/lib.rs::validate"
+
+[[call_edge]]
+from = "src/lib.rs::handle_request"
+to = "src/router.rs::route"
+
+# Reverse-impact from validate reaches its intra-file caller.
+[[blast]]
+seed = "src/lib.rs::validate"
+affects = ["src/lib.rs::handle_request"]

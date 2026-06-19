@@ -13,7 +13,10 @@ thiserror = { workspace = true }
 codegraph-core = { workspace = true }
 codegraph-graph = { workspace = true }
 codegraph-history = { workspace = true }
+codegraph-incremental = { workspace = true }
 codegraph-predict = { workspace = true }
+codegraph-query = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

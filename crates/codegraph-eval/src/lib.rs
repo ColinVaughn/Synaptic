@@ -11,12 +11,15 @@
 //! Calibration is advisory: the harness measures, it does not silently retune.
 #![forbid(unsafe_code)]
 
+mod corpus;
 mod cross_language;
+pub mod groundtruth;
 mod ledger;
 mod replay;
 mod scoring;
 
 pub use cross_language::{calibrate_cross_language, CrossLanguageReport};
+pub use groundtruth::{GroundTruth, Manifest};
 pub use ledger::{Ledger, PredictionRecord};
 pub use replay::{replay, score_commit, CommitEval, ReplayOptions, ReplayReport};
 pub use scoring::{aggregate, score_sets, Scores};
