@@ -134,47 +134,64 @@ commits returns immediately and only the working-tree side is rebuilt.
 ## Accuracy
 
 The token study above is a smoke test on one repo. The relationships CodeGraph extracts are
-validated separately, against a small **hand-labeled corpus** of mini-repos (one per language
-family) whose true call edges, test linkages, blast radii, and cross-language couplings are
-written out by hand in a `ground_truth.toml`. Every number below is exact set-comparison
-against those labels, reproducible with `codegraph eval corpus`:
+validated separately, against a **hand-labeled corpus** of mini-repos whose true call edges,
+test linkages, blast radii (including distractor nodes that must *not* be flagged), and
+cross-language couplings (including look-alikes that must *not* connect) are written out by
+hand in a `ground_truth.toml`. A preflight fails the run if any labeled symbol does not resolve,
+so a dropped node becomes a loud failure rather than a quietly smaller denominator. Every number
+below is exact set-comparison against those labels, reproducible with `codegraph eval corpus`:
 
-| Fixture | Family | Call P/R/F1 | Aff-test recall | Blast FN | Cross P/R/F1 |
+| Fixture | Family | Call P/R/F1 | Aff-test rec | Blast rec / excl / size | Cross P/R/F1 |
 |---|---|---|---|---|---|
-| systems-rust | systems-rust | 100/50/66 | — | 0% | — |
-| scripting-python | scripting-python | 100/100/100 | 100% | 0% | — |
-| web-ts | web-ts | 100/100/100 | — | 0% | — |
-| oo-java | oo-java | 100/100/100 | — | 0% | — |
+| systems-rust | systems-rust | 100/50/66 | — | 100% / 100% / 1.0 | — |
+| scripting-python | scripting-python | 100/100/100 | 100% | 100% / 100% / 2.0 | — |
+| web-ts | web-ts | 100/100/100 | — | 100% / 100% / 1.0 | — |
+| oo-java | oo-java | 100/100/100 | — | 100% / 100% / 1.0 | — |
+| systems-go | systems-go | 100/100/100 | — | 100% / 100% / 1.0 | — |
+| deep-python (multi-hop) | scripting-python | 100/100/100 | 100% | 100% / 100% / 3.0 | — |
 | cross-lang-ts-rust | cross-lang | — | — | — | 100/100/100 |
 
-Pooled call edges: **precision 100% / recall 88% / F1 93%** over 9 labeled edges; blast-radius
-false-negative rate **0%** across the corpus. Reading the numbers honestly:
+Across 7 fixtures / 6 language families / 26 labeled symbols (all resolved): pooled call edges
+**precision 100% / recall 93% / F1 96%** over 15 labeled edges; blast-radius **recall 100% with
+0 distractors leaked**; affected-test **recall 100%** over the labeled linkages with the one
+labeled *unrelated* test correctly **not** selected; cross-language **precision 100% / recall
+100%** with 2 distractor couplings correctly **not** connected. Reading the numbers honestly:
 
-- **Precision is 100%** everywhere: CodeGraph does not invent call edges.
-- **Recall is 100%** for Python/TypeScript/Java, which resolve cross-file calls through
-  imports. The **50%** on Rust is real and expected: Rust call resolution is intra-file, so a
-  module-qualified cross-file call is a true miss. (Cross-file *reachability* is still
-  preserved through `imports` edges, which is why the blast-radius false-negative rate is 0%.)
-- **Cross-language** accuracy is measured by whether a TypeScript `fetch("/session")` connects
-  to the Rust axum handler that serves it — through the path-keyed route node — and it does.
+- **No false call edges were observed** in this 15-edge corpus (precision 100%); that is a
+  result on the corpus, not a guarantee at scale.
+- **Recall is 100%** for Python/TypeScript/Java/Go, which resolve cross-file calls. The **50%**
+  on Rust is real and expected: Rust call resolution is intra-file, so a module-qualified
+  cross-file call is a true miss. Cross-file *reachability* is still preserved through `imports`
+  edges, which is why blast-radius recall stays 100%.
+- **Blast radius is scored for noise, not just misses:** each seed labels distractor nodes that
+  must stay out, and none leaked (100% exclusion); the average reported impact-set size equals
+  the true affected-set size, so the walk is not over-broad.
+- **Affected-test selection is multi-hop:** the `deep-python` fixture changes a leaf three call
+  hops below its test and still selects it, while a deliberately unrelated test is excluded
+  (so recall is not bought with precision).
+- **Cross-language precision is earned:** a TypeScript `fetch("/session")` connects to the Rust
+  axum handler that serves it, while `/sessions` (look-alike path) and an unrelated handler are
+  correctly left unconnected.
 
-The corpus is intentionally small and hand-verified (5 fixtures, 5 language families); it
-validates extraction *correctness*, not internet-scale coverage. See
-[BENCHMARKS.md](BENCHMARKS.md) for methodology and the ground-truth format.
+The corpus is intentionally small and hand-verified; it validates extraction *correctness* on
+representative shapes, not internet-scale coverage. The [scale](#scale) section measures real
+repositories. See [BENCHMARKS.md](BENCHMARKS.md) for methodology and the ground-truth format.
 
 ### Prediction calibration
 
 The change-forecast layer attaches a confidence to each predicted co-change. `codegraph eval
-calibrate` measures whether that confidence is meaningful: it walks recent history, and for
-each commit asks the predictor (trained only on prior commits) which files should co-change,
-then scores each prediction's confidence against what actually changed. It reports a
-**reliability table** (predicted vs. observed hit rate per confidence bin) and a **Brier
-score** (mean squared error of the probability; 0 is perfect).
+calibrate` measures whether that confidence is meaningful: it walks recent history, and for each
+commit uses every changed file as a seed, asks the predictor (trained only on prior commits)
+which files should co-change, then scores each prediction's confidence against what actually
+changed. It reports a **reliability table** (predicted vs. observed hit rate per confidence
+bin), a **Brier score**, the **Brier skill score** against an always-guess-the-base-rate
+baseline (so the Brier number is interpretable), and **expected calibration error**.
 
-This is a per-repo measurement, not a fixed headline number: confidence reflects each repo's
-commit habits, so run it on yours. (Run against this repo's own squash-heavy synthetic history
-it scores ~0.35, with high-confidence bins over-confident — exactly the kind of signal the
-reliability table is meant to expose.) Methodology in [BENCHMARKS.md](BENCHMARKS.md).
+This is a per-repo property: confidence reflects each repo's commit habits, so run it on yours.
+On this repo's own (squash-heavy, synthetic) history the skill score is **negative** — co-change
+prediction there is *worse than guessing the base rate*, because squashed commits touch many
+files at once and inflate apparent co-change. That is the metric working: it refuses to dress up
+a predictor that is miscalibrated on this history. Methodology in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Scale
 
