@@ -1,0 +1,15 @@
+# Hand-verified ground truth for the web-ts fixture. TypeScript call resolution
+# follows ES imports, so the cross-file call is resolved alongside the intra-file
+# call.
+
+[[call_edge]]
+from = "app.ts::handleRequest"
+to = "app.ts::validate"
+
+[[call_edge]]
+from = "app.ts::handleRequest"
+to = "router.ts::route"
+
+[[blast]]
+seed = "router.ts::route"
+affects = ["app.ts::handleRequest"]

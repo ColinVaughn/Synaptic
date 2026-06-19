@@ -80,10 +80,16 @@ impl Manifest {
 }
 
 /// The bare symbol a node represents: its display label minus the `(...)` arg
-/// hint the extractor appends to functions/methods. `handle_request()` ->
-/// `handle_request`, `Type::method()` -> `Type::method`.
+/// hint the extractor appends to functions/methods and any leading `.` some
+/// language extractors prefix onto methods. `handle_request()` ->
+/// `handle_request`, `.route()` -> `route`, `Type::method()` -> `Type::method`.
 fn node_symbol(label: &str) -> &str {
-    label.split('(').next().unwrap_or(label).trim()
+    label
+        .split('(')
+        .next()
+        .unwrap_or(label)
+        .trim()
+        .trim_start_matches('.')
 }
 
 /// Resolve a "relative/path::symbol" label to the NodeId the extractor emitted.

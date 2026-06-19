@@ -331,6 +331,46 @@ mod tests {
             .find(|f| f.dir == "systems-rust")
             .expect("systems-rust scored");
         assert_eq!(rust.call_edges.true_positive, 1);
-        assert_eq!(report.pooled_call_edges().true_positive, 1);
+    }
+
+    /// Per-fixture baselines measured 2026-06-19. These lock in current
+    /// extraction quality so a regression fails CI; if extraction IMPROVES
+    /// (e.g. Rust resolves cross-file calls), update the affected baseline
+    /// upward deliberately. `(call precision, call recall)`.
+    #[test]
+    fn per_fixture_baselines_hold() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("corpus");
+        let report = run_corpus(&root).unwrap();
+        let expect = |dir: &str| -> (u8, u8) {
+            match dir {
+                "systems-rust" => (100, 50),
+                "scripting-python" => (100, 100),
+                "web-ts" => (100, 100),
+                "oo-java" => (100, 100),
+                other => panic!("no baseline recorded for fixture {other}"),
+            }
+        };
+        for f in &report.fixtures {
+            let (p, r) = expect(&f.dir);
+            assert_eq!(
+                (f.call_edges.precision_pct(), f.call_edges.recall_pct()),
+                (p, r),
+                "{} call-edge baseline drifted: {:?}",
+                f.dir,
+                f.call_edges
+            );
+            // No labeled affected node is ever missed across the corpus.
+            assert_eq!(
+                f.blast.false_negative_pct(),
+                0,
+                "{} blast radius regressed: {:?}",
+                f.dir,
+                f.blast
+            );
+        }
+        // Pooled precision stays perfect; pooled recall stays at/above today's value.
+        let pooled = report.pooled_call_edges();
+        assert_eq!(pooled.precision_pct(), 100, "pooled call precision regressed");
+        assert!(pooled.recall_pct() >= 88, "pooled call recall regressed: {pooled:?}");
     }
 }

@@ -1,0 +1,25 @@
+# Hand-verified ground truth for the scripting-python fixture. Python call
+# resolution follows imports, so both the intra-file and the cross-file call are
+# resolved, and the test's call into covered code is captured too.
+
+[[call_edge]]
+from = "app.py::handle_request"
+to = "app.py::validate"
+
+[[call_edge]]
+from = "app.py::handle_request"
+to = "router.py::route"
+
+# The test calls the function it covers; that is a real call edge too.
+[[call_edge]]
+from = "test_router.py::test_route"
+to = "router.py::route"
+
+[[test_link]]
+test = "test_router.py::test_route"
+covers = ["router.py::route"]
+
+# Changing route affects its caller and its test.
+[[blast]]
+seed = "router.py::route"
+affects = ["app.py::handle_request", "test_router.py::test_route"]

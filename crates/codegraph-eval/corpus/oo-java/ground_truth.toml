@@ -1,0 +1,14 @@
+# Hand-verified ground truth for the oo-java fixture. Java method-call
+# resolution links across classes/files, so the cross-class call resolves.
+
+[[call_edge]]
+from = "Server.java::handleRequest"
+to = "Server.java::validate"
+
+[[call_edge]]
+from = "Server.java::handleRequest"
+to = "Router.java::route"
+
+[[blast]]
+seed = "Router.java::route"
+affects = ["Server.java::handleRequest"]
