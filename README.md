@@ -179,20 +179,25 @@ reliability table is meant to expose.) Methodology in [BENCHMARKS.md](BENCHMARKS
 ## Scale
 
 Extraction throughput across real OSS repositories spanning size tiers and language families,
-each cloned at a pinned SHA (`codegraph eval scale`; network + git, opt-in). Cold is the first
-build; warm is a rebuild with the AST cache hot:
+each cloned at a pinned SHA (`codegraph eval scale`; network + git, opt-in). Each timing is the
+median of 3 reps. **Cold** clears the AST cache first (genuinely cold); **warm** is cache-hot;
+**incr** re-extracts a single file. Measured on Windows / x86_64 / 16 logical CPUs:
 
-| Repo | Family | Tier | Files | Nodes | Edges | Cold (s) | Warm (s) | Files/s |
-|---|---|---|--:|--:|--:|--:|--:|--:|
-| memchr | systems-rust | small | 75 | 3,849 | 13,592 | 14.3 | 7.0 | 11 |
-| click | scripting-python | medium | 112 | 2,189 | 3,475 | 11.1 | 4.2 | 27 |
-| p-map | web-ts | small | 10 | 85 | 83 | 0.8 | 0.1 | 103 |
-| cobra | go | medium | 55 | 846 | 2,362 | 2.8 | 0.6 | 86 |
+| Repo | Family | Tier | Files | LOC | Nodes | Edges | Cold (s) | Warm (s) | Incr (s) | Files/s |
+|---|---|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| memchr | systems-rust | small | 75 | 70,044 | 3,849 | 13,592 | 12.5 | 7.5 | 4.3 | 10 |
+| click | scripting-python | medium | 112 | 35,063 | 2,189 | 3,475 | 2.4 | 1.7 | 0.8 | 66 |
+| p-map | web-ts | small | 10 | 1,501 | 85 | 83 | 0.07 | 0.04 | 0.04 | 269 |
+| cobra | go | medium | 55 | 19,514 | 846 | 2,362 | 1.1 | 0.7 | 0.4 | 82 |
+| axum | systems-rust | large | 348 | 52,969 | 3,656 | 9,510 | 4.7 | 3.6 | 3.5 | 97 |
 
-The numbers are machine-dependent (measured on a dev laptop) — what matters is the shape: the
-warm build is **~2-8x faster** than cold because the Rust AST cache eliminates re-parsing, so
-re-running on a working repo is cheap. The pinned SHAs make a run reproducible; refresh them
-deliberately. Full method and the manifest are in [BENCHMARKS.md](BENCHMARKS.md).
+The absolute times are machine-dependent; the reproducible signals are the **cold→warm ratio**
+(~1.4-2x; the Rust AST cache removes re-parsing on rebuilds) and that throughput scales with
+repo content rather than collapsing on the large tier. Note `memchr` is slow per-file: it is
+macro-heavy and edge-dense (13.6k edges over 75 files), which the benchmark surfaces rather than
+hides. `incr` re-extracts one file but still re-runs graph assembly, so it is not free. The
+pinned SHAs make a run reproducible; refresh them deliberately. Full method and the manifest are
+in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Install
 

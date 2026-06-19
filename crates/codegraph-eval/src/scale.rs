@@ -1,12 +1,12 @@
 //! Scale benchmark: clone pinned external repositories at fixed SHAs and measure
 //! `extract` throughput across size tiers and language families.
 //!
-//! For each repo it reports, over several repetitions (median + p95):
-//! - **cold** full build (AST cache cleared first, so cold is genuinely cold),
-//! - **warm** full build (AST cache hot),
-//! - **incremental** rebuild of a single file (the steady-state edit latency),
-//! plus files, lines, graph nodes/edges. Environment (OS/arch/CPUs/version) is
-//! recorded so a published number is interpretable.
+//! For each repo it reports, over several repetitions (median + p95): a **cold**
+//! full build (AST cache cleared first, so cold is genuinely cold), a **warm**
+//! full build (AST cache hot), and an **incremental** rebuild of a single file
+//! (the steady-state edit latency), plus files, lines, and graph nodes/edges.
+//! Environment (OS/arch/CPUs/version) is recorded so a published number is
+//! interpretable.
 //!
 //! Network + git are required, so this is opt-in (never run in CI by default). A
 //! repo that cannot be cloned or built is recorded in `skipped` and reported

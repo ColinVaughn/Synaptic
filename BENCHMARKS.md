@@ -12,9 +12,12 @@ estimated or self-reported by the tool.
 
 ## Accuracy corpus
 
-Location: `crates/codegraph-eval/corpus/`. Each fixture is a small, real, compiling mini-repo
-plus a `ground_truth.toml` that encodes only what a human verified by reading the code. A
-top-level `manifest.toml` lists the fixtures and groups them by language family.
+Location: `crates/codegraph-eval/corpus/`. Each fixture is a small, hand-written, parseable
+source fixture (not a full buildable project) plus a `ground_truth.toml` that encodes only what
+a human verified by reading the code. A top-level `manifest.toml` lists the fixtures and groups
+them by language family. A preflight resolves every labeled symbol before any metric is
+computed and fails the run if any label does not resolve, so a dropped node cannot silently
+shrink a denominator (or let a malformed fixture become a misleading oracle).
 
 Run it:
 
@@ -147,16 +150,24 @@ keep the transfer small), times a **cold** build and then a **warm** build (AST 
 records files, graph nodes/edges, both timings, and warm files/sec. A repo that cannot be
 cloned or built is logged to stderr and skipped, never fatal.
 
-### Results (pinned 2026-06-19; dev laptop)
+### Results (pinned 2026-06-19; Windows / x86_64 / 16 logical CPUs; median of 3 reps)
 
-| Repo | Family | Tier | Files | Nodes | Edges | Cold (s) | Warm (s) | Files/s |
-|---|---|---|--:|--:|--:|--:|--:|--:|
-| memchr | systems-rust | small | 75 | 3,849 | 13,592 | 14.3 | 7.0 | 11 |
-| click | scripting-python | medium | 112 | 2,189 | 3,475 | 11.1 | 4.2 | 27 |
-| p-map | web-ts | small | 10 | 85 | 83 | 0.8 | 0.1 | 103 |
-| cobra | go | medium | 55 | 846 | 2,362 | 2.8 | 0.6 | 86 |
+| Repo | Family | Tier | Files | LOC | Nodes | Edges | Cold (s) | Warm (s) | Incr (s) | Files/s |
+|---|---|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| memchr | systems-rust | small | 75 | 70,044 | 3,849 | 13,592 | 12.5 | 7.5 | 4.3 | 10 |
+| click | scripting-python | medium | 112 | 35,063 | 2,189 | 3,475 | 2.4 | 1.7 | 0.8 | 66 |
+| p-map | web-ts | small | 10 | 1,501 | 85 | 83 | 0.07 | 0.04 | 0.04 | 269 |
+| cobra | go | medium | 55 | 19,514 | 846 | 2,362 | 1.1 | 0.7 | 0.4 | 82 |
+| axum | systems-rust | large | 348 | 52,969 | 3,656 | 9,510 | 4.7 | 3.6 | 3.5 | 97 |
 
-Absolute times are machine-dependent; the reproducible signal is the **cold-to-warm ratio**
-(~2-8x here): the Rust AST cache removes re-parsing on rebuilds, so the steady-state cost on a
-working repo is the warm column. Refresh the pinned SHAs deliberately — a moved SHA changes the
-numbers.
+Notes on reading these:
+
+- Absolute times are machine-dependent; the reproducible signals are the **cold→warm ratio**
+  (~1.4-2x; the AST cache removes re-parsing) and that throughput tracks repo content rather
+  than collapsing on the large tier.
+- `Files` counts distinct source files that produced graph nodes (not every file on disk);
+  `LOC` sums lines across those files.
+- `Incr` re-extracts a single file against the prior graph but still re-runs graph assembly, so
+  it is the steady-state edit cost, not a parse-only number.
+- The harness records skipped repos in the report and warns prominently; a published run with
+  skips is partial by construction. Refresh the pinned SHAs deliberately.
