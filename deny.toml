@@ -6,7 +6,15 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # RUSTSEC-2023-0071 (Marvin Attack in the `rsa` crate) has no patched release.
+    # `rsa` is pulled in only by sqlx's MySQL driver (the optional, off-by-default
+    # `live-explain` feature), and only for client-side password encryption with
+    # the server's PUBLIC key during caching_sha2_password auth -- the vulnerable
+    # RSA private-key path the timing attack targets is never exercised here.
+    # Revisit when a constant-time `rsa` release ships (RustCrypto/RSA#390).
+    "RUSTSEC-2023-0071",
+]
 
 [licenses]
 version = 2
