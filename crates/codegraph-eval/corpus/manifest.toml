@@ -5,3 +5,15 @@
 [[fixture]]
 dir = "systems-rust"
 family = "systems-rust"
+
+[[fixture]]
+dir = "scripting-python"
+family = "scripting-python"
+
+[[fixture]]
+dir = "web-ts"
+family = "web-ts"
+
+[[fixture]]
+dir = "oo-java"
+family = "oo-java"
