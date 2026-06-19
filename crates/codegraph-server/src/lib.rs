@@ -384,10 +384,10 @@ impl Server {
         out
     }
 
-    /// `get_community` — members of a community. Uses the prebuilt, sorted
-    /// community index (kept fresh across hot-reloads) rather than rescanning
-    /// every node.
-    pub fn tool_get_community(&self, community_id: u32) -> String {
+    /// `get_community` — a page of a community's members (`offset`/`limit`), so
+    /// a large community cannot blow the context window. Uses the prebuilt,
+    /// sorted community index (kept fresh across hot-reloads).
+    pub fn tool_get_community(&self, community_id: u32, offset: usize, limit: usize) -> String {
         let Some(ids) = self
             .communities
             .get(&community_id)
@@ -395,8 +395,15 @@ impl Server {
         else {
             return format!("No community {community_id}.");
         };
-        let mut out = format!("Community {community_id} ({} nodes):", ids.len());
-        for id in ids {
+        let total = ids.len();
+        let start = offset.min(total);
+        let end = start.saturating_add(limit).min(total);
+        let page = &ids[start..end];
+        let mut out = format!(
+            "Community {community_id} (showing {} of {total}):",
+            page.len()
+        );
+        for id in page {
             if let Some(n) = self.kg.node(id) {
                 out.push_str(&format!(
                     "\n  {} [{}]",
@@ -408,13 +415,16 @@ impl Server {
         out
     }
 
-    /// `god_nodes` — the top-N highest-degree nodes.
-    pub fn tool_god_nodes(&self, top_n: usize) -> String {
+    /// `god_nodes` — a page of the degree-ranked hub list (`offset` then `top_n`).
+    /// `offset == 0` keeps the historical output byte-identical.
+    pub fn tool_god_nodes(&self, top_n: usize, offset: usize) -> String {
         // Slice from the precomputed ranked list (H3). `god_nodes` returns one
-        // node even for top_n == 0 (it pushes then checks the cap), so mirror
-        // that with `max(1)` to stay byte-identical to the old per-call path.
-        let take = self.god_nodes_all.len().min(top_n.max(1));
-        let gods = &self.god_nodes_all[..take];
+        // node even for top_n == 0 (push-then-check the cap), so mirror that with
+        // `max(1)` to stay byte-identical to the old per-call path.
+        let total = self.god_nodes_all.len();
+        let start = offset.min(total);
+        let end = start.saturating_add(top_n.max(1)).min(total);
+        let gods = &self.god_nodes_all[start..end];
         if gods.is_empty() {
             return "No nodes.".to_string();
         }
@@ -422,7 +432,7 @@ impl Server {
         for (i, g) in gods.iter().enumerate() {
             out.push_str(&format!(
                 "\n  {}. {} - {} edges",
-                i + 1,
+                start + i + 1,
                 sanitize_label(&g.label),
                 g.degree
             ));
@@ -745,9 +755,11 @@ impl Server {
         })
     }
 
-    fn god_nodes_json(&self, top_n: usize) -> Value {
-        let take = self.god_nodes_all.len().min(top_n.max(1));
-        let arr: Vec<Value> = self.god_nodes_all[..take]
+    fn god_nodes_json(&self, top_n: usize, offset: usize) -> Value {
+        let total = self.god_nodes_all.len();
+        let start = offset.min(total);
+        let end = start.saturating_add(top_n.max(1)).min(total);
+        let arr: Vec<Value> = self.god_nodes_all[start..end]
             .iter()
             .map(|g| {
                 json!({
@@ -989,8 +1001,12 @@ impl Server {
                 let rf = args.get("relation_filter").and_then(Value::as_str);
                 self.tool_get_neighbors(&s("label"), rf)
             }
-            "get_community" => self.tool_get_community(u("community_id", 0) as u32),
-            "god_nodes" => self.tool_god_nodes(u("top_n", 10) as usize),
+            "get_community" => self.tool_get_community(
+                u("community_id", 0) as u32,
+                u("offset", 0) as usize,
+                u("limit", 100) as usize,
+            ),
+            "god_nodes" => self.tool_god_nodes(u("top_n", 10) as usize, u("offset", 0) as usize),
             "graph_stats" => self.tool_graph_stats(),
             "list_repos" => self.tool_list_repos(),
             "repo_stats" => self.tool_repo_stats(&s("repo")),
@@ -1027,7 +1043,9 @@ impl Server {
         // Typed mirror of the text, for the tools that declare an outputSchema.
         let structured: Option<Value> = match name {
             "graph_stats" => Some(self.stats_json()),
-            "god_nodes" => Some(self.god_nodes_json(u("top_n", 10) as usize)),
+            "god_nodes" => {
+                Some(self.god_nodes_json(u("top_n", 10) as usize, u("offset", 0) as usize))
+            }
             "affected" => {
                 let rels: Vec<String> = args
                     .get("relations")
@@ -1055,7 +1073,7 @@ impl Server {
         let (mime, text) = match uri {
             "codegraph://report" => ("text/markdown", self.resource_report()),
             "codegraph://stats" => ("text/plain", self.tool_graph_stats()),
-            "codegraph://god-nodes" => ("text/plain", self.tool_god_nodes(10)),
+            "codegraph://god-nodes" => ("text/plain", self.tool_god_nodes(10, 0)),
             "codegraph://surprises" => ("text/plain", self.resource_surprises()),
             "codegraph://audit" => ("text/plain", self.resource_audit()),
             "codegraph://questions" => ("text/plain", self.resource_questions()),
@@ -1219,10 +1237,17 @@ fn tools_list() -> Value {
           }, "required": ["label"] } },
         { "name": "get_neighbors", "description": "List a node's directly connected nodes and the relation on each edge. Answers 'what does X call/use' and 'what calls X'.",
           "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." }, "relation_filter": { "type": "string", "description": "Optional: keep only this edge relation (substring match). Common relations: calls, imports, inherits, implements, references, contains, depends_on." } }, "required": ["label"] } },
-        { "name": "get_community", "description": "List the members of a community: a cluster of densely-connected nodes, roughly a module or subsystem. Use to see what belongs together.",
-          "inputSchema": { "type": "object", "properties": { "community_id": { "type": "integer", "description": "Community id, as reported by graph_stats, god_nodes, or a node's 'Community' field." } }, "required": ["community_id"] } },
+        { "name": "get_community", "description": "List the members of a community: a cluster of densely-connected nodes, roughly a module or subsystem. Use to see what belongs together. Paginates: a large community returns one page at a time.",
+          "inputSchema": { "type": "object", "properties": {
+              "community_id": { "type": "integer", "description": "Community id, as reported by graph_stats, god_nodes, or a node's 'Community' field." },
+              "offset": { "type": "integer", "description": "Members to skip before the page (default 0). Raise it to page through a large community." },
+              "limit": { "type": "integer", "description": "Max members to return in this page (default 100)." }
+          }, "required": ["community_id"] } },
         { "name": "god_nodes", "description": "The most-connected nodes ('god nodes' = high-degree hubs, the structurally central symbols). Use to orient in an unfamiliar codebase.",
-          "inputSchema": { "type": "object", "properties": { "top_n": { "type": "integer", "description": "How many hubs to return (default is a small list)." } } },
+          "inputSchema": { "type": "object", "properties": {
+              "top_n": { "type": "integer", "description": "How many hubs to return (default is a small list)." },
+              "offset": { "type": "integer", "description": "Hubs to skip before the page (default 0), for paging past the top ranks." }
+          } },
           "outputSchema": { "type": "object", "properties": {
               "god_nodes": { "type": "array", "items": { "type": "object", "properties": {
                   "label": {"type":"string"}, "degree": {"type":"integer"}, "id": {"type":"string"} } } }
@@ -1557,6 +1582,49 @@ mod tests {
         let mut s = server(); // no source root
         let out = call_tool(&mut s, "get_source", json!({"label": "AuthService"}));
         assert!(out.contains("Source not available"), "{out}");
+    }
+
+    #[test]
+    fn get_community_paginates() {
+        // 6 members in community 0.
+        let nodes: Vec<_> = (0..6)
+            .map(|i| {
+                let id: &'static str = Box::leak(format!("n{i}").into_boxed_str());
+                let lbl: &'static str = Box::leak(format!("N{i}").into_boxed_str());
+                node(id, lbl, Some(0))
+            })
+            .collect();
+        let gd = GraphData {
+            nodes,
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        let out = call_tool(
+            &mut s,
+            "get_community",
+            json!({"community_id":0,"offset":2,"limit":2}),
+        );
+        assert!(out.contains("showing 2 of 6"), "footer: {out}");
+        // Offset past the end yields an empty page, not a panic.
+        let past = call_tool(
+            &mut s,
+            "get_community",
+            json!({"community_id":0,"offset":99,"limit":2}),
+        );
+        assert!(past.contains("showing 0 of 6"), "{past}");
+    }
+
+    #[test]
+    fn god_nodes_offset_pages_and_numbers_absolutely() {
+        let mut s = server(); // AuthService(2), Database(1), login_user(1)
+                              // offset 0 stays byte-identical to the historical output.
+        assert_eq!(
+            call_tool(&mut s, "god_nodes", json!({"top_n": 1})),
+            "God nodes:\n  1. AuthService - 2 edges"
+        );
+        // offset 1 skips the top hub and numbers from its absolute rank.
+        let paged = call_tool(&mut s, "god_nodes", json!({"top_n": 1, "offset": 1}));
+        assert_eq!(paged, "God nodes:\n  2. Database - 1 edges");
     }
 
     #[test]
