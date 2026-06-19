@@ -162,6 +162,20 @@ The corpus is intentionally small and hand-verified (5 fixtures, 5 language fami
 validates extraction *correctness*, not internet-scale coverage. See
 [BENCHMARKS.md](BENCHMARKS.md) for methodology and the ground-truth format.
 
+### Prediction calibration
+
+The change-forecast layer attaches a confidence to each predicted co-change. `codegraph eval
+calibrate` measures whether that confidence is meaningful: it walks recent history, and for
+each commit asks the predictor (trained only on prior commits) which files should co-change,
+then scores each prediction's confidence against what actually changed. It reports a
+**reliability table** (predicted vs. observed hit rate per confidence bin) and a **Brier
+score** (mean squared error of the probability; 0 is perfect).
+
+This is a per-repo measurement, not a fixed headline number: confidence reflects each repo's
+commit habits, so run it on yours. (Run against this repo's own squash-heavy synthetic history
+it scores ~0.35, with high-confidence bins over-confident — exactly the kind of signal the
+reliability table is meant to expose.) Methodology in [BENCHMARKS.md](BENCHMARKS.md).
+
 ## Install
 
 CodeGraph builds with a stable Rust toolchain (pinned to 1.95 via

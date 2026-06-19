@@ -89,3 +89,39 @@ resolution), the affected baseline is updated upward deliberately.
   coverage at internet scale. Scale is measured separately (below).
 - Per-fixture precision is reported, not gated, on tiny fixtures where one unlabeled-but-real
   edge would swing the ratio; the regression guard pins the measured value instead.
+
+## Prediction calibration
+
+The forecast layer attaches a confidence to each predicted co-change. Calibration asks whether
+that confidence is honest: do the things it calls "70% likely" happen ~70% of the time?
+
+Run it:
+
+```sh
+codegraph eval calibrate --max-commits 200    # reliability table + Brier score
+codegraph eval calibrate --json
+```
+
+### Method
+
+For each of the most recent `--max-commits` commits (oldest-first overall), the harness:
+
+1. takes the lexicographically smallest file the commit touched as the seed;
+2. asks the co-change predictor, trained ONLY on commits preceding this one, which other files
+   should change with the seed (each suggestion carries a confidence);
+3. records a sample `(confidence, hit)` where `hit` is whether that file actually changed in
+   the commit.
+
+It then bins the samples into `--bins` equal-width confidence buckets and reports, per bucket,
+the mean predicted confidence vs. the observed hit rate (the **reliability table**), plus the
+overall **Brier score** = mean of `(confidence - outcome)^2` (0 perfect, 1 worst). The scoring
+core (`samples_from_history`) is pure and unit-tested; only history extraction touches git.
+
+### Interpreting it
+
+Calibration is a **per-repo** property: confidence is derived from that repo's own co-change
+history, so the number reflects the repo's commit granularity. A repo of small, focused commits
+calibrates differently from one of large squashed commits. Measured on CodeGraph's own
+(squash-heavy, synthetic) history the Brier score is ~0.35 with the high-confidence bins
+over-confident — which is the reliability table doing its job: surfacing where confidence and
+reality diverge, rather than asserting the predictor is well-calibrated.

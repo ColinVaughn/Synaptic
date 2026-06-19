@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 
 use codegraph_eval::{
-    calibrate_cross_language, replay, run_corpus, CorpusReport, ReplayOptions, ReplayReport,
+    calibrate_cross_language, calibrate_history, replay, run_corpus, CalibrationReport,
+    CorpusReport, ReplayOptions, ReplayReport,
 };
 
 use crate::cli::EvalAction;
@@ -36,7 +37,66 @@ pub(crate) fn run_eval(action: EvalAction) -> Result<()> {
         }),
         EvalAction::CrossLanguage { graph, json } => run_cross_language(graph, json),
         EvalAction::Corpus { root, out, json } => run_corpus_cmd(root, out, json),
+        EvalAction::Calibrate {
+            root,
+            max_commits,
+            bins,
+            out,
+            json,
+        } => run_calibrate_cmd(root, max_commits, bins, out, json),
     }
+}
+
+fn run_calibrate_cmd(
+    root: PathBuf,
+    max_commits: usize,
+    bins: usize,
+    out: Option<PathBuf>,
+    json: bool,
+) -> Result<()> {
+    let report =
+        calibrate_history(&root, max_commits, bins).map_err(|e| anyhow!("calibrating: {e}"))?;
+    let md = calibrate_markdown(&report);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        let out_dir = out.unwrap_or_else(|| PathBuf::from("codegraph-out/eval/calibrate"));
+        std::fs::create_dir_all(&out_dir)
+            .with_context(|| format!("creating {}", out_dir.display()))?;
+        std::fs::write(out_dir.join("report.json"), serde_json::to_string_pretty(&report)?)?;
+        std::fs::write(out_dir.join("report.md"), &md)?;
+        print!("{md}");
+        println!("  report: {}", out_dir.join("report.json").display());
+    }
+    Ok(())
+}
+
+fn calibrate_markdown(r: &CalibrationReport) -> String {
+    let mut s = String::from("# Prediction calibration (co-change)\n\n");
+    s.push_str(&format!(
+        "Brier score: **{:.3}** over {} prediction(s). 0 is perfect; lower is better.\n\n",
+        r.brier, r.n
+    ));
+    if r.n == 0 {
+        s.push_str("No multi-file commits in range, so there is nothing to calibrate.\n");
+        return s;
+    }
+    s.push_str("| Confidence bin | Predicted (mean) | Observed hit rate | Count |\n");
+    s.push_str("|---|--:|--:|--:|\n");
+    for b in &r.bins {
+        if b.count == 0 {
+            continue;
+        }
+        s.push_str(&format!(
+            "| {:.0}-{:.0}% | {:.0}% | {:.0}% | {} |\n",
+            b.lo * 100.0,
+            b.hi * 100.0,
+            b.mean_confidence * 100.0,
+            b.observed_hit_rate * 100.0,
+            b.count
+        ));
+    }
+    s
 }
 
 /// Default corpus root: the in-tree corpus, located relative to this crate at

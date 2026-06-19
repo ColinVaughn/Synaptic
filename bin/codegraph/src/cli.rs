@@ -568,6 +568,26 @@ pub(crate) enum EvalAction {
         #[arg(long)]
         json: bool,
     },
+    /// Calibrate co-change prediction confidence over recent history: bin each
+    /// prediction's confidence against whether it actually co-changed, and report
+    /// a reliability table plus a Brier score (0 = perfect, lower is better).
+    Calibrate {
+        /// Repo root (default: current directory).
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// How many of the most recent commits to evaluate.
+        #[arg(long, default_value_t = 200)]
+        max_commits: usize,
+        /// Number of reliability bins over [0,1].
+        #[arg(long, default_value_t = 10)]
+        bins: usize,
+        /// Output directory for report.json + report.md (default: codegraph-out/eval/calibrate).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Emit the report as JSON to stdout.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
