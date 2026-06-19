@@ -6,6 +6,8 @@ All notable changes to CodeGraph are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-06-19
+
 ### Changed
 - **MCP server, protocol 2025-11-25:** the server now negotiates protocol revision
   `2025-11-25` as its latest (legacy `2025-06-18` / `2025-03-26` / `2024-11-05` still
