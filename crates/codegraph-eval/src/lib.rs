@@ -18,6 +18,9 @@ mod ledger;
 mod replay;
 mod scoring;
 
+pub use corpus::{
+    build_fixture, run_corpus, score_fixture, BlastScore, CorpusReport, FixtureReport, PrF1,
+};
 pub use cross_language::{calibrate_cross_language, CrossLanguageReport};
 pub use groundtruth::{GroundTruth, Manifest};
 pub use ledger::{Ledger, PredictionRecord};

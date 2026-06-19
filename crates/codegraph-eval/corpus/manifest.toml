@@ -1,0 +1,7 @@
+# Registry of corpus fixtures scored by `codegraph eval corpus`. Each fixture is
+# a small, real, hand-labeled mini-repo; `family` groups them for pooled
+# per-language reporting.
+
+[[fixture]]
+dir = "systems-rust"
+family = "systems-rust"

@@ -13,7 +13,7 @@ use codegraph_graph::KnowledgeGraph;
 use codegraph_incremental::{rebuild, ChangeSet, RebuildOptions};
 use codegraph_query::{affected_nodes, DEFAULT_AFFECTED_RELATIONS};
 
-use crate::groundtruth::{resolve_label, GroundTruth};
+use crate::groundtruth::{resolve_label, GroundTruth, Manifest};
 
 /// Precision / recall / F1 from set-comparison counts.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
@@ -205,6 +205,67 @@ pub fn score_affected_tests(gd: &GraphData, gt: &GroundTruth) -> PrF1 {
     pr
 }
 
+/// Scores for one fixture across every metric.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FixtureReport {
+    pub dir: String,
+    pub family: String,
+    pub call_edges: PrF1,
+    pub affected_tests: PrF1,
+    pub blast: BlastScore,
+    pub cross_edges: PrF1,
+}
+
+/// Whole-corpus report: one entry per fixture in the manifest.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CorpusReport {
+    pub fixtures: Vec<FixtureReport>,
+}
+
+impl CorpusReport {
+    /// Pooled call-edge P/R/F1 across all fixtures (counts summed, then ratio'd).
+    pub fn pooled_call_edges(&self) -> PrF1 {
+        self.fixtures
+            .iter()
+            .fold(PrF1::default(), |mut acc, f| {
+                acc.true_positive += f.call_edges.true_positive;
+                acc.false_positive += f.call_edges.false_positive;
+                acc.false_negative += f.call_edges.false_negative;
+                acc
+            })
+    }
+}
+
+/// Score one fixture directory given its labels.
+pub fn score_fixture(dir: &Path, name: &str, family: &str) -> Result<FixtureReport, String> {
+    let gd = build_fixture(dir)?;
+    let gt = GroundTruth::parse(
+        &std::fs::read_to_string(dir.join("ground_truth.toml")).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(FixtureReport {
+        dir: name.to_string(),
+        family: family.to_string(),
+        call_edges: score_call_edges(&gd, &gt),
+        affected_tests: score_affected_tests(&gd, &gt),
+        blast: score_blast_radius(&gd, &gt),
+        cross_edges: score_cross_edges(&gd, &gt),
+    })
+}
+
+/// Score every fixture listed in `<corpus_root>/manifest.toml`.
+pub fn run_corpus(corpus_root: &Path) -> Result<CorpusReport, String> {
+    let manifest = Manifest::parse(
+        &std::fs::read_to_string(corpus_root.join("manifest.toml")).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let mut fixtures = Vec::new();
+    for f in &manifest.fixtures {
+        fixtures.push(score_fixture(&corpus_root.join(&f.dir), &f.dir, &f.family)?);
+    }
+    Ok(CorpusReport { fixtures })
+}
+
 /// Generic precision/recall over an expected and an extracted set.
 fn score_sets(expected: &HashSet<(String, String)>, extracted: &HashSet<(String, String)>) -> PrF1 {
     let tp = expected.intersection(extracted).count();
@@ -257,5 +318,19 @@ mod tests {
             0,
             "labeled caller must be in the blast radius: {score:?}"
         );
+    }
+
+    #[test]
+    fn runs_full_corpus_from_manifest() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("corpus");
+        let report = run_corpus(&root).unwrap();
+        assert!(!report.fixtures.is_empty(), "manifest lists fixtures");
+        let rust = report
+            .fixtures
+            .iter()
+            .find(|f| f.dir == "systems-rust")
+            .expect("systems-rust scored");
+        assert_eq!(rust.call_edges.true_positive, 1);
+        assert_eq!(report.pooled_call_edges().true_positive, 1);
     }
 }
