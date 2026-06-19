@@ -141,8 +141,20 @@ fn host_allowlist(addr: &SocketAddr) -> Option<HashSet<String>> {
     Some(set)
 }
 
-/// Host-allowlist + API-key gate shared by every route. Returns the rejection
-/// response when a check fails, else `None` (request may proceed).
+/// Extract the `host[:port]` authority from an `Origin` header value by
+/// stripping the `scheme://` prefix. Values without a scheme (e.g. the literal
+/// `null` sent by sandboxed/privacy-sensitive browsers) are returned unchanged
+/// so they fail the allowlist check.
+fn origin_authority(origin: &str) -> &str {
+    origin
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(origin)
+}
+
+/// Host-allowlist + Origin-allowlist + API-key gate shared by every route.
+/// Returns the rejection response when a check fails, else `None` (request may
+/// proceed).
 fn guard(headers: &HeaderMap, st: &HttpState) -> Option<Response> {
     if let Some(allowed) = &st.allowed_hosts {
         let host = headers
@@ -151,6 +163,15 @@ fn guard(headers: &HeaderMap, st: &HttpState) -> Option<Response> {
             .unwrap_or("");
         if !allowed.contains(host) {
             return Some((StatusCode::FORBIDDEN, "forbidden host").into_response());
+        }
+        // DNS-rebinding protection (2025-11-25): reject a present-but-disallowed
+        // Origin. Absent Origin (non-browser clients) is allowed. Gated on the
+        // same specific/loopback bind as the Host check; a wildcard bind
+        // disables both.
+        if let Some(origin) = headers.get("origin").and_then(|h| h.to_str().ok()) {
+            if !allowed.contains(origin_authority(origin)) {
+                return Some((StatusCode::FORBIDDEN, "forbidden origin").into_response());
+            }
         }
     }
     if let Some(key) = &st.api_key {
@@ -508,6 +529,12 @@ mod tests {
         }
     }
 
+    fn test_state_loopback() -> HttpState {
+        let mut st = test_state(None);
+        st.allowed_hosts = host_allowlist(&"127.0.0.1:8080".parse().unwrap());
+        st
+    }
+
     fn init_body() -> Body {
         Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)
     }
@@ -616,6 +643,65 @@ mod tests {
         let set = host_allowlist(&"127.0.0.1:8080".parse().unwrap()).unwrap();
         assert!(set.contains("localhost:8080"));
         assert!(set.contains("127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn origin_authority_strips_scheme() {
+        assert_eq!(origin_authority("http://localhost:8080"), "localhost:8080");
+        assert_eq!(origin_authority("https://127.0.0.1:8080"), "127.0.0.1:8080");
+        assert_eq!(origin_authority("http://localhost"), "localhost");
+        // A bare/odd value with no scheme is returned unchanged (will fail the
+        // allowlist check downstream, which is what we want).
+        assert_eq!(origin_authority("null"), "null");
+        assert_eq!(origin_authority("evil.com"), "evil.com");
+    }
+
+    #[tokio::test]
+    async fn rejects_disallowed_origin() {
+        let resp = router(test_state_loopback())
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .header("host", "127.0.0.1:8080")
+                    .header("origin", "http://evil.com")
+                    .body(init_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn allows_loopback_origin() {
+        let resp = router(test_state_loopback())
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .header("host", "127.0.0.1:8080")
+                    .header("origin", "http://localhost:8080")
+                    .body(init_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn allows_absent_origin() {
+        // Non-browser MCP clients send no Origin header; must not be rejected.
+        let resp = router(test_state_loopback())
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .header("host", "127.0.0.1:8080")
+                    .body(init_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
