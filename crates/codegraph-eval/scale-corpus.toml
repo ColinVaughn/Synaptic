@@ -1,0 +1,29 @@
+# Pinned external repositories for the scale benchmark (`codegraph eval scale`).
+# Each is cloned at its SHA and extracted cold + warm. Spans size tiers and
+# language families. Network + git required; opt-in (not run in CI).
+#
+# SHAs pinned 2026-06-19. Refresh deliberately; a moved SHA changes the numbers.
+
+[[repo]]
+url = "https://github.com/BurntSushi/memchr"
+sha = "581faf00de3143f43384be6a253698d8dd9b51c5"
+family = "systems-rust"
+tier = "small"
+
+[[repo]]
+url = "https://github.com/pallets/click"
+sha = "8a1b1a33d739be05b7e91251e3c0dde77c5e152f"
+family = "scripting-python"
+tier = "medium"
+
+[[repo]]
+url = "https://github.com/sindresorhus/p-map"
+sha = "65aaa8f4d7e757a5254a146c4c39403efa9e2139"
+family = "web-ts"
+tier = "small"
+
+[[repo]]
+url = "https://github.com/spf13/cobra"
+sha = "ad460ea8f249db69c943a365fb84f3a59042d54e"
+family = "go"
+tier = "medium"
