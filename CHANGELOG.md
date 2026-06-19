@@ -6,6 +6,13 @@ All notable changes to CodeGraph are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **MCP server, protocol 2025-11-25:** the server now negotiates protocol revision
+  `2025-11-25` as its latest (legacy `2025-06-18` / `2025-03-26` / `2024-11-05` still
+  accepted), advertises the optional `serverInfo.description`, and rejects browser
+  requests carrying a disallowed `Origin` header with HTTP `403` (DNS-rebinding
+  protection over Streamable HTTP, alongside the existing `Host` allowlist).
+
 ## [0.2.5] - 2026-06-19
 
 ### Added

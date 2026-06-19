@@ -200,7 +200,7 @@ push and first-class Obsidian Canvas and Mermaid call-flow outputs. [26]
 **Where CodeGraph differs.** CodeGraph ships as a single static Rust binary with no
 interpreter or dependency tree to install; graphify is a Python package that needs Python
 3.10+ and its libraries. [26] CodeGraph's MCP server is larger (24 read-only tools versus
-graphify's 10 tools plus 6 resources) and implements the 2025-06-18 protocol revision with
+graphify's 10 tools plus 6 resources) and implements the 2025-11-25 protocol revision with
 prompts, completions, resource subscriptions, and structured tool output
 ([MCP Server](MCP-Server)). [26] Its cross-repo federation resolves references across
 repositories through export surfaces and import / tsconfig / module-federation aliases

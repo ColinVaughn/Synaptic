@@ -16,10 +16,10 @@ the agent asked for.
 ## Protocol version
 
 The `initialize` reply negotiates the protocol version: if the client requests
-one the server supports (`2025-06-18`, `2025-03-26`, or `2024-11-05`) the server
-echoes it back, otherwise it returns its latest, `2025-06-18`. A client that
-sends no `protocolVersion` gets `2025-06-18`. Server info is
-`{ "name": "codegraph", "version": <crate version> }`.
+one the server supports (`2025-11-25`, `2025-06-18`, `2025-03-26`, or
+`2024-11-05`) the server echoes it back, otherwise it returns its latest,
+`2025-11-25`. A client that sends no `protocolVersion` gets `2025-11-25`. Server
+info is `{ "name": "codegraph", "version": <crate version>, "description": <one-line summary> }`.
 
 The `initialize` reply also advertises capabilities:
 
@@ -651,7 +651,7 @@ curl -H "X-API-Key: s3cret" "http://127.0.0.1:8765/api/query?q=authentication&to
 ## Example: a raw JSON-RPC session over stdio
 
 ```
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_graph","arguments":{"question":"how does login work","mode":"bfs"}}}
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_source","arguments":{"label":"login_user"}}}
 {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"affected","arguments":{"label":"login_user"}}}

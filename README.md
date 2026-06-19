@@ -67,7 +67,7 @@ grepping or reading files.
   queries to the tables they touch). `codegraph sql advise --query "<sql>"` critiques a candidate
   query before you write it, cross-referenced against the graph's tables/indexes/RLS. See
   [SQL Auditing](https://github.com/ColinVaughn/CodeGraph/wiki/SQL-Auditing).
-- **MCP server** (protocol 2025-06-18) exposing 26 read-only tools over stdio or HTTP:
+- **MCP server** (protocol 2025-11-25) exposing 26 read-only tools over stdio or HTTP:
   subgraph search, source reading, reverse-impact, PR/working-tree blast radius, change
   forecasting, predictive test selection, edit-impact prediction, structural search, time-travel
   diff, plan-only rename, and SQL audit/advise, plus prompts, completions, resource subscriptions,

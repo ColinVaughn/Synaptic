@@ -721,7 +721,7 @@ codegraph serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-roo
 | `--source-root` | dir above `codegraph-out/` | Trusted root for resolving a node's source file in the `get_source` tool (path-traversal jailed). |
 | `--allow-exec` | off | Expose the command-running `speculate` tool (the 24th tool). This makes the server no longer read-only, so enable it only for trusted clients. See [MCP Server](MCP-Server). |
 
-Defaults to stdio transport. The MCP server reports protocol `2025-06-18` and exposes 24 read-only tools (25 with `--allow-exec`, which adds the command-running `speculate` tool), prompts, completions, resource templates/subscriptions, and structured tool output. When serving HTTP on a wildcard address with no API key, it prints a warning.
+Defaults to stdio transport. The MCP server reports protocol `2025-11-25` and exposes 24 read-only tools (25 with `--allow-exec`, which adds the command-running `speculate` tool), prompts, completions, resource templates/subscriptions, and structured tool output. When serving HTTP on a wildcard address with no API key, it prints a warning.
 
 Example:
 
