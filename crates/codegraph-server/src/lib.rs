@@ -1336,7 +1336,11 @@ impl Server {
                         "completions": {},
                         "logging": {}
                     },
-                    "serverInfo": { "name": "codegraph", "version": env!("CARGO_PKG_VERSION") },
+                    "serverInfo": {
+                        "name": "codegraph",
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "description": "Read-only code knowledge graph: query, impact, and structural search."
+                    },
                     "instructions": SERVER_INSTRUCTIONS,
                 }))
             }
@@ -2649,6 +2653,10 @@ mod tests {
             .handle_request(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
             .unwrap();
         assert_eq!(init["result"]["serverInfo"]["name"], "codegraph");
+        assert_eq!(
+            init["result"]["serverInfo"]["description"],
+            "Read-only code knowledge graph: query, impact, and structural search."
+        );
         assert_eq!(init["result"]["protocolVersion"], "2025-11-25");
 
         let tl = s
