@@ -125,3 +125,38 @@ calibrates differently from one of large squashed commits. Measured on CodeGraph
 (squash-heavy, synthetic) history the Brier score is ~0.35 with the high-confidence bins
 over-confident — which is the reliability table doing its job: surfacing where confidence and
 reality diverge, rather than asserting the predictor is well-calibrated.
+
+## Scale
+
+Extraction throughput across pinned external repositories spanning size tiers and language
+families. Manifest: `crates/codegraph-eval/scale-corpus.toml` (repo URL + full SHA + family +
+tier). Network + git required; opt-in (never run in CI).
+
+Run it:
+
+```sh
+codegraph eval scale                 # clone each pinned repo, time cold + warm builds
+codegraph eval scale --tier small    # restrict to a tier
+codegraph eval scale --json
+```
+
+### Method
+
+For each repo the harness clones at the pinned SHA into a cache dir (`--filter=blob:none` to
+keep the transfer small), times a **cold** build and then a **warm** build (AST cache hot), and
+records files, graph nodes/edges, both timings, and warm files/sec. A repo that cannot be
+cloned or built is logged to stderr and skipped, never fatal.
+
+### Results (pinned 2026-06-19; dev laptop)
+
+| Repo | Family | Tier | Files | Nodes | Edges | Cold (s) | Warm (s) | Files/s |
+|---|---|---|--:|--:|--:|--:|--:|--:|
+| memchr | systems-rust | small | 75 | 3,849 | 13,592 | 14.3 | 7.0 | 11 |
+| click | scripting-python | medium | 112 | 2,189 | 3,475 | 11.1 | 4.2 | 27 |
+| p-map | web-ts | small | 10 | 85 | 83 | 0.8 | 0.1 | 103 |
+| cobra | go | medium | 55 | 846 | 2,362 | 2.8 | 0.6 | 86 |
+
+Absolute times are machine-dependent; the reproducible signal is the **cold-to-warm ratio**
+(~2-8x here): the Rust AST cache removes re-parsing on rebuilds, so the steady-state cost on a
+working repo is the warm column. Refresh the pinned SHAs deliberately — a moved SHA changes the
+numbers.
