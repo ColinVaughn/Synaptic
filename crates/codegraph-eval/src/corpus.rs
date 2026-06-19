@@ -73,7 +73,35 @@ fn resolved_pairs<'a>(
     set
 }
 
+/// Which labeled symbols failed to resolve to a node. An empty `unresolved` is a
+/// precondition for trustworthy metrics: a label that does not resolve means the
+/// extractor dropped a node the human verified exists, which must be a loud
+/// failure rather than a silently smaller denominator.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct ResolutionReport {
+    pub total: usize,
+    pub unresolved: Vec<String>,
+}
+
+/// Resolve every label the ground truth references and report which ones fail.
+pub fn resolution_coverage(gd: &GraphData, gt: &GroundTruth) -> ResolutionReport {
+    let labels = gt.all_labels();
+    let unresolved: Vec<String> = labels
+        .iter()
+        .filter(|l| resolve_label(gd, l).is_none())
+        .cloned()
+        .collect();
+    ResolutionReport {
+        total: labels.len(),
+        unresolved,
+    }
+}
+
 /// Score extracted `calls` edges against the labeled call-edge set.
+///
+/// The recall denominator is EVERY labeled call edge, so a labeled endpoint that
+/// fails to resolve (a dropped node) counts as a false negative instead of
+/// vanishing from the denominator.
 pub fn score_call_edges(gd: &GraphData, gt: &GroundTruth) -> PrF1 {
     let expected = resolved_pairs(
         gd,
@@ -85,7 +113,14 @@ pub fn score_call_edges(gd: &GraphData, gt: &GroundTruth) -> PrF1 {
         .filter(|e| e.relation == "calls")
         .map(|e| (e.source.0.clone(), e.target.0.clone()))
         .collect();
-    score_sets(&expected, &extracted)
+    let tp = expected.intersection(&extracted).count();
+    PrF1 {
+        true_positive: tp,
+        false_positive: extracted.len() - tp,
+        // Unresolved labeled edges are excluded from `expected` (a resolved
+        // pair); counting against the full labeled total turns them into FNs.
+        false_negative: gt.call_edges.len() - tp,
+    }
 }
 
 /// The relations that carry a cross-language coupling. A client call connects to
@@ -132,16 +167,18 @@ fn cross_reachable(
     false
 }
 
-/// Score labeled cross-language couplings by forward reachability over the
-/// cross-language relations. Recall = labeled couplings the graph connects;
-/// there is no false-positive notion here (we ask only whether each labeled
-/// coupling is realized).
+/// Score labeled cross-language couplings as a real precision/recall by adding
+/// distractor non-couplings.
+///
+/// Positives (`cross_edge`) MUST connect: each labeled coupling that the graph
+/// connects is a true positive; one it fails to connect (or whose endpoint did
+/// not resolve) is a false negative -> recall. Negatives (`cross_nonedge`) must
+/// NOT connect: a distractor the graph DOES connect (a look-alike route, a
+/// method mismatch, a client call with no server) is a false positive ->
+/// precision. Without negatives precision is structurally 1.0, which is why a
+/// fixture that only labels positives reports recall, not P/R/F1.
 pub fn score_cross_edges(gd: &GraphData, gt: &GroundTruth) -> PrF1 {
-    let expected = resolved_pairs(
-        gd,
-        gt.cross_edges.iter().map(|c| (c.from.as_str(), c.to.as_str())),
-    );
-    if expected.is_empty() {
+    if gt.cross_edges.is_empty() && gt.cross_nonedges.is_empty() {
         return PrF1::default();
     }
     let allow: HashSet<&str> = CROSS_LANGUAGE_RELATIONS.iter().copied().collect();
@@ -153,24 +190,43 @@ pub fn score_cross_edges(gd: &GraphData, gt: &GroundTruth) -> PrF1 {
                 .push(e.target.0.as_str());
         }
     }
+    let connected = |from: &str, to: &str| -> bool {
+        match (resolve_label(gd, from), resolve_label(gd, to)) {
+            (Some(f), Some(t)) => cross_reachable(&fwd, &f.0, &t.0, 6),
+            _ => false, // an unresolved endpoint cannot be connected
+        }
+    };
     let mut pr = PrF1::default();
-    for (from, to) in &expected {
-        if cross_reachable(&fwd, from, to, 6) {
+    for c in &gt.cross_edges {
+        if connected(&c.from, &c.to) {
             pr.true_positive += 1;
         } else {
             pr.false_negative += 1;
         }
     }
+    for c in &gt.cross_nonedges {
+        if connected(&c.from, &c.to) {
+            pr.false_positive += 1; // a coupling that should not exist
+        }
+    }
     pr
 }
 
-/// Result of the blast-radius checks across a fixture: how many labeled
-/// affected nodes the reverse-impact analysis missed (the false-negative rate).
+/// Result of the blast-radius checks across a fixture. Tracks both misses
+/// (recall) and noise: `distractors_total` are nodes labeled as definitely NOT
+/// affected, `distractors_hit` are those the analysis wrongly reported -- so a
+/// blast that returns the whole graph scores 0% false-negatives but leaks every
+/// distractor. `predicted_total` / `seed_count` give the average impact-set size
+/// to compare against the true set.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub struct BlastScore {
     pub expected: usize,
     pub found: usize,
     pub missed: usize,
+    pub distractors_total: usize,
+    pub distractors_hit: usize,
+    pub predicted_total: usize,
+    pub seed_count: usize,
 }
 
 impl BlastScore {
@@ -179,27 +235,69 @@ impl BlastScore {
     pub fn false_negative_pct(&self) -> u8 {
         (self.missed * 100).checked_div(self.expected).unwrap_or(0) as u8
     }
+
+    /// Recall of truly-affected nodes (vacuously 100 when nothing expected).
+    pub fn recall_pct(&self) -> u8 {
+        (self.found * 100).checked_div(self.expected).unwrap_or(100) as u8
+    }
+
+    /// Precision against distractors: percent of labeled not-affected nodes the
+    /// analysis correctly EXCLUDED. 100 means no distractor leaked into the blast
+    /// radius; vacuously 100 when no distractors were labeled.
+    pub fn distractor_exclusion_pct(&self) -> u8 {
+        let kept_out = self.distractors_total - self.distractors_hit;
+        (kept_out * 100).checked_div(self.distractors_total).unwrap_or(100) as u8
+    }
+
+    /// Average reported impact-set size per seed (the noise dimension; compare to
+    /// the true affected-set size).
+    pub fn avg_predicted_size(&self) -> f64 {
+        if self.seed_count == 0 {
+            0.0
+        } else {
+            self.predicted_total as f64 / self.seed_count as f64
+        }
+    }
 }
 
-/// For each labeled blast seed, run reverse-impact and measure how many labeled
-/// affected nodes were missed. Depth is generous so reachability, not hop count,
-/// is what is tested.
+/// For each labeled blast seed, run reverse-impact and measure both misses
+/// (labeled affected nodes not reached) and noise (labeled not-affected
+/// distractors that WERE reached, plus the reported set size). Depth is generous
+/// so reachability, not hop count, is what is tested.
 pub fn score_blast_radius(gd: &GraphData, gt: &GroundTruth) -> BlastScore {
     let kg = KnowledgeGraph::from_graph_data(gd.clone());
     let mut score = BlastScore::default();
     for b in &gt.blasts {
         let Some(seed) = resolve_label(gd, &b.seed) else {
+            // An unresolved seed is a dropped node: every node it should have
+            // reached is a miss, and distractors cannot be excluded by a walk
+            // that never ran. Preflight fails the run before this matters, but
+            // score conservatively regardless.
+            score.expected += b.affects.len();
+            score.missed += b.affects.len();
+            score.distractors_total += b.not_affected.len();
+            score.seed_count += 1;
             continue;
         };
         let reached: HashSet<String> = affected_nodes(&kg, &seed, DEFAULT_AFFECTED_RELATIONS, 64)
             .into_iter()
             .map(|h| h.node_id.0)
             .collect();
+        score.seed_count += 1;
+        score.predicted_total += reached.len();
         for label in &b.affects {
             score.expected += 1;
             match resolve_label(gd, label) {
                 Some(NodeId(id)) if reached.contains(&id) => score.found += 1,
                 _ => score.missed += 1,
+            }
+        }
+        for label in &b.not_affected {
+            score.distractors_total += 1;
+            if let Some(NodeId(id)) = resolve_label(gd, label) {
+                if reached.contains(&id) {
+                    score.distractors_hit += 1;
+                }
             }
         }
     }
@@ -215,21 +313,20 @@ pub fn score_affected_tests(gd: &GraphData, gt: &GroundTruth) -> PrF1 {
     let kg = KnowledgeGraph::from_graph_data(gd.clone());
     let mut pr = PrF1::default();
     for tl in &gt.test_links {
-        let Some(test_id) = resolve_label(gd, &tl.test) else {
-            continue;
-        };
+        let test_id = resolve_label(gd, &tl.test);
         for covered in &tl.covers {
-            let Some(seed) = resolve_label(gd, covered) else {
-                continue;
+            // Every labeled (test, covered) pair is an expectation; an unresolved
+            // test or covered symbol counts as a miss, not a skipped sample.
+            let reached: HashSet<String> = match resolve_label(gd, covered) {
+                Some(seed) => affected_nodes(&kg, &seed, DEFAULT_AFFECTED_RELATIONS, 64)
+                    .into_iter()
+                    .map(|h| h.node_id.0)
+                    .collect(),
+                None => HashSet::new(),
             };
-            let reached: HashSet<String> = affected_nodes(&kg, &seed, DEFAULT_AFFECTED_RELATIONS, 64)
-                .into_iter()
-                .map(|h| h.node_id.0)
-                .collect();
-            if reached.contains(&test_id.0) {
-                pr.true_positive += 1;
-            } else {
-                pr.false_negative += 1;
+            match &test_id {
+                Some(t) if reached.contains(&t.0) => pr.true_positive += 1,
+                _ => pr.false_negative += 1,
             }
         }
     }
@@ -241,6 +338,7 @@ pub fn score_affected_tests(gd: &GraphData, gt: &GroundTruth) -> PrF1 {
 pub struct FixtureReport {
     pub dir: String,
     pub family: String,
+    pub resolution: ResolutionReport,
     pub call_edges: PrF1,
     pub affected_tests: PrF1,
     pub blast: BlastScore,
@@ -254,16 +352,43 @@ pub struct CorpusReport {
 }
 
 impl CorpusReport {
+    fn pooled<F: Fn(&FixtureReport) -> &PrF1>(&self, pick: F) -> PrF1 {
+        self.fixtures.iter().fold(PrF1::default(), |mut acc, f| {
+            let p = pick(f);
+            acc.true_positive += p.true_positive;
+            acc.false_positive += p.false_positive;
+            acc.false_negative += p.false_negative;
+            acc
+        })
+    }
+
     /// Pooled call-edge P/R/F1 across all fixtures (counts summed, then ratio'd).
     pub fn pooled_call_edges(&self) -> PrF1 {
+        self.pooled(|f| &f.call_edges)
+    }
+
+    /// Pooled cross-language P/R/F1 across all fixtures.
+    pub fn pooled_cross_edges(&self) -> PrF1 {
+        self.pooled(|f| &f.cross_edges)
+    }
+
+    /// Pooled affected-test recall across all fixtures.
+    pub fn pooled_affected_tests(&self) -> PrF1 {
+        self.pooled(|f| &f.affected_tests)
+    }
+
+    /// Every (fixture, label) that failed to resolve. An empty result is the
+    /// precondition for trusting any other number in the report.
+    pub fn unresolved(&self) -> Vec<(String, String)> {
         self.fixtures
             .iter()
-            .fold(PrF1::default(), |mut acc, f| {
-                acc.true_positive += f.call_edges.true_positive;
-                acc.false_positive += f.call_edges.false_positive;
-                acc.false_negative += f.call_edges.false_negative;
-                acc
+            .flat_map(|f| {
+                f.resolution
+                    .unresolved
+                    .iter()
+                    .map(move |l| (f.dir.clone(), l.clone()))
             })
+            .collect()
     }
 }
 
@@ -277,6 +402,7 @@ pub fn score_fixture(dir: &Path, name: &str, family: &str) -> Result<FixtureRepo
     Ok(FixtureReport {
         dir: name.to_string(),
         family: family.to_string(),
+        resolution: resolution_coverage(&gd, &gt),
         call_edges: score_call_edges(&gd, &gt),
         affected_tests: score_affected_tests(&gd, &gt),
         blast: score_blast_radius(&gd, &gt),
@@ -295,16 +421,6 @@ pub fn run_corpus(corpus_root: &Path) -> Result<CorpusReport, String> {
         fixtures.push(score_fixture(&corpus_root.join(&f.dir), &f.dir, &f.family)?);
     }
     Ok(CorpusReport { fixtures })
-}
-
-/// Generic precision/recall over an expected and an extracted set.
-fn score_sets(expected: &HashSet<(String, String)>, extracted: &HashSet<(String, String)>) -> PrF1 {
-    let tp = expected.intersection(extracted).count();
-    PrF1 {
-        true_positive: tp,
-        false_positive: extracted.len() - tp,
-        false_negative: expected.len() - tp,
-    }
 }
 
 #[cfg(test)]
@@ -364,6 +480,25 @@ mod tests {
         assert_eq!(rust.call_edges.true_positive, 1);
     }
 
+    /// The preflight: EVERY labeled symbol across the whole corpus must resolve
+    /// to a real node. A failure here means the extractor dropped a node the
+    /// ground truth references, which would otherwise silently shrink a metric's
+    /// denominator instead of scoring as a miss.
+    #[test]
+    fn every_label_resolves() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("corpus");
+        let report = run_corpus(&root).unwrap();
+        let unresolved = report.unresolved();
+        assert!(
+            unresolved.is_empty(),
+            "unresolved labels (extractor dropped nodes the corpus references): {unresolved:?}"
+        );
+        // And the coverage count is non-trivial, so the preflight is actually
+        // exercising labels rather than passing vacuously.
+        let total: usize = report.fixtures.iter().map(|f| f.resolution.total).sum();
+        assert!(total >= 12, "expected a meaningful label count, got {total}");
+    }
+
     /// Per-fixture baselines measured 2026-06-19. These lock in current
     /// extraction quality so a regression fails CI; if extraction IMPROVES
     /// (e.g. Rust resolves cross-file calls), update the affected baseline
@@ -408,7 +543,9 @@ mod tests {
         assert_eq!(pooled.precision_pct(), 100, "pooled call precision regressed");
         assert!(pooled.recall_pct() >= 88, "pooled call recall regressed: {pooled:?}");
 
-        // The TS->Rust HTTP coupling is connected end to end.
+        // The TS->Rust HTTP coupling is connected end to end, and the labeled
+        // distractors (look-alike path, wrong handler) are NOT coupled -- so the
+        // cross-language precision is earned, not structural.
         let xlang = report
             .fixtures
             .iter()
@@ -419,6 +556,24 @@ mod tests {
             100,
             "cross-language coupling not connected: {:?}",
             xlang.cross_edges
+        );
+        assert_eq!(
+            xlang.cross_edges.false_positive, 0,
+            "a distractor coupling was wrongly connected: {:?}",
+            xlang.cross_edges
+        );
+        assert_eq!(
+            xlang.cross_edges.precision_pct(),
+            100,
+            "cross-language precision regressed: {:?}",
+            xlang.cross_edges
+        );
+
+        // Whole-corpus preflight: every labeled symbol resolves.
+        assert!(
+            report.unresolved().is_empty(),
+            "unresolved labels: {:?}",
+            report.unresolved()
         );
     }
 }

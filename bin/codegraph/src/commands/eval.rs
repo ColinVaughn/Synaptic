@@ -195,14 +195,23 @@ fn run_corpus_cmd(root: Option<PathBuf>, out: Option<PathBuf>, json: bool) -> Re
         print!("{md}");
         println!("  report: {}", out_dir.join("report.json").display());
     }
+    // Preflight gate: a labeled symbol that does not resolve means the extractor
+    // dropped a node the ground truth references. Fail loudly rather than let it
+    // silently shrink a denominator (this is what makes the metrics trustworthy).
+    let unresolved = report.unresolved();
+    if !unresolved.is_empty() {
+        for (fixture, label) in &unresolved {
+            eprintln!("unresolved label: {fixture} :: {label}");
+        }
+        bail!(
+            "{} labeled symbol(s) did not resolve; corpus metrics are not trustworthy until fixed",
+            unresolved.len()
+        );
+    }
     Ok(())
 }
 
 fn corpus_markdown(report: &CorpusReport) -> String {
-    let mut s = String::from("# Accuracy corpus\n\n");
-    s.push_str("Exact set-comparison against hand-labeled ground truth. Call/cross P/R/F1 are percentages; blast FN is the percent of truly-affected nodes missed (lower is better).\n\n");
-    s.push_str("| Fixture | Family | Call P/R/F1 | Aff-test recall | Blast FN | Cross P/R/F1 |\n");
-    s.push_str("|---|---|---|---|---|---|\n");
     // A metric with no labels in a fixture renders "n/a" rather than a vacuous
     // 100%, so an empty set is never mistaken for a perfect score.
     let prf1 = |p: &codegraph_eval::PrF1| {
@@ -219,11 +228,34 @@ fn corpus_markdown(report: &CorpusReport) -> String {
             format!("{}%", p.recall_pct())
         }
     };
+
+    let total_labels: usize = report.fixtures.iter().map(|f| f.resolution.total).sum();
+    let unresolved = report.unresolved().len();
+
+    let mut s = String::from("# Accuracy corpus\n\n");
+    s.push_str(&format!(
+        "Preflight: {}/{} labeled symbol(s) resolved{}.\n\n",
+        total_labels - unresolved,
+        total_labels,
+        if unresolved == 0 {
+            ""
+        } else {
+            " — UNRESOLVED LABELS PRESENT; metrics not trustworthy"
+        }
+    ));
+    s.push_str("Exact set-comparison against hand-labeled ground truth. Call P/R/F1 over `calls` edges; affected-test recall over labeled test linkage; blast columns are recall / distractor-exclusion / avg impact-set size; cross P/R/F1 needs labeled non-couplings for precision (else recall only).\n\n");
+    s.push_str("| Fixture | Family | Call P/R/F1 | Aff-test rec | Blast rec/excl/size | Cross P/R/F1 |\n");
+    s.push_str("|---|---|---|---|---|---|\n");
     for f in &report.fixtures {
-        let blast = if f.blast.expected == 0 {
+        let blast = if f.blast.expected == 0 && f.blast.distractors_total == 0 {
             "n/a".to_string()
         } else {
-            format!("{}%", f.blast.false_negative_pct())
+            format!(
+                "{}%/{}%/{:.1}",
+                f.blast.recall_pct(),
+                f.blast.distractor_exclusion_pct(),
+                f.blast.avg_predicted_size(),
+            )
         };
         s.push_str(&format!(
             "| {} | {} | {} | {} | {} | {} |\n",
@@ -235,14 +267,33 @@ fn corpus_markdown(report: &CorpusReport) -> String {
             prf1(&f.cross_edges),
         ));
     }
-    let pooled = report.pooled_call_edges();
+    let call = report.pooled_call_edges();
+    let tests = report.pooled_affected_tests();
+    let cross = report.pooled_cross_edges();
     s.push_str(&format!(
-        "\nPooled call-edge: precision {}% / recall {}% / F1 {}% over {} labeled call edge(s).\n",
-        pooled.precision_pct(),
-        pooled.recall_pct(),
-        pooled.f1_pct(),
-        pooled.true_positive + pooled.false_negative,
+        "\nPooled call-edge: precision {}% / recall {}% / F1 {}% over {} labeled edge(s).\n",
+        call.precision_pct(),
+        call.recall_pct(),
+        call.f1_pct(),
+        call.true_positive + call.false_negative,
     ));
+    if tests.true_positive + tests.false_negative > 0 {
+        s.push_str(&format!(
+            "Pooled affected-test recall: {}% over {} labeled test linkage(s).\n",
+            tests.recall_pct(),
+            tests.true_positive + tests.false_negative,
+        ));
+    }
+    if cross.true_positive + cross.false_positive + cross.false_negative > 0 {
+        s.push_str(&format!(
+            "Pooled cross-language: precision {}% / recall {}% / F1 {}% ({} coupling(s), {} distractor false-positive(s)).\n",
+            cross.precision_pct(),
+            cross.recall_pct(),
+            cross.f1_pct(),
+            cross.true_positive + cross.false_negative,
+            cross.false_positive,
+        ));
+    }
     s
 }
 

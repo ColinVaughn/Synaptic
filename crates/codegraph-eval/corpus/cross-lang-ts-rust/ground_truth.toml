@@ -2,6 +2,18 @@
 # POST /session; the Rust axum backend serves it with create_session. CodeGraph
 # connects them through a path-keyed route node (calls_service -> handled_by).
 
+# Positive coupling: must connect.
 [[cross_edge]]
 from = "web/src/api.ts::createSession"
 to = "src/routes.rs::create_session"
+
+# Distractors: must NOT connect (drive cross-language PRECISION).
+# getSessions hits /sessions (plural); the backend serves /session only.
+[[cross_nonedge]]
+from = "web/src/api.ts::getSessions"
+to = "src/routes.rs::create_session"
+
+# createSession calls /session, not /items; it must not couple to list_items.
+[[cross_nonedge]]
+from = "web/src/api.ts::createSession"
+to = "src/routes.rs::list_items"

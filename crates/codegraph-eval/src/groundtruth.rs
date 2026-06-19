@@ -26,14 +26,19 @@ pub struct TestLink {
     pub covers: Vec<String>,
 }
 
-/// A labeled blast-radius expectation: a seed change and its true transitive set.
+/// A labeled blast-radius expectation: a seed change, its true transitive set,
+/// and (optionally) distractor nodes that must NOT be reported as affected so
+/// the metric penalizes an over-broad impact set, not just misses.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Blast {
     pub seed: String,
     pub affects: Vec<String>,
+    #[serde(default)]
+    pub not_affected: Vec<String>,
 }
 
-/// A labeled cross-language edge (only in cross-lang fixtures).
+/// A labeled cross-language edge (only in cross-lang fixtures): a client-side
+/// symbol that MUST connect to a server/native symbol.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct CrossEdge {
     pub from: String,
@@ -51,11 +56,55 @@ pub struct GroundTruth {
     pub blasts: Vec<Blast>,
     #[serde(default, rename = "cross_edge")]
     pub cross_edges: Vec<CrossEdge>,
+    /// Cross-language couplings that MUST NOT exist (distractors): a client call
+    /// whose path/method has no matching server route, a look-alike route, etc.
+    /// A connection here is a false positive for cross-language precision.
+    #[serde(default, rename = "cross_nonedge")]
+    pub cross_nonedges: Vec<CrossEdge>,
 }
 
 impl GroundTruth {
     pub fn parse(toml_src: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(toml_src)
+    }
+
+    /// Every distinct `path::symbol` label this ground truth references, across
+    /// all label kinds. Used by the preflight to assert every label resolves to
+    /// a real node before any metric is computed -- so a dropped node becomes a
+    /// loud failure, not a silently shrunken denominator.
+    pub fn all_labels(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut push = |s: &str| out.push(s.to_string());
+        for c in &self.call_edges {
+            push(&c.from);
+            push(&c.to);
+        }
+        for t in &self.test_links {
+            push(&t.test);
+            for c in &t.covers {
+                push(c);
+            }
+        }
+        for b in &self.blasts {
+            push(&b.seed);
+            for a in &b.affects {
+                push(a);
+            }
+            for d in &b.not_affected {
+                push(d);
+            }
+        }
+        for c in &self.cross_edges {
+            push(&c.from);
+            push(&c.to);
+        }
+        for c in &self.cross_nonedges {
+            push(&c.from);
+            push(&c.to);
+        }
+        out.sort();
+        out.dedup();
+        out
     }
 }
 
