@@ -87,6 +87,103 @@ pub fn reliability(samples: &[Sample], n_bins: usize) -> CalibrationReport {
     }
 }
 
+use codegraph_predict::{co_change, CoChangeOptions};
+use std::path::Path;
+use std::process::Command;
+
+/// Turn commit history into calibration samples by leave-one-out co-change.
+///
+/// `transactions` is the full history oldest-first, each commit the list of
+/// files it touched. For every commit index in `eval`, we take one of its files
+/// as the seed, ask the co-change predictor (trained ONLY on the commits before
+/// it) which other files should change with the seed, and record each
+/// suggestion's confidence against whether that file actually changed in the
+/// commit. Pure: no git, fully unit-testable.
+pub fn samples_from_history(
+    transactions: &[Vec<String>],
+    eval: impl IntoIterator<Item = usize>,
+) -> Vec<Sample> {
+    // Calibrate across the whole confidence range: do not pre-filter low
+    // confidence, and count a single supporting commit.
+    let opts = CoChangeOptions {
+        min_support: 1,
+        min_confidence_pct: 0,
+        ..Default::default()
+    };
+    let mut samples = Vec::new();
+    for i in eval {
+        let Some(files) = transactions.get(i) else {
+            continue;
+        };
+        if files.len() < 2 {
+            continue; // need a seed plus at least one other file to predict
+        }
+        let actual: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
+        // Deterministic seed: the lexicographically smallest file.
+        let seed = files.iter().min().expect("non-empty");
+        let history = &transactions[..i];
+        for sug in co_change(history, std::slice::from_ref(seed), &opts) {
+            samples.push(Sample {
+                confidence: sug.confidence_pct as f64 / 100.0,
+                hit: actual.contains(sug.file.as_str()),
+            });
+        }
+    }
+    samples
+}
+
+/// Read commit transactions (oldest-first) from a git repo: each commit becomes
+/// the list of files it touched. Uses an SOH record separator so paths with
+/// unusual characters still parse.
+fn read_transactions(repo_root: &Path) -> Result<Vec<Vec<String>>, String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args([
+            "log",
+            "--reverse",
+            "--no-renames",
+            "--name-only",
+            "--pretty=tformat:\x01%H",
+        ])
+        .output()
+        .map_err(|e| format!("running git log: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git log failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut txns: Vec<Vec<String>> = Vec::new();
+    for line in text.lines() {
+        if let Some(_hash) = line.strip_prefix('\x01') {
+            txns.push(Vec::new());
+        } else if !line.is_empty() {
+            if let Some(cur) = txns.last_mut() {
+                cur.push(line.replace('\\', "/"));
+            }
+        }
+    }
+    Ok(txns)
+}
+
+/// Calibrate co-change prediction confidence over a repo's recent history: the
+/// last `max_commits` commits are evaluated against the predictor trained on the
+/// history preceding each. IO-heavy (shells out to git); the scoring itself is
+/// [`samples_from_history`].
+pub fn calibrate_history(
+    repo_root: &Path,
+    max_commits: usize,
+    n_bins: usize,
+) -> Result<CalibrationReport, String> {
+    let txns = read_transactions(repo_root)?;
+    let total = txns.len();
+    let start = total.saturating_sub(max_commits);
+    let samples = samples_from_history(&txns, start..total);
+    Ok(reliability(&samples, n_bins))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +218,32 @@ mod tests {
         let r = reliability(&[], 10);
         assert_eq!(r.n, 0);
         assert_eq!(r.bins.len(), 10);
+    }
+
+    #[test]
+    fn samples_from_history_leave_one_out() {
+        // a.py and b.py co-change in commits 0..2; commit 3 changes both again.
+        // Trained on commits 0..3, seeding a.py should predict b.py with high
+        // confidence, and b.py did change in commit 3 -> a hit.
+        let txns = vec![
+            vec!["a.py".to_string(), "b.py".to_string()],
+            vec!["a.py".to_string(), "b.py".to_string()],
+            vec!["a.py".to_string(), "c.py".to_string()],
+            vec!["a.py".to_string(), "b.py".to_string()],
+        ];
+        let samples = samples_from_history(&txns, [3]);
+        assert!(!samples.is_empty(), "should predict at least one co-change");
+        let b = samples
+            .iter()
+            .find(|s| (s.confidence - 0.66).abs() < 0.02 || s.confidence > 0.5)
+            .expect("a high-confidence prediction for b.py");
+        assert!(b.hit, "b.py actually changed in commit 3");
+    }
+
+    #[test]
+    fn single_file_commits_yield_no_samples() {
+        let txns = vec![vec!["only.py".to_string()], vec!["solo.py".to_string()]];
+        assert!(samples_from_history(&txns, 0..2).is_empty());
     }
 
     #[test]

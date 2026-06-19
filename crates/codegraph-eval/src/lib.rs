@@ -19,7 +19,9 @@ mod ledger;
 mod replay;
 mod scoring;
 
-pub use calibrate::{brier, reliability, Bin, CalibrationReport, Sample};
+pub use calibrate::{
+    brier, calibrate_history, reliability, samples_from_history, Bin, CalibrationReport, Sample,
+};
 pub use corpus::{
     build_fixture, run_corpus, score_fixture, BlastScore, CorpusReport, FixtureReport, PrF1,
 };
