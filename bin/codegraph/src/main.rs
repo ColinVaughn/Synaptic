@@ -60,7 +60,17 @@ fn run() -> Result<()> {
             max_nodes,
             repo,
             dfs,
-        } => run_query(&text, graph, max_nodes, repo.as_deref(), dfs),
+            since,
+            seed_changed,
+        } => run_query(
+            &text,
+            graph,
+            max_nodes,
+            repo.as_deref(),
+            dfs,
+            since.as_deref(),
+            seed_changed,
+        ),
         Cmd::Update {
             paths,
             full,

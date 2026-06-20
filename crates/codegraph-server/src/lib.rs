@@ -47,8 +47,8 @@ use codegraph_prs::{
     Status, SystemCommands,
 };
 use codegraph_query::{
-    affected_nodes, describe_node, explain, resolve_seed, shortest_path, QueryIndex,
-    ReverseImpactIndex, TraversalMode, DEFAULT_AFFECTED_RELATIONS,
+    affected_nodes, describe_node, explain, resolve_seed, shortest_path, QueryIndex, Recency,
+    RecencyMode, ReverseImpactIndex, TraversalMode, DEFAULT_AFFECTED_RELATIONS,
 };
 use codegraph_sandbox::{
     render_markdown as render_speculate_md, speculate, Change, SpeculateOptions,
@@ -56,6 +56,22 @@ use codegraph_sandbox::{
 use serde_json::{json, Value};
 
 const SUPPORTED_PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// `query_graph` recency-boost strength: a max-churn changed-file node gains an
+/// additive `RECENCY_BOOST` on its relevance (IDF scores run ~2-6), so changed
+/// code ranks well above otherwise-equal unchanged code without burying a strong
+/// query match. Tuned against the live test.
+const RECENCY_BOOST: f64 = 4.0;
+
+/// The changed-files signal resolved from a `since` argument: which graph nodes
+/// live in changed files, each node's normalised churn weight, and a label for
+/// the output header. Built by [`Server::resolve_recency`] via git.
+struct ResolvedRecency {
+    changed: std::collections::HashSet<NodeId>,
+    churn: std::collections::HashMap<NodeId, f64>,
+    base_label: String,
+    n_files: usize,
+}
 const LATEST_PROTOCOL: &str = "2025-11-25";
 
 /// Echo the client's requested protocol when we support it, else our latest.
@@ -231,20 +247,35 @@ impl Server {
     // tools
 
     /// Retrieve the subgraph for `question` and apply `context_filter`, returning
-    /// the raw result plus the indices into `r.nodes` that survived the filter.
-    /// Shared by the text and structured renderers so a request runs the index
-    /// query once (not once per output shape).
+    /// the raw result, the indices into `r.nodes` that survived the filter, and the
+    /// resolved recency (changed-files) signal when `since` was given. Shared by the
+    /// text and structured renderers so a request runs the index query once.
     fn query_filtered(
         &self,
         question: &str,
         mode: TraversalMode,
         token_budget: usize,
         context_filter: &[String],
-    ) -> (codegraph_query::QueryResult, Vec<usize>) {
+        since: Option<&str>,
+        recency_mode: RecencyMode,
+    ) -> (
+        codegraph_query::QueryResult,
+        Vec<usize>,
+        Option<ResolvedRecency>,
+    ) {
         // Map a token budget to a node cap (heuristic); the text render is later
         // truncated to the budget by truncate_to_tokens.
         let max_nodes = (token_budget / 40).clamp(10, 400);
-        let r = self.query_index.query(&self.kg, question, max_nodes, mode);
+        let resolved = since.and_then(|s| self.resolve_recency(s));
+        let rec = resolved.as_ref().map(|rr| Recency {
+            changed: &rr.changed,
+            churn: Some(&rr.churn),
+            mode: recency_mode,
+            boost: RECENCY_BOOST,
+        });
+        let r =
+            self.query_index
+                .query_with_recency(&self.kg, question, max_nodes, mode, rec.as_ref());
         let keep: Vec<usize> = r
             .nodes
             .iter()
@@ -262,7 +293,77 @@ impl Server {
             })
             .map(|(i, _)| i)
             .collect();
-        (r, keep)
+        (r, keep, resolved)
+    }
+
+    /// Resolve a `since` argument (a git ref, a date, or the literal `"auto"`) to
+    /// the set of graph nodes living in files changed on the current branch, with
+    /// per-node churn weights. Runs git through `self.runner` so it is unit-testable
+    /// with a mock. Returns `None` (graceful degrade to a plain query) when git is
+    /// unavailable, the ref does not resolve, or nothing changed.
+    ///
+    /// Scope: `merge-base(base, HEAD)..working-tree` — the branch's commits since it
+    /// diverged from `base`, plus uncommitted edits. Churn weight per file is
+    /// `ln(1+lines) / ln(1+max_lines)`, so weights land in `(0, 1]`.
+    fn resolve_recency(&self, since: &str) -> Option<ResolvedRecency> {
+        let git = |args: &[&str]| {
+            self.runner
+                .run("git", args)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        // 1. Resolve the base ref. Try as a git rev first, then as a date; "auto"
+        //    uses the detected default branch. No syntax-guessing of ref vs date.
+        let base = if since == "auto" {
+            detect_default_branch(&*self.runner, None)
+        } else {
+            git(&["rev-parse", "--verify", &format!("{since}^{{commit}}")])
+                .or_else(|| git(&["rev-list", "-1", &format!("--before={since}"), "HEAD"]))?
+        };
+        // 2. merge-base(base, HEAD): scope to the branch point, not main's later work.
+        let mb = git(&["merge-base", &base, "HEAD"]).unwrap_or_else(|| base.clone());
+        // 3. Churn vs the working tree (includes uncommitted edits).
+        let out = git(&["diff", "--numstat", "--no-color", "--no-renames", &mb])?;
+        let rows = codegraph_history::git::parse_numstat(&out);
+
+        // Total churn (added+removed) per changed file, normalised forward slashes.
+        let mut file_churn: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (a, d, p) in rows {
+            *file_churn.entry(p.replace('\\', "/")).or_default() += a + d;
+        }
+        if file_churn.is_empty() {
+            return None;
+        }
+        let max = file_churn.values().copied().max().unwrap_or(1).max(1) as f64;
+        let denom = (1.0 + max).ln();
+
+        // Map changed files to graph nodes (one pass over the graph).
+        let mut changed = std::collections::HashSet::new();
+        let mut churn = std::collections::HashMap::new();
+        for n in self.kg.nodes() {
+            let sf = n.source_file.replace('\\', "/");
+            if let Some(&lines) = file_churn.get(&sf) {
+                // Binary files (lines == 0) keep a small floor so they still boost.
+                let w = if lines == 0 {
+                    0.1
+                } else {
+                    ((1.0 + lines as f64).ln() / denom).max(0.1)
+                };
+                changed.insert(n.id.clone());
+                churn.insert(n.id.clone(), w);
+            }
+        }
+        if changed.is_empty() {
+            return None; // files changed, but none map to graph nodes
+        }
+        let short = &mb[..mb.len().min(7)];
+        Some(ResolvedRecency {
+            changed,
+            churn,
+            base_label: format!("{since} (merge-base {short})"),
+            n_files: file_churn.len(),
+        })
     }
 
     fn render_query_text(
@@ -271,6 +372,7 @@ impl Server {
         keep: &[usize],
         mode: TraversalMode,
         token_budget: usize,
+        recency: Option<&ResolvedRecency>,
     ) -> String {
         let in_set: std::collections::HashSet<&NodeId> =
             keep.iter().map(|&i| &r.nodes[i]).collect();
@@ -288,10 +390,24 @@ impl Server {
             seeds.join(", "),
             keep.len()
         );
+        if let Some(rr) = recency {
+            out.push_str(&format!(
+                "Recency: since {} | {} changed file(s); changed nodes boosted and marked (changed)\n",
+                sanitize_label(&rr.base_label),
+                rr.n_files
+            ));
+        }
         for &i in keep {
             if let Some(n) = self.kg.node(&r.nodes[i]) {
+                let mark = if recency.is_some_and(|rr| rr.changed.contains(&r.nodes[i])) {
+                    " (changed)"
+                } else {
+                    ""
+                };
                 out.push_str(&format!(
-                    "NODE {} [{}] {}\n",
+                    "NODE [{:.2}]{} {} [{}] {}\n",
+                    r.scores.get(i).copied().unwrap_or(0.0),
+                    mark,
                     sanitize_label(&n.label),
                     file_type_str(&n.file_type),
                     sanitize_label(&n.source_file)
@@ -321,8 +437,15 @@ impl Server {
         token_budget: usize,
         context_filter: &[String],
     ) -> String {
-        let (r, keep) = self.query_filtered(question, mode, token_budget, context_filter);
-        self.render_query_text(&r, &keep, mode, token_budget)
+        let (r, keep, recency) = self.query_filtered(
+            question,
+            mode,
+            token_budget,
+            context_filter,
+            None,
+            RecencyMode::Boost,
+        );
+        self.render_query_text(&r, &keep, mode, token_budget, recency.as_ref())
     }
 
     /// `get_node` — metadata + degree for the node matching `label`.
@@ -1225,17 +1348,28 @@ impl Server {
     /// Typed mirror of [`render_query_text`](Server::render_query_text) over the
     /// same filtered retrieval, so structuredContent stays consistent with the
     /// rendered text without re-querying.
-    fn render_query_json(&self, r: &codegraph_query::QueryResult, keep: &[usize]) -> Value {
+    fn render_query_json(
+        &self,
+        r: &codegraph_query::QueryResult,
+        keep: &[usize],
+        recency: Option<&ResolvedRecency>,
+    ) -> Value {
         let in_set: std::collections::HashSet<&NodeId> =
             keep.iter().map(|&i| &r.nodes[i]).collect();
         let nodes: Vec<Value> = keep
             .iter()
-            .filter_map(|&i| self.kg.node(&r.nodes[i]))
-            .map(|n| {
+            .filter_map(|&i| self.kg.node(&r.nodes[i]).map(|n| (i, n)))
+            .map(|(i, n)| {
                 json!({
                     "label": sanitize_label(&n.label),
                     "file_type": file_type_str(&n.file_type),
-                    "source_file": sanitize_label(&n.source_file)
+                    "source_file": sanitize_label(&n.source_file),
+                    // Relevance score (higher = more relevant); nodes are already
+                    // ordered by it so a caller can triage signal from noise.
+                    "score": round2(r.scores.get(i).copied().unwrap_or(0.0)),
+                    // True when `since` was given and this node's file changed on the
+                    // current branch (its score was boosted accordingly).
+                    "changed": recency.is_some_and(|rr| rr.changed.contains(&r.nodes[i]))
                 })
             })
             .collect();
@@ -1596,11 +1730,17 @@ impl Server {
                 .unwrap_or_default();
             let question = s("question");
             let budget = u("token_budget", 2000) as usize;
-            let (r, keep) = self.query_filtered(&question, mode, budget, &ctx);
-            let text = self.render_query_text(&r, &keep, mode, budget);
+            let since = opt("since");
+            let recency_mode = match opt("recency_mode") {
+                Some("seed") => RecencyMode::Seed,
+                _ => RecencyMode::Boost,
+            };
+            let (r, keep, recency) =
+                self.query_filtered(&question, mode, budget, &ctx, since, recency_mode);
+            let text = self.render_query_text(&r, &keep, mode, budget, recency.as_ref());
             // Log the "<n> nodes found" count from the header.
             self.log_query(&question, nodes_found(&text));
-            let structured = self.render_query_json(&r, &keep);
+            let structured = self.render_query_json(&r, &keep, recency.as_ref());
             return Ok(json!({
                 "content": [{ "type": "text", "text": text }],
                 "structuredContent": structured,
@@ -1920,6 +2060,11 @@ fn fetch_pr_files_concurrent(
     out
 }
 
+/// Round a relevance score to 2 decimals for compact tool output.
+fn round2(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
+}
+
 fn file_type_str(ft: &codegraph_core::FileType) -> &'static str {
     use codegraph_core::FileType::*;
     match ft {
@@ -2049,21 +2194,25 @@ fn tools_list(allow_exec: bool) -> Value {
     let mut tools = json!([
         {
             "name": "query_graph",
-            "description": "Primary entry point: return a relevant subgraph (nodes + edges) for a natural-language question about this codebase, instead of grepping or reading files. Good for 'where is X handled', 'how does auth work', 'what is related to Y'.",
+            "description": "Primary entry point: return a relevant subgraph (nodes + edges) for a natural-language question about this codebase, instead of grepping or reading files. Good for 'where is X handled', 'how does auth work', 'what is related to Y'. Pass `since` (e.g. 'main' or 'auto') to rank code changed on the current branch higher; use recency_mode='seed' to surface the branch's changed surface itself.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "question": { "type": "string", "description": "Natural-language question, e.g. 'how does login work' or 'what handles payments'." },
                     "mode": { "type": "string", "enum": ["bfs", "dfs"], "description": "Traversal from the seed nodes: 'bfs' (default) expands a broad neighbourhood; 'dfs' follows deep call chains. Use dfs to trace one flow end to end." },
                     "token_budget": { "type": "integer", "description": "Approximate token budget for the result (default 2000). Controls how many nodes return (about budget/40, capped 10-400). Raise it for broader context." },
-                    "context_filter": { "type": "array", "items": { "type": "string" }, "description": "Optional source-file path substrings; keeps only nodes whose file matches one (e.g. ['src/auth','login']). Use to scope a question to a subsystem." }
+                    "context_filter": { "type": "array", "items": { "type": "string" }, "description": "Optional source-file path substrings; keeps only nodes whose file matches one (e.g. ['src/auth','login']). Use to scope a question to a subsystem." },
+                    "since": { "type": "string", "description": "Optional. Boost nodes whose file changed on the current branch since this baseline: a git ref ('main', 'HEAD~10'), a date ('2 weeks ago'), or 'auto' (detect the default branch). Scope is merge-base(since, HEAD)..working-tree, so it includes uncommitted edits. Use when working on a feature branch to surface in-progress code. Silently ignored if not a git repo." },
+                    "recency_mode": { "type": "string", "enum": ["boost", "seed"], "description": "Only with `since`. 'boost' (default) re-ranks query matches by recency. 'seed' also injects changed-file nodes as seeds, so the changed surface appears even when the question matches little (use to answer 'what did this branch change')." }
                 },
                 "required": ["question"]
             },
             "outputSchema": { "type": "object", "properties": {
-                "nodes": { "type": "array", "items": { "type": "object", "properties": {
-                    "label": {"type":"string"}, "file_type": {"type":"string"}, "source_file": {"type":"string"} } } },
-                "edges": { "type": "array", "items": { "type": "object", "properties": {
+                "nodes": { "type": "array", "description": "Ordered most- to least-relevant.", "items": { "type": "object", "properties": {
+                    "label": {"type":"string"}, "file_type": {"type":"string"}, "source_file": {"type":"string"},
+                    "score": {"type":"number", "description":"Relevance score (higher = more relevant); nodes are sorted by it. Use it to focus on the top results and ignore the low-scored tail."},
+                    "changed": {"type":"boolean", "description":"True when `since` was given and this node's file changed on the current branch (its score was boosted)."} } } },
+                "edges": { "type": "array", "description": "Ordered by endpoint relevance.", "items": { "type": "object", "properties": {
                     "source": {"type":"string"}, "relation": {"type":"string"}, "target": {"type":"string"} } } }
             }, "required": ["nodes", "edges"] }
         },
@@ -3041,6 +3190,33 @@ mod tests {
     }
 
     #[test]
+    fn query_graph_structured_nodes_carry_descending_scores() {
+        // Each structured node exposes a relevance `score`, and nodes come back
+        // sorted by it (so a caller can focus on the top results).
+        let mut s = server();
+        let resp = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":"query_graph","arguments":{"question":"auth login"}}
+            }))
+            .unwrap();
+        let nodes = resp["result"]["structuredContent"]["nodes"]
+            .as_array()
+            .unwrap();
+        assert!(!nodes.is_empty());
+        let scores: Vec<f64> = nodes
+            .iter()
+            .map(|n| n["score"].as_f64().expect("each node has a numeric score"))
+            .collect();
+        for w in scores.windows(2) {
+            assert!(
+                w[0] >= w[1],
+                "structured nodes must be score-sorted: {scores:?}"
+            );
+        }
+    }
+
+    #[test]
     fn query_graph_structured_respects_context_filter() {
         // structuredContent must apply context_filter just like the text path,
         // or the two diverge. Filter to auth.py; login.py/db.py must drop out.
@@ -3429,6 +3605,92 @@ mod tests {
                 None
             }
         }
+    }
+
+    // A git runner that reports db.py as heavily changed on `main`, for the
+    // query_graph recency tests. Answers the three calls resolve_recency makes.
+    struct RecencyGit;
+    impl CommandRunner for RecencyGit {
+        fn run(&self, program: &str, args: &[&str]) -> Option<String> {
+            if program != "git" {
+                return None;
+            }
+            match args.first().copied() {
+                Some("rev-parse") => Some("a".repeat(40)),
+                Some("merge-base") => Some("b".repeat(40)),
+                Some("diff") => Some("20\t5\tdb.py\n".to_string()), // db.py churned
+                _ => None,
+            }
+        }
+    }
+
+    fn query_graph_structured(s: &mut Server, args: Value) -> Value {
+        let req = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name":"query_graph","arguments":args}});
+        s.handle_request(&req).unwrap()["result"].clone()
+    }
+
+    #[test]
+    fn recency_flags_changed_nodes_and_adds_header() {
+        let mut s = server().with_runner(Box::new(RecencyGit));
+        let res =
+            query_graph_structured(&mut s, json!({"question":"auth database","since":"main"}));
+        let nodes = res["structuredContent"]["nodes"].as_array().unwrap();
+        let by_file = |f: &str| nodes.iter().find(|n| n["source_file"] == json!(f)).cloned();
+        assert_eq!(
+            by_file("db.py").unwrap()["changed"],
+            json!(true),
+            "db.py changed"
+        );
+        assert_eq!(
+            by_file("auth.py").unwrap()["changed"],
+            json!(false),
+            "auth.py unchanged"
+        );
+        let text = res["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Recency: since main"),
+            "header present: {text}"
+        );
+        assert!(text.contains("(changed)"), "changed marker present: {text}");
+    }
+
+    #[test]
+    fn recency_seed_mode_surfaces_changed_node_with_no_query_match() {
+        // The question matches nothing; seed mode must still surface the changed db.
+        let mut s = server().with_runner(Box::new(RecencyGit));
+        let res = query_graph_structured(
+            &mut s,
+            json!({"question":"zzz nomatch","since":"main","recency_mode":"seed"}),
+        );
+        let nodes = res["structuredContent"]["nodes"].as_array().unwrap();
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n["source_file"] == json!("db.py") && n["changed"] == json!(true)),
+            "seed mode should inject changed db.py: {nodes:?}"
+        );
+    }
+
+    #[test]
+    fn recency_degrades_gracefully_when_git_unavailable() {
+        struct NoGit;
+        impl CommandRunner for NoGit {
+            fn run(&self, _p: &str, _a: &[&str]) -> Option<String> {
+                None
+            }
+        }
+        let mut s = server().with_runner(Box::new(NoGit));
+        let res = query_graph_structured(&mut s, json!({"question":"auth","since":"main"}));
+        let text = res["content"][0]["text"].as_str().unwrap();
+        assert!(
+            !text.contains("Recency:"),
+            "no recency header when git fails: {text}"
+        );
+        // Nodes still returned, none flagged changed.
+        let nodes = res["structuredContent"]["nodes"].as_array().unwrap();
+        assert!(!nodes.is_empty());
+        assert!(nodes.iter().all(|n| n["changed"] == json!(false)));
     }
 
     #[test]

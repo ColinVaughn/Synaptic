@@ -17,10 +17,17 @@ use serde::Serialize;
 pub use describe::{describe_node, NodeDescription};
 
 /// Result of a text query: matched seeds plus the surrounding subgraph.
+///
+/// `nodes` is sorted by descending relevance score; `scores[i]` is the relevance
+/// of `nodes[i]` (same length, same order). `edges` is sorted by descending
+/// relevance of its endpoints. The scores let a caller triage signal from noise
+/// instead of treating every returned node as equally relevant.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct QueryResult {
     pub seeds: Vec<NodeId>,
     pub nodes: Vec<NodeId>,
+    /// Relevance score per node, parallel to `nodes` (higher = more relevant).
+    pub scores: Vec<f64>,
     pub edges: Vec<EdgeRef>,
 }
 
@@ -150,6 +157,47 @@ pub enum TraversalMode {
     Dfs,
 }
 
+/// How the recency (changed-files) signal influences a query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecencyMode {
+    /// Multiply the relevance of changed-file nodes (re-rank + expand). Default.
+    #[default]
+    Boost,
+    /// Boost *and* inject changed-file nodes as seeds, so the branch's changed
+    /// surface appears even when the query text matches little or nothing.
+    Seed,
+}
+
+/// The changed-files signal for a single query. Borrowed; the caller (server/CLI)
+/// builds it from git, so `codegraph-query` itself never touches git.
+pub struct Recency<'a> {
+    /// Node ids whose source file is in the changed set.
+    pub changed: &'a HashSet<NodeId>,
+    /// Per-node churn weight in `(0, 1]` (normalised lines-changed). A node absent
+    /// from the map (or `None` map) gets weight `1.0`.
+    pub churn: Option<&'a HashMap<NodeId, f64>>,
+    pub mode: RecencyMode,
+    /// Strength: a changed node's relevance gains an additive `boost * churn_weight`.
+    pub boost: f64,
+}
+
+impl Recency<'_> {
+    /// Additive relevance bonus for a node: `boost * churn_weight` if the node's
+    /// file changed, else `0`. Additive (not multiplicative) so a changed node
+    /// that does *not* match the query text still earns a positive score — that is
+    /// what lets seed mode surface the changed surface, and lets boost re-rank
+    /// zero-query-match neighbours. With no recency signal the bonus is `0`, so the
+    /// frontier key is unchanged from the plain query.
+    fn bonus(&self, id: &NodeId) -> f64 {
+        if self.changed.contains(id) {
+            let w = self.churn.and_then(|c| c.get(id).copied()).unwrap_or(1.0);
+            self.boost * w
+        } else {
+            0.0
+        }
+    }
+}
+
 /// Retrieve a subgraph relevant to `query_text`: IDF-score nodes by label-token
 /// overlap, pick the top seeds, then BFS-expand up to `max_nodes`.
 pub fn query(kg: &KnowledgeGraph, query_text: &str, max_nodes: usize) -> QueryResult {
@@ -171,6 +219,23 @@ pub struct QueryIndex {
     df: HashMap<String, usize>,
     /// Undirected adjacency (sorted, deduped) for subgraph expansion.
     adjacency: HashMap<NodeId, Vec<NodeId>>,
+    /// Mean undirected degree, used to normalise the hub penalty so it is
+    /// graph-relative (a "hub" is a node whose degree dwarfs the average).
+    avg_degree: f64,
+}
+
+/// Relevance decay applied per expansion hop: a node `k` hops from the seed that
+/// reaches it inherits `seed_score * DECAY^k`. Keeps far-flung neighbours from
+/// ranking as high as the seeds while still letting a long relevant chain survive.
+const DECAY: f64 = 0.5;
+
+/// Down-weight a node by how far its degree exceeds the graph average, so a
+/// high-fan-out hub (a registry, a `Builder`) is expanded last and its many
+/// incidental neighbours rarely reach the node budget. Returns 1.0 for an
+/// average node and falls toward 0 as degree grows; never increases relevance.
+fn hub_penalty(degree: usize, avg_degree: f64) -> f64 {
+    let avg = avg_degree.max(1.0);
+    1.0 / (1.0 + (1.0 + degree as f64 / avg).ln())
 }
 
 impl QueryIndex {
@@ -187,11 +252,17 @@ impl QueryIndex {
             node_tokens.insert(node.id.clone(), toks);
         }
         let adjacency = undirected_adjacency(kg);
+        let avg_degree = if adjacency.is_empty() {
+            0.0
+        } else {
+            adjacency.values().map(|v| v.len()).sum::<usize>() as f64 / adjacency.len() as f64
+        };
         QueryIndex {
             n,
             node_tokens,
             df,
             adjacency,
+            avg_degree,
         }
     }
 
@@ -206,58 +277,151 @@ impl QueryIndex {
         max_nodes: usize,
         mode: TraversalMode,
     ) -> QueryResult {
+        self.query_with_recency(kg, query_text, max_nodes, mode, None)
+    }
+
+    /// Like [`query`](Self::query) but biased toward recently-changed code: nodes
+    /// in `recency.changed` have their relevance multiplied (boost mode) and, in
+    /// seed mode, are injected as additional seeds so the changed surface appears
+    /// even when the query text matches little. `recency = None` is byte-identical
+    /// to [`query`](Self::query).
+    pub fn query_with_recency(
+        &self,
+        kg: &KnowledgeGraph,
+        query_text: &str,
+        max_nodes: usize,
+        mode: TraversalMode,
+        recency: Option<&Recency>,
+    ) -> QueryResult {
         let idf =
             |t: &str| ((self.n + 1.0) / (1.0 + *self.df.get(t).unwrap_or(&0) as f64)).ln() + 1.0;
 
         let q_tokens: HashSet<String> = tokenize(query_text).into_iter().collect();
 
-        // Score and rank seeds.
-        let mut scored: Vec<(NodeId, f64)> = Vec::new();
-        for (id, toks) in &self.node_tokens {
-            let score: f64 = q_tokens
+        // A node's own relevance to the query: sum of matched-token IDF, length-
+        // normalised so a long label can't out-score a tight match just by
+        // accumulating tokens (BM25-lite). 0.0 if nothing matches.
+        let node_relevance = |id: &NodeId| -> f64 {
+            let Some(toks) = self.node_tokens.get(id) else {
+                return 0.0;
+            };
+            let sum: f64 = q_tokens
                 .iter()
                 .filter(|t| toks.contains(*t))
                 .map(|t| idf(t))
                 .sum();
-            if score > 0.0 {
-                scored.push((id.clone(), score));
+            if sum == 0.0 {
+                0.0
+            } else {
+                sum / (toks.len().max(1) as f64).sqrt()
             }
-        }
-        // Highest score first; tie-break by id for determinism.
-        scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
-        });
-        let seeds: Vec<NodeId> = scored.iter().take(8).map(|(id, _)| id.clone()).collect();
+        };
+        let degree = |id: &NodeId| self.adjacency.get(id).map_or(0, |v| v.len());
+        // Additive recency bonus (0.0 when no recency signal or node unchanged).
+        // Added to a node's relevance before the hub penalty, so changed code both
+        // ranks higher and is more likely to be pulled into the node budget.
+        let recency_bonus = |id: &NodeId| recency.map_or(0.0, |r| r.bonus(id));
 
-        // Expand from seeds up to max_nodes (BFS pops the front, DFS the back).
-        let mut included: Vec<NodeId> = Vec::new();
-        let mut seen: HashSet<NodeId> = HashSet::new();
-        let mut queue: VecDeque<NodeId> = VecDeque::new();
-        for s in &seeds {
-            if seen.insert(s.clone()) {
-                queue.push_back(s.clone());
+        // Score and rank seeds by raw relevance (no hub penalty here: a seed earns
+        // its place by matching the query, even if it is also well-connected).
+        let mut scored: Vec<(NodeId, f64)> = self
+            .node_tokens
+            .keys()
+            .map(|id| (id.clone(), node_relevance(id)))
+            .filter(|(_, s)| *s > 0.0)
+            .collect();
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let mut seeds: Vec<NodeId> = scored.iter().take(8).map(|(id, _)| id.clone()).collect();
+
+        // Seed mode: inject changed nodes as seeds so the changed surface appears
+        // even with zero query-token overlap. They enter the frontier with a base
+        // relevance (the seed-relevant amount carried by their churn-weighted
+        // boost), so a changed node with no match still ranks sensibly.
+        if let Some(r) = recency {
+            if r.mode == RecencyMode::Seed {
+                let existing: HashSet<&NodeId> = seeds.iter().collect();
+                let mut inject: Vec<NodeId> = r
+                    .changed
+                    .iter()
+                    .filter(|id| self.adjacency.contains_key(*id) && !existing.contains(*id))
+                    .cloned()
+                    .collect();
+                inject.sort(); // deterministic injection order
+                drop(existing);
+                seeds.extend(inject);
             }
         }
-        while let Some(cur) = match mode {
-            TraversalMode::Bfs => queue.pop_front(),
-            TraversalMode::Dfs => queue.pop_back(),
-        } {
+
+        // Best-first expansion. The frontier is a max-heap keyed by hub-penalised
+        // relevance, so the budget is spent on the most relevant neighbourhood
+        // rather than on whatever a breadth-first wave happened to reach. `rel` is
+        // the pre-penalty relevance carried for inheritance (so the hub penalty
+        // shapes ordering without compounding along a path); `key` = rel * penalty
+        // is the frontier priority and the reported score. `mode` only breaks
+        // score ties: bfs prefers earlier-discovered nodes (FIFO), dfs later (LIFO).
+        let mut heap: std::collections::BinaryHeap<Frontier> = std::collections::BinaryHeap::new();
+        let mut seq: u64 = 0;
+        for s in &seeds {
+            let rel = node_relevance(s);
+            let key = (rel + recency_bonus(s)) * hub_penalty(degree(s), self.avg_degree);
+            heap.push(Frontier {
+                key,
+                rel,
+                seq,
+                bias: mode,
+                id: s.clone(),
+            });
+            seq += 1;
+        }
+
+        let mut included: Vec<NodeId> = Vec::new();
+        let mut scores: Vec<f64> = Vec::new();
+        let mut done: HashSet<NodeId> = HashSet::new();
+        while let Some(cur) = heap.pop() {
             if included.len() >= max_nodes {
                 break;
             }
-            included.push(cur.clone());
-            if let Some(nbrs) = self.adjacency.get(&cur) {
+            if !done.insert(cur.id.clone()) {
+                continue; // already settled via a higher-priority path
+            }
+            included.push(cur.id.clone());
+            scores.push(cur.key);
+            if let Some(nbrs) = self.adjacency.get(&cur.id) {
                 for nb in nbrs {
-                    if seen.insert(nb.clone()) {
-                        queue.push_back(nb.clone());
+                    if done.contains(nb) {
+                        continue;
                     }
+                    let rel = node_relevance(nb).max(cur.rel * DECAY);
+                    let key = (rel + recency_bonus(nb)) * hub_penalty(degree(nb), self.avg_degree);
+                    heap.push(Frontier {
+                        key,
+                        rel,
+                        seq,
+                        bias: mode,
+                        id: nb.clone(),
+                    });
+                    seq += 1;
                 }
             }
         }
 
-        let node_set: HashSet<&NodeId> = included.iter().collect();
+        // Re-rank the included set by score descending (id tie-break) so the most
+        // relevant nodes lead, regardless of the order the frontier settled them.
+        let score_of: HashMap<&NodeId, f64> = included
+            .iter()
+            .zip(scores.iter())
+            .map(|(n, s)| (n, *s))
+            .collect();
+        let mut order: Vec<usize> = (0..included.len()).collect();
+        order.sort_by(|&a, &b| {
+            scores[b]
+                .total_cmp(&scores[a])
+                .then_with(|| included[a].cmp(&included[b]))
+        });
+        let nodes: Vec<NodeId> = order.iter().map(|&i| included[i].clone()).collect();
+        let scores: Vec<f64> = order.iter().map(|&i| scores[i]).collect();
+
+        let node_set: HashSet<&NodeId> = nodes.iter().collect();
         let mut edges: Vec<EdgeRef> = kg
             .edges()
             .filter(|e| node_set.contains(&e.source) && node_set.contains(&e.target))
@@ -267,19 +431,76 @@ impl QueryIndex {
                 relation: e.relation.clone(),
             })
             .collect();
+        // Rank edges by the relevance of their weaker endpoint (descending), so
+        // signal edges lead; lexicographic order only breaks ties for determinism.
+        let edge_rank = |e: &EdgeRef| -> f64 {
+            let s = score_of.get(&e.source).copied().unwrap_or(0.0);
+            let t = score_of.get(&e.target).copied().unwrap_or(0.0);
+            s.min(t)
+        };
         edges.sort_by(|a, b| {
-            (a.source.as_str(), a.target.as_str(), a.relation.as_str()).cmp(&(
-                b.source.as_str(),
-                b.target.as_str(),
-                b.relation.as_str(),
-            ))
+            edge_rank(b).total_cmp(&edge_rank(a)).then_with(|| {
+                (a.source.as_str(), a.target.as_str(), a.relation.as_str()).cmp(&(
+                    b.source.as_str(),
+                    b.target.as_str(),
+                    b.relation.as_str(),
+                ))
+            })
         });
 
         QueryResult {
             seeds,
-            nodes: included,
+            nodes,
+            scores,
             edges,
         }
+    }
+}
+
+/// One entry on the best-first expansion frontier. `Ord` makes a `BinaryHeap`
+/// pop the highest-relevance node first; score ties are broken by traversal
+/// `bias` (bfs = earlier `seq` first, dfs = later first) then node id, so the
+/// whole expansion is deterministic.
+struct Frontier {
+    key: f64,
+    rel: f64,
+    seq: u64,
+    bias: TraversalMode,
+    id: NodeId,
+}
+
+impl PartialEq for Frontier {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+impl Eq for Frontier {}
+impl PartialOrd for Frontier {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Frontier {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        // Primary: higher key is greater (popped first).
+        match self.key.total_cmp(&other.key) {
+            Ordering::Equal => {}
+            ord => return ord,
+        }
+        // Tie-break by traversal bias on insertion order.
+        let seq_ord = match self.bias {
+            // bfs: earlier seq should pop first => earlier seq is "greater".
+            TraversalMode::Bfs => other.seq.cmp(&self.seq),
+            // dfs: later seq should pop first => later seq is "greater".
+            TraversalMode::Dfs => self.seq.cmp(&other.seq),
+        };
+        match seq_ord {
+            Ordering::Equal => {}
+            ord => return ord,
+        }
+        // Final deterministic tie-break: smaller id pops first => "greater".
+        other.id.cmp(&self.id)
     }
 }
 
@@ -777,6 +998,314 @@ mod tests {
                 );
             }
         }
+    }
+
+    // A graph shaped like the screenshot regression: one strongly-matching seed
+    // (`reader`), a relevant neighbour (`mesh`), and a high-degree hub (`builder`)
+    // whose many junk neighbours (`j1..j6`) flood a plain BFS. Used by the
+    // best-first / hub-penalty tests below.
+    fn hub_graph() -> KnowledgeGraph {
+        let mut nodes = vec![
+            ("reader", "VehicleScreenMapReader"),
+            ("mesh", "MeshQuadInterpreter"),
+            ("deep", "MeshDetailLevel"),
+            ("builder", "Builder"),
+        ];
+        let mut edges = vec![
+            ("reader", "mesh", "calls"),
+            ("reader", "builder", "references"),
+            ("mesh", "deep", "calls"),
+        ];
+        for i in 1..=6 {
+            // leak ids so the &str borrows live for the call; test-only.
+            let id: &'static str = Box::leak(format!("j{i}").into_boxed_str());
+            let label: &'static str = Box::leak(format!("CreateFromCopy{i}").into_boxed_str());
+            nodes.push((id, label));
+            edges.push(("builder", id, "method"));
+        }
+        build(&nodes, &edges)
+    }
+
+    #[test]
+    fn query_returns_relevance_scores_sorted_descending() {
+        let kg = hub_graph();
+        let r = query(&kg, "vehicle screen reader mesh", 20);
+        assert_eq!(r.scores.len(), r.nodes.len(), "one score per returned node");
+        assert!(!r.scores.is_empty());
+        for w in r.scores.windows(2) {
+            assert!(
+                w[0] >= w[1],
+                "nodes must come back sorted by score descending, got {:?}",
+                r.scores
+            );
+        }
+        // The strongly-matching seed must be the top-ranked node.
+        assert_eq!(r.nodes.first(), Some(&NodeId("reader".into())));
+    }
+
+    #[test]
+    fn relevant_neighbour_ranks_above_hub() {
+        let kg = hub_graph();
+        let r = query(&kg, "reader mesh", 20);
+        let pos = |id: &str| r.nodes.iter().position(|n| n.0 == id);
+        let mesh = pos("mesh").expect("mesh included");
+        let builder = pos("builder").expect("builder included");
+        assert!(
+            mesh < builder,
+            "query-matching neighbour `mesh` (#{mesh}) must outrank hub `builder` (#{builder})"
+        );
+    }
+
+    #[test]
+    fn best_first_spends_budget_on_relevance_not_hub_junk() {
+        let kg = hub_graph();
+        // Budget 4: a plain BFS from `reader` pulls in reader, builder, mesh, then
+        // a junk hub-neighbour before reaching the relevant 2-hop `deep`.
+        // Best-first must instead spend the budget on the relevant chain.
+        let r = query(&kg, "reader mesh", 4);
+        let ids: HashSet<&str> = r.nodes.iter().map(|n| n.0.as_str()).collect();
+        assert!(
+            ids.contains("deep"),
+            "relevant 2-hop node should be included"
+        );
+        for i in 1..=6 {
+            let j = format!("j{i}");
+            assert!(
+                !ids.contains(j.as_str()),
+                "hub junk node {j} must not crowd out relevant nodes under a tight budget"
+            );
+        }
+    }
+
+    #[test]
+    fn edges_sorted_by_relevance_not_lexicographically() {
+        let kg = hub_graph();
+        let r = query(&kg, "reader mesh", 20);
+        let touches_hub = |e: &EdgeRef| {
+            let h = |id: &str| id == "builder" || id.starts_with('j');
+            h(&e.source.0) || h(&e.target.0)
+        };
+        // The lexicographic ordering this replaces put `builder`-sourced edges
+        // first ("builder" < "mesh" < "reader"). Relevance ranking must instead
+        // lead with an edge between query-relevant nodes, never the hub.
+        assert!(
+            !touches_hub(&r.edges[0]),
+            "top edge should connect relevant nodes, got {:?}->{:?}",
+            r.edges[0].source,
+            r.edges[0].target
+        );
+        // Every hub/junk edge must sink below every relevant edge.
+        let first_hub = r.edges.iter().position(touches_hub);
+        let last_relevant = r.edges.iter().rposition(|e| !touches_hub(e));
+        if let (Some(fh), Some(lr)) = (first_hub, last_relevant) {
+            assert!(
+                fh > lr,
+                "hub edges must rank below all relevant edges (first hub #{fh}, last relevant #{lr})"
+            );
+        }
+    }
+
+    #[test]
+    fn query_is_deterministic() {
+        let kg = hub_graph();
+        let a = query(&kg, "reader mesh builder", 10);
+        let b = query(&kg, "reader mesh builder", 10);
+        assert_eq!(a, b, "same query must return identical results");
+    }
+
+    // --- Recency (git/changed-files) awareness ---------------------------------
+
+    fn nid(s: &str) -> NodeId {
+        NodeId(s.into())
+    }
+    fn changed_set(ids: &[&str]) -> HashSet<NodeId> {
+        ids.iter().map(|s| nid(s)).collect()
+    }
+    fn pos(r: &QueryResult, id: &str) -> Option<usize> {
+        r.nodes.iter().position(|n| n.0 == id)
+    }
+
+    #[test]
+    fn recency_boost_reranks_changed_above_equal_unchanged() {
+        // x and y have identical labels and degree => identical base score (tie
+        // broken by id, so x leads). Marking y as changed must float it above x.
+        let kg = build(
+            &[
+                ("x", "auth_service"),
+                ("y", "auth_service"),
+                ("h", "Helper"),
+            ],
+            &[("x", "h", "calls"), ("y", "h", "calls")],
+        );
+        let idx = QueryIndex::build(&kg);
+        let changed = changed_set(&["y"]);
+        let rec = Recency {
+            changed: &changed,
+            churn: None,
+            mode: RecencyMode::Boost,
+            boost: 1.0,
+        };
+        let r = idx.query_with_recency(&kg, "auth service", 10, TraversalMode::Bfs, Some(&rec));
+        assert!(
+            pos(&r, "y").unwrap() < pos(&r, "x").unwrap(),
+            "changed node y must outrank equal unchanged node x: {:?}",
+            r.nodes
+        );
+    }
+
+    #[test]
+    fn recency_boost_changes_inclusion_under_tight_budget() {
+        // s matches; n1/n2 are equal-score non-matching neighbours. Budget 2 keeps
+        // s + one neighbour; by id that is n1. Boosting n2 must pull n2 in instead.
+        let kg = build(
+            &[("s", "Target"), ("n1", "Other"), ("n2", "Other")],
+            &[("s", "n1", "calls"), ("s", "n2", "calls")],
+        );
+        let idx = QueryIndex::build(&kg);
+        let changed = changed_set(&["n2"]);
+        let rec = Recency {
+            changed: &changed,
+            churn: None,
+            mode: RecencyMode::Boost,
+            boost: 2.0,
+        };
+        let r = idx.query_with_recency(&kg, "target", 2, TraversalMode::Bfs, Some(&rec));
+        let ids: HashSet<&str> = r.nodes.iter().map(|n| n.0.as_str()).collect();
+        assert!(
+            ids.contains("n2"),
+            "boosted neighbour should be included: {ids:?}"
+        );
+        assert!(
+            !ids.contains("n1"),
+            "unboosted neighbour should be crowded out: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn recency_churn_weight_ranks_heavier_change_higher() {
+        // x and y are equal base score and both changed; y has higher churn weight
+        // and must therefore rank above x.
+        let kg = build(
+            &[
+                ("x", "auth_service"),
+                ("y", "auth_service"),
+                ("h", "Helper"),
+            ],
+            &[("x", "h", "calls"), ("y", "h", "calls")],
+        );
+        let idx = QueryIndex::build(&kg);
+        let changed = changed_set(&["x", "y"]);
+        let churn: HashMap<NodeId, f64> = [(nid("x"), 0.2), (nid("y"), 1.0)].into_iter().collect();
+        let rec = Recency {
+            changed: &changed,
+            churn: Some(&churn),
+            mode: RecencyMode::Boost,
+            boost: 1.0,
+        };
+        let r = idx.query_with_recency(&kg, "auth service", 10, TraversalMode::Bfs, Some(&rec));
+        assert!(
+            pos(&r, "y").unwrap() < pos(&r, "x").unwrap(),
+            "higher-churn node y must outrank lower-churn x: {:?}",
+            r.nodes
+        );
+    }
+
+    #[test]
+    fn seed_mode_injects_changed_node_query_does_not_match() {
+        // z is unrelated to the query and disconnected, so boost mode never reaches
+        // it. Seed mode must inject it as a seed so the changed surface appears.
+        let kg = build(
+            &[("s", "Target"), ("z", "Unrelated")],
+            &[("s", "s", "calls")], // self-loop ignored; z is isolated
+        );
+        let idx = QueryIndex::build(&kg);
+        let changed = changed_set(&["z"]);
+        let boost = Recency {
+            changed: &changed,
+            churn: None,
+            mode: RecencyMode::Boost,
+            boost: 1.0,
+        };
+        let seed = Recency {
+            mode: RecencyMode::Seed,
+            ..boost
+        };
+        let r_boost = idx.query_with_recency(&kg, "target", 10, TraversalMode::Bfs, Some(&boost));
+        let r_seed = idx.query_with_recency(&kg, "target", 10, TraversalMode::Bfs, Some(&seed));
+        assert!(
+            pos(&r_boost, "z").is_none(),
+            "boost mode should not inject z"
+        );
+        assert!(
+            pos(&r_seed, "z").is_some(),
+            "seed mode must inject changed z: {:?}",
+            r_seed.nodes
+        );
+    }
+
+    #[test]
+    fn seed_mode_with_no_query_match_returns_changed_subgraph() {
+        let kg = build(
+            &[("a", "Alpha"), ("b", "Beta"), ("c", "Gamma")],
+            &[("a", "b", "calls")],
+        );
+        let idx = QueryIndex::build(&kg);
+        let changed = changed_set(&["a", "b"]);
+        let rec = Recency {
+            changed: &changed,
+            churn: None,
+            mode: RecencyMode::Seed,
+            boost: 1.0,
+        };
+        let r = idx.query_with_recency(&kg, "zzz nomatch", 10, TraversalMode::Bfs, Some(&rec));
+        assert!(
+            pos(&r, "a").is_some() && pos(&r, "b").is_some(),
+            "changed subgraph: {:?}",
+            r.nodes
+        );
+    }
+
+    #[test]
+    fn recency_none_is_identical_to_plain_query() {
+        let kg = build(
+            &[
+                ("auth", "AuthService"),
+                ("login", "login_user"),
+                ("db", "Database"),
+            ],
+            &[("auth", "login", "calls"), ("auth", "db", "uses")],
+        );
+        let idx = QueryIndex::build(&kg);
+        for mode in [TraversalMode::Bfs, TraversalMode::Dfs] {
+            assert_eq!(
+                idx.query_with_recency(&kg, "auth login", 10, mode, None),
+                query_modal(&kg, "auth login", 10, mode),
+                "recency=None must match the plain query path (mode={mode:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn recency_query_is_deterministic() {
+        let kg = build(
+            &[
+                ("x", "auth_service"),
+                ("y", "auth_service"),
+                ("h", "Helper"),
+            ],
+            &[("x", "h", "calls"), ("y", "h", "calls")],
+        );
+        let idx = QueryIndex::build(&kg);
+        let changed = changed_set(&["y"]);
+        let rec = Recency {
+            changed: &changed,
+            churn: None,
+            mode: RecencyMode::Boost,
+            boost: 1.0,
+        };
+        let a = idx.query_with_recency(&kg, "auth service", 10, TraversalMode::Bfs, Some(&rec));
+        let b = idx.query_with_recency(&kg, "auth service", 10, TraversalMode::Bfs, Some(&rec));
+        assert_eq!(a, b);
     }
 
     #[test]
