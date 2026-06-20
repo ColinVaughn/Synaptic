@@ -1,13 +1,17 @@
 ---
 name: codegraph
-description: Queries this repo's CodeGraph knowledge graph (symbols and their calls, imports, and inheritance) instead of grepping or reading files. Use when exploring an unfamiliar codebase, finding what calls or depends on a symbol, tracing how one part reaches another, reading a symbol's source, or judging the blast radius of a change.
+description: Queries this repo's CodeGraph knowledge graph -- symbols and how they call, import, inherit, and (across language boundaries) reach each other -- to navigate code and analyze the impact of changes. It answers what calls or depends on a symbol, the blast radius of changing it, a forecast of what a planned edit breaks, which tests exercise it, and a real pass/fail from running the change in a throwaway worktree; it also runs structural/architectural pattern search, plan-only refactors, time-travel architecture diffs, and SQL audit. Use when exploring an unfamiliar codebase, finding callers or dependents, tracing how one part reaches another, reading a symbol's source, or -- before editing code others depend on -- judging blast radius, forecasting a change, choosing which tests to run, or verifying it. Prefer it over grepping or reading files broadly.
 ---
 
 # CodeGraph for Kilo Code
 
-This repository has a **CodeGraph** knowledge graph of its code. Before grepping
-or reading files broadly, query the graph. It is faster and surfaces
-relationships (calls, imports, inheritance, impact).
+This repository has a **CodeGraph** knowledge graph of its code -- a queryable map of
+symbols and how they call, import, inherit, and reach each other (across language
+boundaries too). Treat it as a code-intelligence layer, not just a faster grep: use it
+to navigate the codebase, and -- before you change code that other code depends on -- to
+judge the blast radius, forecast what the change breaks, choose the tests to run, and
+verify the change by running it. Query the graph before grepping or reading files
+broadly; it is faster and surfaces relationships and impact that text search cannot.
 
 ## Build / refresh
 - `codegraph extract .`: build the graph into `codegraph-out/`.
@@ -75,6 +79,9 @@ Use the **codegraph** MCP server's tools. Start with `query_graph`, then:
 - `time_travel_diff` -- how the graph changed between two git revisions.
 - `plan_rename` -- a plan-only, confidence-scored rename plan (never edits;
   apply it, then `codegraph refactor verify` on the CLI).
+- `audit_sql` / `advise_sql` -- review the repo's SQL for performance and
+  security issues over the SQL-aware graph, or critique a candidate query before
+  you run it (SQL-bearing repos).
 - `list_prs` / `get_pr_impact` / `triage_prs` -- graph-aware PR review (need `gh`).
 
 Reference them with your client's MCP prefix (Claude Code:

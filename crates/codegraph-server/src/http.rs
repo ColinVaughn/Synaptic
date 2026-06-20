@@ -10,6 +10,11 @@
 //!     server-initiated channel; we have no pushes yet, so it's a heartbeat).
 //!   - `DELETE` — terminates a session.
 //!
+//! On every `/mcp` request after initialization, a present-but-unsupported
+//! `MCP-Protocol-Version` header is rejected with 400 (per the 2025-11-25
+//! transport); an absent header is tolerated (assume `2025-03-26`), and the
+//! `initialize` request is exempt (its version comes from negotiation).
+//!
 //! An idle reaper drops sessions after [`DEFAULT_SESSION_IDLE`]. This realizes
 //! the MCP Streamable-HTTP transport (see [`crate::session`]).
 //!
@@ -188,6 +193,22 @@ fn guard(headers: &HeaderMap, st: &HttpState) -> Option<Response> {
     None
 }
 
+/// Validate the `MCP-Protocol-Version` header (Streamable HTTP, 2025-11-25): a
+/// present-but-unsupported value MUST be answered with 400 Bad Request. An absent
+/// header is tolerated (the spec says assume `2025-03-26` for backwards
+/// compatibility); the `initialize` request is exempt (its version comes from
+/// negotiation, not this header), so callers skip the check there.
+fn protocol_version_rejection(headers: &HeaderMap) -> Option<Response> {
+    let value = headers
+        .get("mcp-protocol-version")
+        .and_then(|h| h.to_str().ok())?;
+    if crate::SUPPORTED_PROTOCOLS.contains(&value) {
+        None
+    } else {
+        Some((StatusCode::BAD_REQUEST, "unsupported MCP-Protocol-Version").into_response())
+    }
+}
+
 fn session_header(headers: &HeaderMap) -> Option<String> {
     headers
         .get("mcp-session-id")
@@ -204,6 +225,15 @@ async fn handle_post(State(st): State<HttpState>, headers: HeaderMap, body: Byte
         return (StatusCode::BAD_REQUEST, "invalid JSON").into_response();
     };
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+
+    // MCP-Protocol-Version header (2025-11-25): a present-but-unsupported value
+    // MUST get 400 on any post-initialization request. `initialize` is exempt
+    // (its version comes from negotiation); an absent header is tolerated.
+    if method != "initialize" {
+        if let Some(resp) = protocol_version_rejection(&headers) {
+            return resp;
+        }
+    }
 
     let mut new_session: Option<String> = None;
     if !st.stateless {
@@ -261,6 +291,9 @@ async fn handle_post(State(st): State<HttpState>, headers: HeaderMap, body: Byte
 /// session subscribes to its broadcast channel).
 async fn handle_sse(State(st): State<HttpState>, headers: HeaderMap) -> Response {
     if let Some(resp) = guard(&headers, &st) {
+        return resp;
+    }
+    if let Some(resp) = protocol_version_rejection(&headers) {
         return resp;
     }
     let mut session_id = None;
@@ -336,6 +369,9 @@ fn resource_updated_event() -> Event {
 /// `DELETE /mcp` — terminate a session.
 async fn handle_delete(State(st): State<HttpState>, headers: HeaderMap) -> Response {
     if let Some(resp) = guard(&headers, &st) {
+        return resp;
+    }
+    if let Some(resp) = protocol_version_rejection(&headers) {
         return resp;
     }
     match session_header(&headers) {
@@ -964,5 +1000,93 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn rejects_unsupported_protocol_version_header() {
+        // 2025-11-25 transport: a present-but-unsupported MCP-Protocol-Version on
+        // a post-initialization request MUST be answered with 400 Bad Request.
+        let resp = router(test_state(None))
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .header("mcp-protocol-version", "1999-01-01")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn sse_get_rejects_unsupported_protocol_version_header() {
+        // The header check covers the GET (SSE) channel too.
+        let resp = router(test_state(None))
+            .oneshot(
+                Request::get("/mcp")
+                    .header("accept", "text/event-stream")
+                    .header("mcp-protocol-version", "1999-01-01")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn accepts_supported_protocol_version_header() {
+        // A negotiated/supported version passes through.
+        let resp = router(test_state(None))
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .header("mcp-protocol-version", "2025-11-25")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn tolerates_absent_protocol_version_header() {
+        // Backwards compatibility: an absent header is NOT rejected (the spec
+        // says assume 2025-03-26), so simple request/response clients keep working.
+        let resp = router(test_state(None))
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn initialize_is_exempt_from_protocol_version_header() {
+        // The version is negotiated in the initialize exchange, so the header is
+        // not expected there; a bad/absent value must not block initialization.
+        let resp = router(test_state(None))
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .header("mcp-protocol-version", "not-a-version")
+                    .body(init_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

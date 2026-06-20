@@ -6,10 +6,15 @@
 //! pure [`Server::handle_request`] dispatcher, which makes the whole protocol
 //! unit-testable without an async runtime.
 //!
-//! Twelve read-only tools over a graph loaded at startup: graph (`query_graph`,
-//! `get_node`, `get_neighbors`, `get_community`, `god_nodes`, `graph_stats`,
-//! `shortest_path`), federation (`list_repos`, `repo_stats`), and PR (`list_prs`,
-//! `get_pr_impact`, `triage_prs`), plus six resources. The `initialize` reply
+//! 26 read-only tools by default (27 with `--allow-exec`, which adds the
+//! command-running `speculate`), over a graph loaded at startup: graph navigation
+//! (`query_graph`, `get_node`, `get_source`, `get_neighbors`, `get_community`,
+//! `god_nodes`, `graph_stats`, `shortest_path`, `find_callers`, `find_callees`),
+//! impact and forecasting (`affected`, `working_changes_impact`, `predict_impact`,
+//! `affected_tests`, `predict_edit`), advanced (`structural_search`, `describe_node`,
+//! `time_travel_diff`, plan-only `plan_rename`), SQL (`audit_sql`, `advise_sql`),
+//! federation (`list_repos`, `repo_stats`), and PR (`list_prs`, `get_pr_impact`,
+//! `triage_prs`), plus six resources. The `initialize` reply
 //! returns server `instructions` orienting the agent, and each tool documents its
 //! parameters, so an assistant uses them correctly. Every label is run through
 //! [`codegraph_core::sanitize_label`] before it reaches tool text (a security
@@ -66,9 +71,9 @@ fn negotiate_protocol(requested: Option<&str>) -> &'static str {
 }
 
 /// A loaded graph + the server's view of it. Hot-reloads when `graph.json`
-/// changes (C3c). [`handle_request`](Server::handle_request) takes `&mut self`;
-/// the HTTP transport shares one behind an `Arc<Mutex<Server>>` (requests are
-/// low-QPS, so serializing them is fine).
+/// changes (C3c). [`handle_request`](Server::handle_request) takes `&mut self`
+/// (the stdio path); the HTTP transport shares one behind an `Arc<RwLock<Server>>`,
+/// so read requests run concurrently and the write lock is taken only to hot-reload.
 pub struct Server {
     kg: KnowledgeGraph,
     communities: BTreeMap<u32, Vec<NodeId>>,
@@ -407,8 +412,9 @@ impl Server {
 
     /// `get_source` — the actual source lines for a symbol. Resolves the node,
     /// reads its file under the source-root jail, and returns a window starting
-    /// at the node's recorded line (`source_location` = "L<n>"). The graph has
-    /// no end line, so it returns `context_lines` lines from the start.
+    /// at the node's recorded line (`source_location` = "L<n>"): it stops at the
+    /// symbol's end line when the node carries a span (bounded by `context_lines`),
+    /// otherwise returns `context_lines` lines from the start.
     pub fn tool_get_source(&self, label: &str, context_lines: usize) -> String {
         let Some(id) = resolve_seed(&self.kg, label) else {
             return format!("No node matches '{}'.", sanitize_label(label));
@@ -2020,12 +2026,17 @@ Recommended flow: call graph_stats or god_nodes to orient, query_graph for a que
 (returns a relevant subgraph), then get_source to read a symbol's actual code, \
 get_neighbors / find_callers / find_callees / shortest_path to navigate, and get_node \
 for detail. For change impact, affected gives the blast radius of editing a symbol and \
-working_changes_impact does the same for your current git diff. For a multi-repo graph, \
-call list_repos then pass the repo argument to scope. The PR tools (list_prs / \
-get_pr_impact / triage_prs) need the `gh` CLI. To see how the architecture changed \
-over time, run the CLI (not exposed as a tool here): `codegraph diff <rev1> [rev2]` \
-reports new/removed dependencies, removed APIs, drift, new cycles, and hotspots \
-between two git revisions.\n\
+working_changes_impact does the same for your current git diff. Before editing a symbol \
+other code depends on, forecast the change: predict_impact gives the blast radius plus \
+the public APIs and tests at risk, affected_tests lists the tests to run, and \
+predict_edit says what a delete / signature / visibility change breaks. structural_search \
+runs a CGQL query or a named pattern (matches on kind / loc / fan-in-out, not text); \
+describe_node summarizes a symbol's shape; time_travel_diff reports how the architecture \
+changed between two git revisions (added/removed dependencies, removed APIs, drift, new \
+cycles, hotspots); plan_rename produces a plan-only, confidence-scored rename. For \
+SQL-bearing code, audit_sql reviews the schema and advise_sql critiques a candidate query. \
+For a multi-repo graph, call list_repos then pass the repo argument to scope. The PR tools \
+(list_prs / get_pr_impact / triage_prs) need the `gh` CLI.\n\
 \n\
 Terms: a 'god node' is a high-degree hub (structurally central); a 'community' is a \
 cluster of densely-connected nodes (roughly a module); edge confidence is EXTRACTED \
@@ -2073,7 +2084,7 @@ fn tools_list(allow_exec: bool) -> Value {
           }, "required": ["community_id"] } },
         { "name": "god_nodes", "description": "The most-connected nodes ('god nodes' = high-degree hubs, the structurally central symbols). Use to orient in an unfamiliar codebase.",
           "inputSchema": { "type": "object", "properties": {
-              "top_n": { "type": "integer", "description": "How many hubs to return (default is a small list)." },
+              "top_n": { "type": "integer", "description": "How many hubs to return (default 10)." },
               "offset": { "type": "integer", "description": "Hubs to skip before the page (default 0), for paging past the top ranks." }
           } },
           "outputSchema": { "type": "object", "properties": {
@@ -2091,12 +2102,12 @@ fn tools_list(allow_exec: bool) -> Value {
         { "name": "repo_stats", "description": "Node/edge counts for one federated member repo.",
           "inputSchema": { "type": "object", "properties": { "repo": { "type": "string", "description": "Repo tag, as listed by list_repos." } }, "required": ["repo"] } },
         { "name": "shortest_path", "description": "Shortest path between two nodes, showing the chain of relations. Answers 'how does A reach B' or 'is X connected to Y'.",
-          "inputSchema": { "type": "object", "properties": { "source": { "type": "string", "description": "Start node: label, id, or bare name." }, "target": { "type": "string", "description": "End node: label, id, or bare name." }, "max_hops": { "type": "integer", "description": "Optional cap on path length (hops)." } }, "required": ["source", "target"] } },
+          "inputSchema": { "type": "object", "properties": { "source": { "type": "string", "description": "Start node: label, id, or bare name." }, "target": { "type": "string", "description": "End node: label, id, or bare name." }, "max_hops": { "type": "integer", "description": "Optional cap on path length in hops (default 8)." } }, "required": ["source", "target"] } },
         { "name": "affected", "description": "Reverse-impact: the nodes that transitively depend on a symbol, i.e. what could break if you change it. Walks calls/imports/inheritance edges plus cross-language coupling (subprocess `invokes`, FFI `binds_native`, HTTP/gRPC `calls_service`/`handled_by`) backward, so the blast radius spans language boundaries. Answers 'what is the blast radius of changing X'.",
           "inputSchema": { "type": "object", "properties": {
               "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." },
               "depth": { "type": "integer", "description": "Max hops to walk backward (default 3, max 16)." },
-              "relations": { "type": "array", "items": { "type": "string" }, "description": "Optional edge relations to follow; defaults to the structural-impact set: calls, references, imports, imports_from, re_exports, inherits, extends, implements, uses, mixes_in, embeds, depends_on, reads_from." }
+              "relations": { "type": "array", "items": { "type": "string" }, "description": "Optional edge relations to follow; defaults to the structural-impact set: calls, references, imports, imports_from, re_exports, inherits, extends, implements, uses, mixes_in, embeds, depends_on, reads_from, plus the cross-language relations invokes, binds_native, calls_service, handled_by." }
           }, "required": ["label"] },
           "outputSchema": { "type": "object", "properties": {
               "seed": {"type":"string"},
@@ -2186,7 +2197,7 @@ fn tools_list(allow_exec: bool) -> Value {
               "kind": { "type": "string", "description": "The edit kind: delete, signature, or visibility." },
               "depth": { "type": "integer", "description": "Reverse-impact hop bound (default 3, max 16)." }
           }, "required": ["symbol", "kind"] } },
-        { "name": "audit_sql", "description": "Audit the codebase's SQL for performance and security problems over the SQL-aware graph: row-level-security gaps, over-broad grants, likely SQL injection, missing indexes on filter/foreign-key columns, SELECT *, non-sargable predicates, N+1 patterns, and missing primary keys. Returns findings with severity, location, and a fix for each.",
+        { "name": "audit_sql", "description": "Audit the codebase's SQL for performance and security problems over the SQL-aware graph: row-level-security gaps, over-broad grants, likely SQL injection, missing indexes on filter/foreign-key columns, SELECT *, non-sargable predicates, and missing primary keys. Returns findings with severity, location, and a fix for each.",
           "inputSchema": { "type": "object", "properties": {
               "severity": { "type": "string", "enum": ["critical","high","medium","low","info"], "description": "Only return findings at least this severe (default: all)." }
           } },
@@ -2204,7 +2215,10 @@ fn tools_list(allow_exec: bool) -> Value {
           }, "required": ["query"] },
           "outputSchema": { "type": "object", "properties": {
               "version": {"type":"integer"}, "summary": {"type":"string"},
-              "findings": { "type": "array", "items": { "type": "object" } }
+              "findings": { "type": "array", "items": { "type": "object", "properties": {
+                  "rule_id": {"type":"string"}, "severity": {"type":"string"}, "category": {"type":"string"},
+                  "title": {"type":"string"}, "detail": {"type":"string"}, "location": {"type":"string"},
+                  "remediation": {"type":"string"}, "confidence": {"type":"number"} } } }
           }, "required": ["version","summary","findings"] } }
     ]);
     // The single command-running tool, exposed only when the operator opted in

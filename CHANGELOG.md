@@ -6,6 +6,39 @@ All notable changes to CodeGraph are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-06-20
+
+### Added
+- **MCP `MCP-Protocol-Version` header validation (Streamable HTTP):** a request sent after
+  initialization with an unsupported `MCP-Protocol-Version` is now rejected with HTTP
+  `400 Bad Request`, per the 2025-11-25 transport. An absent header is tolerated for
+  backwards compatibility (assumed `2025-03-26`), and the `initialize` request is exempt.
+- **`advise_sql` typed output schema:** the MCP tool now declares the same structured
+  `findings` shape as `audit_sql` (`rule_id`, `severity`, `category`, `title`, `detail`,
+  `location`, `remediation`, `confidence`), so clients can parse its result.
+
+### Changed
+- **Skill framing:** the generated CodeGraph skill (frontmatter description, intro, and the
+  always-on block) now positions the graph as a code-intelligence and change-impact layer
+  -- navigate code AND forecast/verify a change before editing -- rather than only a faster
+  search.
+- **MCP server `instructions`:** the `initialize` orientation text now covers the full tool
+  surface (impact/forecasting, structural search, `describe_node`, `time_travel_diff`,
+  `plan_rename`, SQL audit) instead of the original twelve-tool subset, and no longer points
+  to the CLI for the architecture diff that `time_travel_diff` already exposes.
+- **`SECURITY.md`:** replaced the placeholder template with an accurate policy (supported
+  version line, private-advisory reporting, and the read-only / `--allow-exec` and
+  `Host`/`Origin`-allowlist boundaries).
+
+### Fixed
+- **MCP tool descriptions and schemas reconciled with behavior:** `audit_sql` no longer
+  advertises N+1 detection (which needs a source root the read-only MCP path does not pass);
+  the `affected` `relations` default now lists the cross-language relations it actually walks
+  (`invokes`, `binds_native`, `calls_service`, `handled_by`); `god_nodes` and `shortest_path`
+  now state their numeric defaults (10 and 8); and `get_source` documents that it stops at a
+  symbol's span end. Wiki structured-output and tool counts, and the 0.2.5 static-rule count,
+  reconciled with the code.
+
 ## [0.2.6] - 2026-06-19
 
 ### Changed
@@ -21,10 +54,10 @@ All notable changes to CodeGraph are documented here. The format is based on
 - **SQL performance & security auditor (`codegraph sql audit`):** new `codegraph-sqlaudit` crate
   that runs a rule engine over a SQL-aware graph and reports findings by severity, each with a
   location, the offending object/query, a remediation, a confidence score, and the graph evidence
-  that triggered it. 18 static rules across security (row-level-security gaps, RLS not `FORCE`d,
+  that triggered it. 19 static rules across security (row-level-security gaps, RLS not `FORCE`d,
   `USING`-without-`WITH CHECK`, views without `security_invoker`, SQL Server security-policy
   coverage, over-broad grants, secret-looking columns, string-concatenation injection),
-  performance (unindexed foreign-key and RLS-filter columns, `SELECT *`, non-sargable predicates,
+  performance (unindexed foreign-key columns, unindexed RLS-filter columns, `SELECT *`, non-sargable predicates,
   `UPDATE`/`DELETE` with no `WHERE`, `ORDER BY RAND()`, N+1 in a loop, many-join queries), and
   design (missing primary key, implied-but-missing foreign key, positional `INSERT`).
 - **`codegraph sql advise --query "<sql>"`:** critiques a candidate query before it is written,
