@@ -21,6 +21,12 @@ one the server supports (`2025-11-25`, `2025-06-18`, `2025-03-26`, or
 `2025-11-25`. A client that sends no `protocolVersion` gets `2025-11-25`. Server
 info is `{ "name": "codegraph", "version": <crate version>, "description": <one-line summary> }`.
 
+Over HTTP, requests sent after initialization carry an `MCP-Protocol-Version`
+header. A present-but-unsupported value is rejected with `400 Bad Request`; an
+absent header is tolerated (assumed `2025-03-26`, for backwards compatibility),
+and the `initialize` request itself is exempt because its version is set by the
+negotiation above.
+
 The `initialize` reply also advertises capabilities:
 
 ```json
@@ -163,7 +169,7 @@ annotated honestly as `readOnlyHint: false, openWorldHint: true`. The default
 server never advertises or runs it, preserving the strictly read-only surface.
 
 Each tool returns a text content block (the load-bearing, purpose-formatted
-output). Six tools additionally declare an `outputSchema` and return a typed
+output). Eight tools additionally declare an `outputSchema` and return a typed
 `structuredContent` object alongside the text (a 2025-06-18 feature) -- see
 [Structured output](#structured-output).
 
