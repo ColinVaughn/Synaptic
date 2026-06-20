@@ -276,7 +276,7 @@ A code-only corpus runs fully offline; the optional LLM semantic pass over docs 
 |---|---|
 | `extract [path]` | Build the graph and write `codegraph-out/`. Flags: `--directed`, `--obsidian`, `--wiki`, `--semantic` |
 | `export <format>` | Re-emit a format from an existing `graph.json` (no rebuild) or push live to Neo4j/FalkorDB |
-| `query <text>` | Return a relevant subgraph. Flags: `--max-nodes`, `--repo`, `--dfs` |
+| `query <text>` | Return a relevance-ranked subgraph (each node scored). Flags: `--max-nodes`, `--repo`, `--dfs`, `--since <ref>` (boost code changed on the branch), `--seed-changed` |
 | `path <from> <to>` | Shortest path between two nodes |
 | `explain <node>` | Show a node and its neighbours |
 | `affected <node>` | Nodes that (transitively) depend on a node. Flags: `--depth`, `--relation` |

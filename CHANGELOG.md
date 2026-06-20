@@ -6,6 +6,31 @@ All notable changes to CodeGraph are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-06-20
+
+### Added
+- **`query_graph` relevance scores:** the tool now ranks results by relevance instead of
+  returning them in traversal/lexicographic order. Expansion is best-first (a priority
+  frontier keyed by relevance), high-fan-out hub nodes are down-weighted so a registry or
+  builder no longer floods the result with its incidental neighbours, and seeds are scored
+  with length-normalised IDF. Each structured node carries a `score` (higher = more
+  relevant; nodes are sorted by it) and edges are ordered by endpoint relevance, so a
+  caller can focus on the top results and ignore the low-scored tail. The `codegraph query`
+  CLI prints the ranked nodes with their scores.
+- **`query_graph` git/recency awareness:** an optional `since` argument (a git ref like
+  `main`, a date like `"2 weeks ago"`, or `auto` to detect the default branch) boosts nodes
+  whose file changed on the current branch, so in-progress code surfaces first. Scope is
+  `merge-base(since, HEAD)..working-tree`, so it includes uncommitted edits; the boost is
+  churn-weighted. `recency_mode: "seed"` additionally injects the changed-file nodes as
+  seeds, surfacing the branch's changed surface even when the question matches little
+  ("what did this branch change"). Changed nodes are flagged with `changed: true` (a
+  `(changed)` marker in text) and the result header reports the baseline. The `codegraph
+  query` CLI exposes the same via `--since` / `--seed-changed`. Resolution runs git and
+  degrades gracefully to a plain query when git is unavailable.
+- **History helpers:** `codegraph_history::git::merge_base` (common ancestor of two revs)
+  and a pure `parse_numstat` (so callers running git through their own runner can reuse the
+  parsing).
+
 ## [0.2.7] - 2026-06-20
 
 ### Added
@@ -304,7 +329,10 @@ All notable changes to CodeGraph are documented here. The format is based on
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.8...HEAD
+[0.2.8]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.7...v0.2.8
+[0.2.7]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.6...v0.2.7
+[0.2.6]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.4...v0.2.5
 [0.2.1]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/ColinVaughn/CodeGraph/compare/v0.1.1...v0.2.0

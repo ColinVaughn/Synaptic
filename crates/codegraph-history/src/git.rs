@@ -50,6 +50,13 @@ pub fn rev_before(repo_root: &Path, date: &str) -> Result<String, HistoryError> 
     Ok(sha)
 }
 
+/// The merge base (common ancestor) of two revisions: `git merge-base <a> <b>`.
+/// Used to scope "what this branch changed" to commits since it diverged from its
+/// base, rather than counting commits the base made afterward.
+pub fn merge_base(repo_root: &Path, a: &str, b: &str) -> Result<String, HistoryError> {
+    run(repo_root, &["merge-base", a, b])
+}
+
 /// Create a detached worktree of `sha` at `dest`. `dest` must not already exist.
 pub fn worktree_add(repo_root: &Path, dest: &Path, sha: &str) -> Result<(), HistoryError> {
     let dest_s = deverbatim(dest);
@@ -87,6 +94,14 @@ pub fn numstat(
         args.push(r2);
     }
     let out = run(repo_root, &args)?;
+    Ok(parse_numstat(&out))
+}
+
+/// Parse `git diff --numstat` output into `(added, removed, path)` rows. Pure, so
+/// callers that run git through their own runner (e.g. the MCP server's
+/// `CommandRunner`) can reuse the parsing without re-shelling git here. Binary
+/// files (`-`) count as 0.
+pub fn parse_numstat(out: &str) -> Vec<(usize, usize, String)> {
     let mut rows = Vec::new();
     for line in out.lines() {
         let mut parts = line.splitn(3, '\t');
@@ -98,7 +113,7 @@ pub fn numstat(
         let removed = d.parse::<usize>().unwrap_or(0);
         rows.push((added, removed, p.to_string()));
     }
-    Ok(rows)
+    rows
 }
 
 #[cfg(test)]
@@ -163,6 +178,46 @@ mod tests {
         assert_eq!(sha.len(), 40, "full sha");
         // No commit exists before 2019.
         assert!(rev_before(root, "2019-01-01").is_err());
+    }
+
+    #[test]
+    fn parse_numstat_handles_text_and_binary_rows() {
+        let out = "3\t1\tsrc/a.rs\n10\t0\tdocs/b.md\n-\t-\tassets/logo.png\n";
+        let rows = parse_numstat(out);
+        assert_eq!(
+            rows,
+            vec![
+                (3, 1, "src/a.rs".to_string()),
+                (10, 0, "docs/b.md".to_string()),
+                (0, 0, "assets/logo.png".to_string()), // binary `-` counts as 0
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_base_finds_branch_point() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git_run(root, &["init", "-q"]);
+        git_run(root, &["checkout", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), b"base\n").unwrap();
+        git_run(root, &["add", "-A"]);
+        git_run(root, &["commit", "-q", "-m", "base", "--no-gpg-sign"]);
+        let base_sha = rev_parse(root, "HEAD").unwrap();
+        // branch off, advance the feature branch
+        git_run(root, &["checkout", "-q", "-b", "feat"]);
+        std::fs::write(root.join("b.txt"), b"feature\n").unwrap();
+        git_run(root, &["add", "-A"]);
+        git_run(root, &["commit", "-q", "-m", "feat", "--no-gpg-sign"]);
+        // advance main too, so HEAD and main have diverged
+        git_run(root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("c.txt"), b"main2\n").unwrap();
+        git_run(root, &["add", "-A"]);
+        git_run(root, &["commit", "-q", "-m", "main2", "--no-gpg-sign"]);
+        git_run(root, &["checkout", "-q", "feat"]);
+        // merge-base(main, HEAD) is the shared base commit, not either tip.
+        let mb = merge_base(root, "main", "HEAD").unwrap();
+        assert_eq!(mb, base_sha, "merge-base should be the branch point");
     }
 
     #[test]

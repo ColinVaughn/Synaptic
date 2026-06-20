@@ -4,18 +4,31 @@ use crate::commands::common::{
     default_graph_path, label_or_id, load_graph, load_scoped_graph, resolve,
 };
 use anyhow::Result;
+use codegraph_core::NodeId;
+use codegraph_graph::KnowledgeGraph;
 use codegraph_query::{
-    affected_nodes, explain, query_modal, resolve_seed, shortest_path, TraversalMode,
-    DEFAULT_AFFECTED_RELATIONS,
+    affected_nodes, explain, query_modal, resolve_seed, shortest_path, QueryIndex, Recency,
+    RecencyMode, TraversalMode, DEFAULT_AFFECTED_RELATIONS,
 };
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
+/// `query` recency-boost strength (mirrors the MCP server's RECENCY_BOOST).
+const RECENCY_BOOST: f64 = 4.0;
+
+/// Resolved `--since` signal: (changed node ids, per-node churn weight, base
+/// label, changed-file count).
+type ResolvedRecency = (HashSet<NodeId>, HashMap<NodeId, f64>, String, usize);
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_query(
     text: &str,
     graph: Option<PathBuf>,
     max_nodes: usize,
     repo: Option<&str>,
     dfs: bool,
+    since: Option<&str>,
+    seed_changed: bool,
 ) -> Result<()> {
     let kg = load_scoped_graph(&default_graph_path(graph), repo)?;
     let mode = if dfs {
@@ -23,14 +36,46 @@ pub(crate) fn run_query(
     } else {
         TraversalMode::Bfs
     };
-    let r = query_modal(&kg, text, max_nodes, mode);
-    if r.seeds.is_empty() {
+    // Resolve the changed-files set when --since is given (current dir = repo root).
+    let resolved = since.and_then(|s| resolve_recency_cli(&kg, Path::new("."), s));
+    if let Some((_, _, label, n_files)) = resolved.as_ref() {
+        println!("Recency: since {label} | {n_files} changed file(s)");
+    } else if since.is_some() {
+        println!("Recency: unavailable (not a git repo, bad ref, or no changes) — plain query.");
+    }
+    let rec = resolved.as_ref().map(|(changed, churn, _, _)| Recency {
+        changed,
+        churn: Some(churn),
+        mode: if seed_changed {
+            RecencyMode::Seed
+        } else {
+            RecencyMode::Boost
+        },
+        boost: RECENCY_BOOST,
+    });
+    let r = match &rec {
+        Some(_) => {
+            QueryIndex::build(&kg).query_with_recency(&kg, text, max_nodes, mode, rec.as_ref())
+        }
+        None => query_modal(&kg, text, max_nodes, mode),
+    };
+    if r.seeds.is_empty() && r.nodes.is_empty() {
         println!("No matches for {text:?}.");
         return Ok(());
     }
     println!("Seeds:");
     for s in &r.seeds {
         println!("  - {}", label_or_id(&kg, s));
+    }
+    let changed_set = resolved.as_ref().map(|(c, ..)| c);
+    println!("\nRanked nodes ({}):", r.nodes.len());
+    for (id, score) in r.nodes.iter().zip(r.scores.iter()) {
+        let mark = if changed_set.is_some_and(|c| c.contains(id)) {
+            " (changed)"
+        } else {
+            ""
+        };
+        println!("  [{score:.2}]{mark} {}", label_or_id(&kg, id));
     }
     println!(
         "\nSubgraph ({} nodes, {} edges):",
@@ -46,6 +91,56 @@ pub(crate) fn run_query(
         );
     }
     Ok(())
+}
+
+/// Resolve `--since` to (changed node ids, per-node churn weight, base label,
+/// changed-file count) via git, or `None` if git is unavailable / nothing changed.
+/// Scope: merge-base(SINCE, HEAD)..working-tree (includes uncommitted edits).
+/// Mirrors the MCP server's `resolve_recency`, but shells git directly (the CLI is
+/// not sandboxed).
+fn resolve_recency_cli(kg: &KnowledgeGraph, root: &Path, since: &str) -> Option<ResolvedRecency> {
+    use codegraph_history::git;
+    // Base ref: try as a git rev, then as a date.
+    let base = git::rev_parse(root, since)
+        .or_else(|_| git::rev_before(root, since))
+        .ok()?;
+    let mb = git::merge_base(root, &base, "HEAD").unwrap_or(base);
+    let rows = git::numstat(root, &mb, None).ok()?;
+
+    let mut file_churn: HashMap<String, usize> = HashMap::new();
+    for (a, d, p) in rows {
+        *file_churn.entry(p.replace('\\', "/")).or_default() += a + d;
+    }
+    if file_churn.is_empty() {
+        return None;
+    }
+    let max = file_churn.values().copied().max().unwrap_or(1).max(1) as f64;
+    let denom = (1.0 + max).ln();
+
+    let mut changed = HashSet::new();
+    let mut churn = HashMap::new();
+    for n in kg.nodes() {
+        let sf = n.source_file.replace('\\', "/");
+        if let Some(&lines) = file_churn.get(&sf) {
+            let w = if lines == 0 {
+                0.1
+            } else {
+                ((1.0 + lines as f64).ln() / denom).max(0.1)
+            };
+            changed.insert(n.id.clone());
+            churn.insert(n.id.clone(), w);
+        }
+    }
+    if changed.is_empty() {
+        return None;
+    }
+    let short = &mb[..mb.len().min(7)];
+    Some((
+        changed,
+        churn,
+        format!("{since} (merge-base {short})"),
+        file_churn.len(),
+    ))
 }
 
 pub(crate) fn run_path(

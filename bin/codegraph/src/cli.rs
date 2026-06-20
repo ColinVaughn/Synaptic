@@ -82,6 +82,15 @@ pub(crate) enum Cmd {
         /// call chains over broad neighbourhoods).
         #[arg(long)]
         dfs: bool,
+        /// Boost nodes whose file changed on the current branch since this baseline:
+        /// a git ref (main, HEAD~10), a date ("2 weeks ago"), or "auto" (detect the
+        /// default branch). Scope is merge-base(SINCE, HEAD)..working-tree.
+        #[arg(long)]
+        since: Option<String>,
+        /// With --since: also inject changed-file nodes as seeds, so the branch's
+        /// changed surface appears even when the query matches little.
+        #[arg(long)]
+        seed_changed: bool,
     },
     /// Shortest path between two nodes (by id or label).
     Path {

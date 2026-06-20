@@ -178,9 +178,17 @@ output). Eight tools additionally declare an `outputSchema` and return a typed
 Primary entry point. Retrieve a relevant subgraph for a natural-language
 question.
 
+Results are ranked by relevance: expansion is best-first (a priority frontier),
+high-fan-out hub nodes are down-weighted so they do not flood the result, and
+every node carries a relevance `score`. Nodes and edges come back sorted by it, so
+you can focus on the top results and ignore the low-scored tail. See
+[Querying#query] for the scoring details.
+
 Parameters:
 - `question` (string, required) -- the natural-language question.
-- `mode` (string, `"bfs"` or `"dfs"`) -- traversal mode. Default `bfs`.
+- `mode` (string, `"bfs"` or `"dfs"`) -- traversal mode. Default `bfs`. Both
+  expand best-first by relevance; the mode only breaks score ties (bfs favors
+  shallower nodes, dfs deeper ones).
 - `token_budget` (integer) -- approximate output token budget. Default 2000. It
   maps to a node cap (about `budget/40`, clamped to 10..400). The rendered text
   is bounded to about `token_budget` tokens: output within `token_budget*4` bytes
@@ -188,9 +196,20 @@ Parameters:
   `cl100k_base` tokenizer for an exact cut.
 - `context_filter` (array of strings) -- keep only nodes whose source file path
   contains one of these substrings.
+- `since` (string) -- optional recency boost. Nodes whose file changed on the
+  current branch since this baseline rank higher. The baseline is a git ref
+  (`main`, `HEAD~10`), a date (`"2 weeks ago"`), or `auto` to detect the default
+  branch. Scope is `merge-base(since, HEAD)..working-tree`, so it includes
+  uncommitted edits; the boost is churn-weighted. Silently ignored when the source
+  is not a git repo or the ref does not resolve.
+- `recency_mode` (string, `"boost"` or `"seed"`) -- only with `since`. `boost`
+  (default) re-ranks query matches by recency. `seed` also injects changed-file
+  nodes as seeds, so the changed surface appears even when the question matches
+  little -- use it to answer "what did this branch change".
 
-Returns a header (`Traversal: <mode> | Start: [<seeds>] | <n> nodes found`)
-followed by `NODE` lines (label, file type, source file) and `EDGE` lines
+Returns a header (`Traversal: <mode> | Start: [<seeds>] | <n> nodes found`, plus a
+`Recency:` line when `since` is used) followed by `NODE` lines (`[score]`, an
+optional `(changed)` marker, label, file type, source file) and `EDGE` lines
 (`source --relation--> target`), plus a `structuredContent` mirror (see below).
 When the `CODEGRAPH_QUERY_LOG` environment variable points to a path, each query
 is appended to it as JSONL (disable with `CODEGRAPH_QUERY_LOG_DISABLE=1`).
@@ -546,7 +565,7 @@ formatted text:
 | `graph_stats` | `{ nodes, edges, communities, extracted, inferred, ambiguous }` |
 | `god_nodes` | `{ god_nodes: [{ label, degree, id }] }` |
 | `affected` | `{ seed, affected: [{ label, depth, via_relation }] }` |
-| `query_graph` | `{ nodes: [{ label, file_type, source_file }], edges: [{ source, relation, target }] }` |
+| `query_graph` | `{ nodes: [{ label, file_type, source_file, score, changed }], edges: [{ source, relation, target }] }` (nodes sorted by `score`; `changed` is true when `since` was given and the node's file changed) |
 | `structural_search` | `{ columns, results: [[{ id, label, kind, visibility, file, line, loc, signature }]] }` (or `groups` for aggregates) |
 | `describe_node` | `{ found, id, label, kind, summary, callees, signature }` |
 | `audit_sql` / `advise_sql` | `{ version, summary, findings: [{ rule_id, severity, category, title, detail, location, remediation, confidence }] }` |

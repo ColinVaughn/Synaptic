@@ -28,7 +28,9 @@ codegraph query "user authentication" --max-nodes 30
 
 `query` retrieves a subgraph relevant to free text. It scores every node by how
 well its label tokens overlap the query, picks the best-scoring nodes as seeds,
-then expands outward from those seeds until it has collected `--max-nodes` nodes.
+then expands outward from those seeds — best-first, by relevance — until it has
+collected `--max-nodes` nodes. Results come back ranked, each with a relevance
+score.
 
 How scoring works:
 
@@ -36,24 +38,42 @@ How scoring works:
   both `snake_case` and `camelCase` boundaries and dropping tokens shorter than
   two characters. `run_analysis()` becomes `run`, `analysis`; `AuthService`
   becomes `auth`, `service`.
-- Each node's score is the sum of IDF weights of the query tokens it contains,
-  where IDF is `ln((N + 1) / (1 + df)) + 1` with `N` the node count and `df` the
-  number of nodes whose label contains that token. Rarer tokens count for more.
-- Nodes with a score above zero are ranked highest-first (ties broken by node id
-  for determinism). The top 8 become the seeds.
+- A node's seed score is the sum of IDF weights of the query tokens it contains
+  — IDF is `ln((N + 1) / (1 + df)) + 1`, with `N` the node count and `df` the
+  number of nodes whose label contains that token, so rarer tokens count for more
+  — divided by the square root of the node's token count, so a long label can't
+  out-score a tight match just by accumulating tokens.
+- Nodes scoring above zero are ranked highest-first (ties broken by node id for
+  determinism). The top 8 become the seeds.
 
-Expansion from the seeds uses the undirected adjacency of the graph (edge
-direction and self-loops are ignored). New neighbours are pushed onto a queue;
-nodes are collected until the count reaches `--max-nodes`.
+Expansion uses the undirected adjacency of the graph (edge direction and
+self-loops are ignored), but it is **best-first**, not a plain breadth-first
+wave: the frontier is a priority queue keyed by relevance, so the `--max-nodes`
+budget is spent on the most relevant neighbourhood rather than on whatever a
+breadth-first sweep happened to reach first. Two refinements keep the result
+clean:
+
+- **Hub penalty.** A high-fan-out node (a registry, a `Builder`, a documentation
+  index) is down-weighted in proportion to how far its degree exceeds the graph
+  average, so it is expanded last and its many incidental neighbours rarely reach
+  the budget. This stops one hub from flooding the result with noise.
+- **Decay.** A neighbour inherits a fraction of the relevance of the node that
+  reached it, so far-flung nodes fade while a genuinely relevant chain survives.
+
+Every returned node keeps a final relevance score; nodes and edges are returned
+sorted by it (edges by the relevance of their weaker endpoint), so you can read
+the top of the list and ignore the low-scored tail.
 
 ### bfs vs --dfs
 
-The expansion order is the only difference between the two traversal modes:
+Both modes expand best-first by relevance; the traversal mode only breaks score
+ties:
 
-- Default (breadth-first): collects nodes in order of distance from the seeds, so
-  the result is a broad neighbourhood around the matches.
-- `--dfs`: follows a chain as far as it goes before fanning out, favoring deep
-  call chains over wide neighbourhoods.
+- Default (breadth-first): among equally-relevant frontier nodes, the
+  earlier-discovered (shallower) one is taken first, giving a broad neighbourhood
+  around the matches.
+- `--dfs`: among equal scores, the later-discovered (deeper) one is taken first,
+  favoring deep call chains over wide neighbourhoods.
 
 ```
 codegraph query "request handler" --dfs --max-nodes 50
@@ -66,14 +86,49 @@ It is a node count, not a token budget. Expansion stops as soon as the limit is
 reached; edges are then included only when both their endpoints are in the
 collected set.
 
+### --since and --seed-changed (recency)
+
+`--since <baseline>` boosts nodes whose file changed on the current branch, so
+in-progress code surfaces first. The baseline is a git ref (`main`, `HEAD~10`), a
+date (`"2 weeks ago"`), or `auto` to detect the default branch. The changed set is
+scoped to `merge-base(<baseline>, HEAD)..working-tree`, so it includes uncommitted
+edits — what you are working on right now — and the boost is weighted by each
+file's churn (lines changed).
+
+```
+codegraph query "collider mesh" --since main
+```
+
+Changed nodes are marked `(changed)` in the ranked list and float toward the top,
+while a strong query match still holds its rank — recency re-ranks *within* the
+relevant set rather than replacing it. Add `--seed-changed` to also inject the
+changed-file nodes as seeds, so the branch's changed surface appears even when the
+query matches little ("what did this branch change"):
+
+```
+codegraph query "anything" --since main --seed-changed
+```
+
+Resolution runs `git`; if the directory is not a git repo, the ref does not
+resolve, or nothing changed, the command prints a short note and falls back to a
+plain query. The MCP `query_graph` tool exposes the same via its `since` and
+`recency_mode` arguments — see [MCP-Server].
+
 ### Output
 
-The command prints the matched seeds, then the subgraph as a list of edges:
+The command prints the matched seeds, the ranked nodes with their scores, then the
+subgraph as a list of edges (a `Recency:` header and `(changed)` markers appear
+when `--since` is used):
 
 ```
 Seeds:
   - AuthService
   - login_user
+
+Ranked nodes (12):
+  [6.10] AuthService
+  [4.80] login_user
+  ...
 
 Subgraph (12 nodes, 9 edges):
   AuthService --calls--> login_user
@@ -81,7 +136,8 @@ Subgraph (12 nodes, 9 edges):
   ...
 ```
 
-If no node scores above zero, it prints `No matches for "...".`
+If no node scores above zero (and no changed nodes are seeded), it prints
+`No matches for "...".`
 
 ### --repo
 
