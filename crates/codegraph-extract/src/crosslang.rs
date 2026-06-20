@@ -1551,12 +1551,12 @@ fn scan_sql(ext: &str, path: &str, text: &str, result: &mut ExtractionResult) {
             .next()
             .unwrap_or("")
             .to_ascii_uppercase();
+        let up = trimmed.to_ascii_uppercase();
         let relation = match verb.as_str() {
             "SELECT" => "queries",
             // A CTE (`WITH ...`) can wrap a read or a write; classify by whether a
             // write keyword follows the CTE definitions.
             "WITH" => {
-                let up = lit.to_ascii_uppercase();
                 if up.contains(" INSERT ")
                     || up.contains(" UPDATE ")
                     || up.contains(" DELETE ")
@@ -1571,6 +1571,24 @@ fn scan_sql(ext: &str, path: &str, text: &str, result: &mut ExtractionResult) {
             "CALL" | "EXEC" | "EXECUTE" => "calls_proc",
             _ => continue,
         };
+        // Clause gate: a leading SQL verb is not enough. Require the companion
+        // clause that a real statement of that shape must contain, so prose and
+        // UI strings like `'Update password'` or `'DELETE account'` (no SET / no
+        // FROM) are not mistaken for queries.
+        let shaped = match verb.as_str() {
+            "SELECT" => sql_clause_present(&up, "FROM"),
+            "WITH" => sql_clause_present(&up, "SELECT") && sql_clause_present(&up, "FROM"),
+            "INSERT" => sql_clause_present(&up, "INTO"),
+            "UPDATE" => sql_clause_present(&up, "SET"),
+            "DELETE" => sql_clause_present(&up, "FROM"),
+            "MERGE" => sql_clause_present(&up, "INTO") || sql_clause_present(&up, "USING"),
+            "UPSERT" => sql_clause_present(&up, "INTO") || sql_clause_present(&up, "SET"),
+            "CALL" | "EXEC" | "EXECUTE" => trimmed.contains('('),
+            _ => false,
+        };
+        if !shaped {
+            continue;
+        }
         let line = line_of(text, start);
         for table in referenced_tables(&lit) {
             let table_lower = table.to_lowercase();
@@ -1588,6 +1606,15 @@ fn scan_sql(ext: &str, path: &str, text: &str, result: &mut ExtractionResult) {
             }
         }
     }
+}
+
+/// Whole-word presence of an (already uppercased) SQL keyword in `up`. Used by the
+/// clause gate so a string is only treated as SQL when it carries the structural
+/// keyword a real statement of its shape requires.
+#[cfg(feature = "lang-sql")]
+fn sql_clause_present(up: &str, kw: &str) -> bool {
+    up.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|tok| tok == kw)
 }
 
 /// Table names referenced by a single SQL string. SELECT statements are walked

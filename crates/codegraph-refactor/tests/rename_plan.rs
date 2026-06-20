@@ -94,6 +94,80 @@ fn plan_enumerates_sites_and_routes_ambiguous_to_review() {
 }
 
 #[test]
+fn plan_rename_surfaces_module_level_importer() {
+    // A symbol whose only reference from another file is a module-level
+    // `imports_from` edge to a stub (the symbol-level walk misses it). plan_rename
+    // must still surface that importer as a review site and in the blast radius,
+    // not silently report zero. Graph-only (scan_text off) to isolate the path.
+    use codegraph_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
+    use serde_json::Map;
+
+    let mut imp = Edge {
+        source: NodeId("testfile".into()),
+        target: NodeId("stub".into()),
+        relation: "imports_from".into(),
+        confidence: Confidence::Extracted,
+        source_file: "src/darkMode.test.ts".into(),
+        source_location: Some("L1".into()),
+        confidence_score: None,
+        weight: 1.0,
+        context: None,
+        cross_repo: false,
+        extra: Map::new(),
+    };
+    imp.extra
+        .insert("imported".into(), serde_json::json!(["toggleDarkMode"]));
+    let mk = |id: &str, label: &str, file: &str| Node {
+        id: NodeId(id.into()),
+        label: label.into(),
+        file_type: FileType::Code,
+        source_file: file.into(),
+        source_location: Some("L1".into()),
+        community: None,
+        repo: None,
+        extra: Map::new(),
+    };
+    let kg = KnowledgeGraph::from_graph_data(GraphData {
+        directed: true,
+        multigraph: false,
+        graph: Map::new(),
+        nodes: vec![
+            mk("toggle", "toggleDarkMode", "src/darkMode.ts"),
+            mk("testfile", "darkMode.test.ts", "src/darkMode.test.ts"),
+            mk("stub", "./darkMode", ""),
+        ],
+        links: vec![imp],
+        hyperedges: vec![],
+        built_at_commit: None,
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let opts = RenameOptions {
+        scan_text: false,
+        ..Default::default()
+    };
+    let plan = plan_rename(&kg, "toggleDarkMode", "toggleTheme", dir.path(), &opts).expect("plan");
+
+    let all_sites = plan.edits.iter().chain(plan.review.iter());
+    assert!(
+        all_sites
+            .clone()
+            .any(|s| s.file.ends_with("darkMode.test.ts")),
+        "the module-level test importer must be a site; edits={:?} review={:?}",
+        plan.edits,
+        plan.review
+    );
+    assert!(
+        plan.blast_radius
+            .affected_node_ids
+            .iter()
+            .any(|id| id == "testfile"),
+        "importer must be in the blast radius: {:?}",
+        plan.blast_radius.affected_node_ids
+    );
+}
+
+#[test]
 fn move_plan_lists_def_and_import_update_then_verifies() {
     // helpers.py defines `helper`; app.py imports + calls it. Move helper to core.py.
     let dir = tempfile::tempdir().unwrap();

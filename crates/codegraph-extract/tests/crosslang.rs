@@ -752,6 +752,56 @@ fn scan_sql_classifies_write_as_writes_to() {
     );
 }
 
+#[cfg(feature = "lang-javascript")]
+#[cfg(feature = "lang-sql")]
+#[test]
+fn scan_sql_ignores_prose_string_with_leading_verb() {
+    // Real a11ycore false positive: a UI string starting with "Update" but with no
+    // SET clause must NOT become a SQL write edge.
+    let src = br#"function label() { return 'Update password'; }"#;
+    let r = extract_source("Auth.tsx", src).unwrap();
+    let sql_edge = r
+        .edges
+        .iter()
+        .any(|e| matches!(e.relation.as_str(), "queries" | "writes_to" | "calls_proc"));
+    assert!(
+        !sql_edge,
+        "prose 'Update password' must not be treated as SQL; edges: {:?}",
+        r.edges
+    );
+}
+
+#[cfg(feature = "lang-javascript")]
+#[cfg(feature = "lang-sql")]
+#[test]
+fn scan_sql_ignores_delete_prose_without_from() {
+    let src = br#"const msg = 'Delete account permanently';"#;
+    let r = extract_source("app.tsx", src).unwrap();
+    let sql_edge = r
+        .edges
+        .iter()
+        .any(|e| matches!(e.relation.as_str(), "queries" | "writes_to" | "calls_proc"));
+    assert!(
+        !sql_edge,
+        "prose 'Delete account...' (no FROM) must not be SQL; edges: {:?}",
+        r.edges
+    );
+}
+
+#[cfg(feature = "lang-javascript")]
+#[cfg(feature = "lang-sql")]
+#[test]
+fn scan_sql_still_detects_real_delete_with_from() {
+    let src = br#"const sql = "DELETE FROM sessions WHERE expired = true";"#;
+    let r = extract_source("app.js", src).unwrap();
+    let writes = r.edges.iter().any(|e| e.relation == "writes_to");
+    assert!(
+        writes,
+        "real DELETE FROM should still map to writes_to; edges: {:?}",
+        r.edges
+    );
+}
+
 #[cfg(feature = "lang-python")]
 #[cfg(feature = "lang-sql")]
 #[test]

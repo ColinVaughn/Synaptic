@@ -375,6 +375,23 @@ mod tests {
             .imports
             .iter()
             .any(|i| i.imported_name == "bar" && i.local_name == "baz" && i.module_stem == "util"));
+        // The imports_from edge is tagged with the imported symbol names (original
+        // names, not aliases) so forecast-time impact can resolve module importers.
+        let edge = r
+            .edges
+            .iter()
+            .find(|e| e.relation == "imports_from")
+            .expect("imports_from edge");
+        let names: Vec<&str> = edge
+            .extra
+            .get("imported")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert!(
+            names.contains(&"foo") && names.contains(&"bar"),
+            "edge imported tag: {names:?}"
+        );
     }
 
     #[cfg(feature = "lang-javascript")]

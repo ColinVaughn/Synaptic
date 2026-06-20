@@ -175,7 +175,11 @@ fn scan_changed(kg: &KnowledgeGraph, changed_files: &[String]) -> (Vec<NodeRef>,
     let mut changed_nodes: Vec<NodeRef> = Vec::new();
     let mut changed_ids: HashSet<NodeId> = HashSet::new();
     for n in kg.nodes() {
-        if changed_set.contains(&normalize_path(&n.source_file)) {
+        // Only code symbols enter the change set; markdown headings and config
+        // keys living in a changed file are excluded so they neither inflate the
+        // count/output nor seed the blast-radius walk. The file match is checked
+        // first so the kind check only runs for the few nodes in changed files.
+        if changed_set.contains(&normalize_path(&n.source_file)) && n.is_code_symbol() {
             changed_ids.insert(n.id.clone());
             changed_nodes.push(node_ref(n));
         }
@@ -529,6 +533,33 @@ mod tests {
         let bi = f.blast_radius.iter().position(|h| h.id == "b").unwrap();
         let ci = f.blast_radius.iter().position(|h| h.id == "c").unwrap();
         assert!(bi < ci, "shallower dependents listed first");
+    }
+
+    #[test]
+    fn changed_nodes_exclude_docs_and_config_artifacts() {
+        // A changed file's real code symbol is kept; a markdown heading and a JSON
+        // config-key node in changed files must be excluded from changed_nodes.
+        let mut heading = node("h", "Build or Obtain the Bundle", "README.md", None);
+        heading.file_type = FileType::Document;
+        let mut cfgkey = node("k", "browserslist", "package.json", None);
+        cfgkey
+            .extra
+            .insert("_node_type".into(), serde_json::json!("config_key"));
+        let kg = graph(
+            vec![node("a", "alpha", "src/a.ts", None), heading, cfgkey],
+            vec![],
+        );
+        let f = forecast_changes(
+            &kg,
+            &[
+                "src/a.ts".to_string(),
+                "README.md".to_string(),
+                "package.json".to_string(),
+            ],
+            &ForecastOptions::default(),
+        );
+        let ids: Vec<&str> = f.changed_nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["a"], "only the code symbol is a changed node");
     }
 
     #[test]

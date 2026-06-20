@@ -47,8 +47,9 @@ use codegraph_prs::{
     Status, SystemCommands,
 };
 use codegraph_query::{
-    affected_nodes, describe_node, explain, resolve_seed, shortest_path, QueryIndex, Recency,
-    RecencyMode, ReverseImpactIndex, TraversalMode, DEFAULT_AFFECTED_RELATIONS,
+    affected_nodes, describe_node, explain, resolve_detailed, resolve_seed, shortest_path,
+    QueryIndex, Recency, RecencyMode, Resolution, ReverseImpactIndex, TraversalMode,
+    DEFAULT_AFFECTED_RELATIONS,
 };
 use codegraph_sandbox::{
     render_markdown as render_speculate_md, speculate, Change, SpeculateOptions,
@@ -448,10 +449,38 @@ impl Server {
         self.render_query_text(&r, &keep, mode, token_budget, recency.as_ref())
     }
 
+    /// Resolve a user-supplied name/id to a single node, or a consistent error
+    /// message. On ambiguity the message lists candidate ids (unlike a bare "no
+    /// node matches"), so every tool reports the same way. Shared by all
+    /// name-taking tools.
+    fn resolve_or_msg(&self, label: &str) -> Result<NodeId, String> {
+        match resolve_detailed(&self.kg, label) {
+            Resolution::Unique(id) => Ok(id),
+            Resolution::Ambiguous(ids) => {
+                let shown: Vec<String> =
+                    ids.iter().take(10).map(|i| sanitize_label(&i.0)).collect();
+                let more = if ids.len() > 10 {
+                    format!(", +{} more", ids.len() - 10)
+                } else {
+                    String::new()
+                };
+                Err(format!(
+                    "'{}' is ambiguous - {} candidates: [{}{}]. Pass a node id to disambiguate.",
+                    sanitize_label(label),
+                    ids.len(),
+                    shown.join(", "),
+                    more
+                ))
+            }
+            Resolution::NotFound => Err(format!("No node matches '{}'.", sanitize_label(label))),
+        }
+    }
+
     /// `get_node` — metadata + degree for the node matching `label`.
     pub fn tool_get_node(&self, label: &str) -> String {
-        let Some(id) = resolve_seed(&self.kg, label) else {
-            return format!("No node matches '{}'.", sanitize_label(label));
+        let id = match self.resolve_or_msg(label) {
+            Ok(id) => id,
+            Err(msg) => return msg,
         };
         let Some(n) = self.kg.node(&id) else {
             return format!("No node matches '{}'.", sanitize_label(label));
@@ -486,12 +515,12 @@ impl Server {
     /// symbol from its captured signature and outgoing call edges (graph-only, no
     /// source read). Built for feeding tool/function description generation.
     pub fn tool_describe_node(&self, label: &str) -> String {
-        let not_found = || format!("No node matches '{}'.", sanitize_label(label));
-        let Some(id) = resolve_seed(&self.kg, label) else {
-            return not_found();
+        let id = match self.resolve_or_msg(label) {
+            Ok(id) => id,
+            Err(msg) => return msg,
         };
         let Some(d) = describe_node(&self.kg, &id) else {
-            return not_found();
+            return format!("No node matches '{}'.", sanitize_label(label));
         };
         let mut out = sanitize_label(&d.summary);
         if let Some(sig) = &d.signature {
@@ -539,8 +568,9 @@ impl Server {
     /// symbol's end line when the node carries a span (bounded by `context_lines`),
     /// otherwise returns `context_lines` lines from the start.
     pub fn tool_get_source(&self, label: &str, context_lines: usize) -> String {
-        let Some(id) = resolve_seed(&self.kg, label) else {
-            return format!("No node matches '{}'.", sanitize_label(label));
+        let id = match self.resolve_or_msg(label) {
+            Ok(id) => id,
+            Err(msg) => return msg,
         };
         let Some(n) = self.kg.node(&id) else {
             return format!("No node matches '{}'.", sanitize_label(label));
@@ -587,8 +617,9 @@ impl Server {
 
     /// `get_neighbors` — in/out neighbours, optionally filtered by relation.
     pub fn tool_get_neighbors(&self, label: &str, relation_filter: Option<&str>) -> String {
-        let Some(id) = resolve_seed(&self.kg, label) else {
-            return format!("No node matches '{}'.", sanitize_label(label));
+        let id = match self.resolve_or_msg(label) {
+            Ok(id) => id,
+            Err(msg) => return msg,
         };
         let Some(ex) = explain(&self.kg, &id) else {
             return format!("No node matches '{}'.", sanitize_label(label));
@@ -738,11 +769,13 @@ impl Server {
 
     /// `shortest_path` — keyword-resolved source→target path, ≤ max_hops.
     pub fn tool_shortest_path(&self, source: &str, target: &str, max_hops: usize) -> String {
-        let (Some(from), Some(to)) = (
-            resolve_seed(&self.kg, source),
-            resolve_seed(&self.kg, target),
-        ) else {
-            return "Could not resolve source and/or target to a unique node.".to_string();
+        let from = match self.resolve_or_msg(source) {
+            Ok(id) => id,
+            Err(msg) => return format!("source: {msg}"),
+        };
+        let to = match self.resolve_or_msg(target) {
+            Ok(id) => id,
+            Err(msg) => return format!("target: {msg}"),
         };
         if from == to {
             return "Source and target resolve to the same node.".to_string();
@@ -780,8 +813,9 @@ impl Server {
     }
 
     fn directional(&self, title: &str, label: &str, dir: &str) -> String {
-        let Some(id) = resolve_seed(&self.kg, label) else {
-            return format!("No node matches '{}'.", sanitize_label(label));
+        let id = match self.resolve_or_msg(label) {
+            Ok(id) => id,
+            Err(msg) => return msg,
         };
         let Some(ex) = explain(&self.kg, &id) else {
             return format!("No node matches '{}'.", sanitize_label(label));
@@ -812,8 +846,9 @@ impl Server {
     /// walking impact edges backward up to `depth` hops. Empty `relations`
     /// uses the default structural-impact set.
     pub fn tool_affected(&self, label: &str, depth: usize, relations: &[String]) -> String {
-        let Some(id) = resolve_seed(&self.kg, label) else {
-            return format!("No node matches '{}'.", sanitize_label(label));
+        let id = match self.resolve_or_msg(label) {
+            Ok(id) => id,
+            Err(msg) => return msg,
         };
         let rels: Vec<&str> = if relations.is_empty() {
             DEFAULT_AFFECTED_RELATIONS.to_vec()
@@ -911,6 +946,8 @@ impl Server {
         files: &[String],
         base: Option<&str>,
         depth: usize,
+        limit: usize,
+        verbose: bool,
     ) -> String {
         let changed = self.changed_from_args(files, base);
         if changed.is_empty() {
@@ -922,6 +959,9 @@ impl Server {
             ..Default::default()
         };
         let f = forecast_changes_with_index(&self.kg, &self.affected_index, &changed, &opts);
+        // Per-section display cap. `verbose` shows everything; otherwise each list
+        // is truncated to `limit` with a "+N more" note so the payload stays small.
+        let cap = if verbose { usize::MAX } else { limit.max(1) };
         let mut out = format!("Forecast: {}", sanitize_label(&f.summary));
         if let Some(r) = &f.risk {
             out.push_str(&format!("\nChange risk: {} ({}/100)", r.level, r.score));
@@ -929,50 +969,58 @@ impl Server {
                 out.push_str(&format!("\n  - {}", sanitize_label(factor)));
             }
         }
-        if !f.changed_nodes.is_empty() {
-            out.push_str(&format!("\nChanged nodes ({}):", f.changed_nodes.len()));
-            for n in &f.changed_nodes {
+        // Render a labelled "name (file)" section, capped unless verbose.
+        let push_section = |out: &mut String, header: &str, items: &[(String, String)]| {
+            if items.is_empty() {
+                return;
+            }
+            out.push_str(&format!("\n{} ({}):", header, items.len()));
+            for (label, file) in items.iter().take(cap) {
                 out.push_str(&format!(
                     "\n  {} ({})",
-                    sanitize_label(&n.label),
-                    sanitize_label(&n.file)
+                    sanitize_label(label),
+                    sanitize_label(file)
                 ));
             }
-        }
-        if !f.public_api_breaks.is_empty() {
-            out.push_str(&format!(
-                "\nPublic API at risk ({}):",
-                f.public_api_breaks.len()
-            ));
-            for n in &f.public_api_breaks {
+            if items.len() > cap {
                 out.push_str(&format!(
-                    "\n  {} ({})",
-                    sanitize_label(&n.label),
-                    sanitize_label(&n.file)
+                    "\n  ... (+{} more; pass verbose=true for the full list)",
+                    items.len() - cap
                 ));
             }
-        }
-        if !f.at_risk_tests.is_empty() {
-            out.push_str(&format!("\nTests at risk ({}):", f.at_risk_tests.len()));
-            for h in &f.at_risk_tests {
-                out.push_str(&format!(
-                    "\n  {} ({})",
-                    sanitize_label(&h.label),
-                    sanitize_label(&h.file)
-                ));
-            }
-        }
+        };
+        let pairs = |xs: &[codegraph_predict::NodeRef]| -> Vec<(String, String)> {
+            xs.iter()
+                .map(|n| (n.label.clone(), n.file.clone()))
+                .collect()
+        };
+        push_section(&mut out, "Changed nodes", &pairs(&f.changed_nodes));
+        push_section(&mut out, "Public API at risk", &pairs(&f.public_api_breaks));
+        push_section(
+            &mut out,
+            "Tests at risk",
+            &f.at_risk_tests
+                .iter()
+                .map(|h| (h.label.clone(), h.file.clone()))
+                .collect::<Vec<_>>(),
+        );
         out.push_str(&format!(
             "\nBlast radius ({} at-risk dependent(s)):",
             f.blast_radius.len()
         ));
-        for h in &f.blast_radius {
+        for h in f.blast_radius.iter().take(cap) {
             out.push_str(&format!(
                 "\n  [{}h via {}] {} ({})",
                 h.depth,
                 sanitize_label(&h.via_relation),
                 sanitize_label(&h.label),
                 sanitize_label(&h.file)
+            ));
+        }
+        if f.blast_radius.len() > cap {
+            out.push_str(&format!(
+                "\n  ... (+{} more; pass verbose=true for the full list)",
+                f.blast_radius.len() - cap
             ));
         }
         if !f.verify_checklist.is_empty() {
@@ -1104,8 +1152,26 @@ impl Server {
             );
         };
         let Some(impact) = assess_edit(&self.kg, symbol, kind_enum, depth.clamp(1, 16)) else {
+            // Surface candidate ids when the name is ambiguous, consistent with the
+            // other name-taking tools (the @file hint covers disambiguation here).
+            if let Resolution::Ambiguous(ids) = resolve_detailed(&self.kg, symbol) {
+                let shown: Vec<String> =
+                    ids.iter().take(10).map(|i| sanitize_label(&i.0)).collect();
+                let more = if ids.len() > 10 {
+                    format!(", +{} more", ids.len() - 10)
+                } else {
+                    String::new()
+                };
+                return format!(
+                    "'{}' is ambiguous - {} candidates: [{}{}]. Qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts'), or pass a node id.",
+                    sanitize_label(symbol),
+                    ids.len(),
+                    shown.join(", "),
+                    more
+                );
+            }
             return format!(
-                "No unique node matches '{}'. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts'), or pass a node id.",
+                "No node matches '{}'. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts'), or pass a node id.",
                 sanitize_label(symbol)
             );
         };
@@ -1684,9 +1750,11 @@ impl Server {
     }
 
     /// Compact text rendering of an audit report for the MCP text channel.
-    fn render_audit_text(&self, r: &codegraph_sqlaudit::AuditReport) -> String {
+    /// Shows at most `cap` findings (the report is severity-sorted) before a
+    /// "+N more" note, so a large audit does not overflow the channel.
+    fn render_audit_text(&self, r: &codegraph_sqlaudit::AuditReport, cap: usize) -> String {
         let mut out = sanitize_label(&r.summary);
-        for f in r.findings.iter().take(50) {
+        for f in r.findings.iter().take(cap) {
             out.push_str(&format!(
                 "\n[{}] {} ({})\n  {}\n  fix: {}",
                 f.severity.as_str(),
@@ -1694,6 +1762,12 @@ impl Server {
                 sanitize_label(&f.rule_id),
                 sanitize_label(&f.detail),
                 sanitize_label(&f.remediation),
+            ));
+        }
+        if r.findings.len() > cap {
+            out.push_str(&format!(
+                "\n... (+{} more finding(s); pass verbose=true or raise limit for the full list)",
+                r.findings.len() - cap
             ));
         }
         out
@@ -1710,6 +1784,7 @@ impl Server {
         };
         let u = |k: &str, d: u64| args.get(k).and_then(Value::as_u64).unwrap_or(d);
         let opt = |k: &str| args.get(k).and_then(Value::as_str);
+        let b = |k: &str| args.get(k).and_then(Value::as_bool).unwrap_or(false);
 
         // query_graph renders both text and structuredContent from a SINGLE
         // retrieval. The index query is O(graph); rendering both shapes from one
@@ -1789,8 +1864,24 @@ impl Server {
             } else {
                 self.audit_sql_report(opt("severity"))
             };
-            let text = self.render_audit_text(&report);
-            let structured = serde_json::to_value(&report).unwrap_or(Value::Null);
+            // Summary + top-N by default; verbose (or a larger limit) returns the
+            // full dump. advise_sql is a single query, so it is never truncated.
+            let verbose = b("verbose") || name == "advise_sql";
+            let cap = if verbose {
+                usize::MAX
+            } else {
+                (u("limit", 20) as usize).max(1)
+            };
+            let text = self.render_audit_text(&report, cap);
+            // The structured channel mirrors the text cap so the response payload
+            // stays bounded; the summary still reflects the true total.
+            let structured = if report.findings.len() > cap {
+                let mut trimmed = report.clone();
+                trimmed.findings.truncate(cap);
+                serde_json::to_value(&trimmed).unwrap_or(Value::Null)
+            } else {
+                serde_json::to_value(&report).unwrap_or(Value::Null)
+            };
             return Ok(json!({
                 "content": [{ "type": "text", "text": text }],
                 "structuredContent": structured,
@@ -1845,7 +1936,13 @@ impl Server {
                             .collect()
                     })
                     .unwrap_or_default();
-                self.tool_predict_impact(&files, opt("base"), u("depth", 3) as usize)
+                self.tool_predict_impact(
+                    &files,
+                    opt("base"),
+                    u("depth", 3) as usize,
+                    u("limit", 20) as usize,
+                    b("verbose"),
+                )
             }
             "affected_tests" => {
                 let files: Vec<String> = args
@@ -2332,7 +2429,9 @@ fn tools_list(allow_exec: bool) -> Value {
           "inputSchema": { "type": "object", "properties": {
               "files": { "type": "array", "items": { "type": "string" }, "description": "Repo-relative changed files to forecast. Omit to use the working-tree diff vs `base`." },
               "base": { "type": "string", "description": "Base branch to diff against when `files` is omitted (default: the repo's default branch)." },
-              "depth": { "type": "integer", "description": "Reverse-impact hop bound (default 3, max 16)." }
+              "depth": { "type": "integer", "description": "Reverse-impact hop bound (default 3, max 16)." },
+              "limit": { "type": "integer", "description": "Max entries shown per section before a '+N more' summary (default 20). Ignored when verbose=true." },
+              "verbose": { "type": "boolean", "description": "Emit the full, uncapped lists instead of the summarized top-N (default false)." }
           } } },
         { "name": "affected_tests", "description": "Predictive test selection: the tests that exercise the changed code, found by walking the reverse-impact set from the changed files and keeping the test nodes (detected by path convention). The focused 'which tests should I run for this change' view.",
           "inputSchema": { "type": "object", "properties": {
@@ -2348,7 +2447,9 @@ fn tools_list(allow_exec: bool) -> Value {
           }, "required": ["symbol", "kind"] } },
         { "name": "audit_sql", "description": "Audit the codebase's SQL for performance and security problems over the SQL-aware graph: row-level-security gaps, over-broad grants, likely SQL injection, missing indexes on filter/foreign-key columns, SELECT *, non-sargable predicates, and missing primary keys. Returns findings with severity, location, and a fix for each.",
           "inputSchema": { "type": "object", "properties": {
-              "severity": { "type": "string", "enum": ["critical","high","medium","low","info"], "description": "Only return findings at least this severe (default: all)." }
+              "severity": { "type": "string", "enum": ["critical","high","medium","low","info"], "description": "Only return findings at least this severe (default: all)." },
+              "limit": { "type": "integer", "description": "Max findings returned before a '+N more' summary (default 20). Ignored when verbose=true." },
+              "verbose": { "type": "boolean", "description": "Return all findings instead of the summarized top-N (default false)." }
           } },
           "outputSchema": { "type": "object", "properties": {
               "version": {"type":"integer"}, "summary": {"type":"string"},
@@ -2791,7 +2892,7 @@ mod tests {
             "predict_edit",
             json!({"symbol": "Nope", "kind": "delete"}),
         );
-        assert!(miss.contains("No unique node matches"), "{miss}");
+        assert!(miss.contains("No node matches"), "{miss}");
     }
 
     #[test]

@@ -79,12 +79,38 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         let tgt = NodeId(make_id(&[spec.as_str()]));
         self.add_external_node(tgt.clone(), spec.clone());
         self.add_edge(file_nid.clone(), tgt, "imports_from", line, Some("import"));
+        let edge_idx = self.edges.len() - 1;
 
         // `import_clause` is a positional child, not a named field.
+        let mut imported: Vec<String> = Vec::new();
         for child in Self::children(node) {
             if child.kind() == "import_clause" {
-                self.import_records(child, &stem, line);
+                imported.extend(self.import_records(child, &stem, line));
             }
+        }
+        self.tag_imported_names(edge_idx, imported);
+    }
+
+    /// Record the specific symbol names an `imports_from`/`re_exports` edge brings
+    /// in, under the edge's `imported` extra key. This is what lets forecast-time
+    /// impact resolve whether a module importer actually references a given
+    /// exported symbol (the edge itself only points at a module stub).
+    fn tag_imported_names(&mut self, edge_idx: usize, mut imported: Vec<String>) {
+        if imported.is_empty() {
+            return;
+        }
+        imported.sort();
+        imported.dedup();
+        if let Some(e) = self.edges.get_mut(edge_idx) {
+            e.extra.insert(
+                "imported".to_string(),
+                serde_json::Value::Array(
+                    imported
+                        .into_iter()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            );
         }
     }
 
@@ -144,11 +170,14 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         let tgt = NodeId(make_id(&[spec.as_str()]));
         self.add_external_node(tgt.clone(), spec.clone());
         self.add_edge(file_nid.clone(), tgt, "re_exports", line, Some("import"));
+        let edge_idx = self.edges.len() - 1;
+        let mut imported: Vec<String> = Vec::new();
         for child in Self::children(node) {
             if child.kind() == "export_clause" {
-                self.import_records(child, &stem, line);
+                imported.extend(self.import_records(child, &stem, line));
             }
         }
+        self.tag_imported_names(edge_idx, imported);
     }
 
     /// The module specifier string of an import/export statement (`source`
@@ -166,7 +195,9 @@ impl<'tree> Extractor<'_, '_, 'tree> {
 
     /// Named-import records from an `import_clause`/`export_clause`: each
     /// `import_specifier`/`export_specifier` → `{local, imported, module_stem}`.
-    fn import_records(&mut self, clause: TsNode<'tree>, stem: &str, line: usize) {
+    /// Returns the original imported symbol names so the caller can tag the import
+    /// edge with what it brought in.
+    fn import_records(&mut self, clause: TsNode<'tree>, stem: &str, line: usize) -> Vec<String> {
         let mut specs: Vec<TsNode<'tree>> = Vec::new();
         let mut stack = vec![clause];
         while let Some(n) = stack.pop() {
@@ -176,6 +207,7 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                 stack.extend(Self::children(n));
             }
         }
+        let mut names = Vec::new();
         for spec in specs {
             let Some(name_node) = self.field(spec, "name") else {
                 continue;
@@ -188,6 +220,7 @@ impl<'tree> Extractor<'_, '_, 'tree> {
             if imported.is_empty() {
                 continue;
             }
+            names.push(imported.clone());
             self.imports.push(ImportRecord {
                 local_name: local,
                 imported_name: imported,
@@ -196,6 +229,7 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                 source_location: Some(format!("L{line}")),
             });
         }
+        names
     }
 
     /// Emit `references` edges for the parameter/return `type_annotation`s of a

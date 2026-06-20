@@ -179,13 +179,55 @@ pub fn plan_rename(
             .collect(),
     };
 
-    // Blast radius: reverse-reachable affected nodes.
+    // Module-level importers: files that import this symbol's module through a stub
+    // edge the symbol-level walk cannot reach (e.g. a test that imports and calls
+    // it at top level). Add a review site for any such file not already covered, so
+    // a rename never silently drops a module-level user. The token's exact span is
+    // unknown here, so it is flagged for the agent to locate.
+    let target_node_id = NodeId(target.id.clone());
+    let importers = codegraph_query::module_importers(kg, &target_node_id);
+    {
+        let covered_files: BTreeSet<String> = sites.iter().map(|s| s.file.clone()).collect();
+        for mi in &importers {
+            let Some(n) = kg.node(&mi.node_id) else {
+                continue;
+            };
+            let file = codegraph_graph::norm_source_file(&n.source_file, None);
+            if file.is_empty() || covered_files.contains(&file) {
+                continue;
+            }
+            sites.push(EditSite {
+                file,
+                span: None,
+                line: None,
+                old: old.to_string(),
+                new: new.to_string(),
+                confidence: Confidence::Inferred,
+                reason: "module-level import of the symbol; locate and rename the reference"
+                    .to_string(),
+                needs_review: true,
+                repo: n.repo.clone(),
+            });
+        }
+    }
+
+    // Blast radius: reverse-reachable affected nodes, plus the module importers the
+    // symbol-level walk misses.
     let hits = codegraph_query::affected_nodes(
         kg,
-        &NodeId(target.id.clone()),
+        &target_node_id,
         codegraph_query::DEFAULT_AFFECTED_RELATIONS,
         opts.depth,
     );
+    let mut affected_ids: Vec<String> = hits.iter().map(|h| h.node_id.0.clone()).collect();
+    {
+        let mut seen: BTreeSet<String> = affected_ids.iter().cloned().collect();
+        for mi in &importers {
+            if seen.insert(mi.node_id.0.clone()) {
+                affected_ids.push(mi.node_id.0.clone());
+            }
+        }
+    }
 
     // Route each site: confident + no review flag -> edits; else review.
     // Guard against a NaN/out-of-range --min-confidence.
@@ -219,8 +261,8 @@ pub fn plan_rename(
         blast_radius: BlastRadius {
             edit_count: edits.len() + review.len(),
             file_count: files.len(),
-            affected_node_count: hits.len(),
-            affected_node_ids: hits.iter().map(|h| h.node_id.0.clone()).collect(),
+            affected_node_count: affected_ids.len(),
+            affected_node_ids: affected_ids,
         },
         edits,
         review,

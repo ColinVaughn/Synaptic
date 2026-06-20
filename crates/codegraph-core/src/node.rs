@@ -114,6 +114,19 @@ impl Node {
     pub fn is_test(&self) -> bool {
         crate::is_test_path(&self.source_file)
     }
+
+    /// True if this node represents a code symbol eligible for change-impact
+    /// analysis: it lives in real code (`FileType::Code`) and is not a docs or
+    /// config artifact (markdown heading -> `FileType::Document`; JSON/YAML config
+    /// key -> `_node_type == "config_key"`). Keeps impact output focused on code
+    /// rather than prose and configuration keys.
+    pub fn is_code_symbol(&self) -> bool {
+        self.file_type == FileType::Code
+            && !matches!(
+                self.extra.get("_node_type").and_then(|v| v.as_str()),
+                Some("config_key")
+            )
+    }
 }
 
 #[cfg(test)]

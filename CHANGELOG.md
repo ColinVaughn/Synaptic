@@ -6,6 +6,41 @@ All notable changes to CodeGraph are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-06-20
+
+Quality pass on the agent-facing tools, from issues found driving CodeGraph over a real
+TypeScript codebase. Backward-compatible: MCP tool count is unchanged (only new optional
+parameters), and `graph.json` gains only additive edge keys.
+
+### Fixed
+- **SQL audit false positives:** `audit_sql` no longer flags ordinary string literals and
+  comments that merely begin with a SQL verb (e.g. `return 'Update password'`). SQL is now
+  extracted only when a string carries the companion clause a real statement of its shape
+  requires (`UPDATE`->`SET`, `DELETE`/`SELECT`->`FROM`, `INSERT`->`INTO`, `MERGE`->`INTO`/
+  `USING`), and the query-text rules additionally drop any snippet that does not parse as
+  real SQL (placeholders normalized first, so parameterized queries and `::` casts survive).
+- **`predict_edit` / `plan_rename` missed module-level usages:** a symbol used only through a
+  module-level import (e.g. a test that does `import { fn } from './mod'` and calls it at top
+  level) is now resolved. The reverse-impact walk could not reach it because the import edge
+  points at a module stub, not the symbol. Imports now record the names they bring in, and
+  the forecast resolves module importers back to the symbol -- named importers are reported as
+  "will break" (or a rename edit site), opaque ones as "to review". An exported symbol with
+  module importers can no longer report a bare `0 will break, 0 to review`.
+- **Node resolution consistency:** all name-taking tools share one resolver. An ambiguous
+  name now reports `'<name>' is ambiguous - N candidates: [...]` with candidate ids instead
+  of a misleading "No node matches", trailing `()` is stripped consistently, and the wording
+  is uniform across `get_node`, `describe_node`, `get_source`, `get_neighbors`,
+  `find_callers`/`find_callees`, `affected`, `shortest_path`, and `predict_edit`.
+- **`predict_impact` changed-node pollution:** the changed-node list now contains only code
+  symbols. Markdown headings and JSON/YAML config keys living in a changed file are excluded,
+  so the count and output are no longer inflated by non-code nodes.
+
+### Changed
+- **Bounded tool output:** `predict_impact` and `audit_sql` default to a summary plus a
+  top-N view, with new optional `limit` and `verbose` parameters for the full dump. This
+  keeps large reports from overflowing the response channel (they previously had to be
+  spilled to files); `advise_sql` (a single query) is never truncated.
+
 ## [0.2.8] - 2026-06-20
 
 ### Added

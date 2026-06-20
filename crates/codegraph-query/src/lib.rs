@@ -632,10 +632,165 @@ pub fn resolve_seed(kg: &KnowledgeGraph, query: &str) -> Option<NodeId> {
     None
 }
 
+/// Outcome of resolving a free-text name/id to a graph node, distinguishing a
+/// genuine miss from an ambiguous one so callers can report candidates instead of
+/// a misleading "no node matches".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolution {
+    /// Exactly one node resolved.
+    Unique(NodeId),
+    /// Several nodes match; none could be chosen. Candidate ids are returned
+    /// (node order, deduped) so the caller can list them.
+    Ambiguous(Vec<NodeId>),
+    /// Nothing matched at any cascade stage.
+    NotFound,
+}
+
+/// Like [`resolve_seed`] but reports WHY resolution failed. The unique-resolution
+/// path is identical to [`resolve_seed`] (no behavior change for callers that
+/// already resolve a node); only the failure case is enriched into
+/// `Ambiguous(candidates)` vs `NotFound`. Shared by every name-taking tool so the
+/// messaging is consistent.
+pub fn resolve_detailed(kg: &KnowledgeGraph, query: &str) -> Resolution {
+    if let Some(id) = resolve_seed(kg, query) {
+        return Resolution::Unique(id);
+    }
+    // resolve_seed returned None: no cascade stage had exactly one match, so the
+    // first stage that matched anything matched two or more -> ambiguous. If
+    // nothing matched anywhere -> not found.
+    match candidate_matches(kg, query) {
+        cands if cands.len() >= 2 => Resolution::Ambiguous(cands),
+        _ => Resolution::NotFound,
+    }
+}
+
+/// The matches from the first resolution stage that yields any, in node order.
+/// Mirrors the [`resolve_seed`] cascade (exact label -> bare name -> source_file
+/// -> label substring); the exact-id stage is omitted (an id match is unique).
+fn candidate_matches(kg: &KnowledgeGraph, query: &str) -> Vec<NodeId> {
+    let q = query.to_lowercase();
+    let q_bare = bare_name(&q);
+    let stages: [&dyn Fn(&codegraph_core::Node) -> bool; 4] = [
+        &|n: &codegraph_core::Node| n.label.to_lowercase() == q,
+        &|n: &codegraph_core::Node| bare_name(&n.label.to_lowercase()) == q_bare,
+        &|n: &codegraph_core::Node| n.source_file.to_lowercase() == q,
+        &|n: &codegraph_core::Node| n.label.to_lowercase().contains(&q),
+    ];
+    for pred in stages {
+        let hits: Vec<NodeId> = kg
+            .nodes()
+            .filter(|n| pred(n))
+            .map(|n| n.id.clone())
+            .collect();
+        if !hits.is_empty() {
+            return hits;
+        }
+    }
+    Vec::new()
+}
+
 /// Lowercased label with a trailing `()` callable decoration removed.
 fn bare_name(label: &str) -> String {
     let l = label.to_lowercase();
     l.strip_suffix("()").map(str::to_string).unwrap_or(l)
+}
+
+/// An importer that reaches a symbol only through a module-level import edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleImporter {
+    /// The importing node (typically the importing file).
+    pub node_id: NodeId,
+    /// True when the import edge explicitly names the target symbol; false when
+    /// the import brings the module in opaquely (namespace/default import, or an
+    /// older graph with no recorded names), so the reference is uncertain.
+    pub confirmed: bool,
+    /// The import relation the link came through (`imports_from` / `re_exports`).
+    pub via_relation: String,
+}
+
+/// Importers that reach `target` through a module-level `imports_from` /
+/// `re_exports` edge to the module that DEFINES it.
+///
+/// The symbol-level reverse-impact walk misses these: an import edge points at a
+/// module stub, not at the symbol, so walking backward from the symbol never
+/// traverses it. Here we match a stub to the target's defining file by path stem,
+/// and — when the edge records the imported names (see the extractor's `imported`
+/// edge tag) — confirm the symbol is among them. Imports that record names but not
+/// this symbol are skipped; opaque imports (no recorded names) are returned
+/// `confirmed = false` so callers can surface them for review rather than assume.
+pub fn module_importers(kg: &KnowledgeGraph, target: &NodeId) -> Vec<ModuleImporter> {
+    let Some(tnode) = kg.node(target) else {
+        return Vec::new();
+    };
+    let file_stem = path_stem(&tnode.source_file);
+    if file_stem.is_empty() {
+        return Vec::new();
+    }
+    let sym = bare_name(&tnode.label.to_lowercase());
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for e in kg.edges() {
+        if e.relation != "imports_from" && e.relation != "re_exports" {
+            continue;
+        }
+        if e.source == *target {
+            continue; // a module importing from itself is not an external user
+        }
+        let Some(stub) = kg.node(&e.target) else {
+            continue;
+        };
+        // The stub label is the import specifier; match its final path component
+        // (sans source extension) to the defining file's stem.
+        if !spec_stem(&stub.label).eq_ignore_ascii_case(&file_stem) {
+            continue;
+        }
+        let confirmed = match e.extra.get("imported").and_then(|v| v.as_array()) {
+            Some(arr) => {
+                let names_this = arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .any(|n| n.eq_ignore_ascii_case(&sym));
+                if !names_this {
+                    continue; // names are recorded and ours is not one of them
+                }
+                true
+            }
+            None => false, // opaque import: uncertain, surface for review
+        };
+        if seen.insert(e.source.clone()) {
+            out.push(ModuleImporter {
+                node_id: e.source.clone(),
+                confirmed,
+                via_relation: e.relation.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// Lowercased final path component of `p` with a known source extension removed
+/// (`src/darkMode.ts` -> `darkmode`).
+fn path_stem(p: &str) -> String {
+    let norm = p.replace('\\', "/");
+    let file = norm.rsplit('/').next().unwrap_or(norm.as_str());
+    strip_source_ext(file).to_lowercase()
+}
+
+/// Final path component of an import specifier with a source extension removed
+/// (`./darkMode` -> `darkMode`, `../a/b.js` -> `b`).
+fn spec_stem(spec: &str) -> String {
+    let norm = spec.replace('\\', "/");
+    let last = norm.rsplit('/').next().unwrap_or(norm.as_str());
+    strip_source_ext(last).to_string()
+}
+
+fn strip_source_ext(name: &str) -> &str {
+    for ext in [".d.ts", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py"] {
+        if let Some(s) = name.strip_suffix(ext) {
+            return s;
+        }
+    }
+    name
 }
 
 /// Return the single node id matching `pred`, or `None` if zero or >1 match.
@@ -1498,5 +1653,47 @@ mod tests {
         let kg = build(&[("h1", "transform()"), ("h2", "transform()")], &[]);
         // Two nodes share the label: ambiguous, so no guess.
         assert_eq!(resolve_seed(&kg, "transform"), None);
+    }
+
+    #[test]
+    fn resolve_detailed_distinguishes_unique_ambiguous_missing() {
+        let kg = build(
+            &[
+                ("u", "unique_fn"),
+                ("h1", "announce()"),
+                ("h2", "announce()"),
+            ],
+            &[],
+        );
+        // Unique resolution is unchanged.
+        assert_eq!(
+            resolve_detailed(&kg, "unique_fn"),
+            Resolution::Unique(NodeId("u".into()))
+        );
+        // An id always resolves uniquely.
+        assert_eq!(
+            resolve_detailed(&kg, "u"),
+            Resolution::Unique(NodeId("u".into()))
+        );
+        // Ambiguous names return candidates (trailing () stripped consistently),
+        // not a misleading "not found".
+        match resolve_detailed(&kg, "announce") {
+            Resolution::Ambiguous(ids) => {
+                let mut got: Vec<String> = ids.iter().map(|i| i.0.clone()).collect();
+                got.sort();
+                assert_eq!(got, vec!["h1".to_string(), "h2".to_string()]);
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+        // Same ambiguity whether or not the caller appends ().
+        assert_eq!(
+            resolve_detailed(&kg, "announce()"),
+            resolve_detailed(&kg, "announce")
+        );
+        // Genuinely absent -> NotFound.
+        assert_eq!(
+            resolve_detailed(&kg, "does_not_exist"),
+            Resolution::NotFound
+        );
     }
 }

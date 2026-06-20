@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use codegraph_core::{Node, NodeId};
 use codegraph_graph::KnowledgeGraph;
-use codegraph_query::{affected_nodes_multi, resolve_seed, DEFAULT_AFFECTED_RELATIONS};
+use codegraph_query::{
+    affected_nodes_multi, module_importers, resolve_seed, DEFAULT_AFFECTED_RELATIONS,
+};
 
 fn strip_call(label: &str) -> &str {
     label.split('(').next().unwrap_or(label).trim()
@@ -179,10 +181,12 @@ pub fn assess_edit(
     );
     let mut breaks = Vec::new();
     let mut review = Vec::new();
+    let mut seen: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
     for hit in hits {
         let Some(node) = kg.node(&hit.node_id) else {
             continue;
         };
+        seen.insert(hit.node_id.clone());
         let file = node.source_file.clone();
         let rel = hit.via_relation.clone();
         // Different file OR different federated repo counts as cross-file: a same
@@ -231,6 +235,67 @@ pub fn assess_edit(
             } else {
                 review.push(dep);
             }
+        }
+    }
+
+    // Module-level importers: files that import the symbol's module but whose link
+    // is only a stub edge the symbol-level walk cannot reach (e.g. a test that does
+    // `import { sym } from './mod'` and calls it at top level). For delete this is
+    // the dangerous direction to under-report, so an exported symbol with such
+    // importers never silently reports zero.
+    for mi in module_importers(kg, &id) {
+        if !seen.insert(mi.node_id.clone()) {
+            continue; // already counted via a resolved edge
+        }
+        let Some(node) = kg.node(&mi.node_id) else {
+            continue;
+        };
+        let (will_break, reason) = match kind {
+            EditKind::Delete => {
+                if mi.confirmed {
+                    (
+                        true,
+                        "imports this symbol; it would no longer exist".to_string(),
+                    )
+                } else {
+                    (
+                        false,
+                        "imports this module; re-check whether it uses the deleted symbol"
+                            .to_string(),
+                    )
+                }
+            }
+            EditKind::Signature => (
+                false,
+                "imports the symbol; re-check its uses after the signature change".to_string(),
+            ),
+            EditKind::Visibility => {
+                if mi.confirmed {
+                    (
+                        true,
+                        "imports the symbol from another file; narrowing visibility blocks it"
+                            .to_string(),
+                    )
+                } else {
+                    (
+                        false,
+                        "imports this module from another file; re-check after narrowing visibility"
+                            .to_string(),
+                    )
+                }
+            }
+        };
+        let dep = EditDependent {
+            label: node.label.clone(),
+            file: node.source_file.clone(),
+            depth: 1,
+            via_relation: mi.via_relation,
+            reason,
+        };
+        if will_break {
+            breaks.push(dep);
+        } else {
+            review.push(dep);
         }
     }
 
@@ -351,6 +416,69 @@ mod tests {
     #[test]
     fn unknown_symbol_returns_none() {
         assert!(assess_edit(&kg(), "Nonexistent", EditKind::Delete, 5).is_none());
+    }
+
+    #[test]
+    fn delete_surfaces_module_level_test_importer() {
+        // Repro of the a11ycore miss: darkMode.test.ts does
+        // `import { toggleDarkMode } from './darkMode'` and calls it at top level,
+        // so the only edge is a module-level imports_from to the './darkMode' stub
+        // (no resolved symbol edge). Deleting toggleDarkMode must still flag the test.
+        let mut imp = edge("test_file", "stub_darkmode", "imports_from");
+        imp.extra.insert(
+            "imported".into(),
+            serde_json::json!(["toggleDarkMode", "setTheme"]),
+        );
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![
+                node("toggle", "toggleDarkMode", "src/darkMode.ts"),
+                node("test_file", "darkMode.test.ts", "tests/darkMode.test.ts"),
+                // module stub: import specifier as label, no source file.
+                node("stub_darkmode", "./darkMode", ""),
+            ],
+            links: vec![imp],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let kg = KnowledgeGraph::from_graph_data(gd);
+        let r = assess_edit(&kg, "toggleDarkMode", EditKind::Delete, 3).unwrap();
+        assert!(
+            r.breaks.iter().any(|d| d.file.contains("darkMode.test.ts")),
+            "the test importer must be flagged as breaking, got {r:?}"
+        );
+        assert!(
+            !(r.breaks.is_empty() && r.review.is_empty()),
+            "an exported symbol with a module importer must never report a bare 0"
+        );
+    }
+
+    #[test]
+    fn delete_routes_opaque_module_importer_to_review() {
+        // A namespace/default import records no symbol names -> uncertain, so it is
+        // surfaced for review rather than assumed to break.
+        let imp = edge("ns_file", "stub_darkmode", "imports_from"); // no `imported` tag
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![
+                node("toggle", "toggleDarkMode", "src/darkMode.ts"),
+                node("ns_file", "consumer.ts", "src/consumer.ts"),
+                node("stub_darkmode", "./darkMode", ""),
+            ],
+            links: vec![imp],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let kg = KnowledgeGraph::from_graph_data(gd);
+        let r = assess_edit(&kg, "toggleDarkMode", EditKind::Delete, 3).unwrap();
+        assert!(
+            r.review.iter().any(|d| d.file.contains("consumer.ts")),
+            "opaque importer should be in review, got {r:?}"
+        );
     }
 
     #[test]
