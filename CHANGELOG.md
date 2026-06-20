@@ -6,6 +6,26 @@ All notable changes to CodeGraph are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.11] - 2026-06-20
+
+Two more agent-tooling fixes from continued re-testing.
+
+### Fixed
+- **`affected` output is now bounded.** The 0.2.9 summary+top-N treatment reached
+  `predict_impact` and `audit_sql` but not `affected`, the tool most likely aimed at a
+  hub node (which could dump hundreds of dependents in one response). It now leads with a
+  per-depth breakdown (`[depth 1: 140, depth 2: 160]`), lists the top-N, and appends a
+  `... (+N more; pass verbose=true)` note. New optional `limit` (default 50) and `verbose`
+  parameters control it; the structured output is capped the same way and adds `total`,
+  `truncated`, and `by_depth`.
+- **`describe_node` / `structural_search` no longer HTML-escape signatures.** Generics
+  came back entity-encoded in the structured channel (`Record&lt;string, unknown&gt;`)
+  because signatures were sanitized with the HTML-escaping metadata path meant for
+  `graph.json`/HTML viewers. The structured signature is now sanitized with the plain
+  label rule (control-strip + length cap, no entity escaping), so `Record<string,
+  unknown>` and `Promise<void>` come through verbatim — important since `describe_node`
+  feeds tool/function-description generation.
+
 ## [0.2.10] - 2026-06-20
 
 Follow-up to 0.2.9, from a re-test on the same TypeScript repo. Four of the five 0.2.9

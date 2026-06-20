@@ -35,7 +35,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use codegraph_core::{sanitize_label, sanitize_metadata_value, GraphData, NodeId};
+use codegraph_core::{sanitize_label, GraphData, NodeId};
 use codegraph_graph::{
     god_nodes, graph_stats, suggest_questions, surprising_connections, GodNode, GraphStats,
     KnowledgeGraph,
@@ -552,8 +552,7 @@ impl Server {
             obj.insert("kind".into(), json!(k));
         }
         if let Some(sig) = &d.signature {
-            let raw = serde_json::to_value(sig).unwrap_or(Value::Null);
-            obj.insert("signature".into(), sanitize_metadata_value(&raw));
+            obj.insert("signature".into(), signature_json(sig));
         }
         obj.insert(
             "callees".into(),
@@ -845,7 +844,14 @@ impl Server {
     /// `affected` — the nodes that transitively depend on `label`, found by
     /// walking impact edges backward up to `depth` hops. Empty `relations`
     /// uses the default structural-impact set.
-    pub fn tool_affected(&self, label: &str, depth: usize, relations: &[String]) -> String {
+    pub fn tool_affected(
+        &self,
+        label: &str,
+        depth: usize,
+        relations: &[String],
+        limit: usize,
+        verbose: bool,
+    ) -> String {
         let id = match self.resolve_or_msg(label) {
             Ok(id) => id,
             Err(msg) => return msg,
@@ -861,13 +867,35 @@ impl Server {
         if hits.is_empty() {
             return format!("Nothing depends on {seed} within {depth} hops.");
         }
-        let mut out = format!("{} nodes depend on {seed} (<= {depth} hops):", hits.len());
+        // Per-depth breakdown so a hub's blast radius is summarized even when the
+        // entry list is truncated.
+        let mut by_depth: BTreeMap<usize, usize> = BTreeMap::new();
         for h in &hits {
+            *by_depth.entry(h.depth).or_default() += 1;
+        }
+        let breakdown = by_depth
+            .iter()
+            .map(|(d, c)| format!("depth {d}: {c}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // Top-N by default (hits are ordered shallowest-first); verbose dumps all.
+        let cap = if verbose { usize::MAX } else { limit.max(1) };
+        let mut out = format!(
+            "{} nodes depend on {seed} (<= {depth} hops) [{breakdown}]:",
+            hits.len()
+        );
+        for h in hits.iter().take(cap) {
             out.push_str(&format!(
                 "\n  [{}h via {}] {}",
                 h.depth,
                 sanitize_label(&h.via_relation),
                 sanitize_label(&self.label_of(&h.node_id))
+            ));
+        }
+        if hits.len() > cap {
+            out.push_str(&format!(
+                "\n  ... (+{} more; pass verbose=true for the full list)",
+                hits.len() - cap
             ));
         }
         out
@@ -1349,9 +1377,16 @@ impl Server {
         json!({ "god_nodes": arr })
     }
 
-    fn affected_json(&self, label: &str, depth: usize, relations: &[String]) -> Value {
+    fn affected_json(
+        &self,
+        label: &str,
+        depth: usize,
+        relations: &[String],
+        limit: usize,
+        verbose: bool,
+    ) -> Value {
         let Some(id) = resolve_seed(&self.kg, label) else {
-            return json!({ "seed": sanitize_label(label), "affected": [] });
+            return json!({ "seed": sanitize_label(label), "affected": [], "total": 0, "truncated": false });
         };
         let rels: Vec<&str> = if relations.is_empty() {
             DEFAULT_AFFECTED_RELATIONS.to_vec()
@@ -1359,8 +1394,17 @@ impl Server {
             relations.iter().map(String::as_str).collect()
         };
         let hits = affected_nodes(&self.kg, &id, &rels, depth.clamp(1, 16));
+        let total = hits.len();
+        let cap = if verbose { usize::MAX } else { limit.max(1) };
+        let mut by_depth: serde_json::Map<String, Value> = serde_json::Map::new();
+        for h in &hits {
+            let k = h.depth.to_string();
+            let n = by_depth.get(&k).and_then(Value::as_u64).unwrap_or(0) + 1;
+            by_depth.insert(k, json!(n));
+        }
         let arr: Vec<Value> = hits
             .iter()
+            .take(cap)
             .map(|h| {
                 json!({
                     "label": sanitize_label(&self.label_of(&h.node_id)),
@@ -1369,7 +1413,13 @@ impl Server {
                 })
             })
             .collect();
-        json!({ "seed": sanitize_label(&self.label_of(&id)), "affected": arr })
+        json!({
+            "seed": sanitize_label(&self.label_of(&id)),
+            "affected": arr,
+            "total": total,
+            "truncated": total > cap,
+            "by_depth": Value::Object(by_depth)
+        })
     }
 
     /// Typed mirror of [`tool_structural_search`](Server::tool_structural_search):
@@ -1918,7 +1968,13 @@ impl Server {
                             .collect()
                     })
                     .unwrap_or_default();
-                self.tool_affected(&s("label"), u("depth", 3) as usize, &rels)
+                self.tool_affected(
+                    &s("label"),
+                    u("depth", 3) as usize,
+                    &rels,
+                    u("limit", 50) as usize,
+                    b("verbose"),
+                )
             }
             "find_callers" => self.tool_find_callers(&s("label")),
             "find_callees" => self.tool_find_callees(&s("label")),
@@ -1993,7 +2049,13 @@ impl Server {
                             .collect()
                     })
                     .unwrap_or_default();
-                Some(self.affected_json(&s("label"), u("depth", 3) as usize, &rels))
+                Some(self.affected_json(
+                    &s("label"),
+                    u("depth", 3) as usize,
+                    &rels,
+                    u("limit", 50) as usize,
+                    b("verbose"),
+                ))
             }
             "structural_search" => Some(self.structural_search_json(
                 opt("query"),
@@ -2195,11 +2257,36 @@ fn node_view_to_json(v: &codegraph_cgql::NodeView) -> Value {
         obj.insert("loc".into(), json!(loc));
     }
     if let Some(sig) = &v.signature {
-        // The signature is source-derived text; sanitize it like other metadata.
-        let raw = serde_json::to_value(sig).unwrap_or(Value::Null);
-        obj.insert("signature".into(), sanitize_metadata_value(&raw));
+        obj.insert("signature".into(), signature_json(sig));
     }
     Value::Object(obj)
+}
+
+/// JSON for a function signature, sanitized with `sanitize_label` (control-strip +
+/// length cap) rather than `sanitize_metadata_value`. The latter HTML-escapes
+/// `<`/`>`, which mangles generics like `Record<string, unknown>` in the JSON
+/// channels that feed tool/function-description generation. Shape mirrors the
+/// serde form (`type_ref`/`return_type` omitted when absent).
+fn signature_json(sig: &codegraph_core::Signature) -> Value {
+    let params: Vec<Value> = sig
+        .params
+        .iter()
+        .map(|p| {
+            let mut po = serde_json::Map::new();
+            po.insert("name".into(), json!(sanitize_label(&p.name)));
+            if let Some(t) = &p.type_ref {
+                po.insert("type_ref".into(), json!(sanitize_label(t)));
+            }
+            Value::Object(po)
+        })
+        .collect();
+    let mut o = serde_json::Map::new();
+    o.insert("params".into(), Value::Array(params));
+    if let Some(rt) = &sig.return_type {
+        o.insert("return_type".into(), json!(sanitize_label(rt)));
+    }
+    o.insert("raw".into(), json!(sanitize_label(&sig.raw)));
+    Value::Object(o)
 }
 
 /// Parse the `<n> nodes found` count from a `query_graph` result header (the
@@ -2353,12 +2440,16 @@ fn tools_list(allow_exec: bool) -> Value {
           "inputSchema": { "type": "object", "properties": {
               "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." },
               "depth": { "type": "integer", "description": "Max hops to walk backward (default 3, max 16)." },
-              "relations": { "type": "array", "items": { "type": "string" }, "description": "Optional edge relations to follow; defaults to the structural-impact set: calls, references, imports, imports_from, re_exports, inherits, extends, implements, uses, mixes_in, embeds, depends_on, reads_from, plus the cross-language relations invokes, binds_native, calls_service, handled_by." }
+              "relations": { "type": "array", "items": { "type": "string" }, "description": "Optional edge relations to follow; defaults to the structural-impact set: calls, references, imports, imports_from, re_exports, inherits, extends, implements, uses, mixes_in, embeds, depends_on, reads_from, plus the cross-language relations invokes, binds_native, calls_service, handled_by." },
+              "limit": { "type": "integer", "description": "Max dependents listed before a '+N more' summary (default 50). A per-depth breakdown and the true total are always shown. Ignored when verbose=true." },
+              "verbose": { "type": "boolean", "description": "Emit the full, uncapped dependent list instead of the summarized top-N (default false). Useful only after narrowing depth/relations on a hub." }
           }, "required": ["label"] },
           "outputSchema": { "type": "object", "properties": {
               "seed": {"type":"string"},
               "affected": { "type": "array", "items": { "type": "object", "properties": {
-                  "label": {"type":"string"}, "depth": {"type":"integer"}, "via_relation": {"type":"string"} } } }
+                  "label": {"type":"string"}, "depth": {"type":"integer"}, "via_relation": {"type":"string"} } } },
+              "total": {"type":"integer"}, "truncated": {"type":"boolean"},
+              "by_depth": { "type": "object", "additionalProperties": {"type":"integer"} }
           }, "required": ["seed","affected"] } },
         { "name": "find_callers", "description": "List the nodes that call, use, or reference this symbol (incoming edges only). Answers 'who calls X'.",
           "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." } }, "required": ["label"] } },
@@ -2766,6 +2857,101 @@ mod tests {
             .as_str()
             .unwrap_or("")
             .contains("takes (name: str)"));
+    }
+
+    #[test]
+    fn describe_node_structured_signature_preserves_generics() {
+        // The structured signature must NOT HTML-escape generics (`Record<...>`),
+        // since it feeds tool/function-description generation.
+        use codegraph_core::{NodeKind, Param, Signature};
+        let mut f = node("load", "loadWidget()", None);
+        f.set_kind(NodeKind::Function);
+        f.set_signature(Signature {
+            params: vec![Param {
+                name: "opts".into(),
+                type_ref: Some("Record<string, unknown>".into()),
+            }],
+            return_type: Some("Promise<void>".into()),
+            raw: "loadWidget(opts: Record<string, unknown>): Promise<void>".into(),
+        });
+        let gd = GraphData {
+            directed: false,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![f],
+            links: vec![],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        let req = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"describe_node","arguments":{"label":"loadWidget"}}});
+        let resp = s.handle_request(&req).unwrap();
+        let sig = &resp["result"]["structuredContent"]["signature"];
+        let raw = sig["raw"].as_str().unwrap_or("");
+        assert!(
+            raw.contains("Record<string, unknown>") && raw.contains("Promise<void>"),
+            "generics preserved verbatim: {raw}"
+        );
+        assert!(
+            !raw.contains("&lt;") && !raw.contains("&gt;"),
+            "signature must not be HTML-escaped: {raw}"
+        );
+        assert_eq!(sig["return_type"], "Promise<void>");
+        assert_eq!(sig["params"][0]["type_ref"], "Record<string, unknown>");
+    }
+
+    #[test]
+    fn affected_truncates_with_per_depth_breakdown_and_verbose() {
+        // A hub with many dependents must summarize (per-depth counts + "+N more")
+        // by default, and dump everything under verbose=true.
+        let mut nodes = vec![node("h", "hub", Some(0))];
+        let mut links = Vec::new();
+        for i in 0..6 {
+            nodes.push(node(&format!("d{i}"), &format!("dep{i}"), Some(0)));
+            links.push(edge(&format!("d{i}"), "h", "calls"));
+        }
+        // A depth-2 dependent (g -> d0 -> h).
+        nodes.push(node("g", "grand", Some(0)));
+        links.push(edge("g", "d0", "calls"));
+        let gd = GraphData {
+            directed: false,
+            multigraph: false,
+            graph: Map::new(),
+            nodes,
+            links,
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let mut s = Server::from_graph_data(gd, None);
+
+        let out = call_tool(
+            &mut s,
+            "affected",
+            json!({"label":"hub","depth":3,"limit":2}),
+        );
+        assert!(
+            out.contains("depth 1:") && out.contains("depth 2:"),
+            "per-depth breakdown present: {out}"
+        );
+        assert!(
+            out.contains("more; pass verbose=true"),
+            "truncation note present: {out}"
+        );
+        // The body is capped at the limit (2 entry lines).
+        let entry_lines = out.lines().filter(|l| l.contains("h via ")).count();
+        assert_eq!(entry_lines, 2, "limit caps entries: {out}");
+
+        let full = call_tool(&mut s, "affected", json!({"label":"hub","verbose":true}));
+        assert!(
+            !full.contains("more; pass verbose=true"),
+            "verbose must not truncate: {full}"
+        );
+        assert_eq!(
+            full.lines().filter(|l| l.contains("h via ")).count(),
+            7,
+            "verbose lists all 7 dependents: {full}"
+        );
     }
 
     #[test]

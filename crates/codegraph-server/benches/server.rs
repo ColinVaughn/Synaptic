@@ -114,7 +114,7 @@ fn bench_new_tools(c: &mut Criterion) {
             .with_source_root(dir.path().to_path_buf());
 
         group.bench_with_input(BenchmarkId::new("affected_depth8", n), &n, |b, _| {
-            b.iter(|| black_box(server.tool_affected("n0", 8, &[])));
+            b.iter(|| black_box(server.tool_affected("n0", 8, &[], 50, true)));
         });
 
         group.bench_with_input(BenchmarkId::new("get_source_40", n), &n, |b, _| {
