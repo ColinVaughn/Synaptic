@@ -68,6 +68,30 @@ impl Builder {
         }
     }
 
+    /// Add a located node tagged with a `_node_type` marker in `extra` (e.g.
+    /// `"config_key"` for a JSON/YAML config key, `"config_resource"` for a k8s/CI
+    /// resource). The marker lets downstream consumers tell the node is not a code
+    /// symbol (see `Node::is_code_symbol`). Deduped by id like [`add_node`].
+    pub fn add_tagged_node(&mut self, id: NodeId, label: String, line: usize, node_type: &str) {
+        if self.seen.insert(id.clone()) {
+            let mut extra = ast_origin();
+            extra.insert(
+                "_node_type".to_string(),
+                serde_json::Value::String(node_type.to_string()),
+            );
+            self.nodes.push(Node {
+                id,
+                label,
+                file_type: FileType::Code,
+                source_file: self.path.clone(),
+                source_location: Some(format!("L{line}")),
+                community: None,
+                repo: None,
+                extra,
+            });
+        }
+    }
+
     /// Add a located code node enriched with kind, optional visibility, and the
     /// full source span (from `node`). Deduped by id like [`add_node`].
     pub fn add_code_node(

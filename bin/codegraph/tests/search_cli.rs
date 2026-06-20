@@ -60,6 +60,29 @@ fn search_query_and_patterns() {
 }
 
 #[test]
+fn explain_reports_ambiguity_with_candidates() {
+    // Two `helper` functions in different files make the bare name ambiguous. The
+    // CLI must report candidates (shared resolver), not "Node not found".
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join("a.py"), b"def helper():\n    return 1\n").unwrap();
+    std::fs::write(root.join("b.py"), b"def helper():\n    return 2\n").unwrap();
+    let ex = codegraph(&["extract", "."], root);
+    assert!(ex.status.success());
+
+    let e = codegraph(&["explain", "helper"], root);
+    let out = String::from_utf8_lossy(&e.stdout);
+    assert!(
+        out.contains("is ambiguous") && out.contains("candidates"),
+        "expected an ambiguity message with candidates, got: {out}"
+    );
+    assert!(
+        !out.contains("Node not found"),
+        "old misleading message must be gone: {out}"
+    );
+}
+
+#[test]
 fn search_explain_saved_and_aggregation() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
