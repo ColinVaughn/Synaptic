@@ -45,13 +45,31 @@ pub(crate) fn load_scoped_graph(path: &Path, repo: Option<&str>) -> Result<Knowl
     }
 }
 
-/// Resolve a user-supplied node id or label to a node id.
-pub(crate) fn resolve(kg: &KnowledgeGraph, arg: &str) -> Option<NodeId> {
-    let nid = NodeId(arg.to_string());
-    if kg.contains_node(&nid) {
-        return Some(nid);
+/// Resolve a user-supplied name/id to a single node, or a human-readable error
+/// message. Uses the same shared resolver as the MCP server, so the CLI and MCP
+/// report ambiguity identically (candidate ids instead of a bare "not found").
+pub(crate) fn resolve_or_message(
+    kg: &KnowledgeGraph,
+    arg: &str,
+) -> std::result::Result<NodeId, String> {
+    match codegraph_query::resolve_detailed(kg, arg) {
+        codegraph_query::Resolution::Unique(id) => Ok(id),
+        codegraph_query::Resolution::Ambiguous(ids) => {
+            let shown: Vec<String> = ids.iter().take(10).map(|i| i.0.clone()).collect();
+            let more = if ids.len() > 10 {
+                format!(", +{} more", ids.len() - 10)
+            } else {
+                String::new()
+            };
+            Err(format!(
+                "'{arg}' is ambiguous - {} candidates: [{}{}]. Pass a node id to disambiguate.",
+                ids.len(),
+                shown.join(", "),
+                more
+            ))
+        }
+        codegraph_query::Resolution::NotFound => Err(format!("No node matches '{arg}'.")),
     }
-    kg.nodes().find(|n| n.label == arg).map(|n| n.id.clone())
 }
 
 pub(crate) fn label_or_id(kg: &KnowledgeGraph, id: &NodeId) -> String {

@@ -365,7 +365,14 @@ fn build_checklist(
     tests: &[ImpactHit],
 ) -> Vec<VerifyStep> {
     let mut steps = Vec::new();
-    if let (false, Some(rep)) = (blast.is_empty(), changed.first()) {
+    // Prefer a real code symbol (one with a kind) as the representative example, so
+    // the suggested `codegraph affected` command never points at a bare file or a
+    // residual config node; fall back to the first changed node.
+    let rep = changed
+        .iter()
+        .find(|nr| nr.kind.is_some())
+        .or_else(|| changed.first());
+    if let (false, Some(rep)) = (blast.is_empty(), rep) {
         steps.push(VerifyStep {
             description: format!(
                 "Before editing, review the {} node(s) that transitively depend on this change",
@@ -450,7 +457,7 @@ fn summary_line(f: &ChangeForecast) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codegraph_core::{Confidence, Edge, FileType, GraphData, Node, Visibility};
+    use codegraph_core::{Confidence, Edge, FileType, GraphData, Node, NodeKind, Visibility};
     use codegraph_history::{DriftReport, ModuleDep, RemovedApi};
     use serde_json::Map;
 
@@ -560,6 +567,29 @@ mod tests {
         );
         let ids: Vec<&str> = f.changed_nodes.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(ids, vec!["a"], "only the code symbol is a changed node");
+    }
+
+    #[test]
+    fn checklist_example_prefers_a_code_symbol() {
+        // A changed file with a bare node (no kind, e.g. the file/config node) and a
+        // real code symbol. The verify checklist's `codegraph affected` example must
+        // reference the code symbol, not the kind-less node.
+        let bare = node("f", "package.json", "src/a.ts", None);
+        let mut code = node("c", "doThing", "src/a.ts", None);
+        code.set_kind(NodeKind::Function);
+        let dep = node("d", "caller", "src/b.ts", None);
+        let kg = graph(vec![bare, code, dep], vec![edge("d", "c", "calls")]);
+        let f = forecast_changes(&kg, &["src/a.ts".to_string()], &ForecastOptions::default());
+        let step = f
+            .verify_checklist
+            .iter()
+            .find(|s| s.command.starts_with("codegraph affected"))
+            .expect("an affected example step");
+        assert!(
+            step.command.contains("doThing"),
+            "example should be the code symbol, got: {}",
+            step.command
+        );
     }
 
     #[test]

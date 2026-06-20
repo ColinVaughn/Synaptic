@@ -81,7 +81,7 @@ pub fn extract_yaml_source(path: &str, source: &[u8]) -> ExtractionResult {
                     _ => kind.clone(),
                 };
                 let id = NodeId(make_id(&["k8s", path, &idx.to_string(), &label]));
-                b.add_node(id.clone(), label, 1);
+                b.add_tagged_node(id.clone(), label, 1, "config_resource");
                 b.add_edge(file_nid.clone(), id, "contains", 1, Some("k8s"));
             }
         }
@@ -234,7 +234,12 @@ impl Yaml<'_> {
                 continue;
             }
             let id = NodeId(make_id(&[group_key, &name]));
-            b.add_node(id.clone(), name.clone(), e.start_position().row + 1);
+            b.add_tagged_node(
+                id.clone(),
+                name.clone(),
+                e.start_position().row + 1,
+                "config_resource",
+            );
             b.add_edge(file_nid.clone(), id.clone(), "contains", 1, Some(group_key));
             ids.insert(name, id);
         }

@@ -128,7 +128,7 @@ pub fn extract_json_source(path: &str, source: &[u8]) -> ExtractionResult {
             continue;
         }
         let key_nid = NodeId(make_id(&["jsonkey", path, &key]));
-        b.add_node(key_nid.clone(), key.clone(), line);
+        b.add_tagged_node(key_nid.clone(), key.clone(), line, "config_key");
         b.add_edge(
             file_nid.clone(),
             key_nid.clone(),
@@ -150,7 +150,7 @@ pub fn extract_json_source(path: &str, source: &[u8]) -> ExtractionResult {
                 }
                 let cline = child.start_position().row + 1;
                 let child_nid = NodeId(make_id(&["jsonkey", path, &key, &ck]));
-                b.add_node(child_nid.clone(), ck, cline);
+                b.add_tagged_node(child_nid.clone(), ck, cline, "config_key");
                 b.add_edge(
                     key_nid.clone(),
                     child_nid,
@@ -318,6 +318,18 @@ mod tests {
             .edges
             .iter()
             .any(|e| e.source.0 == scripts_id && e.relation == "contains"));
+        // Config-key nodes are tagged non-code so change-impact excludes them.
+        for n in r
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.label.as_str(), "scripts" | "build" | "test" | "name"))
+        {
+            assert!(
+                !n.is_code_symbol(),
+                "config key {:?} must not be a code symbol",
+                n.label
+            );
+        }
     }
 
     #[test]

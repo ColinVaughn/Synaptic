@@ -1,14 +1,14 @@
 //! `query` command(s) split from main.rs.
 
 use crate::commands::common::{
-    default_graph_path, label_or_id, load_graph, load_scoped_graph, resolve,
+    default_graph_path, label_or_id, load_graph, load_scoped_graph, resolve_or_message,
 };
 use anyhow::Result;
 use codegraph_core::NodeId;
 use codegraph_graph::KnowledgeGraph;
 use codegraph_query::{
-    affected_nodes, explain, query_modal, resolve_seed, shortest_path, QueryIndex, Recency,
-    RecencyMode, TraversalMode, DEFAULT_AFFECTED_RELATIONS,
+    affected_nodes, explain, query_modal, shortest_path, QueryIndex, Recency, RecencyMode,
+    TraversalMode, DEFAULT_AFFECTED_RELATIONS,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -150,9 +150,19 @@ pub(crate) fn run_path(
     repo: Option<&str>,
 ) -> Result<()> {
     let kg = load_scoped_graph(&default_graph_path(graph), repo)?;
-    let (Some(a), Some(b)) = (resolve(&kg, from), resolve(&kg, to)) else {
-        println!("Could not resolve one or both endpoints.");
-        return Ok(());
+    let a = match resolve_or_message(&kg, from) {
+        Ok(id) => id,
+        Err(msg) => {
+            println!("source: {msg}");
+            return Ok(());
+        }
+    };
+    let b = match resolve_or_message(&kg, to) {
+        Ok(id) => id,
+        Err(msg) => {
+            println!("target: {msg}");
+            return Ok(());
+        }
     };
     match shortest_path(&kg, &a, &b) {
         Some(path) => {
@@ -166,9 +176,12 @@ pub(crate) fn run_path(
 
 pub(crate) fn run_explain(node: &str, graph: Option<PathBuf>, repo: Option<&str>) -> Result<()> {
     let kg = load_scoped_graph(&default_graph_path(graph), repo)?;
-    let Some(id) = resolve(&kg, node) else {
-        println!("Node not found: {node}");
-        return Ok(());
+    let id = match resolve_or_message(&kg, node) {
+        Ok(id) => id,
+        Err(msg) => {
+            println!("{msg}");
+            return Ok(());
+        }
     };
     let e = explain(&kg, &id).expect("resolved node exists");
     println!("{} [{}]", e.label, e.source_file);
@@ -190,9 +203,12 @@ pub(crate) fn run_affected(
     relations: Vec<String>,
 ) -> Result<()> {
     let kg = load_graph(&default_graph_path(graph))?;
-    let Some(seed) = resolve_seed(&kg, node) else {
-        println!("No unique node match for {node}");
-        return Ok(());
+    let seed = match resolve_or_message(&kg, node) {
+        Ok(id) => id,
+        Err(msg) => {
+            println!("{msg}");
+            return Ok(());
+        }
     };
     // Default to the structural impact relations when none are given.
     let rel_owned: Vec<String> = if relations.is_empty() {

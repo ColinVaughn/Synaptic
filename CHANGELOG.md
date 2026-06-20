@@ -6,6 +6,27 @@ All notable changes to CodeGraph are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.10] - 2026-06-20
+
+Follow-up to 0.2.9, from a re-test on the same TypeScript repo. Four of the five 0.2.9
+fixes were confirmed; this release closes the remaining gaps. Requires re-extraction for
+the changed-node fix (the config marker is written at extract time).
+
+### Fixed
+- **`predict_impact` still listed JSON/YAML config keys as changed nodes:** the 0.2.9
+  exclusion only caught markdown headings because the `config_key` marker lived on the
+  edge, not the node. Config-key nodes (package.json keys, tsconfig keys, etc.) and
+  YAML/k8s/CI resource nodes now carry a node-level `_node_type`, so `is_code_symbol`
+  excludes them from the changed-node set in both the MCP `predict_impact` response and the
+  CLI `forecast.json`.
+- **Verify-checklist example pointed at a config key:** the `codegraph affected "..."`
+  example in `predict_impact`'s checklist now prefers a real code symbol (one with a kind)
+  instead of whatever node sorts first.
+- **CLI `explain` / `path` / `affected` did not share the resolver:** these commands now
+  use the same resolver as the MCP tools, so an ambiguous name reports
+  `'<name>' is ambiguous - N candidates: [...]` instead of "Node not found", uniformly
+  across CLI and MCP.
+
 ## [0.2.9] - 2026-06-20
 
 Quality pass on the agent-facing tools, from issues found driving CodeGraph over a real
