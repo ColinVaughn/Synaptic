@@ -201,6 +201,8 @@ pub(crate) fn run_affected(
     graph: Option<PathBuf>,
     depth: usize,
     relations: Vec<String>,
+    limit: usize,
+    verbose: bool,
 ) -> Result<()> {
     let kg = load_graph(&default_graph_path(graph))?;
     let seed = match resolve_or_message(&kg, node) {
@@ -229,7 +231,20 @@ pub(crate) fn run_affected(
         println!("No affected nodes found.");
         return Ok(());
     }
+    // Per-depth breakdown so a hub's blast radius is summarized even when the list
+    // is truncated (mirrors the MCP `affected` tool).
+    let mut by_depth: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
     for h in &hits {
+        *by_depth.entry(h.depth).or_default() += 1;
+    }
+    let breakdown = by_depth
+        .iter()
+        .map(|(d, c)| format!("depth {d}: {c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let cap = if verbose { usize::MAX } else { limit.max(1) };
+    println!("Total: {} [{breakdown}]", hits.len());
+    for h in hits.iter().take(cap) {
         let loc = kg
             .node(&h.node_id)
             .map(|n| match &n.source_location {
@@ -248,6 +263,12 @@ pub(crate) fn run_affected(
             label_or_id(&kg, &h.node_id),
             h.via_relation,
             loc
+        );
+    }
+    if hits.len() > cap {
+        println!(
+            "... (+{} more; pass --verbose for the full list)",
+            hits.len() - cap
         );
     }
     Ok(())

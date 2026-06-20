@@ -90,7 +90,9 @@ fn run() -> Result<()> {
             graph,
             depth,
             relations,
-        } => run_affected(&node, graph, depth, relations),
+            limit,
+            verbose,
+        } => run_affected(&node, graph, depth, relations, limit, verbose),
         Cmd::MergeDriver {
             base: _,
             current,

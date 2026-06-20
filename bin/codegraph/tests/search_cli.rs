@@ -60,6 +60,46 @@ fn search_query_and_patterns() {
 }
 
 #[test]
+fn affected_cli_bounds_output_with_limit_and_verbose() {
+    // A function called by many others (a hub). `affected --limit` must truncate
+    // with a per-depth breakdown + "+N more"; `--verbose` must list all.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mut src = String::from("def core():\n    return 1\n");
+    for i in 0..6 {
+        src.push_str(&format!("def f{i}():\n    return core()\n"));
+    }
+    std::fs::write(root.join("m.py"), src.as_bytes()).unwrap();
+    let ex = codegraph(&["extract", "."], root);
+    assert!(ex.status.success());
+
+    let capped = codegraph(&["affected", "core", "--limit", "2"], root);
+    let out = String::from_utf8_lossy(&capped.stdout);
+    assert!(
+        out.contains("Total: 6") && out.contains("depth 1:"),
+        "breakdown: {out}"
+    );
+    assert!(
+        out.contains("more; pass --verbose"),
+        "truncation note: {out}"
+    );
+    let entries = out.lines().filter(|l| l.starts_with("- ")).count();
+    assert_eq!(entries, 2, "limit caps listed entries: {out}");
+
+    let full = codegraph(&["affected", "core", "--verbose"], root);
+    let fout = String::from_utf8_lossy(&full.stdout);
+    assert!(
+        !fout.contains("more; pass --verbose"),
+        "verbose not truncated: {fout}"
+    );
+    assert_eq!(
+        fout.lines().filter(|l| l.starts_with("- ")).count(),
+        6,
+        "verbose lists all 6: {fout}"
+    );
+}
+
+#[test]
 fn explain_reports_ambiguity_with_candidates() {
     // Two `helper` functions in different files make the bare name ambiguous. The
     // CLI must report candidates (shared resolver), not "Node not found".

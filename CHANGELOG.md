@@ -6,6 +6,18 @@ All notable changes to CodeGraph are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.12] - 2026-06-20
+
+### Fixed
+- **CLI `affected` is now bounded, matching the MCP tool.** `codegraph affected` printed
+  every dependent (hundreds on a hub). It now leads with a per-depth breakdown
+  (`Total: N [depth 1: …, depth 2: …]`), lists the top-N, and appends a
+  `... (+N more; pass --verbose for the full list)` note. New `--limit` (default 50) and
+  `--verbose` flags control it, mirroring the MCP `affected` parameters added in 0.2.11.
+  (The MCP `affected` `limit`/`verbose` from 0.2.11 were already wired; if a client still
+  sees a 50-cap with no override, refresh the binary and reconnect so it re-fetches the
+  tool list.)
+
 ## [0.2.11] - 2026-06-20
 
 Two more agent-tooling fixes from continued re-testing.

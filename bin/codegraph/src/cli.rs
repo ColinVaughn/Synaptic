@@ -148,6 +148,13 @@ pub(crate) enum Cmd {
         /// structural impact relations.
         #[arg(long = "relation")]
         relations: Vec<String>,
+        /// Max dependents listed before a "+N more" summary (a per-depth
+        /// breakdown and the true total are always shown). Ignored with --verbose.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// List every dependent instead of the summarized top-N.
+        #[arg(long)]
+        verbose: bool,
     },
     /// Git merge driver for graph.json — invoked by git as `%O %A %B`, not by
     /// users. Union-composes the two sides into `current` so graph.json never
