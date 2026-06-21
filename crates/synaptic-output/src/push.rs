@@ -98,14 +98,16 @@ fn parse_host_port(uri: &str) -> (String, u16) {
 /// a field, never interpolated into a URL, so a password containing `@`/`:`/`/`/
 /// `%` (which would break a `redis://…` URL) connects correctly.
 fn falkordb_conn_info(uri: &str, password: Option<&str>) -> redis::ConnectionInfo {
+    use redis::IntoConnectionInfo;
     let (host, port) = parse_host_port(uri);
-    redis::ConnectionInfo {
-        addr: redis::ConnectionAddr::Tcp(host, port),
-        redis: redis::RedisConnectionInfo {
-            password: password.filter(|p| !p.is_empty()).map(str::to_string),
-            ..Default::default()
-        },
+    let mut redis = redis::RedisConnectionInfo::default();
+    if let Some(p) = password.filter(|p| !p.is_empty()) {
+        redis = redis.set_password(p);
     }
+    redis::ConnectionAddr::Tcp(host, port)
+        .into_connection_info()
+        .expect("Tcp ConnectionAddr always yields valid ConnectionInfo")
+        .set_redis_settings(redis)
 }
 
 #[cfg(test)]
@@ -128,20 +130,30 @@ mod tests {
     #[test]
     fn conn_info_sets_addr_and_password_without_url_escaping() {
         let ci = falkordb_conn_info("falkordb://h:6380", Some("p@ss/w:rd"));
-        match ci.addr {
+        match ci.addr() {
             redis::ConnectionAddr::Tcp(host, port) => {
                 assert_eq!(host, "h");
-                assert_eq!(port, 6380);
+                assert_eq!(*port, 6380);
             }
             other => panic!("expected Tcp addr, got {other:?}"),
         }
         // The special-char password survives verbatim (no URL mangling).
-        assert_eq!(ci.redis.password.as_deref(), Some("p@ss/w:rd"));
+        assert_eq!(ci.redis_settings().password(), Some("p@ss/w:rd"));
     }
 
     #[test]
     fn conn_info_omits_empty_password() {
-        assert_eq!(falkordb_conn_info("h:6379", Some("")).redis.password, None);
-        assert_eq!(falkordb_conn_info("h:6379", None).redis.password, None);
+        assert_eq!(
+            falkordb_conn_info("h:6379", Some(""))
+                .redis_settings()
+                .password(),
+            None
+        );
+        assert_eq!(
+            falkordb_conn_info("h:6379", None)
+                .redis_settings()
+                .password(),
+            None
+        );
     }
 }

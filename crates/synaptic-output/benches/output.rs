@@ -9,7 +9,8 @@
 //!
 //! Run: `cargo bench -p synaptic-output`
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
 use synaptic_graph::KnowledgeGraph;
 use synaptic_output::{

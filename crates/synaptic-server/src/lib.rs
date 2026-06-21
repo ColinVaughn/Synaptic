@@ -2335,9 +2335,7 @@ fn truncate_to_tokens(text: String, token_budget: usize) -> String {
     if toks.len() <= token_budget {
         return text;
     }
-    let kept = bpe
-        .decode(toks[..token_budget].to_vec())
-        .unwrap_or_default();
+    let kept = bpe.decode(&toks[..token_budget]).unwrap_or_default();
     format!("{kept}\n... (truncated to ~{token_budget} tokens)")
 }
 
