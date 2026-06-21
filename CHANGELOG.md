@@ -10,6 +10,43 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-06-21
+
+A second round of agent-feedback usability fixes (tested against a real external
+repo), plus a dependency bump.
+
+### Added
+- **`god_nodes` flags untested hubs.** Each hub is annotated with how many tests
+  transitively exercise it -- `N test(s)` in the text output, `test_count` in the
+  structured mirror. A high-degree hub with `0 test(s)` (high blast radius, no
+  safety net) is surfaced for what it is, without a follow-up `affected_tests`
+  call. Because each row costs a reverse-impact walk, a page is capped (`top_n`
+  default 10, max 200; page further with `offset`).
+
+### Changed
+- **The `name@file-substring` disambiguation qualifier now works across every
+  name-taking tool** -- `get_node`, `get_neighbors`, `get_source`, `find_callers`,
+  `find_callees`, `shortest_path`, `affected`, and `predict_edit` -- not just
+  `predict_edit`. It is parsed in the shared resolver. A node id or label that
+  legitimately contains `@` (for example `react@18` or an import specifier like
+  `git@github.com`) still resolves as-is: the literal interpretation is tried
+  first and the split is only a fallback.
+- **Ambiguous-name results list each candidate's file and degree inline** (MCP and
+  CLI), so an agent can pick one without a second `get_node` round-trip.
+- **`get_neighbors` with a `relation_filter` that matches nothing now names the
+  relations the node does have** -- `(none with relation 'calls'; this node has:
+  method(11), contains(1))` -- so an empty result is no longer indistinguishable
+  from a missing node.
+- **SQL audit signal-to-noise.** `PERF-IDX-001` ("likely-foreign-key column not
+  indexed"), a pure column-name heuristic at 0.5 confidence, is demoted from High
+  to Medium so it no longer outranks evidenced security findings (RLS gaps,
+  injection). Findings are now sorted by severity then by confidence (most
+  confident first within a tier), and the confidence score is shown in the CLI,
+  MCP, and Markdown output.
+
+### Dependencies
+- Bumped `zip` 2.4.2 -> 7.2.0.
+
 ## [0.3.3] - 2026-06-21
 
 ### Fixed

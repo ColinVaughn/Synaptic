@@ -51,17 +51,30 @@ pub(crate) fn resolve_or_message(
     match synaptic_query::resolve_detailed(kg, arg) {
         synaptic_query::Resolution::Unique(id) => Ok(id),
         synaptic_query::Resolution::Ambiguous(ids) => {
-            let shown: Vec<String> = ids.iter().take(10).map(|i| i.0.clone()).collect();
+            // List each candidate with its file + degree inline so the user can pick
+            // one without a follow-up lookup. Shared with the MCP server via
+            // candidate_details. Enrich only the shown prefix; `+N more` conveys the
+            // rest from ids.len().
+            let shown = ids.len().min(10);
+            let lines: String = synaptic_query::candidate_details(kg, &ids[..shown])
+                .iter()
+                .map(|c| {
+                    let file = if c.file.is_empty() {
+                        "-"
+                    } else {
+                        c.file.as_str()
+                    };
+                    format!("\n  {} [{}] (degree {})", c.id.0, file, c.degree)
+                })
+                .collect();
             let more = if ids.len() > 10 {
-                format!(", +{} more", ids.len() - 10)
+                format!("\n  +{} more", ids.len() - 10)
             } else {
                 String::new()
             };
             Err(format!(
-                "'{arg}' is ambiguous - {} candidates: [{}{}]. Pass a node id to disambiguate.",
+                "'{arg}' is ambiguous - {} candidates:{lines}{more}\nPass a node id (or qualify as name@file) to disambiguate.",
                 ids.len(),
-                shown.join(", "),
-                more
             ))
         }
         synaptic_query::Resolution::NotFound => Err(format!("No node matches '{arg}'.")),

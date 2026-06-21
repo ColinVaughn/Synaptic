@@ -77,9 +77,12 @@ synaptic search 'MATCH (t:table)-[:protected_by]->(p:policy) RETURN t, p'
 
 ## The rules
 
-`sql audit` runs every rule and returns findings sorted by severity, each with a
-location, the offending object/query, a remediation, a confidence score, and the
-graph evidence that triggered it.
+`sql audit` runs every rule and returns findings sorted by severity, then by
+confidence (most confident first within a tier, so a wall of low-confidence
+name-heuristics never buries an evidenced finding of equal severity). Each finding
+carries a location, the offending object/query, a remediation, a confidence score
+(shown in the CLI/MCP output and the Markdown report), and the graph evidence that
+triggered it.
 
 ### Security
 
@@ -98,7 +101,7 @@ graph evidence that triggered it.
 
 | Rule | Severity | Flags |
 |---|---|---|
-| `PERF-IDX-001` | High | a likely foreign-key column (`*_id`) with no index |
+| `PERF-IDX-001` | Medium | a likely foreign-key column (`*_id`) with no index (name-only heuristic, 0.5 confidence) |
 | `PERF-IDX-002` | Medium | an RLS policy filter column with no index (scans every request) |
 | `PERF-SEL-001` | Low | `SELECT *` |
 | `PERF-SARG-001` | Medium | a non-sargable predicate (function on a column, leading-wildcard `LIKE`) |

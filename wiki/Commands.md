@@ -174,10 +174,17 @@ synaptic explain <NODE> [--graph <PATH>] [--repo <TAG>]
 
 Prints the node's label, source file, community (if assigned), and each neighbour with the edge direction and relation.
 
+When a name is shared by several files, pin it with a `name@file-substring`
+qualifier (e.g. `announce@core/foo.ts`). This works for every command that takes a
+node name (`explain`, `path`, `affected`, and `predict --edit`). If the name is
+still ambiguous, the candidate list shows each candidate's id, file, and degree
+inline.
+
 Example:
 
 ```sh
 synaptic explain "PaymentService"
+synaptic explain "announce@core/foo.ts"   # qualify a name shared by several files
 ```
 
 See [Querying](Querying).

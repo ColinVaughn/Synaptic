@@ -605,31 +605,86 @@ pub fn explain(kg: &KnowledgeGraph, id: &NodeId) -> Option<Explain> {
 /// `()`) → unique case-insensitive source_file → unique case-insensitive
 /// substring of a label. Any tie (or no match) returns `None` — we never guess.
 pub fn resolve_seed(kg: &KnowledgeGraph, query: &str) -> Option<NodeId> {
-    // 1. Exact node id.
+    // 1. Exact node id. Checked on the FULL query first so an id that legitimately
+    // contains `@` (e.g. a `react@18` package stub) is not split into name@file.
     let as_id = NodeId(query.to_string());
     if kg.contains_node(&as_id) {
         return Some(as_id);
     }
-    let q = query.to_lowercase();
+    // An optional `name@file-substring` qualifier pins a name shared by several
+    // files to one file. Honored here (not just in predict_edit) so every
+    // navigation tool that resolves through resolve_seed handles it uniformly.
+    let (name, file_hint) = split_file_hint(query);
 
-    // 2. Unique case-insensitive exact label.
-    if let Some(id) = unique_match(kg, |n| n.label.to_lowercase() == q) {
+    // When the query carries an `@` qualifier, first try the WHOLE query as-is
+    // (no split): a label may legitimately contain `@` (e.g. an import specifier
+    // `git@github.com`), and that literal meaning wins over the qualifier reading.
+    // Only if the whole query resolves to nothing do we fall back to the split.
+    if file_hint.is_some() {
+        if let Some(id) = resolve_cascade(kg, &query.to_lowercase(), |_| true, true) {
+            return Some(id);
+        }
+    }
+
+    let q = name.to_lowercase();
+    let file_ok = |n: &synaptic_core::Node| match &file_hint {
+        Some(h) => normalized_file(&n.source_file).contains(h),
+        None => true,
+    };
+    // The source_file stage is meaningless once a file hint is present (the bare
+    // part is a symbol, not a path), so it is dropped from the cascade in that case.
+    resolve_cascade(kg, &q, file_ok, file_hint.is_none())
+}
+
+/// The unique-resolution cascade over a lowercased `q` and a `file_ok` filter:
+/// unique exact label -> unique bare name -> (optional) unique source_file ->
+/// unique label substring. Each stage requires EXACTLY one match (a tie falls
+/// through to the next stage); returns `None` if no stage resolves uniquely.
+fn resolve_cascade(
+    kg: &KnowledgeGraph,
+    q: &str,
+    file_ok: impl Fn(&synaptic_core::Node) -> bool,
+    use_file_stage: bool,
+) -> Option<NodeId> {
+    if let Some(id) = unique_match(kg, |n| file_ok(n) && n.label.to_lowercase() == q) {
         return Some(id);
     }
-    // 3. Unique bare name (undecorated callable label).
-    let q_bare = bare_name(&q);
-    if let Some(id) = unique_match(kg, |n| bare_name(&n.label.to_lowercase()) == q_bare) {
+    let q_bare = bare_name(q);
+    if let Some(id) = unique_match(kg, |n| {
+        file_ok(n) && bare_name(&n.label.to_lowercase()) == q_bare
+    }) {
         return Some(id);
     }
-    // 4. Unique case-insensitive source_file.
-    if let Some(id) = unique_match(kg, |n| n.source_file.to_lowercase() == q) {
-        return Some(id);
+    if use_file_stage {
+        if let Some(id) = unique_match(kg, |n| n.source_file.to_lowercase() == q) {
+            return Some(id);
+        }
     }
-    // 5. Unique case-insensitive label substring.
-    if let Some(id) = unique_match(kg, |n| n.label.to_lowercase().contains(&q)) {
+    if let Some(id) = unique_match(kg, |n| file_ok(n) && n.label.to_lowercase().contains(q)) {
         return Some(id);
     }
     None
+}
+
+/// Parse an optional `name@file-substring` qualifier. Returns `(name, Some(hint))`
+/// when an `@` splits the query into two non-empty halves, else `(query, None)`.
+/// The hint is normalized (backslashes to `/`, lowercased) to match against a
+/// node's source file the same way [`normalized_file`] does.
+fn split_file_hint(query: &str) -> (&str, Option<String>) {
+    if let Some((name, hint)) = query.split_once('@') {
+        let name = name.trim();
+        let hint = hint.trim();
+        if !name.is_empty() && !hint.is_empty() {
+            return (name, Some(hint.replace('\\', "/").to_lowercase()));
+        }
+    }
+    (query, None)
+}
+
+/// A source file path normalized for substring matching: backslashes to `/`,
+/// lowercased. Keeps Windows and POSIX path separators comparable.
+fn normalized_file(path: &str) -> String {
+    path.replace('\\', "/").to_lowercase()
 }
 
 /// Outcome of resolving a free-text name/id to a graph node, distinguishing a
@@ -664,18 +719,71 @@ pub fn resolve_detailed(kg: &KnowledgeGraph, query: &str) -> Resolution {
     }
 }
 
+/// A single candidate from an ambiguous resolution, carrying the facts a caller
+/// needs to pick one WITHOUT a follow-up `get_node` round-trip: the node id, its
+/// source file, and its degree (edge count).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmbiguityCandidate {
+    pub id: NodeId,
+    pub file: String,
+    pub degree: usize,
+}
+
+/// Enrich a list of ambiguous candidate ids with each node's file and degree, so
+/// both the MCP server and the CLI can render a self-sufficient candidate list
+/// from one shared place.
+pub fn candidate_details(kg: &KnowledgeGraph, ids: &[NodeId]) -> Vec<AmbiguityCandidate> {
+    ids.iter()
+        .map(|id| AmbiguityCandidate {
+            id: id.clone(),
+            file: kg
+                .node(id)
+                .map(|n| n.source_file.clone())
+                .unwrap_or_default(),
+            degree: kg.degree(id),
+        })
+        .collect()
+}
+
 /// The matches from the first resolution stage that yields any, in node order.
 /// Mirrors the [`resolve_seed`] cascade (exact label -> bare name -> source_file
 /// -> label substring); the exact-id stage is omitted (an id match is unique).
 fn candidate_matches(kg: &KnowledgeGraph, query: &str) -> Vec<NodeId> {
-    let q = query.to_lowercase();
-    let q_bare = bare_name(&q);
-    let stages: [&dyn Fn(&synaptic_core::Node) -> bool; 4] = [
-        &|n: &synaptic_core::Node| n.label.to_lowercase() == q,
-        &|n: &synaptic_core::Node| bare_name(&n.label.to_lowercase()) == q_bare,
-        &|n: &synaptic_core::Node| n.source_file.to_lowercase() == q,
-        &|n: &synaptic_core::Node| n.label.to_lowercase().contains(&q),
-    ];
+    let (name, file_hint) = split_file_hint(query);
+    // Mirror resolve_seed: with an `@` qualifier, try the WHOLE query first (a
+    // label may contain `@`), and only fall back to the split when it matches
+    // nothing.
+    if file_hint.is_some() {
+        let whole = candidate_stage_hits(kg, &query.to_lowercase(), |_| true, true);
+        if !whole.is_empty() {
+            return whole;
+        }
+    }
+    let file_ok = |n: &synaptic_core::Node| match &file_hint {
+        Some(h) => normalized_file(&n.source_file).contains(h),
+        None => true,
+    };
+    candidate_stage_hits(kg, &name.to_lowercase(), file_ok, file_hint.is_none())
+}
+
+/// The hits from the first cascade stage that yields any, over a lowercased `q`
+/// and a `file_ok` filter. The candidate counterpart of [`resolve_cascade`]:
+/// returns ALL matches of the first non-empty stage (for listing candidates),
+/// where `resolve_cascade` instead requires a stage to be uniquely matched.
+fn candidate_stage_hits(
+    kg: &KnowledgeGraph,
+    q: &str,
+    file_ok: impl Fn(&synaptic_core::Node) -> bool,
+    use_file_stage: bool,
+) -> Vec<NodeId> {
+    let q_bare = bare_name(q);
+    let label_eq = |n: &synaptic_core::Node| file_ok(n) && n.label.to_lowercase() == q;
+    let bare_eq =
+        |n: &synaptic_core::Node| file_ok(n) && bare_name(&n.label.to_lowercase()) == q_bare;
+    let file_eq = |n: &synaptic_core::Node| use_file_stage && n.source_file.to_lowercase() == q;
+    let label_sub = |n: &synaptic_core::Node| file_ok(n) && n.label.to_lowercase().contains(q);
+    let stages: [&dyn Fn(&synaptic_core::Node) -> bool; 4] =
+        [&label_eq, &bare_eq, &file_eq, &label_sub];
     for pred in stages {
         let hits: Vec<NodeId> = kg
             .nodes()
@@ -1695,5 +1803,86 @@ mod tests {
             resolve_detailed(&kg, "does_not_exist"),
             Resolution::NotFound
         );
+    }
+
+    #[test]
+    fn resolve_honors_at_file_qualifier_uniformly() {
+        // Two real definitions share the name `announce`, in different files
+        // (the build helper gives node `h1` the file `h1.py`, etc.).
+        let kg = build(&[("h1", "announce()"), ("h2", "announce()")], &[]);
+
+        // Bare name is ambiguous (baseline).
+        assert_eq!(resolve_seed(&kg, "announce"), None);
+
+        // `name@file` pins it to one file for the SHARED resolver, so every
+        // navigation tool that goes through resolve_seed/resolve_detailed honors
+        // the same qualifier predict_edit documents.
+        assert_eq!(resolve_seed(&kg, "announce@h1"), Some(NodeId("h1".into())));
+        assert_eq!(
+            resolve_detailed(&kg, "announce@h2.py"),
+            Resolution::Unique(NodeId("h2".into()))
+        );
+
+        // A hint that matches no file -> NotFound, not a lenient fall-through to
+        // an arbitrary node.
+        assert_eq!(
+            resolve_detailed(&kg, "announce@nosuchfile"),
+            Resolution::NotFound
+        );
+
+        // A hint that still matches both files stays ambiguous.
+        match resolve_detailed(&kg, "announce@.py") {
+            Resolution::Ambiguous(ids) => assert_eq!(ids.len(), 2),
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn candidate_details_carry_file_and_degree() {
+        // `hub` has two edges, `leaf` has one. The build helper files them at
+        // `<id>.py`. candidate_details must surface both so an ambiguity message
+        // can list file + degree inline.
+        let kg = build(
+            &[("hub", "announce()"), ("leaf", "announce()"), ("x", "X")],
+            &[("hub", "leaf", "calls"), ("hub", "x", "uses")],
+        );
+        let ids = vec![NodeId("hub".into()), NodeId("leaf".into())];
+        let details = candidate_details(&kg, &ids);
+        assert_eq!(details.len(), 2);
+        assert_eq!(details[0].id, NodeId("hub".into()));
+        assert_eq!(details[0].file, "hub.py");
+        assert_eq!(details[0].degree, 2);
+        assert_eq!(details[1].degree, 1);
+    }
+
+    #[test]
+    fn resolve_exact_id_with_at_sign_is_not_split() {
+        // A node id legitimately containing `@` (e.g. a package@version stub)
+        // must resolve as an exact id, not be split into name@file-hint.
+        let kg = build(&[("react@18", "react"), ("other", "Other")], &[]);
+        assert_eq!(
+            resolve_seed(&kg, "react@18"),
+            Some(NodeId("react@18".into()))
+        );
+    }
+
+    #[test]
+    fn resolve_label_containing_at_is_not_split() {
+        // A node LABEL may legitimately contain `@` (an import specifier or remote,
+        // e.g. `git@github.com`) while its id differs. Querying the exact label must
+        // resolve it -- the whole-query interpretation wins over treating `@` as a
+        // file qualifier.
+        let kg = build(&[("n1", "git@github.com"), ("n2", "Other")], &[]);
+        assert_eq!(
+            resolve_seed(&kg, "git@github.com"),
+            Some(NodeId("n1".into()))
+        );
+        assert_eq!(
+            resolve_detailed(&kg, "git@github.com"),
+            Resolution::Unique(NodeId("n1".into()))
+        );
+        // The qualifier still works for a genuinely ambiguous bare name.
+        let amb = build(&[("h1", "announce()"), ("h2", "announce()")], &[]);
+        assert_eq!(resolve_seed(&amb, "announce@h1"), Some(NodeId("h1".into())));
     }
 }

@@ -66,7 +66,13 @@ pub(crate) fn run_sql(action: SqlAction) -> Result<()> {
             } else {
                 println!("{}", report.summary);
                 for f in &report.findings {
-                    println!("  [{}] {} ({})", f.severity.as_str(), f.title, f.rule_id);
+                    println!(
+                        "  [{}] {} ({}) conf {:.2}",
+                        f.severity.as_str(),
+                        f.title,
+                        f.rule_id,
+                        f.confidence
+                    );
                     println!("      fix: {}", f.remediation);
                 }
             }

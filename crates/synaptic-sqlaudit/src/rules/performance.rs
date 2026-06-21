@@ -235,7 +235,10 @@ impl Rule for MissingIndexOnFilterColumn {
                 if looks_fk && !indexed.contains(&name) {
                     out.push(Finding {
                         rule_id: self.id().into(),
-                        severity: Severity::High,
+                        // Name-only heuristic (column ends in `_id`, no structural
+                        // evidence): Medium, not High. A wall of these must not
+                        // outrank evidenced security findings (RLS gaps, injection).
+                        severity: Severity::Medium,
                         category: Category::Performance,
                         title: format!(
                             "Likely-foreign-key column `{}.{}` is not indexed",
@@ -429,7 +432,13 @@ mod tests {
             ]
         }));
         let f = MissingIndexOnFilterColumn.check(&ctx(&kg));
-        assert!(f.iter().any(|x| x.rule_id == "PERF-IDX-001"), "{f:?}");
+        let idx = f
+            .iter()
+            .find(|x| x.rule_id == "PERF-IDX-001")
+            .unwrap_or_else(|| panic!("{f:?}"));
+        // A pure name heuristic (column ends in `_id`, 0.5 confidence) is Medium,
+        // not High: it must not outrank structurally-evidenced security findings.
+        assert_eq!(idx.severity, Severity::Medium);
     }
 
     #[test]

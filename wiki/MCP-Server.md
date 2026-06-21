@@ -220,6 +220,19 @@ optional `(changed)` marker, label, file type, source file) and `EDGE` lines
 When the `SYNAPTIC_QUERY_LOG` environment variable points to a path, each query
 is appended to it as JSONL (disable with `SYNAPTIC_QUERY_LOG_DISABLE=1`).
 
+### Resolving names
+
+Every tool that takes a `label`/`symbol`/`source`/`target` resolves it through the
+same cascade: exact node id, then case-insensitive label, bare name, source file,
+and finally a unique label substring. When a name is shared by several files you
+can pin it to one with a `name@file-substring` qualifier (e.g.
+`announce@core/foo.ts`) -- this works uniformly across `get_node`,
+`get_neighbors`, `get_source`, `find_callers`, `find_callees`, `shortest_path`,
+`affected`, and `predict_edit`. (`plan_rename` instead takes a dedicated `file`
+parameter for the same purpose.) If the name is still ambiguous, the tool returns
+the candidate list with each candidate's id, file, and degree inline, so you can
+pick one without a follow-up `get_node` call.
+
 ### get_node
 
 Show a node's metadata and degree.
@@ -257,7 +270,10 @@ Parameters:
   whose relation contains it.
 
 Returns one line per neighbour with a direction marker and the relation in
-brackets.
+brackets. When a `relation_filter` matches none of the node's edges, the result
+is `(none with relation '<filter>'; this node has: <rel>(<count>), ...)` -- naming
+the relations the node does have, so an empty result is not mistaken for a missing
+node.
 
 ### get_community
 
@@ -276,11 +292,15 @@ Returns `Community <id> (showing <k> of <total>):` and each member on the page
 The most-connected nodes (highest degree).
 
 Parameters:
-- `top_n` (integer) -- how many to return. Default 10.
+- `top_n` (integer) -- how many to return. Default 10, capped at 200 per page
+  (page further with `offset`); each hub costs a reverse-impact walk to count its
+  tests, so the page is bounded.
 - `offset` (integer) -- hubs to skip before the page (absolute rank is preserved
   in the numbering). Default 0.
 
-Returns a ranked list of label and edge count, plus a `structuredContent` mirror.
+Returns a ranked list of label, edge count, and how many tests transitively
+exercise each hub (`N test(s)`), plus a `structuredContent` mirror. A hub with
+`0 test(s)` is an untested high-blast-radius symbol -- exactly what to flag.
 
 ### graph_stats
 
@@ -587,7 +607,7 @@ formatted text:
 | Tool | `structuredContent` shape |
 |---|---|
 | `graph_stats` | `{ nodes, edges, communities, extracted, inferred, ambiguous }` |
-| `god_nodes` | `{ god_nodes: [{ label, degree, id }] }` |
+| `god_nodes` | `{ god_nodes: [{ label, degree, id, test_count }] }` |
 | `affected` | `{ seed, affected: [{ label, depth, via_relation }] }` |
 | `query_graph` | `{ nodes: [{ label, file_type, source_file, score, changed }], edges: [{ source, relation, target }] }` (nodes sorted by `score`; `changed` is true when `since` was given and the node's file changed) |
 | `structural_search` | `{ columns, results: [[{ id, label, kind, visibility, file, line, loc, signature }]] }` (or `groups` for aggregates) |

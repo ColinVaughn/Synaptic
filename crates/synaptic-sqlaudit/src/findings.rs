@@ -94,6 +94,14 @@ impl AuditReport {
             a.severity
                 .rank()
                 .cmp(&b.severity.rank())
+                // Within a severity tier, lead with the most confident findings so a
+                // wall of low-confidence name-heuristics cannot bury a confident
+                // finding of equal severity. Descending, NaN-safe.
+                .then_with(|| {
+                    b.confidence
+                        .partial_cmp(&a.confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .then_with(|| a.rule_id.cmp(&b.rule_id))
                 .then_with(|| a.location.cmp(&b.location))
         });
@@ -145,6 +153,33 @@ mod tests {
         assert_eq!(r.findings[0].rule_id, "A"); // critical sorts first
         assert_eq!(r.counts_by_severity.get("critical"), Some(&1));
         assert_eq!(r.version, AUDIT_VERSION);
+    }
+
+    #[test]
+    fn within_severity_higher_confidence_sorts_first() {
+        // Two findings at the same severity: the high-confidence one must lead so a
+        // wall of low-confidence (0.5) name-heuristics cannot bury a confident
+        // finding of equal severity.
+        let mk = |id: &str, conf: f32| Finding {
+            rule_id: id.into(),
+            severity: Severity::Medium,
+            category: Category::Security,
+            title: "t".into(),
+            detail: "d".into(),
+            location: None,
+            node_ids: vec![],
+            snippet: None,
+            remediation: "fix".into(),
+            confidence: conf,
+            evidence: None,
+        };
+        // Insertion order puts the low-confidence one first; sort must reorder.
+        let r = AuditReport::from_findings(
+            vec![mk("PERF-IDX-001", 0.5), mk("SEC-RLS-001", 0.95)],
+            vec![],
+        );
+        assert_eq!(r.findings[0].rule_id, "SEC-RLS-001");
+        assert_eq!(r.findings[1].rule_id, "PERF-IDX-001");
     }
 
     #[test]

@@ -50,8 +50,8 @@ use synaptic_prs::{
     Status, SystemCommands,
 };
 use synaptic_query::{
-    affected_nodes, describe_node, explain, resolve_detailed, resolve_seed, shortest_path,
-    QueryIndex, Recency, RecencyMode, Resolution, ReverseImpactIndex, TraversalMode,
+    affected_nodes, candidate_details, describe_node, explain, resolve_detailed, resolve_seed,
+    shortest_path, QueryIndex, Recency, RecencyMode, Resolution, ReverseImpactIndex, TraversalMode,
     DEFAULT_AFFECTED_RELATIONS,
 };
 use synaptic_sandbox::{
@@ -76,6 +76,21 @@ struct ResolvedRecency {
     n_files: usize,
 }
 const LATEST_PROTOCOL: &str = "2025-11-25";
+
+/// Hard cap on how many god nodes one page renders. Each row costs a depth-3
+/// reverse-impact walk over a hub, so an unbounded page could run a walk per node
+/// across the whole graph; page past the cap with `offset`.
+const GOD_NODES_PAGE_CAP: usize = 200;
+
+/// One annotated god-node row: a hub plus how many tests transitively exercise it.
+/// The test count is the reverse-impact work computed once per page and shared
+/// between the text and structured channels.
+struct GodNodeRow {
+    id: NodeId,
+    label: String,
+    degree: usize,
+    test_count: usize,
+}
 
 /// Echo the client's requested protocol when we support it, else our latest.
 fn negotiate_protocol(requested: Option<&str>) -> &'static str {
@@ -645,18 +660,38 @@ impl Server {
         match resolve_detailed(&self.kg, label) {
             Resolution::Unique(id) => Ok(id),
             Resolution::Ambiguous(ids) => {
-                let shown: Vec<String> =
-                    ids.iter().take(10).map(|i| sanitize_label(&i.0)).collect();
+                // List each candidate with its file + degree inline so a caller can
+                // pick one without a follow-up get_node round-trip. Enrich only the
+                // shown prefix (`+N more` already conveys the rest from ids.len()),
+                // so a name shared by thousands of files does not pay degree/clone
+                // for candidates it will never print.
+                let shown = ids.len().min(10);
+                let lines: String = candidate_details(&self.kg, &ids[..shown])
+                    .iter()
+                    .map(|c| {
+                        let file = if c.file.is_empty() {
+                            "-".to_string()
+                        } else {
+                            sanitize_label(&c.file)
+                        };
+                        format!(
+                            "\n  {} [{}] (degree {})",
+                            sanitize_label(&c.id.0),
+                            file,
+                            c.degree
+                        )
+                    })
+                    .collect();
                 let more = if ids.len() > 10 {
-                    format!(", +{} more", ids.len() - 10)
+                    format!("\n  +{} more", ids.len() - 10)
                 } else {
                     String::new()
                 };
                 Err(format!(
-                    "'{}' is ambiguous - {} candidates: [{}{}]. Pass a node id to disambiguate.",
+                    "'{}' is ambiguous - {} candidates:{}{}\nPass a node id (or qualify as name@file) to disambiguate.",
                     sanitize_label(label),
                     ids.len(),
-                    shown.join(", "),
+                    lines,
                     more
                 ))
             }
@@ -811,24 +846,53 @@ impl Server {
         let Some(ex) = explain(&self.kg, &id) else {
             return format!("No node matches '{}'.", sanitize_label(label));
         };
-        let mut out = format!("Neighbors of {}:", sanitize_label(&ex.label));
+        let seed = sanitize_label(&ex.label);
         let rel_filter = relation_filter.map(str::to_lowercase);
+        // Tally every relation on the node so a filter that excludes everything can
+        // still report what the node DOES have. Only needed on the filtered path:
+        // with no filter, an empty result means the node simply has no neighbors.
+        let mut by_rel: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut body = String::new();
+        let mut shown = 0usize;
         for nb in &ex.neighbors {
+            if rel_filter.is_some() {
+                *by_rel.entry(nb.relation.as_str()).or_default() += 1;
+            }
             if let Some(f) = &rel_filter {
                 // Case-insensitive substring (lowercase both sides).
                 if !nb.relation.to_lowercase().contains(f.as_str()) {
                     continue;
                 }
             }
+            shown += 1;
             let arrow = if nb.direction == "out" { "-->" } else { "<--" };
-            out.push_str(&format!(
+            body.push_str(&format!(
                 "\n  {} {} [{}]",
                 arrow,
                 sanitize_label(&nb.label),
                 sanitize_label(&nb.relation)
             ));
         }
-        out
+        if shown == 0 {
+            // Distinguish "node exists but no edge matched the filter" from "no
+            // such node". When a filter hid everything, name the relations the node
+            // actually has so the empty list is not misread as a missing node.
+            return match (relation_filter, by_rel.is_empty()) {
+                (Some(f), false) => {
+                    let avail = by_rel
+                        .iter()
+                        .map(|(r, c)| format!("{}({c})", sanitize_label(r)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(
+                        "Neighbors of {seed}:\n  (none with relation '{}'; this node has: {avail})",
+                        sanitize_label(f)
+                    )
+                }
+                _ => format!("Neighbors of {seed}:\n  (none)"),
+            };
+        }
+        format!("Neighbors of {seed}:{body}")
     }
 
     /// `get_community` — a page of a community's members (`offset`/`limit`), so
@@ -863,28 +927,88 @@ impl Server {
     }
 
     /// `god_nodes` — a page of the degree-ranked hub list (`offset` then `top_n`).
-    /// `offset == 0` keeps the historical output byte-identical.
+    /// Used by the resource endpoint; the tool dispatch renders both channels from
+    /// [`Self::god_nodes_page`] directly so the test-count walk runs only once.
     pub fn tool_god_nodes(&self, top_n: usize, offset: usize) -> String {
-        // Slice from the precomputed ranked list (H3). `god_nodes` returns one
-        // node even for top_n == 0 (push-then-check the cap), so mirror that with
-        // `max(1)` to stay byte-identical to the old per-call path.
+        let (rows, start) = self.god_nodes_page(top_n, offset);
+        Self::render_god_nodes_text(&rows, start)
+    }
+
+    /// One page of the ranked hub list, each hub annotated with its transitive test
+    /// count. `top_n` is clamped to [`GOD_NODES_PAGE_CAP`]: each row costs a
+    /// depth-3 reverse-impact walk over a hub (the densest nodes), so an unbounded
+    /// page could run a walk per node across the whole graph — page with `offset`
+    /// instead. Returns the rows and the absolute start index (for 1-based ranks).
+    fn god_nodes_page(&self, top_n: usize, offset: usize) -> (Vec<GodNodeRow>, usize) {
         let total = self.god_nodes_all.len();
         let start = offset.min(total);
-        let end = start.saturating_add(top_n.max(1)).min(total);
-        let gods = &self.god_nodes_all[start..end];
-        if gods.is_empty() {
+        // `max(1)` keeps the historical "one node even for top_n == 0" behavior;
+        // `min(cap)` bounds the per-page reverse-impact work.
+        let cap = top_n.clamp(1, GOD_NODES_PAGE_CAP);
+        let end = start.saturating_add(cap).min(total);
+        let rows = self.god_nodes_all[start..end]
+            .iter()
+            .map(|g| GodNodeRow {
+                id: g.id.clone(),
+                label: g.label.clone(),
+                degree: g.degree,
+                test_count: self.test_count_for(&g.id),
+            })
+            .collect();
+        (rows, start)
+    }
+
+    /// Render a god-node page as text (`God nodes:` then one ranked line each).
+    fn render_god_nodes_text(rows: &[GodNodeRow], start: usize) -> String {
+        if rows.is_empty() {
             return "No nodes.".to_string();
         }
         let mut out = String::from("God nodes:");
-        for (i, g) in gods.iter().enumerate() {
+        for (i, g) in rows.iter().enumerate() {
             out.push_str(&format!(
-                "\n  {}. {} - {} edges",
+                "\n  {}. {} - {} edges, {} test(s)",
                 start + i + 1,
                 sanitize_label(&g.label),
-                g.degree
+                g.degree,
+                g.test_count
             ));
         }
         out
+    }
+
+    /// Render a god-node page as the structured `{ god_nodes: [...] }` mirror.
+    fn render_god_nodes_json(rows: &[GodNodeRow]) -> Value {
+        let arr: Vec<Value> = rows
+            .iter()
+            .map(|g| {
+                json!({
+                    "label": sanitize_label(&g.label),
+                    "degree": g.degree,
+                    "id": sanitize_label(&g.id.0),
+                    "test_count": g.test_count
+                })
+            })
+            .collect();
+        json!({ "god_nodes": arr })
+    }
+
+    /// Number of test nodes that transitively exercise `id`, found by walking the
+    /// reverse-impact set (its dependents) and keeping the ones on a test path.
+    /// Uses the cached reverse-impact index, so it is O(reached) per node — cheap
+    /// enough to annotate the handful of god nodes a page renders. The depth matches
+    /// the default impact forecast depth so the count agrees with `affected_tests`.
+    fn test_count_for(&self, id: &NodeId) -> usize {
+        const GOD_TEST_DEPTH: usize = 3;
+        self.affected_index
+            .affected_multi(&self.kg, std::slice::from_ref(id), GOD_TEST_DEPTH)
+            .iter()
+            .filter(|h| {
+                self.kg
+                    .node(&h.node_id)
+                    .map(|n| n.is_test())
+                    .unwrap_or(false)
+            })
+            .count()
     }
 
     /// `graph_stats` — counts + confidence breakdown.
@@ -1469,21 +1593,37 @@ impl Server {
             );
         };
         let Some(impact) = assess_edit(&self.kg, symbol, kind_enum, depth.clamp(1, 16)) else {
-            // Surface candidate ids when the name is ambiguous, consistent with the
-            // other name-taking tools (the @file hint covers disambiguation here).
+            // Surface candidates with file + degree inline when the name is
+            // ambiguous, consistent with the other name-taking tools (the @file
+            // hint covers disambiguation here).
             if let Resolution::Ambiguous(ids) = resolve_detailed(&self.kg, symbol) {
-                let shown: Vec<String> =
-                    ids.iter().take(10).map(|i| sanitize_label(&i.0)).collect();
+                let shown = ids.len().min(10);
+                let lines: String = candidate_details(&self.kg, &ids[..shown])
+                    .iter()
+                    .map(|c| {
+                        let file = if c.file.is_empty() {
+                            "-".to_string()
+                        } else {
+                            sanitize_label(&c.file)
+                        };
+                        format!(
+                            "\n  {} [{}] (degree {})",
+                            sanitize_label(&c.id.0),
+                            file,
+                            c.degree
+                        )
+                    })
+                    .collect();
                 let more = if ids.len() > 10 {
-                    format!(", +{} more", ids.len() - 10)
+                    format!("\n  +{} more", ids.len() - 10)
                 } else {
                     String::new()
                 };
                 return format!(
-                    "'{}' is ambiguous - {} candidates: [{}{}]. Qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts'), or pass a node id.",
+                    "'{}' is ambiguous - {} candidates:{}{}\nQualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts'), or pass a node id.",
                     sanitize_label(symbol),
                     ids.len(),
-                    shown.join(", "),
+                    lines,
                     more
                 );
             }
@@ -1647,23 +1787,6 @@ impl Server {
             "nodes": s.nodes, "edges": s.edges, "communities": s.communities,
             "extracted": s.extracted, "inferred": s.inferred, "ambiguous": s.ambiguous
         })
-    }
-
-    fn god_nodes_json(&self, top_n: usize, offset: usize) -> Value {
-        let total = self.god_nodes_all.len();
-        let start = offset.min(total);
-        let end = start.saturating_add(top_n.max(1)).min(total);
-        let arr: Vec<Value> = self.god_nodes_all[start..end]
-            .iter()
-            .map(|g| {
-                json!({
-                    "label": sanitize_label(&g.label),
-                    "degree": g.degree,
-                    "id": sanitize_label(&g.id.0)
-                })
-            })
-            .collect();
-        json!({ "god_nodes": arr })
     }
 
     fn affected_json(
@@ -2110,10 +2233,11 @@ impl Server {
         let mut out = sanitize_label(&r.summary);
         for f in r.findings.iter().take(cap) {
             out.push_str(&format!(
-                "\n[{}] {} ({})\n  {}\n  fix: {}",
+                "\n[{}] {} ({}) conf {:.2}\n  {}\n  fix: {}",
                 f.severity.as_str(),
                 sanitize_label(&f.title),
                 sanitize_label(&f.rule_id),
+                f.confidence,
                 sanitize_label(&f.detail),
                 sanitize_label(&f.remediation),
             ));
@@ -2210,6 +2334,21 @@ impl Server {
             }));
         }
 
+        // god_nodes: compute the page (one reverse-impact walk per hub) ONCE and
+        // render both channels, instead of recomputing for the text path and again
+        // for the structured mirror. Mirrors the audit_sql compute-once idiom.
+        if name == "god_nodes" {
+            let (rows, start) =
+                self.god_nodes_page(u("top_n", 10) as usize, u("offset", 0) as usize);
+            let text = Self::render_god_nodes_text(&rows, start);
+            let structured = Self::render_god_nodes_json(&rows);
+            return Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": structured,
+                "isError": false
+            }));
+        }
+
         // SQL audit/advise: compute the report once and render to both channels
         // (mirrors the query_graph compute-once idiom). Both are read-only.
         if name == "audit_sql" || name == "advise_sql" {
@@ -2255,7 +2394,6 @@ impl Server {
                 u("offset", 0) as usize,
                 u("limit", 100) as usize,
             ),
-            "god_nodes" => self.tool_god_nodes(u("top_n", 10) as usize, u("offset", 0) as usize),
             "graph_stats" => self.tool_graph_stats(),
             "list_repos" => self.tool_list_repos(),
             "repo_stats" => self.tool_repo_stats(&s("repo")),
@@ -2353,9 +2491,6 @@ impl Server {
         // Typed mirror of the text, for the tools that declare an outputSchema.
         let structured: Option<Value> = match name {
             "graph_stats" => Some(self.stats_json()),
-            "god_nodes" => {
-                Some(self.god_nodes_json(u("top_n", 10) as usize, u("offset", 0) as usize))
-            }
             "affected" => {
                 let rels: Vec<String> = args
                     .get("relations")
@@ -2730,7 +2865,7 @@ fn tools_list(allow_exec: bool) -> Value {
               "offset": { "type": "integer", "description": "Members to skip before the page (default 0). Raise it to page through a large community." },
               "limit": { "type": "integer", "description": "Max members to return in this page (default 100)." }
           }, "required": ["community_id"] } },
-        { "name": "god_nodes", "description": "The most-connected nodes ('god nodes' = high-degree hubs, the structurally central symbols). Use to orient in an unfamiliar codebase.",
+        { "name": "god_nodes", "description": "The most-connected nodes ('god nodes' = high-degree hubs, the structurally central symbols). Use to orient in an unfamiliar codebase. Each hub is annotated with how many tests transitively exercise it, so an untested hub (0 tests) is flagged for what it is: high blast radius, no safety net.",
           "inputSchema": { "type": "object", "properties": {
               "top_n": { "type": "integer", "description": "How many hubs to return (default 10)." },
               "offset": { "type": "integer", "description": "Hubs to skip before the page (default 0), for paging past the top ranks." }
@@ -3653,6 +3788,126 @@ mod tests {
     }
 
     #[test]
+    fn god_nodes_page_is_capped() {
+        // A huge top_n must not trigger a reverse-impact walk per node across the
+        // whole graph: the page is capped (page further with offset).
+        let nodes: Vec<_> = (0..250)
+            .map(|i| node(&format!("n{i}"), &format!("Fn{i}"), Some(0)))
+            .collect();
+        let gd = GraphData {
+            directed: false,
+            multigraph: false,
+            graph: Map::new(),
+            nodes,
+            links: vec![],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        let out = call_tool(&mut s, "god_nodes", json!({"top_n": 10000}));
+        let count = out.matches("test(s)").count();
+        assert_eq!(count, 200, "page should cap at 200 rows, got {count}");
+    }
+
+    #[test]
+    fn god_nodes_annotate_test_coverage() {
+        // `hub` is exercised by a test (tests/ path) and a plain caller; `orphan`
+        // is a hub with only non-test callers. god_nodes must surface the count so
+        // an untested hub (the prime risk) is flagged without a second tool call.
+        let mut nodes = vec![
+            node("hub", "hub_fn", Some(0)),
+            node("orphan", "orphan_fn", Some(0)),
+        ];
+        // Test caller of hub (path makes it a test node).
+        let mut t = node("t1", "test_hub", Some(0));
+        t.source_file = "tests/test_hub.py".into();
+        nodes.push(t);
+        nodes.push(node("c1", "caller_one", Some(0)));
+        nodes.push(node("c2", "caller_two", Some(0)));
+        nodes.push(node("c3", "caller_three", Some(0)));
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes,
+            links: vec![
+                edge("t1", "hub", "calls"),
+                edge("c1", "hub", "calls"),
+                edge("c2", "orphan", "calls"),
+                edge("c3", "orphan", "calls"),
+            ],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        let out = call_tool(&mut s, "god_nodes", json!({"top_n": 10}));
+        assert!(out.contains("hub_fn"), "{out}");
+        // hub has one test; orphan has none.
+        assert!(
+            out.contains("1 test"),
+            "hub should show a test count: {out}"
+        );
+        assert!(
+            out.contains("0 test"),
+            "untested hub must be flagged with 0 tests: {out}"
+        );
+        // Structured JSON carries the same signal.
+        let js = s
+            .dispatch_tool(&json!({"name":"god_nodes","arguments":{"top_n":10}}))
+            .unwrap();
+        let arr = js["structuredContent"]["god_nodes"].as_array().unwrap();
+        let orphan = arr
+            .iter()
+            .find(|g| g["label"] == "orphan_fn")
+            .unwrap_or_else(|| panic!("{js}"));
+        assert_eq!(orphan["test_count"], 0);
+    }
+
+    #[test]
+    fn ambiguous_resolution_lists_file_and_degree_inline() {
+        // Two `announce()` nodes in different files with different degrees. The
+        // ambiguity message must carry each candidate's file + degree so an agent
+        // can pick without a second get_node call.
+        let gd = GraphData {
+            directed: false,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![
+                node("hub", "announce()", Some(0)),
+                node("leaf", "announce()", Some(0)),
+                node("x", "X", Some(0)),
+            ],
+            links: vec![edge("hub", "leaf", "calls"), edge("hub", "x", "uses")],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        let out = call_tool(&mut s, "get_node", json!({"label": "announce"}));
+        assert!(out.contains("ambiguous"), "{out}");
+        // File of at least one candidate and its degree appear inline.
+        assert!(out.contains("hub.py"), "candidate file missing: {out}");
+        assert!(out.contains("degree"), "candidate degree missing: {out}");
+    }
+
+    #[test]
+    fn get_neighbors_empty_filter_names_available_relations() {
+        let mut s = server();
+        // AuthService has `calls` and `uses` edges, but nothing matches `contains`.
+        // The result must distinguish "0 matching edges" from "no such node" by
+        // naming the relations this node DOES have.
+        let out = call_tool(
+            &mut s,
+            "get_neighbors",
+            json!({"label": "AuthService", "relation_filter": "contains"}),
+        );
+        assert!(out.contains("none"), "{out}");
+        assert!(
+            out.contains("calls") && out.contains("uses"),
+            "should list available relations, got: {out}"
+        );
+    }
+
+    #[test]
     fn get_source_returns_lines_under_jail() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -3726,15 +3981,14 @@ mod tests {
 
     #[test]
     fn god_nodes_offset_pages_and_numbers_absolutely() {
-        let mut s = server(); // AuthService(2), Database(1), login_user(1)
-                              // offset 0 stays byte-identical to the historical output.
+        let mut s = server(); // AuthService(2), Database(1), login_user(1); no tests
         assert_eq!(
             call_tool(&mut s, "god_nodes", json!({"top_n": 1})),
-            "God nodes:\n  1. AuthService - 2 edges"
+            "God nodes:\n  1. AuthService - 2 edges, 0 test(s)"
         );
         // offset 1 skips the top hub and numbers from its absolute rank.
         let paged = call_tool(&mut s, "god_nodes", json!({"top_n": 1, "offset": 1}));
-        assert_eq!(paged, "God nodes:\n  2. Database - 1 edges");
+        assert_eq!(paged, "God nodes:\n  2. Database - 1 edges, 0 test(s)");
     }
 
     #[test]
@@ -4678,11 +4932,11 @@ mod tests {
         let mut s = server();
         assert_eq!(
             call_tool(&mut s, "god_nodes", json!({"top_n": 1})),
-            "God nodes:\n  1. AuthService - 2 edges"
+            "God nodes:\n  1. AuthService - 2 edges, 0 test(s)"
         );
         assert_eq!(
             call_tool(&mut s, "god_nodes", json!({"top_n": 3})),
-            "God nodes:\n  1. AuthService - 2 edges\n  2. Database - 1 edges\n  3. login_user - 1 edges"
+            "God nodes:\n  1. AuthService - 2 edges, 0 test(s)\n  2. Database - 1 edges, 0 test(s)\n  3. login_user - 1 edges, 0 test(s)"
         );
         assert!(call_tool(&mut s, "graph_stats", json!({})).contains("3 nodes, 2 edges"));
 

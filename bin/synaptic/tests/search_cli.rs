@@ -116,6 +116,12 @@ fn explain_reports_ambiguity_with_candidates() {
         out.contains("is ambiguous") && out.contains("candidates"),
         "expected an ambiguity message with candidates, got: {out}"
     );
+    // Each candidate carries its file + degree inline so the user can pick without
+    // a second lookup.
+    assert!(
+        out.contains("a.py") && out.contains("degree"),
+        "candidates should list file + degree inline, got: {out}"
+    );
     assert!(
         !out.contains("Node not found"),
         "old misleading message must be gone: {out}"
