@@ -6,7 +6,13 @@ dependency). The server is read-only over the graph; the PR and working-changes
 tools shell out to `gh`/`git` to read state but never write.
 
 The graph is loaded once at startup from a `graph.json` and hot-reloads when that
-file changes on disk (see [Incremental-Updates](Incremental-Updates)). Every node
+file changes on disk. It also keeps itself current as you edit source: there is no
+live filesystem watcher — instead each query first does a cheap, debounced
+staleness check against the build manifest and re-extracts any changed files
+before answering. So a file you edit but never query is reflected on the *next*
+query, not the instant you save. See
+[Incremental-Updates → serve auto-freshen](Incremental-Updates#synaptic-serve-auto-freshen-on-query-catch-up).
+Every node
 label, relation, and file path is sanitized before it reaches tool output (a
 security boundary on names derived from source). `get_source` is the one tool
 that returns raw file contents; it reads only files inside a configured source
@@ -340,18 +346,24 @@ count, the relation it was reached through, and the label, plus a
 ### find_callers
 
 The nodes that call, use, or reference this symbol (incoming call-like edges
-only). Answers "who calls X".
+only). Answers "who calls X". The header carries the true total and a
+per-relation breakdown; the list is capped on a hub with a `+N more` summary.
 
 Parameters:
 - `label` (string, required).
+- `limit` (integer, default 50) — max callers listed before a `+N more` summary. Ignored when `verbose` is true.
+- `verbose` (boolean, default false) — emit the full, uncapped caller list.
 
 ### find_callees
 
 The nodes this symbol calls, uses, or references (outgoing call-like edges only).
-Answers "what does X call".
+Answers "what does X call". Same capped, count-and-breakdown output as
+`find_callers`.
 
 Parameters:
 - `label` (string, required).
+- `limit` (integer, default 50) — max callees listed before a `+N more` summary. Ignored when `verbose` is true.
+- `verbose` (boolean, default false) — emit the full, uncapped callee list.
 
 ### list_prs
 
@@ -390,9 +402,15 @@ Graph blast radius of your branch's changes against a base branch (`git diff
 have): which graph nodes and communities they touch, before opening a PR. Uses
 `git` only, so it works offline and before any PR exists; no `gh` required.
 
+Default output lists the changed files plus node/community counts. Pass
+`verbose` to also list the top touched nodes (ranked by connectivity) and the
+touched communities with labels.
+
 Parameters:
 - `base` (string) -- base branch to diff against; defaults to the detected
   default branch.
+- `verbose` (boolean, default false) -- also list the top touched nodes and labeled communities, not just files.
+- `limit` (integer, default 20) -- max touched nodes listed when `verbose`.
 
 Returns `Working changes vs <base>: <n> files, <n> graph nodes, <n> communities
 touched` and the changed files, or `No changes vs <base> (or git unavailable).`
@@ -514,18 +532,24 @@ dependencies, removed APIs, drift, new cycles, and hotspots.
 
 ### plan_rename
 
-Plan-only: a confidence-scored rename plan (edit sites, blast radius, collision
-check) for an agent to apply. Never edits source. After applying the edits, run
-`synaptic refactor verify` on the CLI to check the post-edit graph.
+Plan-only: a confidence-scored rename plan for an agent to apply. Never edits
+source. After applying the edits, run `synaptic refactor verify` on the CLI to
+check the post-edit graph.
 
 Parameters:
 - `name` (string, required) -- the symbol to rename (its name, or a node id).
 - `to` (string, required) -- the new name.
 - `id` (string) -- disambiguate by node id when the name matches several definitions.
 - `file` (string) -- disambiguate by a file-path substring.
+- `limit` (integer, default 50) -- max sites listed per section (Edits, Review) before a `+N more` summary. Ignored when `verbose` is true.
+- `verbose` (boolean, default false) -- list every edit/review site instead of the summarized top-N.
 
-Returns `Rename <old> -> <new> [<confidence>], <n> edit(s) across <n> file(s), <n>
-to review, <n> affected`, or an error string if the symbol is not found.
+Returns the `Rename <old> -> <new> [<confidence>], <n> edit(s) across <n>
+file(s), <n> to review, <n> affected` summary, followed by the actual edit sites
+(`file:line:col`, `old -> new`, reason, confidence) under `Edits (<n>):` and the
+lower-confidence ones under `Review (<n>):` — so an agent can apply the rename
+without a second round-trip to the CLI's `plan.md`. Returns an error string if the
+symbol is not found.
 
 ### audit_sql
 

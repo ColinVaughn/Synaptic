@@ -60,7 +60,7 @@ Once enabled, ordinary commands occasionally check for a newer release in the ba
 if one exists, print a single line to **stderr** and then continue normally:
 
 ```
-(note) Synaptic 0.3.1 is available - run `synaptic self-update`
+(note) Synaptic 0.3.2 is available - run `synaptic self-update`
 ```
 
 Properties of the background check:
