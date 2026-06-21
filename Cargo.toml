@@ -6,7 +6,7 @@ members = ["crates/*", "bin/*"]
 edition = "2021"
 version = "0.3.0"
 license = "AGPL-3.0-or-later"
-rust-version = "1.95"
+rust-version = "1.96"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
