@@ -68,7 +68,7 @@ get the binary.
 
 ## Documentation map
 
-**Getting started:** [Installation](Installation) - [Quickstart](Quickstart)
+**Getting started:** [Installation](Installation) - [Quickstart](Quickstart) - [Updating](Updating)
 
 **Concepts:** [Architecture](Architecture) - [Languages](Languages) -
 [Synaptic vs Other Tools](Synaptic-vs-Other-Tools)
@@ -87,8 +87,10 @@ get the binary.
 
 ## Design principles
 
-- **Offline by default.** A code-only corpus makes no network calls. Only the opt-in
-  `--semantic` pass over documents calls an LLM ([Semantic Analysis](Semantic-Analysis)).
+- **Offline by default.** A code-only corpus makes no network calls. The only network
+  features are opt-in and explicit: the `--semantic` pass over documents calls an LLM
+  ([Semantic Analysis](Semantic-Analysis)), and `self-update` (with its optional daily
+  notice) contacts GitHub ([Updating](Updating)).
 - **Auditable.** Every edge carries a confidence level (`EXTRACTED`, `INFERRED`,
   `AMBIGUOUS`).
 - **Deterministic.** The same input produces the same graph; ids and community numbers are

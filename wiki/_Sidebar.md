@@ -4,6 +4,7 @@
 - [Home](Home)
 - [Installation](Installation)
 - [Quickstart](Quickstart)
+- [Updating](Updating)
 
 **Concepts**
 - [Architecture](Architecture)

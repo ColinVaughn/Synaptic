@@ -72,6 +72,8 @@ OpenAI, DeepSeek, Azure OpenAI, Bedrock, Ollama. Set `SYNAPTIC_BACKEND` to force
 |---|---|
 | `HOME` / `USERPROFILE` | Locate the global store `~/.synaptic` (falls back to `.synaptic` in the working directory) |
 | `SYNAPTIC_SKIP_HOOK` | Skip the installed git hook for one invocation (`1`) |
+| `SYNAPTIC_UPDATE_CHECK` | Set to `0` to force the opt-in background update notice off, regardless of config. See [Updating](Updating) |
+| `GITHUB_TOKEN` | Optional. Raises the GitHub API rate limit for the `self-update` release lookup |
 
 ## Config and output files
 
@@ -84,6 +86,7 @@ OpenAI, DeepSeek, Azure OpenAI, Bedrock, Ollama. Set `SYNAPTIC_BACKEND` to force
 | `synaptic-out/cache/ast/` | written | Per-file AST cache, keyed by content; auto-invalidated when extractor logic or enabled languages change. Clear with `synaptic cache clear` |
 | `synaptic-out/cache/semantic/` | written | Semantic-pass response cache |
 | `~/.synaptic/` | read/written | Global cross-repo store (`global-graph.json`, `global-manifest.json`) |
+| `~/.synaptic/update.toml` | read/written | Opt-in self-update state: `enabled` (background notice) and `last_check` (24h throttle). Written by `synaptic self-update --enable`/`--disable`. See [Updating](Updating) |
 | `.claude/settings.json` | read/written | `PreToolUse` hooks installed by `synaptic install` (Claude). See [Assistant Integration](Assistant-Integration) |
 | `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` and per-platform skill files | written | Assistant instruction sections written by `install` |
 | `.codex/config.toml` / `.codex/hooks.json` (+ `~/.codex/config.toml`) | read/written | Codex MCP server + `SessionStart` hook from `synaptic install codex` (project, or global with `--global`). See [Assistant Integration](Assistant-Integration) |
