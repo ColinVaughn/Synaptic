@@ -33,7 +33,7 @@ impl Drop for RebuildLock {
 
 /// Try to acquire the per-repo rebuild lock under `out_dir`, non-blocking.
 /// Returns `Ok(None)` if another (live) process holds it. A stale lockfile
-/// (older than [`STALE_AFTER`]) is stolen.
+/// (older than `STALE_AFTER`) is stolen.
 pub fn try_acquire_lock(out_dir: &Path) -> std::io::Result<Option<RebuildLock>> {
     fs::create_dir_all(out_dir)?;
     let path = out_dir.join(LOCK_FILE);

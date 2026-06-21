@@ -3,7 +3,7 @@
 //! app's `package.json name`; the alias's target path contains the app's directory
 //! (`…/hub/dist/…`). Import-map aliases are **exact** (the import specifier equals the
 //! alias). The bounded walk and member resolution live in [`crate::alias`]; this module
-//! only turns one file's `imports` object into [`RawAlias`] entries.
+//! only turns one file's `imports` object into `RawAlias` entries.
 
 use crate::alias::{named_object, object_pairs, AliasKind, RawAlias};
 
