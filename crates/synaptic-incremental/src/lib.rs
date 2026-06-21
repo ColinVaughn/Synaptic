@@ -656,7 +656,10 @@ mod tests {
         };
         let r1 = rebuild(&opts, &ChangeSet::Full, None).unwrap();
         let existing = r1.kg.to_graph_data();
-        assert!(labels(&r1.kg).contains("drop_me()"), "symbol present at first");
+        assert!(
+            labels(&r1.kg).contains("drop_me()"),
+            "symbol present at first"
+        );
 
         // Remove drop_me() from the still-existing file.
         write(root, "a.py", "def keep():\n    return 1\n");

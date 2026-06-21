@@ -2931,14 +2931,20 @@ mod tests {
         .unwrap();
         synaptic_incremental::persist_manifest(&out, &root).unwrap();
 
-        let mut server = Server::load(graph_path).unwrap().with_source_root(root.clone());
+        let mut server = Server::load(graph_path)
+            .unwrap()
+            .with_source_root(root.clone());
         assert!(
             !server.kg.nodes().any(|n| n.label.contains("beta_func")),
             "beta_func absent before the file is written"
         );
 
         fs::write(root.join("beta.py"), "def beta_func():\n    return 2\n").unwrap();
-        let text = call_tool(&mut server, "query_graph", json!({ "question": "beta_func" }));
+        let text = call_tool(
+            &mut server,
+            "query_graph",
+            json!({ "question": "beta_func" }),
+        );
         assert!(
             text.contains("beta_func"),
             "new file's symbol must be queryable after auto-freshen: {text}"
@@ -2976,7 +2982,9 @@ mod tests {
         .unwrap();
         synaptic_incremental::persist_manifest(&out, &root).unwrap();
 
-        let mut server = Server::load(graph_path).unwrap().with_source_root(root.clone());
+        let mut server = Server::load(graph_path)
+            .unwrap()
+            .with_source_root(root.clone());
         assert!(
             server.kg.nodes().any(|n| n.label.contains("gone_func")),
             "symbol present before the edit"
@@ -2984,7 +2992,11 @@ mod tests {
 
         // Delete gone_func() from the file, then query.
         fs::write(root.join("m.py"), "def keep_func():\n    return 1\n").unwrap();
-        let _ = call_tool(&mut server, "query_graph", json!({ "question": "keep_func" }));
+        let _ = call_tool(
+            &mut server,
+            "query_graph",
+            json!({ "question": "keep_func" }),
+        );
         assert!(
             !server.kg.nodes().any(|n| n.label.contains("gone_func")),
             "removed symbol must leave the graph after auto-freshen"
