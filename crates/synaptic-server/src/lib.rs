@@ -202,7 +202,12 @@ fn query_log_path() -> Option<PathBuf> {
 /// Append a `Title (N):` section listing up to `cap` rename edit sites, with a
 /// `+N more` summary when truncated. Shared by `plan_rename`'s Edits and Review
 /// lists; the per-site rendering is reused from the CLI so the two never drift.
-fn append_capped_sites(o: &mut String, title: &str, sites: &[synaptic_refactor::EditSite], cap: usize) {
+fn append_capped_sites(
+    o: &mut String,
+    title: &str,
+    sites: &[synaptic_refactor::EditSite],
+    cap: usize,
+) {
     if sites.is_empty() {
         return;
     }
@@ -994,7 +999,14 @@ impl Server {
         self.directional("Callees", label, "out", limit, verbose)
     }
 
-    fn directional(&self, title: &str, label: &str, dir: &str, limit: usize, verbose: bool) -> String {
+    fn directional(
+        &self,
+        title: &str,
+        label: &str,
+        dir: &str,
+        limit: usize,
+        verbose: bool,
+    ) -> String {
         let id = match self.resolve_or_msg(label) {
             Ok(id) => id,
             Err(msg) => return msg,
@@ -1036,7 +1048,11 @@ impl Server {
         let total = hits.len();
         let mut out = format!("{total} {title} of {seed}{breakdown}:");
         for (lbl, rel) in hits.iter().take(cap) {
-            out.push_str(&format!("\n  {} [{}]", sanitize_label(lbl), sanitize_label(rel)));
+            out.push_str(&format!(
+                "\n  {} [{}]",
+                sanitize_label(lbl),
+                sanitize_label(rel)
+            ));
         }
         if total > cap {
             out.push_str(&format!(
@@ -4211,7 +4227,11 @@ mod tests {
             "default limit 50 summarizes the tail: {capped}"
         );
 
-        let full = call_tool(&mut s, "find_callers", json!({"label": "hub", "verbose": true}));
+        let full = call_tool(
+            &mut s,
+            "find_callers",
+            json!({"label": "hub", "verbose": true}),
+        );
         assert!(!full.contains("more"), "verbose uncaps: {full}");
         assert_eq!(
             full.matches("[calls]").count(),
@@ -4220,7 +4240,10 @@ mod tests {
         );
 
         let limited = call_tool(&mut s, "find_callers", json!({"label": "hub", "limit": 5}));
-        assert!(limited.contains("+55 more"), "custom limit honored: {limited}");
+        assert!(
+            limited.contains("+55 more"),
+            "custom limit honored: {limited}"
+        );
     }
 
     #[test]
