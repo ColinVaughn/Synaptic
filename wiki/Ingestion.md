@@ -1,9 +1,9 @@
 # Ingestion
 
-`codegraph ingest` brings external sources into the graph. There are two shapes:
+`synaptic ingest` brings external sources into the graph. There are two shapes:
 
-- Shape B: the source is introspected directly into graph nodes and edges, which are merged into `codegraph-out/graph.json` and the graph is rebuilt and re-written. (cargo, mcp, scip, pg)
-- Shape A: the source is fetched/converted into a Markdown file under `codegraph-out/ingested/`, which the next `codegraph extract` or `codegraph update` indexes through the normal extraction pass. (url, office, gws, media)
+- Shape B: the source is introspected directly into graph nodes and edges, which are merged into `synaptic-out/graph.json` and the graph is rebuilt and re-written. (cargo, mcp, scip, pg)
+- Shape A: the source is fetched/converted into a Markdown file under `synaptic-out/ingested/`, which the next `synaptic extract` or `synaptic update` indexes through the normal extraction pass. (url, office, gws, media)
 
 Some sources are behind cargo build features that are off by default. Build with the feature to enable them; otherwise the subcommand stays visible in `--help` but errors with a rebuild hint. See [Configuration].
 
@@ -12,7 +12,7 @@ See also: [Commands], [Extraction], [Incremental-Updates].
 ## Usage
 
 ```
-codegraph ingest <SOURCE> [ARGS]
+synaptic ingest <SOURCE> [ARGS]
 ```
 
 | Source | Shape | Feature | Ingests |
@@ -31,7 +31,7 @@ codegraph ingest <SOURCE> [ARGS]
 Introspect a Cargo workspace. Emits one `crate:<name>` node per workspace member and a `crate_depends_on` edge for each workspace-internal dependency (external registry dependencies are dropped, since they are not graph nodes).
 
 ```
-codegraph ingest cargo .
+synaptic ingest cargo .
 ```
 
 ## mcp
@@ -39,7 +39,7 @@ codegraph ingest cargo .
 Read an MCP config file (`.mcp.json`, `claude_desktop_config.json`, `mcp.json`, `mcp_servers.json`) and turn its `mcpServers` map into nodes: a config-file node containing per-server nodes, each referencing globally-scoped command / package / env-var nodes.
 
 ```
-codegraph ingest mcp .mcp.json
+synaptic ingest mcp .mcp.json
 ```
 
 Security: environment-variable values are never read, only their names become `env_var` nodes; positional `args` are never persisted (a recognized npm/pypi package id is extracted from them, but paths and secrets are not). Labels are sanitized and the file is capped at 1 MiB.
@@ -49,7 +49,7 @@ Security: environment-variable values are never read, only their names become `e
 Ingest a simplified SCIP-style JSON index (not the official protobuf). Builds a symbol-to-node index across all documents, emits one node per symbol, and emits relationship edges (`scip_impl`, `scip_typed`, `scip_def`, `scip_ref`). A relationship target that is external or ambiguous gets a stub `external` node so the edge never dangles.
 
 ```
-codegraph ingest scip scip-index.json
+synaptic ingest scip scip-index.json
 ```
 
 The SCIP index is treated as untrusted: every label and metadata value is sanitized.
@@ -59,19 +59,19 @@ The SCIP index is treated as untrusted: every label and metadata value is saniti
 Introspect a live PostgreSQL database's `information_schema`. Emits a schema-root node that `contains` one node per base table, view, and function/procedure, plus a `references` edge per foreign key (carrying the constraint and column lists in metadata). Queries run read-only.
 
 ```
-codegraph ingest pg "postgresql://user@host/db"
-codegraph ingest pg        # empty DSN: use the PG* environment variables
+synaptic ingest pg "postgresql://user@host/db"
+synaptic ingest pg        # empty DSN: use the PG* environment variables
 ```
 
 The shared `source_file` for these nodes is a credential-free virtual DSN (`postgresql://{host}/{dbname}`); connection-error messages are reduced to one line so a DSN or credentials cannot leak. Requires a build with `--features pg`.
 
 ## url
 
-Fetch a URL into `codegraph-out/ingested/` for the next extract to index.
+Fetch a URL into `synaptic-out/ingested/` for the next extract to index.
 
 ```
-codegraph ingest url https://arxiv.org/abs/2401.00001
-codegraph ingest url https://github.com/owner/repo
+synaptic ingest url https://arxiv.org/abs/2401.00001
+synaptic ingest url https://github.com/owner/repo
 ```
 
 The URL is classified by host/extension:
@@ -94,30 +94,30 @@ URL fetching is SSRF-guarded:
 
 ## office (feature: `office`)
 
-Convert a spreadsheet to Markdown (a `## Sheet` heading per worksheet, ` | `-joined non-empty rows) and write it into `codegraph-out/ingested/` for the next extract. Uses the pure-Rust `calamine` reader, no external tools.
+Convert a spreadsheet to Markdown (a `## Sheet` heading per worksheet, ` | `-joined non-empty rows) and write it into `synaptic-out/ingested/` for the next extract. Uses the pure-Rust `calamine` reader, no external tools.
 
 ```
-codegraph ingest office data.xlsx
+synaptic ingest office data.xlsx
 ```
 
 Requires a build with `--features office`.
 
 ## gws (feature: `gws`)
 
-Export a Google-Workspace document to Markdown. `.gdoc`/`.gsheet`/`.gslides` files are tiny JSON pointers (an id and URL) created by Google Drive desktop sync, not the content. CodeGraph parses the pointer and shells out to the externally-installed `gws` CLI (overridable via `CODEGRAPH_GWS_CMD`) to export the real document into `codegraph-out/ingested/`.
+Export a Google-Workspace document to Markdown. `.gdoc`/`.gsheet`/`.gslides` files are tiny JSON pointers (an id and URL) created by Google Drive desktop sync, not the content. Synaptic parses the pointer and shells out to the externally-installed `gws` CLI (overridable via `SYNAPTIC_GWS_CMD`) to export the real document into `synaptic-out/ingested/`.
 
 ```
-codegraph ingest gws plan.gdoc
+synaptic ingest gws plan.gdoc
 ```
 
 Requires a build with `--features gws`, plus the `gws` CLI installed and authenticated.
 
 ## media (feature: `media`)
 
-Transcribe a local audio/video file to a Markdown transcript in `codegraph-out/ingested/`. Shells out to a transcription CLI (`whisper` by default, overridable via `CODEGRAPH_TRANSCRIBE_CMD`; model via `CODEGRAPH_WHISPER_MODEL`, default `base`). YouTube URLs (via `codegraph ingest url`) instead use `yt-dlp` to fetch subtitles as WebVTT, which are parsed to plain text.
+Transcribe a local audio/video file to a Markdown transcript in `synaptic-out/ingested/`. Shells out to a transcription CLI (`whisper` by default, overridable via `SYNAPTIC_TRANSCRIBE_CMD`; model via `SYNAPTIC_WHISPER_MODEL`, default `base`). YouTube URLs (via `synaptic ingest url`) instead use `yt-dlp` to fetch subtitles as WebVTT, which are parsed to plain text.
 
 ```
-codegraph ingest media talk.mp3
+synaptic ingest media talk.mp3
 ```
 
 Requires a build with `--features media`, plus the relevant external tool (`whisper` and/or `yt-dlp`) on `PATH`. Intermediate transcript files are written to an isolated temp directory so only the final `.md` lands in the ingested directory.
@@ -127,6 +127,6 @@ Requires a build with `--features media`, plus the relevant external tool (`whis
 Shape-A sources (url, office, gws, media) only write a Markdown file. Run an extract or update to index it:
 
 ```
-codegraph ingest url https://arxiv.org/abs/2401.00001
-codegraph extract .
+synaptic ingest url https://arxiv.org/abs/2401.00001
+synaptic extract .
 ```

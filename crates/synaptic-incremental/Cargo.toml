@@ -1,0 +1,25 @@
+[package]
+name = "synaptic-incremental"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Incremental rebuild + git integration for Synaptic: changed-files rebuild, hooks, merge driver."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+rayon = { workspace = true }
+synaptic-core = { workspace = true }
+synaptic-detect = { workspace = true }
+synaptic-extract = { workspace = true }
+synaptic-graph = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "incremental"
+harness = false

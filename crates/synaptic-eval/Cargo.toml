@@ -1,0 +1,27 @@
+[package]
+name = "synaptic-eval"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Evaluation and calibration for Synaptic's change forecasts: a prediction ledger and a replay harness that scores predicted impact against git-history ground truth."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+synaptic-core = { workspace = true }
+synaptic-graph = { workspace = true }
+synaptic-history = { workspace = true }
+synaptic-incremental = { workspace = true }
+synaptic-predict = { workspace = true }
+synaptic-query = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "eval"
+harness = false

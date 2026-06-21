@@ -1,19 +1,19 @@
 # Analysis and Reports
 
-Beyond per-node queries, CodeGraph runs a whole-graph structural analysis and
+Beyond per-node queries, Synaptic runs a whole-graph structural analysis and
 renders it as a human-readable `GRAPH_REPORT.md`. The report surfaces the most
 connected abstractions, non-obvious connections, circular imports, low-confidence
 edges, and a list of questions the graph is positioned to answer.
 
 ## Producing the report
 
-The report is written automatically by `codegraph extract`. Every extract writes
-`codegraph-out/GRAPH_REPORT.md` alongside `graph.json` and the other outputs.
+The report is written automatically by `synaptic extract`. Every extract writes
+`synaptic-out/GRAPH_REPORT.md` alongside `graph.json` and the other outputs.
 
 You can also regenerate it from an existing `graph.json` without re-extracting:
 
 ```
-codegraph export report
+synaptic export report
 ```
 
 `export report` loads the graph, runs community detection and the analysis bundle

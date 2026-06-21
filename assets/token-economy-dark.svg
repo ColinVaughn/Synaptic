@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="720" height="196" viewBox="0 0 720 196" fill="none" role="img" aria-label="A CodeGraph query uses about 31 times fewer tokens than reading the source files it points to: roughly 1,950 tokens versus 60,900.">
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="196" viewBox="0 0 720 196" fill="none" role="img" aria-label="A Synaptic query uses about 31 times fewer tokens than reading the source files it points to: roughly 1,950 tokens versus 60,900.">
   <style>
     text { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
     .title { font-size: 15px;   font-weight: 600; fill: #e6edf3; letter-spacing: .2px; }
@@ -12,18 +12,18 @@
   </style>
 
   <text x="32" y="33" class="title">Tokens to answer one structural question</text>
-  <text x="32" y="52" class="sub">A CodeGraph query, versus reading the source files it points to</text>
+  <text x="32" y="52" class="sub">A Synaptic query, versus reading the source files it points to</text>
 
   <text x="32" y="87" class="lab">Reading the source files</text>
   <rect x="32" y="95" width="430" height="12" rx="2.5" fill="#30363d"/>
   <text x="471" y="106" class="num">60,900</text>
 
-  <text x="32" y="134" class="lab">One CodeGraph query</text>
+  <text x="32" y="134" class="lab">One Synaptic query</text>
   <rect x="32" y="142" width="14" height="12" rx="2.5" fill="#b794f6"/>
   <text x="54" y="153" class="numA">1,950</text>
 
   <text x="624" y="118" class="big" text-anchor="middle">31&#215;</text>
   <text x="624" y="139" class="bigsub" text-anchor="middle">fewer per query</text>
 
-  <text x="32" y="183" class="foot">27-38&#215; across six questions, about 31&#215; overall. cl100k tokens, CodeGraph's own source (199 files).</text>
+  <text x="32" y="183" class="foot">27-38&#215; across six questions, about 31&#215; overall. cl100k tokens, Synaptic's own source (199 files).</text>
 </svg>

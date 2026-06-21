@@ -1,0 +1,43 @@
+[package]
+name = "synaptic-ingest"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "External-source ingestion for Synaptic: SSRF-guarded URL fetch, MCP-config and Cargo introspection (core sources)."
+
+[features]
+# Live Postgres introspection. Off by default — pulls the `postgres` client
+# (and tokio). The pure schema->graph logic is always compiled + tested; only
+# the live connector (`SystemPostgres`) needs this feature.
+pg = ["dep:postgres"]
+# Media transcription (audio/video/YouTube). Off by default — shells out to
+# externally-installed `yt-dlp` (YouTube subtitles) and a transcription CLI
+# (e.g. `whisper`). No heavy native deps; the parsers/command-builders are pure
+# and always tested when the feature is on. `tempfile` isolates the CLI's
+# intermediate output so it never lands in (and gets re-indexed from) the
+# ingested dir.
+media = ["dep:tempfile"]
+# Office documents (xlsx) via the pure-Rust `calamine` reader. Off by default.
+office = ["dep:calamine"]
+# Google Workspace (.gdoc/.gsheet/.gslides) via the externally-installed `gws`
+# CLI. Off by default; shells out (no extra deps).
+gws = []
+
+[dependencies]
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+synaptic-core = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
+toml = { workspace = true }
+glob = { workspace = true }
+regex = { workspace = true }
+blake3 = { workspace = true }
+postgres = { version = "0.19", optional = true }
+calamine = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rust_xlsxwriter = { workspace = true }
+proptest = { workspace = true }

@@ -1,0 +1,37 @@
+[package]
+name = "synaptic-workspace"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Multi-repo / monorepo federation for Synaptic: workspace discovery, per-member subgraphs, cross-repo symbol resolution, and a global graph store."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+glob = { workspace = true }
+roxmltree = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+synaptic-core = { workspace = true }
+synaptic-detect = { workspace = true }
+synaptic-graph = { workspace = true }
+synaptic-incremental = { workspace = true }
+synaptic-ingest = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "workspace"
+harness = false
+
+[[bench]]
+name = "discovery"
+harness = false
+
+[[bench]]
+name = "sibling_scan"
+harness = false

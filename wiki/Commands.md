@@ -1,17 +1,17 @@
 # Commands
 
-Complete reference for the `codegraph` CLI. Every command is a subcommand of `codegraph` (for example `codegraph extract`, `codegraph query "..."`). Run `codegraph --help` for the generated summary, or `codegraph <command> --help` for a single command.
+Complete reference for the `synaptic` CLI. Every command is a subcommand of `synaptic` (for example `synaptic extract`, `synaptic query "..."`). Run `synaptic --help` for the generated summary, or `synaptic <command> --help` for a single command.
 
-Most read commands operate on `codegraph-out/graph.json` by default; build it first with [`extract`](#extract). See [Quickstart](Quickstart) for an end-to-end walkthrough.
+Most read commands operate on `synaptic-out/graph.json` by default; build it first with [`extract`](#extract). See [Quickstart](Quickstart) for an end-to-end walkthrough.
 
 ## Summary
 
 | Command | Purpose |
 | --- | --- |
-| [`extract`](#extract) | Build the graph for a directory and write `codegraph-out/`. |
+| [`extract`](#extract) | Build the graph for a directory and write `synaptic-out/`. |
 | [`export`](#export) | Re-emit an output format from an existing `graph.json` (no re-extraction), or push live to a database. |
 | [`query`](#query) | Find a relevant subgraph for a free-text query. |
-| [`search`](#search) | Structural search (CGQL) and named architectural patterns. Not text search. |
+| [`search`](#search) | Structural search (SYNQL) and named architectural patterns. Not text search. |
 | [`path`](#path) | Shortest path between two nodes. |
 | [`explain`](#explain) | Show a node and its neighbours. |
 | [`update`](#update) | Incrementally rebuild after files change (or fully with `--full`). |
@@ -23,12 +23,12 @@ Most read commands operate on `codegraph-out/graph.json` by default; build it fi
 | [`hook`](#hook) | Manage git hooks and the `graph.json` merge driver. |
 | [`serve`](#serve) | Run the MCP server (stdio or HTTP). |
 | [`ingest`](#ingest) | Ingest an external source into the graph, or fetch a URL for the next extract. |
-| [`install`](#install) | Install the CodeGraph skill for a host assistant. |
-| [`uninstall`](#uninstall) | Remove the CodeGraph skill for a platform (or all). |
+| [`install`](#install) | Install the Synaptic skill for a host assistant. |
+| [`uninstall`](#uninstall) | Remove the Synaptic skill for a platform (or all). |
 | [`prs`](#prs) | Graph-aware PR dashboard and per-PR detail. |
 | [`skill`](#skill) | Maintain the generated skill artifacts (dev/CI). |
 | [`workspace`](#workspace) | Multi-repo / monorepo federation. |
-| [`global`](#global) | Manage the cross-repo global graph store (`~/.codegraph`). |
+| [`global`](#global) | Manage the cross-repo global graph store (`~/.synaptic`). |
 | [`merge-graphs`](#merge-graphs) | Compose several `graph.json` files into one namespaced graph. |
 | [`cache`](#cache) | Maintain the on-disk extraction cache. |
 
@@ -36,12 +36,12 @@ There is also an internal `merge-driver` command. It is hidden from `--help` and
 
 ## extract
 
-Scan a directory, build the knowledge graph, and write the artifact set to `codegraph-out/`.
+Scan a directory, build the knowledge graph, and write the artifact set to `synaptic-out/`.
 
 Syntax:
 
 ```sh
-codegraph extract [PATH] [--directed] [--obsidian] [--wiki] [--semantic] [--no-columns]
+synaptic extract [PATH] [--directed] [--obsidian] [--wiki] [--semantic] [--no-columns]
 ```
 
 Arguments and flags:
@@ -50,17 +50,17 @@ Arguments and flags:
 | --- | --- | --- |
 | `PATH` | `.` | Root directory to scan. |
 | `--directed` | off | Produce a directed graph. |
-| `--obsidian` | off | Also write an Obsidian vault (one note per node) under `codegraph-out/obsidian/`. |
-| `--wiki` | off | Also write a Markdown wiki under `codegraph-out/wiki/`. |
+| `--obsidian` | off | Also write an Obsidian vault (one note per node) under `synaptic-out/obsidian/`. |
+| `--wiki` | off | Also write a Markdown wiki under `synaptic-out/wiki/`. |
 | `--semantic` | off | Run the LLM semantic pass over documents/papers and enable the LLM dedup tiebreaker. Requires an API key in the environment (for example `OPENAI_API_KEY`). Makes paid API calls. |
 | `--no-columns` | off | Skip SQL column and index nodes. Smaller `graph.json` on column-heavy schemas, at the cost of column-level SQL audit rules. |
 
-The default run is fully offline and needs no API key. It always writes `graph.json`, `graph.html`, `GRAPH_REPORT.md`, `graph.graphml`, `graph.cypher`, `graph.dot`, `callflow.html`, `tree.html`, `graph.svg`, and `graph-3d.html` into `codegraph-out/`. With `--obsidian` and `--wiki` it adds the `obsidian/` and `wiki/` directories. Markdown heading structure is always extracted; the LLM concept pass runs only with `--semantic`.
+The default run is fully offline and needs no API key. It always writes `graph.json`, `graph.html`, `GRAPH_REPORT.md`, `graph.graphml`, `graph.cypher`, `graph.dot`, `callflow.html`, `tree.html`, `graph.svg`, and `graph-3d.html` into `synaptic-out/`. With `--obsidian` and `--wiki` it adds the `obsidian/` and `wiki/` directories. Markdown heading structure is always extracted; the LLM concept pass runs only with `--semantic`.
 
 Example:
 
 ```sh
-codegraph extract . --directed
+synaptic extract . --directed
 ```
 
 See [Extraction](Extraction), [Output-Formats](Output-Formats), [Semantic-Analysis](Semantic-Analysis), and [Visualizations](Visualizations).
@@ -72,7 +72,7 @@ Regenerate one output format from an existing `graph.json` without re-extracting
 Syntax:
 
 ```sh
-codegraph export <FORMAT> [--graph <PATH>] [--out <PATH>] [--repo <TAG>] [--push <URI>] [--user <USER>] [--password <PW>]
+synaptic export <FORMAT> [--graph <PATH>] [--out <PATH>] [--repo <TAG>] [--push <URI>] [--user <USER>] [--password <PW>]
 ```
 
 Arguments and flags:
@@ -80,7 +80,7 @@ Arguments and flags:
 | Name | Default | Description |
 | --- | --- | --- |
 | `FORMAT` | required | One of: `json`, `html`, `svg`, `graphml`, `cypher`, `dot`, `callflow` (alias `callflow-html`), `tree`, `3d` (alias `force3d`), `obsidian`, `wiki`, `report`, `neo4j`, `falkordb`. |
-| `--graph` | `codegraph-out/graph.json` | Source `graph.json`. |
+| `--graph` | `synaptic-out/graph.json` | Source `graph.json`. |
 | `--out` | alongside the source `graph.json` | Output file or directory. |
 | `--repo` | none | Scope to one federated member (its `repo` tag) before exporting. |
 | `--push` | none | For `neo4j`/`falkordb`: push live to this URI (for example `bolt://localhost:7687` or `falkordb://localhost:6379`) instead of writing the cypher script. Requires building with `--features push`. |
@@ -92,8 +92,8 @@ Notes: `report` recomputes communities and analysis from the loaded graph. `expo
 Example:
 
 ```sh
-codegraph export svg --out diagram.svg
-codegraph export neo4j --push bolt://localhost:7687 --password secret
+synaptic export svg --out diagram.svg
+synaptic export neo4j --push bolt://localhost:7687 --password secret
 ```
 
 See [Output-Formats](Output-Formats) and [Workspaces-and-Federation](Workspaces-and-Federation).
@@ -105,7 +105,7 @@ Find a relevant subgraph for a free-text query.
 Syntax:
 
 ```sh
-codegraph query <TEXT> [--graph <PATH>] [--max-nodes <N>] [--repo <TAG>] [--dfs]
+synaptic query <TEXT> [--graph <PATH>] [--max-nodes <N>] [--repo <TAG>] [--dfs]
 ```
 
 Arguments and flags:
@@ -113,7 +113,7 @@ Arguments and flags:
 | Name | Default | Description |
 | --- | --- | --- |
 | `TEXT` | required | Free-text query. |
-| `--graph` | `codegraph-out/graph.json` | Source graph. |
+| `--graph` | `synaptic-out/graph.json` | Source graph. |
 | `--max-nodes` | `30` | Maximum nodes in the returned subgraph. |
 | `--repo` | none | Scope to one federated member (its `repo` tag). |
 | `--dfs` | off | Expand the subgraph depth-first instead of breadth-first (favors deep call chains over broad neighbourhoods). |
@@ -123,7 +123,7 @@ Prints the matched seed nodes and the resulting subgraph (nodes and labeled edge
 Example:
 
 ```sh
-codegraph query "auth token refresh" --max-nodes 50
+synaptic query "auth token refresh" --max-nodes 50
 ```
 
 See [Querying](Querying).
@@ -135,14 +135,14 @@ Shortest path between two nodes, each given by id or label.
 Syntax:
 
 ```sh
-codegraph path <FROM> <TO> [--graph <PATH>] [--repo <TAG>]
+synaptic path <FROM> <TO> [--graph <PATH>] [--repo <TAG>]
 ```
 
 | Name | Default | Description |
 | --- | --- | --- |
 | `FROM` | required | Source node id or label. |
 | `TO` | required | Target node id or label. |
-| `--graph` | `codegraph-out/graph.json` | Source graph. |
+| `--graph` | `synaptic-out/graph.json` | Source graph. |
 | `--repo` | none | Scope to one federated member (its `repo` tag). |
 
 Prints the path as labels joined by arrows, or a message if one or both endpoints cannot be resolved or no path exists.
@@ -150,7 +150,7 @@ Prints the path as labels joined by arrows, or a message if one or both endpoint
 Example:
 
 ```sh
-codegraph path "LoginController" "Database"
+synaptic path "LoginController" "Database"
 ```
 
 See [Querying](Querying).
@@ -162,13 +162,13 @@ Show a node and its immediate neighbours.
 Syntax:
 
 ```sh
-codegraph explain <NODE> [--graph <PATH>] [--repo <TAG>]
+synaptic explain <NODE> [--graph <PATH>] [--repo <TAG>]
 ```
 
 | Name | Default | Description |
 | --- | --- | --- |
 | `NODE` | required | Node id or label. |
-| `--graph` | `codegraph-out/graph.json` | Source graph. |
+| `--graph` | `synaptic-out/graph.json` | Source graph. |
 | `--repo` | none | Scope to one federated member (its `repo` tag). |
 
 Prints the node's label, source file, community (if assigned), and each neighbour with the edge direction and relation.
@@ -176,14 +176,14 @@ Prints the node's label, source file, community (if assigned), and each neighbou
 Example:
 
 ```sh
-codegraph explain "PaymentService"
+synaptic explain "PaymentService"
 ```
 
 See [Querying](Querying).
 
 ## search
 
-Structural search over the graph with **CGQL** (a small Cypher-inspired query
+Structural search over the graph with **SYNQL** (a small Cypher-inspired query
 language), or a built-in architectural pattern. This is not text search: it
 matches on structure (kind, visibility, lines-of-code, fan-in/out, degree,
 community) and relationships.
@@ -191,26 +191,26 @@ community) and relationships.
 Syntax:
 
 ```sh
-codegraph search [QUERY] [--pattern <NAME>] [--list-patterns]
+synaptic search [QUERY] [--pattern <NAME>] [--list-patterns]
                  [--explain] [--save <NAME>] [--saved <NAME>] [--list-saved]
                  [--graph <PATH>] [--repo <TAG>] [--json] [--limit <N>]
 ```
 
 | Name | Default | Description |
 | --- | --- | --- |
-| `QUERY` | none | A CGQL query (omit when using `--pattern`/`--saved`/`--list-patterns`). |
+| `QUERY` | none | A SYNQL query (omit when using `--pattern`/`--saved`/`--list-patterns`). |
 | `--pattern` | none | Run a built-in pattern instead of a query. |
 | `--list-patterns` | off | List the built-in patterns and exit. |
 | `--explain` | off | Print the query plan (scan, joins, filter, project/aggregate) without running it. |
-| `--save` | none | Save the given query under a name (`codegraph-out/cgql/<name>.cgql`). |
+| `--save` | none | Save the given query under a name (`synaptic-out/synql/<name>.synql`). |
 | `--saved` | none | Run a previously saved query by name. |
 | `--list-saved` | off | List saved query names and exit. |
-| `--graph` | `codegraph-out/graph.json` | Source graph. |
+| `--graph` | `synaptic-out/graph.json` | Source graph. |
 | `--repo` | none | Scope to one federated member (its `repo` tag). |
 | `--json` | off | Emit results as JSON. |
 | `--limit` | `50` | Max rows to display. |
 
-### CGQL
+### SYNQL
 
 ```
 MATCH pattern [WHERE expr] RETURN items [LIMIT n]
@@ -237,19 +237,19 @@ simply does not match, rather than erroring.
 Examples:
 
 ```sh
-codegraph search "MATCH (c:class) WHERE c.loc > 500 AND c.fan_out > 20 RETURN c"
-codegraph search 'MATCH (c:struct) WHERE c.name =~ "Extractor$" RETURN c'
-codegraph search "MATCH (a:class)-[:implements]->(b:interface) RETURN a, b"
-codegraph search "MATCH (a)-[:calls*1..3]->(b) RETURN a, b"   # transitive callers
-codegraph search "MATCH (c:class) RETURN c.community, count(c)" # group + count
-codegraph search "MATCH (c:class) WHERE c.loc > 500 RETURN c" --explain
-codegraph search "MATCH (c:class) RETURN c" --save big_classes
-codegraph search --saved big_classes
+synaptic search "MATCH (c:class) WHERE c.loc > 500 AND c.fan_out > 20 RETURN c"
+synaptic search 'MATCH (c:struct) WHERE c.name =~ "Extractor$" RETURN c'
+synaptic search "MATCH (a:class)-[:implements]->(b:interface) RETURN a, b"
+synaptic search "MATCH (a)-[:calls*1..3]->(b) RETURN a, b"   # transitive callers
+synaptic search "MATCH (c:class) RETURN c.community, count(c)" # group + count
+synaptic search "MATCH (c:class) WHERE c.loc > 500 RETURN c" --explain
+synaptic search "MATCH (c:class) RETURN c" --save big_classes
+synaptic search --saved big_classes
 ```
 
 ### Named patterns
 
-`codegraph search --list-patterns` lists them; `--pattern <name>` runs one:
+`synaptic search --list-patterns` lists them; `--pattern <name>` runs one:
 
 | Pattern | Matches |
 | --- | --- |
@@ -262,11 +262,11 @@ codegraph search --saved big_classes
 The patterns are structural heuristics over the enriched graph; their precision
 depends on how much `kind`/`visibility` a language extractor supplies (see
 [Extraction]). `service-locator` requires community assignments (build with
-`codegraph extract`).
+`synaptic extract`).
 
 ```sh
-codegraph search --pattern god-class
-codegraph search --pattern singleton --json
+synaptic search --pattern god-class
+synaptic search --pattern singleton --json
 ```
 
 See [Querying](Querying), [Extraction](Extraction), and [Analysis-and-Reports](Analysis-and-Reports).
@@ -278,7 +278,7 @@ Incrementally rebuild the graph after files change, or do a full rebuild.
 Syntax:
 
 ```sh
-codegraph update [PATHS...] [--full] [--directed] [--force]
+synaptic update [PATHS...] [--full] [--directed] [--force]
 ```
 
 | Name | Default | Description |
@@ -288,13 +288,13 @@ codegraph update [PATHS...] [--full] [--directed] [--force]
 | `--directed` | off | Build directed when there is no existing graph to inherit from. |
 | `--force` | off | Bypass the shrink guard. |
 
-Behavior: when no paths are given on the command line (and not `--full`), changed paths are read from the `CODEGRAPH_CHANGED` environment variable (newline-delimited), which is how the post-commit hook passes them. The command inherits the existing graph and its `directed` flag when present, serializes concurrent rebuilds with a lock (queuing paths if another rebuild holds it), and writes the same artifact set as [`extract`](#extract).
+Behavior: when no paths are given on the command line (and not `--full`), changed paths are read from the `SYNAPTIC_CHANGED` environment variable (newline-delimited), which is how the post-commit hook passes them. The command inherits the existing graph and its `directed` flag when present, serializes concurrent rebuilds with a lock (queuing paths if another rebuild holds it), and writes the same artifact set as [`extract`](#extract).
 
 Example:
 
 ```sh
-codegraph update src/auth.rs src/db.rs
-codegraph update --full
+synaptic update src/auth.rs src/db.rs
+synaptic update --full
 ```
 
 See [Incremental-Updates](Incremental-Updates).
@@ -306,7 +306,7 @@ Watch the working tree and rebuild incrementally on change, debounced.
 Syntax:
 
 ```sh
-codegraph watch [--directed] [--force]
+synaptic watch [--directed] [--force]
 ```
 
 | Name | Default | Description |
@@ -319,7 +319,7 @@ Watches the current directory recursively, debounces a burst of saves into one r
 Example:
 
 ```sh
-codegraph watch --directed
+synaptic watch --directed
 ```
 
 See [Incremental-Updates](Incremental-Updates).
@@ -331,13 +331,13 @@ List nodes that transitively depend on a node (reverse-impact analysis).
 Syntax:
 
 ```sh
-codegraph affected <NODE> [--graph <PATH>] [--depth <N>] [--relation <REL>]...
+synaptic affected <NODE> [--graph <PATH>] [--depth <N>] [--relation <REL>]...
 ```
 
 | Name | Default | Description |
 | --- | --- | --- |
 | `NODE` | required | Node id, label, bare name, source file, or unique label substring. |
-| `--graph` | `codegraph-out/graph.json` | Source graph. |
+| `--graph` | `synaptic-out/graph.json` | Source graph. |
 | `--depth` | `2` | Max hops to walk backward. |
 | `--relation` | structural impact relations | Restrict to these edge relations; repeatable. |
 
@@ -346,8 +346,8 @@ When no `--relation` is given, the default structural impact relations are: `cal
 Example:
 
 ```sh
-codegraph affected src/config.rs --depth 3
-codegraph affected "User" --relation calls --relation references
+synaptic affected src/config.rs --depth 3
+synaptic affected "User" --relation calls --relation references
 ```
 
 See [Querying](Querying) and [Analysis-and-Reports](Analysis-and-Reports).
@@ -359,7 +359,7 @@ Time-travel: compare the code graph at two git revisions and report what changed
 Syntax:
 
 ```sh
-codegraph diff [REV1] [REV2] [--since <DATE>] [--root <DIR>] [--directed] [--scope <PREFIX>] [--top <N>] [--module-depth <N>] [--json] [--report <PATH>] [--html <PATH>] [--no-cache]
+synaptic diff [REV1] [REV2] [--since <DATE>] [--root <DIR>] [--directed] [--scope <PREFIX>] [--top <N>] [--module-depth <N>] [--json] [--report <PATH>] [--html <PATH>] [--no-cache]
 ```
 
 | Name | Default | Description |
@@ -377,7 +377,7 @@ codegraph diff [REV1] [REV2] [--since <DATE>] [--root <DIR>] [--directed] [--sco
 | `--html` | none | Also write a self-contained, theme-aware HTML report to this path. |
 | `--no-cache` | off | Always rebuild; skip the per-commit snapshot store. |
 
-Each revision is materialized into a throwaway `git worktree` and built with the same pipeline as [`extract`](#extract) (nothing is written into your working tree). Built graphs are cached per commit SHA under `codegraph-out/history/`, so the first diff of a cold repo builds two full graphs and later diffs of the same commits are near-instant. The report has five sections:
+Each revision is materialized into a throwaway `git worktree` and built with the same pipeline as [`extract`](#extract) (nothing is written into your working tree). Built graphs are cached per commit SHA under `synaptic-out/history/`, so the first diff of a cold repo builds two full graphs and later diffs of the same commits are near-instant. The report has five sections:
 
 - **Added / removed dependencies** — module-to-module dependency edges that appeared or disappeared.
 - **Removed APIs** — code symbols that were referenced from another file and are now gone (an export-surface heuristic).
@@ -388,36 +388,36 @@ Each revision is materialized into a throwaway `git worktree` and built with the
 Example:
 
 ```sh
-codegraph diff HEAD~10 HEAD
-codegraph diff v1.2.0 main --report drift.md
-codegraph diff HEAD --scope crates/auth --json
-codegraph diff --since 2026-01-01 --html drift.html
+synaptic diff HEAD~10 HEAD
+synaptic diff v1.2.0 main --report drift.md
+synaptic diff HEAD --scope crates/auth --json
+synaptic diff --since 2026-01-01 --html drift.html
 ```
 
 See [Analysis-and-Reports](Analysis-and-Reports) and [Incremental-Updates](Incremental-Updates).
 
 ## predict
 
-Forecast the consequences of a change before applying it. Maps the changed files to the graph nodes they define, walks the reverse-impact blast radius that depends on them, flags which edited symbols are public API, and (against a base revision) folds in a time-travel diff for new import cycles, removed APIs, and dependency deltas. Writes `forecast.json` + an agent-readable `forecast.md`. CodeGraph never edits source; the forecast is data an agent reads first.
+Forecast the consequences of a change before applying it. Maps the changed files to the graph nodes they define, walks the reverse-impact blast radius that depends on them, flags which edited symbols are public API, and (against a base revision) folds in a time-travel diff for new import cycles, removed APIs, and dependency deltas. Writes `forecast.json` + an agent-readable `forecast.md`. Synaptic never edits source; the forecast is data an agent reads first.
 
 Syntax:
 
 ```sh
-codegraph predict [PATHS]... [--base <REV>] [--graph <PATH>] [--root <DIR>] [--depth <N>] [--max-hits <N>] [--no-diff] [--gate] [--edit <KIND:SYMBOL>] [--out <DIR>] [--repo <NAME>] [--json]
+synaptic predict [PATHS]... [--base <REV>] [--graph <PATH>] [--root <DIR>] [--depth <N>] [--max-hits <N>] [--no-diff] [--gate] [--edit <KIND:SYMBOL>] [--out <DIR>] [--repo <NAME>] [--json]
 ```
 
 | Name | Default | Description |
 | --- | --- | --- |
 | `PATHS` | `git diff --name-only <base>` | Repo-relative changed files to forecast. When omitted, derived from the working-tree diff vs `--base`. |
 | `--base` | `HEAD` | Base revision the change is measured against (used for the changed-file diff and the time-travel diff). |
-| `--graph` | `codegraph-out/graph.json` | Source graph. |
+| `--graph` | `synaptic-out/graph.json` | Source graph. |
 | `--root` | `.` | Repo root for the time-travel diff. |
 | `--depth` | `3` | Reverse-impact hop bound. |
 | `--max-hits` | `200` | Cap on blast-radius dependents reported. |
 | `--no-diff` | off | Skip the git/worktree time-travel diff (faster; no cycle / removed-API detection). |
 | `--gate` | off | Exit non-zero if the change introduces a new import cycle or removes a public API (a pre-commit / CI quality gate). Forces the time-travel diff. |
 | `--edit` | none | Analytic mode: forecast a *described* edit `<kind>:<symbol>` (kind = `delete`, `signature`, or `visibility`) before any code is written. If the name is shared by several files, qualify it as `<kind>:<name>@<file-substring>` (e.g. `delete:announce@core/foo.ts`). Pure-graph, no git. Writes `editforecast.json` + `editforecast.md` and ignores `--base`/`--gate`. |
-| `--out` | `codegraph-out/predict` | Output directory for `forecast.json` + `forecast.md`. |
+| `--out` | `synaptic-out/predict` | Output directory for `forecast.json` + `forecast.md`. |
 | `--repo` | none | Scope to one federated member (its `repo` tag). |
 | `--json` | off | Print the forecast as JSON to stdout (no files written). |
 
@@ -437,10 +437,10 @@ The time-travel diff builds the base revision in a throwaway `git worktree` (lik
 Example:
 
 ```sh
-codegraph predict src/auth.rs --no-diff
-codegraph predict --base main --json
-codegraph predict src/config.rs src/db.rs --depth 4
-codegraph predict --edit "delete:Service" --json
+synaptic predict src/auth.rs --no-diff
+synaptic predict --base main --json
+synaptic predict src/config.rs src/db.rs --depth 4
+synaptic predict --edit "delete:Service" --json
 ```
 
 In `--edit` mode the forecast is the predicted graph delta of the described edit: whether the symbol's node disappears, how many edges that severs, whether it removes a public API from external view, and which dependents will break vs need review. It is the analytic, pre-code counterpart to [`speculate`](#speculate) (which confirms a change empirically).
@@ -454,14 +454,14 @@ Speculatively execute a proposed change for real. Applies the change in a throwa
 Syntax:
 
 ```sh
-codegraph speculate [PATHS]... [--base <REV>] [--patch <FILE>] [--test-cmd <TMPL>] [--check-cmd <CMD>] [--no-detect] [--depth <N>] [--timeout <SECS>] [--max-tests <N>] [--fail-fast] [--graph <PATH>] [--root <DIR>] [--out <DIR>] [--repo <NAME>] [--json]
+synaptic speculate [PATHS]... [--base <REV>] [--patch <FILE>] [--test-cmd <TMPL>] [--check-cmd <CMD>] [--no-detect] [--depth <N>] [--timeout <SECS>] [--max-tests <N>] [--fail-fast] [--graph <PATH>] [--root <DIR>] [--out <DIR>] [--repo <NAME>] [--json]
 ```
 
 | Name | Default | Description |
 | --- | --- | --- |
 | `PATHS` | derived | Repo-relative changed files. Empty: derived from `--patch`, else from `git diff --name-only <base>`. Explicit paths also scope the applied working-tree diff. |
 | `--base` | `HEAD` with `--patch`, else the detected default branch | Revision to apply onto and diff against. |
-| `--graph` | `codegraph-out/graph.json` | Source graph used to select the at-risk tests. |
+| `--graph` | `synaptic-out/graph.json` | Source graph used to select the at-risk tests. |
 | `--patch` | none | Apply this unified-diff file instead of the current working-tree changes (can include new files). |
 | `--test-cmd` | auto-detected | Test command template; `{files}` expands to the at-risk test files (run per file). With no placeholder it runs once as a whole suite. |
 | `--check-cmd` | auto-detected | Build / type-check command, run once before the tests. |
@@ -470,7 +470,7 @@ codegraph speculate [PATHS]... [--base <REV>] [--patch <FILE>] [--test-cmd <TMPL
 | `--timeout` | `300` | Per-command wall-clock budget in seconds. |
 | `--max-tests` | `20` | Cap on the number of at-risk test files run. |
 | `--fail-fast` | off | Stop after the first failing test. |
-| `--out` | `codegraph-out/speculate` | Output directory for `report.json` + `report.md`. |
+| `--out` | `synaptic-out/speculate` | Output directory for `report.json` + `report.md`. |
 | `--repo` | none | Scope to one federated member (its `repo` tag). |
 | `--json` | off | Print the report as JSON to stdout (no files written). |
 
@@ -481,16 +481,16 @@ The throwaway worktree is a clean checkout, so it has no installed dependencies 
 Example:
 
 ```sh
-codegraph speculate src/auth.rs
-codegraph speculate --patch change.diff --test-cmd "pytest {files}"
-codegraph speculate --base main --max-tests 5 --json
+synaptic speculate src/auth.rs
+synaptic speculate --patch change.diff --test-cmd "pytest {files}"
+synaptic speculate --base main --max-tests 5 --json
 ```
 
 See [`predict`](#predict) (forecast the same change without running it) and [`diff`](#diff).
 
 ## eval
 
-Calibrate CodeGraph's own inference quality. `eval replay` measures
+Calibrate Synaptic's own inference quality. `eval replay` measures
 change-forecast quality by replaying git history; `eval cross-language` measures
 how grounded the inferred cross-language edges are on a single graph.
 
@@ -501,7 +501,7 @@ how grounded the inferred cross-language edges are on a single graph.
 Syntax:
 
 ```sh
-codegraph eval replay [FROM] [--root <DIR>] [--depth <N>] [--max-commits <N>] [--directed] [--min-test-recall <PCT>] [--out <DIR>] [--json]
+synaptic eval replay [FROM] [--root <DIR>] [--depth <N>] [--max-commits <N>] [--directed] [--min-test-recall <PCT>] [--out <DIR>] [--json]
 ```
 
 | Name | Default | Description |
@@ -512,7 +512,7 @@ codegraph eval replay [FROM] [--root <DIR>] [--depth <N>] [--max-commits <N>] [-
 | `--max-commits` | `50` | Cap on the number of commits replayed. |
 | `--directed` | off | Build directed graphs for each revision. |
 | `--min-test-recall` | none | CI gate: exit non-zero if co-edited test recall is below this percentage. |
-| `--out` | `codegraph-out/eval` | Output directory for `report.json` + `report.md`. |
+| `--out` | `synaptic-out/eval` | Output directory for `report.json` + `report.md`. |
 | `--json` | off | Print the report as JSON to stdout (no files written). |
 
 Ground truth is a deterministic proxy (not CI logs or sandbox runs): a co-edited test stands in for a relevant test (co-edited is not the same as failed), and tests **added** in a commit are excluded from the recall denominator because they cannot be predicted from the parent graph. Removed-API recall has signal only on languages whose extractor records visibility, so it is reported as a lower bound and is not used by the gate. Each replayed commit is built in a throwaway `git worktree` (cached per commit), so the first run on a cold repo is slow.
@@ -520,8 +520,8 @@ Ground truth is a deterministic proxy (not CI logs or sandbox runs): a co-edited
 Example:
 
 ```sh
-codegraph eval replay HEAD~20 --json
-codegraph eval replay main --min-test-recall 60   # a CI gate
+synaptic eval replay HEAD~20 --json
+synaptic eval replay main --min-test-recall 60   # a CI gate
 ```
 
 ### eval cross-language
@@ -534,12 +534,12 @@ history is involved.
 Syntax:
 
 ```sh
-codegraph eval cross-language [--graph <PATH>] [--json]
+synaptic eval cross-language [--graph <PATH>] [--json]
 ```
 
 | Name | Default | Description |
 | --- | --- | --- |
-| `--graph` | `codegraph-out/graph.json` | The built graph to calibrate. |
+| `--graph` | `synaptic-out/graph.json` | The built graph to calibrate. |
 | `--json` | off | Print the full `CrossLanguageReport` as JSON to stdout. |
 
 It prints the per-relation edge counts plus two precision proxies: **service
@@ -566,14 +566,14 @@ grants, and the code -> table links the rules read).
 
 ### sql audit
 
-Run every rule over the SQL-aware graph and write `codegraph-out/sql/findings.json`
+Run every rule over the SQL-aware graph and write `synaptic-out/sql/findings.json`
 + `audit.md` (or `--json` to stdout). Findings are sorted by severity, each with a
 location, the offending object/query, a remediation, and a confidence.
 
 Syntax:
 
 ```
-codegraph sql audit [--graph <path>] [--root <dir>] [--severity <level>] [--repo <tag>] [--out <dir>] [--json] [--explain --db-url <url>]
+synaptic sql audit [--graph <path>] [--root <dir>] [--severity <level>] [--repo <tag>] [--out <dir>] [--json] [--explain --db-url <url>]
 ```
 
 - `--severity <critical|high|medium|low|info>` keeps only findings at least that severe.
@@ -591,21 +591,21 @@ the filtered columns indexed).
 Syntax:
 
 ```
-codegraph sql advise --query "<sql>" [--dialect <postgres|mysql|mssql|sqlite>] [--graph <path>] [--repo <tag>] [--json]
+synaptic sql advise --query "<sql>" [--dialect <postgres|mysql|mssql|sqlite>] [--graph <path>] [--repo <tag>] [--json]
 ```
 
 The `audit_sql` / `advise_sql` [MCP tools](MCP-Server) expose both to an assistant.
 
 ## refactor
 
-Safe refactor: plan a single-symbol rename and verify the graph after an AI agent applies it. CodeGraph never edits source itself; it produces an execution plan for the agent (Claude / Codex / Cursor) and then checks invariants.
+Safe refactor: plan a single-symbol rename and verify the graph after an AI agent applies it. Synaptic never edits source itself; it produces an execution plan for the agent (Claude / Codex / Cursor) and then checks invariants.
 
 ### refactor rename
 
 Syntax:
 
 ```sh
-codegraph refactor rename <NAME> --to <NEWNAME> [--id <NODEID>] [--file <SUBSTR>] [--root <DIR>] [--graph <PATH>] [--out <DIR>] [--min-confidence <F>] [--json]
+synaptic refactor rename <NAME> --to <NEWNAME> [--id <NODEID>] [--file <SUBSTR>] [--root <DIR>] [--graph <PATH>] [--out <DIR>] [--min-confidence <F>] [--json]
 ```
 
 | Name | Default | Description |
@@ -615,8 +615,8 @@ codegraph refactor rename <NAME> --to <NEWNAME> [--id <NODEID>] [--file <SUBSTR>
 | `--id` | none | Disambiguate by node id when the name matches several definitions. |
 | `--file` | none | Disambiguate by file-path substring. |
 | `--root` | `.` | Repo root; referencing files are read from here for column-accurate sites. |
-| `--graph` | `codegraph-out/graph.json` | Graph to plan against. |
-| `--out` | `codegraph-out/refactor` | Output directory for the plan. |
+| `--graph` | `synaptic-out/graph.json` | Graph to plan against. |
+| `--out` | `synaptic-out/refactor` | Output directory for the plan. |
 | `--min-confidence` | `0.8` | Minimum per-site confidence score `[0,1]` to land in `edits` vs `review`. |
 | `--no-text-scan` | off | Skip the whole-word textual scan for references the graph does not record as edges (type uses, enum-variant paths). |
 | `--max-text-sites` | `200` | Cap on textual occurrences enumerated by the text scan. |
@@ -632,9 +632,9 @@ Each site is scored (`EXTRACTED` / `INFERRED` / `AMBIGUOUS`); low-confidence or 
 Examples:
 
 ```sh
-codegraph refactor rename UserService --to AccountService
-codegraph refactor rename User --to Account --file models/   # disambiguate
-codegraph refactor rename Confidence --to Trust --id src_confidence_confidence --json
+synaptic refactor rename UserService --to AccountService
+synaptic refactor rename User --to Account --file models/   # disambiguate
+synaptic refactor rename Confidence --to Trust --id src_confidence_confidence --json
 ```
 
 ### refactor move / extract
@@ -642,15 +642,15 @@ codegraph refactor rename Confidence --to Trust --id src_confidence_confidence -
 Relocate a symbol's definition to another module. `move` targets an existing file; `extract` a new one. The symbol name is unchanged — what changes is where it lives and the imports that reach it.
 
 ```sh
-codegraph refactor move <NAME> --to <FILE> [--id <ID>] [--file <SUBSTR>] [--root <DIR>] [--graph <PATH>] [--out <DIR>] [--json]
-codegraph refactor extract <NAME> --to <NEWFILE> [ ...same flags... ]
+synaptic refactor move <NAME> --to <FILE> [--id <ID>] [--file <SUBSTR>] [--root <DIR>] [--graph <PATH>] [--out <DIR>] [--json]
+synaptic refactor extract <NAME> --to <NEWFILE> [ ...same flags... ]
 ```
 
 The plan identifies the definition block to cut (its span), the destination, one import-update site per referencing file, the resolved usages for context, and a destination name collision if any. Verify with `--relocate`.
 
 ```sh
-codegraph refactor move parse_config --to crates/core/src/config.rs
-codegraph refactor extract Helper --to src/helpers.rs
+synaptic refactor move parse_config --to crates/core/src/config.rs
+synaptic refactor extract Helper --to src/helpers.rs
 ```
 
 ### refactor verify
@@ -658,7 +658,7 @@ codegraph refactor extract Helper --to src/helpers.rs
 Syntax:
 
 ```sh
-codegraph refactor verify --plan <PLAN.JSON> [--root <DIR>] [--relocate] [--json]
+synaptic refactor verify --plan <PLAN.JSON> [--root <DIR>] [--relocate] [--json]
 ```
 
 Run after the agent applies the plan's edits. It rebuilds the current source and checks invariants against the pre-edit snapshot, exiting non-zero on failure. For a **rename**:
@@ -681,7 +681,7 @@ Manage git hooks (post-commit/post-checkout) and the `graph.json` merge driver.
 Syntax:
 
 ```sh
-codegraph hook <ACTION>
+synaptic hook <ACTION>
 ```
 
 Actions:
@@ -689,7 +689,7 @@ Actions:
 | Action | Description |
 | --- | --- |
 | `install` | Install the hooks and register the merge driver (idempotent). |
-| `uninstall` | Remove the hooks (and the CodeGraph blocks from any shared hook files). |
+| `uninstall` | Remove the hooks (and the Synaptic blocks from any shared hook files). |
 | `status` | Show which hooks are currently installed. |
 
 Each action prints the per-hook installed/not-installed state. The hooks keep `graph.json` current after commits and checkouts; the merge driver union-composes both sides so `graph.json` never conflicts during merges.
@@ -697,8 +697,8 @@ Each action prints the per-hook installed/not-installed state. The hooks keep `g
 Example:
 
 ```sh
-codegraph hook install
-codegraph hook status
+synaptic hook install
+synaptic hook status
 ```
 
 See [Incremental-Updates](Incremental-Updates).
@@ -710,15 +710,15 @@ Run the MCP server exposing read-only graph tools (and PR tools) to an AI assist
 Syntax:
 
 ```sh
-codegraph serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root <DIR>] [--allow-exec]
+synaptic serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root <DIR>] [--allow-exec]
 ```
 
 | Name | Default | Description |
 | --- | --- | --- |
-| `--graph` | `codegraph-out/graph.json` | Graph to serve. |
+| `--graph` | `synaptic-out/graph.json` | Graph to serve. |
 | `--http` | none (stdio) | Serve over HTTP at this address (for example `127.0.0.1:8765`) instead of stdio. The MCP endpoint is `/mcp`. |
-| `--api-key` | none | Require this API key for HTTP requests (or set `CODEGRAPH_API_KEY`). |
-| `--source-root` | dir above `codegraph-out/` | Trusted root for resolving a node's source file in the `get_source` tool (path-traversal jailed). |
+| `--api-key` | none | Require this API key for HTTP requests (or set `SYNAPTIC_API_KEY`). |
+| `--source-root` | dir above `synaptic-out/` | Trusted root for resolving a node's source file in the `get_source` tool (path-traversal jailed). |
 | `--allow-exec` | off | Expose the command-running `speculate` tool (the 27th tool). This makes the server no longer read-only, so enable it only for trusted clients. See [MCP Server](MCP-Server). |
 
 Defaults to stdio transport. The MCP server reports protocol `2025-11-25` and exposes 26 read-only tools (27 with `--allow-exec`, which adds the command-running `speculate` tool), prompts, completions, resource templates/subscriptions, and structured tool output. When serving HTTP on a wildcard address with no API key, it prints a warning.
@@ -726,20 +726,20 @@ Defaults to stdio transport. The MCP server reports protocol `2025-11-25` and ex
 Example:
 
 ```sh
-codegraph serve
-codegraph serve --http 127.0.0.1:8765 --api-key secret
+synaptic serve
+synaptic serve --http 127.0.0.1:8765 --api-key secret
 ```
 
 See [MCP-Server](MCP-Server) and [Assistant-Integration](Assistant-Integration).
 
 ## ingest
 
-Ingest an external source into the graph, or fetch a URL into `codegraph-out/ingested/` for the next extract.
+Ingest an external source into the graph, or fetch a URL into `synaptic-out/ingested/` for the next extract.
 
 Syntax:
 
 ```sh
-codegraph ingest <SOURCE> [SOURCE-ARGS]
+synaptic ingest <SOURCE> [SOURCE-ARGS]
 ```
 
 Sources:
@@ -750,30 +750,30 @@ Sources:
 | `mcp` | `<FILE>` | An MCP config file (`.mcp.json`, `claude_desktop_config.json`, etc.). |
 | `scip` | `<FILE>` | A SCIP-index JSON file (simplified shape); adds symbol nodes and edges. |
 | `pg` | `[DSN]` (default empty) | A live PostgreSQL database; adds table/view/function nodes and foreign-key edges. Empty DSN uses `PG*` env vars. Requires `--features pg`. |
-| `url` | `<URL>` | A URL, fetched (SSRF-guarded) into `codegraph-out/ingested/`. |
-| `office` | `<FILE>` | An office spreadsheet (`.xlsx`/`.xls`/`.ods`), converted to markdown in `codegraph-out/ingested/`. Requires `--features office`. |
+| `url` | `<URL>` | A URL, fetched (SSRF-guarded) into `synaptic-out/ingested/`. |
+| `office` | `<FILE>` | An office spreadsheet (`.xlsx`/`.xls`/`.ods`), converted to markdown in `synaptic-out/ingested/`. Requires `--features office`. |
 | `gws` | `<FILE>` | A Google-Workspace pointer (`.gdoc`/`.gsheet`/`.gslides`), exported to markdown via the `gws` CLI. Requires `--features gws`. |
 | `media` | `<FILE>` | A local audio/video file, transcribed to markdown. Requires `--features media`. |
 
-The `cargo`, `mcp`, `scip`, and `pg` sources merge their nodes/edges into `codegraph-out/graph.json` and rewrite the artifacts. The `url`, `office`, `gws`, and `media` sources write into `codegraph-out/ingested/` and require a follow-up `codegraph extract` (or `update`) to index. Feature-gated sources error with a rebuild hint when the feature is not compiled in.
+The `cargo`, `mcp`, `scip`, and `pg` sources merge their nodes/edges into `synaptic-out/graph.json` and rewrite the artifacts. The `url`, `office`, `gws`, and `media` sources write into `synaptic-out/ingested/` and require a follow-up `synaptic extract` (or `update`) to index. Feature-gated sources error with a rebuild hint when the feature is not compiled in.
 
 Example:
 
 ```sh
-codegraph ingest cargo .
-codegraph ingest url https://example.com/spec.html
+synaptic ingest cargo .
+synaptic ingest url https://example.com/spec.html
 ```
 
 See [Ingestion](Ingestion).
 
 ## install
 
-Install the CodeGraph skill for a host assistant in the current directory.
+Install the Synaptic skill for a host assistant in the current directory.
 
 Syntax:
 
 ```sh
-codegraph install [PLATFORM] [--global]
+synaptic install [PLATFORM] [--global]
 ```
 
 | Name | Default | Description |
@@ -788,21 +788,21 @@ app). Prints the files written.
 Examples:
 
 ```sh
-codegraph install claude
-codegraph install codex            # Codex CLI (project .codex/)
-codegraph install codex --global   # Codex desktop app (global ~/.codex)
+synaptic install claude
+synaptic install codex            # Codex CLI (project .codex/)
+synaptic install codex --global   # Codex desktop app (global ~/.codex)
 ```
 
 See [Assistant-Integration](Assistant-Integration).
 
 ## uninstall
 
-Remove the CodeGraph skill for a platform.
+Remove the Synaptic skill for a platform.
 
 Syntax:
 
 ```sh
-codegraph uninstall [PLATFORM] [--all] [--global]
+synaptic uninstall [PLATFORM] [--all] [--global]
 ```
 
 | Name | Default | Description |
@@ -814,9 +814,9 @@ codegraph uninstall [PLATFORM] [--all] [--global]
 Example:
 
 ```sh
-codegraph uninstall cursor
-codegraph uninstall codex --global
-codegraph uninstall --all
+synaptic uninstall cursor
+synaptic uninstall codex --global
+synaptic uninstall --all
 ```
 
 See [Assistant-Integration](Assistant-Integration).
@@ -828,7 +828,7 @@ Graph-aware PR dashboard, single-PR detail, triage, and conflict views. Requires
 Syntax:
 
 ```sh
-codegraph prs [NUMBER] [--repo <OWNER/NAME>] [--base <BRANCH>] [--graph <PATH>] [--triage] [--conflicts]
+synaptic prs [NUMBER] [--repo <OWNER/NAME>] [--base <BRANCH>] [--graph <PATH>] [--triage] [--conflicts]
 ```
 
 | Name | Default | Description |
@@ -836,7 +836,7 @@ codegraph prs [NUMBER] [--repo <OWNER/NAME>] [--base <BRANCH>] [--graph <PATH>] 
 | `NUMBER` | none | PR number for a detailed view; omit for the dashboard. |
 | `--repo` | current directory's repo | Target repo `owner/name`. |
 | `--base` | the repo's default branch | Base branch to filter to. |
-| `--graph` | `codegraph-out/graph.json` | Graph used for blast-radius (communities + node count). |
+| `--graph` | `synaptic-out/graph.json` | Graph used for blast-radius (communities + node count). |
 | `--triage` | off | Ranked actionable PRs with blast radius (deterministic; no LLM). |
 | `--conflicts` | off | PRs that touch the same graph community (merge-order risk). |
 
@@ -845,9 +845,9 @@ With no number and no flags it prints the open-PR dashboard. A number shows that
 Example:
 
 ```sh
-codegraph prs
-codegraph prs 142
-codegraph prs --triage
+synaptic prs
+synaptic prs 142
+synaptic prs --triage
 ```
 
 See [PR-Dashboard](PR-Dashboard).
@@ -859,7 +859,7 @@ Maintain the generated skill artifacts (development/CI). Checks for drift agains
 Syntax:
 
 ```sh
-codegraph skill <ACTION>
+synaptic skill <ACTION>
 ```
 
 | Action | Description |
@@ -870,7 +870,7 @@ codegraph skill <ACTION>
 Example:
 
 ```sh
-codegraph skill check
+synaptic skill check
 ```
 
 See [Development](Development).
@@ -882,17 +882,17 @@ Multi-repo / monorepo federation: discover members, build a federated graph, and
 Syntax:
 
 ```sh
-codegraph workspace <ACTION>
+synaptic workspace <ACTION>
 ```
 
 Actions:
 
 | Action | Syntax | Description |
 | --- | --- | --- |
-| `init` | `init [--scan-repos [DIR]] [--depth <N>] [--max <N>]` | Write `codegraph-workspace.toml`, auto-discovering members. `--scan-repos` also scans a parent dir for sibling git repos and appends `[[repos]]` entries (bare flag scans the parent of the current repo). `--depth` defaults to `3`, `--max` defaults to `50`. |
+| `init` | `init [--scan-repos [DIR]] [--depth <N>] [--max <N>]` | Write `synaptic-workspace.toml`, auto-discovering members. `--scan-repos` also scans a parent dir for sibling git repos and appends `[[repos]]` entries (bare flag scans the parent of the current repo). `--depth` defaults to `3`, `--max` defaults to `50`. |
 | `add` | `add <TARGET>` | Add a member: an existing local path becomes a `members` entry, a git URL becomes a `[[repos]]` entry. |
 | `discover` | `discover [PATH] [--depth <N>] [--max <N>]` | Scan a parent dir for sibling git repos and federate them without writing a manifest. `PATH` defaults to the parent of the current repo; `--depth` defaults to `3`, `--max` to `50`. |
-| `build` | `build [--changed] [--directed]` | Build all members and federate into `codegraph-out/graph.json`. `--changed` only rebuilds members that changed; `--directed` produces a directed federated graph. |
+| `build` | `build [--changed] [--directed]` | Build all members and federate into `synaptic-out/graph.json`. `--changed` only rebuilds members that changed; `--directed` produces a directed federated graph. |
 | `federate` | `federate <DIR>` | Compose from a directory of published `<member>/graph.json` artifacts. |
 | `sync` | `sync` | Pull remote git members, then rebuild deltas. |
 | `status` | `status` | Show each member's change status (no build). |
@@ -903,21 +903,21 @@ Actions:
 Example:
 
 ```sh
-codegraph workspace init --scan-repos
-codegraph workspace build --directed
-codegraph workspace status
+synaptic workspace init --scan-repos
+synaptic workspace build --directed
+synaptic workspace status
 ```
 
 See [Workspaces-and-Federation](Workspaces-and-Federation).
 
 ## global
 
-Manage the cross-repo global graph store at `~/.codegraph`.
+Manage the cross-repo global graph store at `~/.synaptic`.
 
 Syntax:
 
 ```sh
-codegraph global <ACTION>
+synaptic global <ACTION>
 ```
 
 | Action | Syntax | Description |
@@ -930,8 +930,8 @@ codegraph global <ACTION>
 Example:
 
 ```sh
-codegraph global add ./codegraph-out/graph.json --as backend
-codegraph global list
+synaptic global add ./synaptic-out/graph.json --as backend
+synaptic global list
 ```
 
 See [Workspaces-and-Federation](Workspaces-and-Federation).
@@ -943,56 +943,56 @@ Compose several `graph.json` files into one namespaced graph.
 Syntax:
 
 ```sh
-codegraph merge-graphs <GRAPHS...> [--out <PATH>]
+synaptic merge-graphs <GRAPHS...> [--out <PATH>]
 ```
 
 | Name | Default | Description |
 | --- | --- | --- |
 | `GRAPHS...` | required (at least one) | The `graph.json` files to merge. Each file's tag is its grandparent directory name. |
-| `--out` | `codegraph-out/merged-graph.json` | Output path. |
+| `--out` | `synaptic-out/merged-graph.json` | Output path. |
 
 Prints the number of graphs merged, the output path, node/edge totals, and the tags. Errors if no graphs are given.
 
 Example:
 
 ```sh
-codegraph merge-graphs repo-a/codegraph-out/graph.json repo-b/codegraph-out/graph.json --out merged.json
+synaptic merge-graphs repo-a/synaptic-out/graph.json repo-b/synaptic-out/graph.json --out merged.json
 ```
 
 See [Workspaces-and-Federation](Workspaces-and-Federation).
 
 ## cache
 
-Maintain the on-disk extraction cache at `codegraph-out/cache`.
+Maintain the on-disk extraction cache at `synaptic-out/cache`.
 
 Syntax:
 
 ```sh
-codegraph cache <ACTION>
+synaptic cache <ACTION>
 ```
 
 Action `clear`:
 
 ```sh
-codegraph cache clear [PATH] [--recursive]
+synaptic cache clear [PATH] [--recursive]
 ```
 
 | Name | Default | Description |
 | --- | --- | --- |
-| `PATH` | `.` | Repo/workspace root whose `codegraph-out/cache` to remove. |
-| `--recursive` | off | Also remove every `codegraph-out/cache` found beneath `PATH` (federated member caches), via a bounded, noise-pruned walk that skips `node_modules` and `.git`. |
+| `PATH` | `.` | Repo/workspace root whose `synaptic-out/cache` to remove. |
+| `--recursive` | off | Also remove every `synaptic-out/cache` found beneath `PATH` (federated member caches), via a bounded, noise-pruned walk that skips `node_modules` and `.git`. |
 
-The AST cache normally self-invalidates when extractors change; use `clear` for a guaranteed cold start or suspected corruption. Only the regenerable `codegraph-out/cache` subtree is ever removed.
+The AST cache normally self-invalidates when extractors change; use `clear` for a guaranteed cold start or suspected corruption. Only the regenerable `synaptic-out/cache` subtree is ever removed.
 
 Example:
 
 ```sh
-codegraph cache clear
-codegraph cache clear . --recursive
+synaptic cache clear
+synaptic cache clear . --recursive
 ```
 
 See [Extraction](Extraction).
 
 ## merge-driver (internal)
 
-`codegraph merge-driver <BASE> <CURRENT> <OTHER>` is a git merge driver for `graph.json`. It is hidden from `--help` and invoked by git as `%O %A %B`, not by users. It union-composes both sides into `CURRENT` so `graph.json` never conflicts. It is registered automatically by `codegraph hook install`.
+`synaptic merge-driver <BASE> <CURRENT> <OTHER>` is a git merge driver for `graph.json`. It is hidden from `--help` and invoked by git as `%O %A %B`, not by users. It union-composes both sides into `CURRENT` so `graph.json` never conflicts. It is registered automatically by `synaptic hook install`.

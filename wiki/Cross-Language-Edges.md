@@ -4,7 +4,7 @@ Most graph edges come from parsing one file in one language. **Cross-language
 edges** capture coupling that no single-language parse can see: a Python script
 that shells out to a Rust binary, a Node addon bound to a native library, a
 JavaScript client calling a Python HTTP route, a Rust function exported to
-Python through PyO3. CodeGraph detects these as a post-extraction pass and adds
+Python through PyO3. Synaptic detects these as a post-extraction pass and adds
 edges so impact analysis traverses the boundary.
 
 These edges are always `INFERRED` confidence. Detection is regex-driven over
@@ -148,9 +148,9 @@ cross-repo dependency.
 The four relations are part of the default reverse-impact set, so they are
 traversed automatically by:
 
-- `codegraph affected` and the MCP `affected` tool -- the blast radius now spans
+- `synaptic affected` and the MCP `affected` tool -- the blast radius now spans
   language boundaries.
-- `codegraph predict` / `predict_impact`, `affected_tests`, `predict_edit` --
+- `synaptic predict` / `predict_impact`, `affected_tests`, `predict_edit` --
   forecasts and test selection follow the same edges.
 - the MCP `describe_node` tool -- its "calls Z" clause includes outgoing
   `invokes` and `calls_service` targets.
@@ -158,13 +158,13 @@ traversed automatically by:
 See [Querying](Querying) for the relation set and [MCP-Server](MCP-Server) for
 the tools.
 
-## Calibration: `codegraph eval cross-language`
+## Calibration: `synaptic eval cross-language`
 
 Because these edges are inferred, the value is knowing how grounded they are.
 The calibration command measures one built graph (no git history):
 
 ```
-codegraph eval cross-language [--graph <path>] [--json]
+synaptic eval cross-language [--graph <path>] [--json]
 ```
 
 It reports, per relation, the edge counts plus two precision proxies:

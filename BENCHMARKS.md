@@ -1,6 +1,6 @@
-# CodeGraph benchmarks
+# Synaptic benchmarks
 
-CodeGraph's claims are backed by reproducible benchmarks rather than assertion. There are
+Synaptic's claims are backed by reproducible benchmarks rather than assertion. There are
 three families:
 
 1. **Token economy** — how much smaller a graph query is than reading source (see the README).
@@ -12,7 +12,7 @@ estimated or self-reported by the tool.
 
 ## Accuracy corpus
 
-Location: `crates/codegraph-eval/corpus/`. Each fixture is a small, hand-written, parseable
+Location: `crates/synaptic-eval/corpus/`. Each fixture is a small, hand-written, parseable
 source fixture (not a full buildable project) plus a `ground_truth.toml` that encodes only what
 a human verified by reading the code. A top-level `manifest.toml` lists the fixtures and groups
 them by language family. A preflight resolves every labeled symbol before any metric is
@@ -22,8 +22,8 @@ shrink a denominator (or let a malformed fixture become a misleading oracle).
 Run it:
 
 ```sh
-codegraph eval corpus            # markdown table to stdout + report.json/md
-codegraph eval corpus --json     # machine-readable
+synaptic eval corpus            # markdown table to stdout + report.json/md
+synaptic eval corpus --json     # machine-readable
 ```
 
 ### Ground-truth format
@@ -115,8 +115,8 @@ that confidence is honest: do the things it calls "70% likely" happen ~70% of th
 Run it:
 
 ```sh
-codegraph eval calibrate --max-commits 200    # reliability table + Brier score
-codegraph eval calibrate --json
+synaptic eval calibrate --max-commits 200    # reliability table + Brier score
+synaptic eval calibrate --json
 ```
 
 ### Method
@@ -146,7 +146,7 @@ extraction touches git.
 ### Interpreting it
 
 Calibration is a **per-repo** property: confidence is derived from that repo's own co-change
-history, so the number reflects the repo's commit granularity. Measured on CodeGraph's own
+history, so the number reflects the repo's commit granularity. Measured on Synaptic's own
 (squash-heavy, synthetic) history the Brier skill score is **negative** — the co-change
 predictor is *worse than always guessing the base rate* — because squashed commits touch many
 unrelated files together and inflate apparent co-change. That is not a flattering number, and it
@@ -157,15 +157,15 @@ baseline makes the Brier comparable across repos.
 ## Scale
 
 Extraction throughput across pinned external repositories spanning size tiers and language
-families. Manifest: `crates/codegraph-eval/scale-corpus.toml` (repo URL + full SHA + family +
+families. Manifest: `crates/synaptic-eval/scale-corpus.toml` (repo URL + full SHA + family +
 tier). Network + git required; opt-in (never run in CI).
 
 Run it:
 
 ```sh
-codegraph eval scale                 # clone each pinned repo, time cold + warm builds
-codegraph eval scale --tier small    # restrict to a tier
-codegraph eval scale --json
+synaptic eval scale                 # clone each pinned repo, time cold + warm builds
+synaptic eval scale --tier small    # restrict to a tier
+synaptic eval scale --json
 ```
 
 ### Method

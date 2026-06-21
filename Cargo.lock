@@ -497,402 +497,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
-name = "codegraph"
-version = "0.2.12"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "clap",
- "codegraph-cgql",
- "codegraph-core",
- "codegraph-detect",
- "codegraph-eval",
- "codegraph-extract",
- "codegraph-graph",
- "codegraph-history",
- "codegraph-incremental",
- "codegraph-ingest",
- "codegraph-llm",
- "codegraph-output",
- "codegraph-predict",
- "codegraph-prs",
- "codegraph-query",
- "codegraph-refactor",
- "codegraph-report",
- "codegraph-sandbox",
- "codegraph-semantic",
- "codegraph-server",
- "codegraph-skillgen",
- "codegraph-sqlaudit",
- "codegraph-workspace",
- "notify",
- "rayon",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "codegraph-cgql"
-version = "0.2.12"
-dependencies = [
- "codegraph-core",
- "codegraph-extract",
- "codegraph-graph",
- "criterion",
- "regex",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "codegraph-core"
-version = "0.2.12"
-dependencies = [
- "caseless",
- "regex",
- "serde",
- "serde_json",
- "thiserror",
- "unicode-normalization",
-]
-
-[[package]]
-name = "codegraph-detect"
-version = "0.2.12"
-dependencies = [
- "blake3",
- "criterion",
- "ignore",
- "regex",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "codegraph-eval"
-version = "0.2.12"
-dependencies = [
- "codegraph-core",
- "codegraph-graph",
- "codegraph-history",
- "codegraph-incremental",
- "codegraph-predict",
- "codegraph-query",
- "criterion",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "toml",
-]
-
-[[package]]
-name = "codegraph-extract"
-version = "0.2.12"
-dependencies = [
- "blake3",
- "codegraph-core",
- "codegraph-detect",
- "criterion",
- "proptest",
- "regex",
- "rmp-serde",
- "roxmltree",
- "serde",
- "serde_json",
- "sqlparser",
- "tempfile",
- "tree-sitter",
- "tree-sitter-bash",
- "tree-sitter-c",
- "tree-sitter-c-sharp",
- "tree-sitter-cpp",
- "tree-sitter-dart",
- "tree-sitter-elixir",
- "tree-sitter-fortran",
- "tree-sitter-go",
- "tree-sitter-groovy",
- "tree-sitter-hcl",
- "tree-sitter-java",
- "tree-sitter-javascript",
- "tree-sitter-json",
- "tree-sitter-julia",
- "tree-sitter-kotlin-ng",
- "tree-sitter-lua",
- "tree-sitter-objc",
- "tree-sitter-php",
- "tree-sitter-powershell",
- "tree-sitter-python",
- "tree-sitter-ruby",
- "tree-sitter-rust",
- "tree-sitter-scala",
- "tree-sitter-sequel",
- "tree-sitter-swift",
- "tree-sitter-typescript",
- "tree-sitter-verilog",
- "tree-sitter-yaml",
- "tree-sitter-zig",
-]
-
-[[package]]
-name = "codegraph-graph"
-version = "0.2.12"
-dependencies = [
- "blake3",
- "codegraph-core",
- "codegraph-extract",
- "criterion",
- "petgraph",
- "regex",
- "serde",
- "serde_json",
- "strsim",
- "thiserror",
-]
-
-[[package]]
-name = "codegraph-history"
-version = "0.2.12"
-dependencies = [
- "codegraph-core",
- "codegraph-graph",
- "codegraph-incremental",
- "criterion",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "codegraph-incremental"
-version = "0.2.12"
-dependencies = [
- "codegraph-core",
- "codegraph-detect",
- "codegraph-extract",
- "codegraph-graph",
- "criterion",
- "rayon",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "codegraph-ingest"
-version = "0.2.12"
-dependencies = [
- "blake3",
- "calamine",
- "codegraph-core",
- "glob",
- "postgres",
- "proptest",
- "regex",
- "reqwest",
- "rust_xlsxwriter",
- "serde_json",
- "tempfile",
- "thiserror",
- "toml",
-]
-
-[[package]]
-name = "codegraph-llm"
-version = "0.2.12"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "blake3",
- "futures-util",
- "hmac 0.12.1",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror",
- "tiktoken-rs",
- "tokio",
- "wiremock",
-]
-
-[[package]]
-name = "codegraph-output"
-version = "0.2.12"
-dependencies = [
- "codegraph-core",
- "codegraph-graph",
- "criterion",
- "redis",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "codegraph-predict"
-version = "0.2.12"
-dependencies = [
- "codegraph-core",
- "codegraph-graph",
- "codegraph-history",
- "codegraph-query",
- "criterion",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "codegraph-prs"
-version = "0.2.12"
-dependencies = [
- "criterion",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "codegraph-query"
-version = "0.2.12"
-dependencies = [
- "codegraph-core",
- "codegraph-graph",
- "criterion",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "codegraph-refactor"
-version = "0.2.12"
-dependencies = [
- "codegraph-core",
- "codegraph-extract",
- "codegraph-graph",
- "codegraph-incremental",
- "codegraph-query",
- "criterion",
- "regex",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "codegraph-report"
-version = "0.2.12"
-dependencies = [
- "codegraph-core",
- "codegraph-graph",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "codegraph-sandbox"
-version = "0.2.12"
-dependencies = [
- "codegraph-history",
- "criterion",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "codegraph-semantic"
-version = "0.2.12"
-dependencies = [
- "async-trait",
- "codegraph-core",
- "codegraph-graph",
- "codegraph-llm",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "codegraph-server"
-version = "0.2.12"
-dependencies = [
- "axum",
- "codegraph-cgql",
- "codegraph-core",
- "codegraph-graph",
- "codegraph-history",
- "codegraph-predict",
- "codegraph-prs",
- "codegraph-query",
- "codegraph-refactor",
- "codegraph-sandbox",
- "codegraph-sqlaudit",
- "criterion",
- "futures-util",
- "getrandom 0.2.17",
- "serde_json",
- "tempfile",
- "tiktoken-rs",
- "tokio",
- "tower",
-]
-
-[[package]]
-name = "codegraph-skillgen"
-version = "0.2.12"
-dependencies = [
- "serde_json",
- "tempfile",
- "toml_edit",
-]
-
-[[package]]
-name = "codegraph-sqlaudit"
-version = "0.2.12"
-dependencies = [
- "codegraph-core",
- "codegraph-graph",
- "codegraph-query",
- "regex",
- "serde",
- "serde_json",
- "sqlparser",
- "sqlx",
- "tempfile",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "codegraph-workspace"
-version = "0.2.12"
-dependencies = [
- "blake3",
- "codegraph-core",
- "codegraph-detect",
- "codegraph-graph",
- "codegraph-incremental",
- "codegraph-ingest",
- "criterion",
- "glob",
- "roxmltree",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "toml",
-]
-
-[[package]]
 name = "codepage"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3462,6 +3066,402 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "synaptic"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "clap",
+ "notify",
+ "rayon",
+ "serde_json",
+ "synaptic-core",
+ "synaptic-detect",
+ "synaptic-eval",
+ "synaptic-extract",
+ "synaptic-graph",
+ "synaptic-history",
+ "synaptic-incremental",
+ "synaptic-ingest",
+ "synaptic-llm",
+ "synaptic-output",
+ "synaptic-predict",
+ "synaptic-prs",
+ "synaptic-query",
+ "synaptic-refactor",
+ "synaptic-report",
+ "synaptic-sandbox",
+ "synaptic-semantic",
+ "synaptic-server",
+ "synaptic-skillgen",
+ "synaptic-sqlaudit",
+ "synaptic-synql",
+ "synaptic-workspace",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "synaptic-core"
+version = "0.3.0"
+dependencies = [
+ "caseless",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "synaptic-detect"
+version = "0.3.0"
+dependencies = [
+ "blake3",
+ "criterion",
+ "ignore",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "synaptic-eval"
+version = "0.3.0"
+dependencies = [
+ "criterion",
+ "serde",
+ "serde_json",
+ "synaptic-core",
+ "synaptic-graph",
+ "synaptic-history",
+ "synaptic-incremental",
+ "synaptic-predict",
+ "synaptic-query",
+ "tempfile",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
+name = "synaptic-extract"
+version = "0.3.0"
+dependencies = [
+ "blake3",
+ "criterion",
+ "proptest",
+ "regex",
+ "rmp-serde",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "sqlparser",
+ "synaptic-core",
+ "synaptic-detect",
+ "tempfile",
+ "tree-sitter",
+ "tree-sitter-bash",
+ "tree-sitter-c",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cpp",
+ "tree-sitter-dart",
+ "tree-sitter-elixir",
+ "tree-sitter-fortran",
+ "tree-sitter-go",
+ "tree-sitter-groovy",
+ "tree-sitter-hcl",
+ "tree-sitter-java",
+ "tree-sitter-javascript",
+ "tree-sitter-json",
+ "tree-sitter-julia",
+ "tree-sitter-kotlin-ng",
+ "tree-sitter-lua",
+ "tree-sitter-objc",
+ "tree-sitter-php",
+ "tree-sitter-powershell",
+ "tree-sitter-python",
+ "tree-sitter-ruby",
+ "tree-sitter-rust",
+ "tree-sitter-scala",
+ "tree-sitter-sequel",
+ "tree-sitter-swift",
+ "tree-sitter-typescript",
+ "tree-sitter-verilog",
+ "tree-sitter-yaml",
+ "tree-sitter-zig",
+]
+
+[[package]]
+name = "synaptic-graph"
+version = "0.3.0"
+dependencies = [
+ "blake3",
+ "criterion",
+ "petgraph",
+ "regex",
+ "serde",
+ "serde_json",
+ "strsim",
+ "synaptic-core",
+ "synaptic-extract",
+ "thiserror",
+]
+
+[[package]]
+name = "synaptic-history"
+version = "0.3.0"
+dependencies = [
+ "criterion",
+ "serde",
+ "serde_json",
+ "synaptic-core",
+ "synaptic-graph",
+ "synaptic-incremental",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "synaptic-incremental"
+version = "0.3.0"
+dependencies = [
+ "criterion",
+ "rayon",
+ "serde",
+ "serde_json",
+ "synaptic-core",
+ "synaptic-detect",
+ "synaptic-extract",
+ "synaptic-graph",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "synaptic-ingest"
+version = "0.3.0"
+dependencies = [
+ "blake3",
+ "calamine",
+ "glob",
+ "postgres",
+ "proptest",
+ "regex",
+ "reqwest",
+ "rust_xlsxwriter",
+ "serde_json",
+ "synaptic-core",
+ "tempfile",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
+name = "synaptic-llm"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "blake3",
+ "futures-util",
+ "hmac 0.12.1",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tiktoken-rs",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
+name = "synaptic-output"
+version = "0.3.0"
+dependencies = [
+ "criterion",
+ "redis",
+ "serde_json",
+ "synaptic-core",
+ "synaptic-graph",
+ "tempfile",
+]
+
+[[package]]
+name = "synaptic-predict"
+version = "0.3.0"
+dependencies = [
+ "criterion",
+ "serde",
+ "serde_json",
+ "synaptic-core",
+ "synaptic-graph",
+ "synaptic-history",
+ "synaptic-query",
+ "thiserror",
+]
+
+[[package]]
+name = "synaptic-prs"
+version = "0.3.0"
+dependencies = [
+ "criterion",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "synaptic-query"
+version = "0.3.0"
+dependencies = [
+ "criterion",
+ "serde",
+ "serde_json",
+ "synaptic-core",
+ "synaptic-graph",
+]
+
+[[package]]
+name = "synaptic-refactor"
+version = "0.3.0"
+dependencies = [
+ "criterion",
+ "regex",
+ "serde",
+ "serde_json",
+ "synaptic-core",
+ "synaptic-extract",
+ "synaptic-graph",
+ "synaptic-incremental",
+ "synaptic-query",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "synaptic-report"
+version = "0.3.0"
+dependencies = [
+ "serde_json",
+ "synaptic-core",
+ "synaptic-graph",
+ "tempfile",
+]
+
+[[package]]
+name = "synaptic-sandbox"
+version = "0.3.0"
+dependencies = [
+ "criterion",
+ "serde",
+ "serde_json",
+ "synaptic-history",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "synaptic-semantic"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "synaptic-core",
+ "synaptic-graph",
+ "synaptic-llm",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "synaptic-server"
+version = "0.3.0"
+dependencies = [
+ "axum",
+ "criterion",
+ "futures-util",
+ "getrandom 0.2.17",
+ "serde_json",
+ "synaptic-core",
+ "synaptic-graph",
+ "synaptic-history",
+ "synaptic-predict",
+ "synaptic-prs",
+ "synaptic-query",
+ "synaptic-refactor",
+ "synaptic-sandbox",
+ "synaptic-sqlaudit",
+ "synaptic-synql",
+ "tempfile",
+ "tiktoken-rs",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "synaptic-skillgen"
+version = "0.3.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "toml_edit",
+]
+
+[[package]]
+name = "synaptic-sqlaudit"
+version = "0.3.0"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "sqlparser",
+ "sqlx",
+ "synaptic-core",
+ "synaptic-graph",
+ "synaptic-query",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "synaptic-synql"
+version = "0.3.0"
+dependencies = [
+ "criterion",
+ "regex",
+ "serde_json",
+ "synaptic-core",
+ "synaptic-extract",
+ "synaptic-graph",
+ "thiserror",
+]
+
+[[package]]
+name = "synaptic-workspace"
+version = "0.3.0"
+dependencies = [
+ "blake3",
+ "criterion",
+ "glob",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "synaptic-core",
+ "synaptic-detect",
+ "synaptic-graph",
+ "synaptic-incremental",
+ "synaptic-ingest",
+ "tempfile",
+ "thiserror",
+ "toml",
 ]
 
 [[package]]

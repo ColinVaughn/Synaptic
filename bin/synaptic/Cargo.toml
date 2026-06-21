@@ -1,0 +1,72 @@
+[package]
+name = "synaptic"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Synaptic CLI — build and query a code knowledge graph."
+
+[lib]
+name = "synaptic_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "synaptic"
+path = "src/bin/synaptic.rs"
+
+[[bin]]
+name = "syn"
+path = "src/bin/syn.rs"
+
+[features]
+# Live Postgres introspection for `synaptic ingest pg` (off by default).
+pg = ["synaptic-ingest/pg"]
+# Media transcription for `synaptic ingest media` + YouTube URLs (shells out to
+# yt-dlp / a transcription CLI; off by default).
+media = ["synaptic-ingest/media"]
+# Office spreadsheet ingest for `synaptic ingest office` (calamine; off by default).
+office = ["synaptic-ingest/office"]
+# Google-Workspace ingest for `synaptic ingest gws` (shells out to the gws CLI; off by default).
+gws = ["synaptic-ingest/gws"]
+# Live Neo4j/FalkorDB push for `synaptic export neo4j|falkordb --push` (off by default).
+push = ["synaptic-output/push"]
+# Store the per-file AST cache as MessagePack instead of JSON. On by default via
+# synaptic-extract's default features (this flag is the explicit re-enable knob).
+cache-binary = ["synaptic-extract/cache-binary"]
+# Live database EXPLAIN for `sql audit --explain` (sqlx; off by default).
+live-explain = ["synaptic-sqlaudit/live-explain"]
+
+[dependencies]
+synaptic-core = { workspace = true }
+synaptic-detect = { workspace = true }
+synaptic-extract = { workspace = true }
+synaptic-graph = { workspace = true }
+synaptic-output = { workspace = true }
+synaptic-report = { workspace = true }
+synaptic-query = { workspace = true }
+synaptic-llm = { workspace = true }
+synaptic-semantic = { workspace = true }
+synaptic-incremental = { workspace = true }
+synaptic-prs = { workspace = true }
+synaptic-server = { workspace = true }
+synaptic-ingest = { workspace = true }
+synaptic-skillgen = { workspace = true }
+synaptic-workspace = { workspace = true }
+synaptic-history = { workspace = true }
+synaptic-synql = { workspace = true }
+synaptic-refactor = { workspace = true }
+synaptic-predict = { workspace = true }
+synaptic-sandbox = { workspace = true }
+synaptic-eval = { workspace = true }
+synaptic-sqlaudit = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+rayon = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+notify = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+tempfile = { workspace = true }
+serde_json = { workspace = true }

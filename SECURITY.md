@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-CodeGraph is pre-1.0 and ships from a single version line (currently `0.2.x`).
+Synaptic is pre-1.0 and ships from a single version line (currently `0.2.x`).
 Security fixes land in the latest release; there are no separate maintenance
 branches for older versions.
 
@@ -26,7 +26,7 @@ a best-effort basis and fixes are released in the latest version line.
 
 ## Scope notes
 
-- The `codegraph serve` MCP server is read-only by default. The command-running
+- The `synaptic serve` MCP server is read-only by default. The command-running
   `speculate` tool is exposed only with the explicit `--allow-exec` opt-in; treat
   enabling it as granting the server permission to run this project's
   test/build commands.

@@ -1,17 +1,17 @@
 # Output Formats
 
-CodeGraph builds one in-memory knowledge graph and can serialize it to many artifacts. The canonical artifact is `graph.json` (a NetworkX node-link document); everything else is derived from the same graph.
+Synaptic builds one in-memory knowledge graph and can serialize it to many artifacts. The canonical artifact is `graph.json` (a NetworkX node-link document); everything else is derived from the same graph.
 
 Two ways to produce artifacts:
 
-- `codegraph extract` writes a full default set in one pass (see [Extraction]).
-- `codegraph export <format>` regenerates a single artifact from an existing `graph.json` without re-extracting, or pushes the graph live to a database.
+- `synaptic extract` writes a full default set in one pass (see [Extraction]).
+- `synaptic export <format>` regenerates a single artifact from an existing `graph.json` without re-extracting, or pushes the graph live to a database.
 
 For the visual/interactive artifacts (`graph.html`, `graph-3d.html`, `graph.svg`, `callflow.html`, `tree.html`) see [Visualizations].
 
 ## What `extract` writes by default
 
-`codegraph extract` writes all of these into `codegraph-out/`:
+`synaptic extract` writes all of these into `synaptic-out/`:
 
 ```
 graph.json        graph.html        GRAPH_REPORT.md
@@ -20,12 +20,12 @@ callflow.html     tree.html         graph.svg
 graph-3d.html
 ```
 
-`--obsidian` additionally writes `codegraph-out/obsidian/` and `--wiki` writes `codegraph-out/wiki/`. Neither is produced by default.
+`--obsidian` additionally writes `synaptic-out/obsidian/` and `--wiki` writes `synaptic-out/wiki/`. Neither is produced by default.
 
 ## The `export` command
 
 ```
-codegraph export <format> [--graph <path>] [--out <path>] [--repo <tag>]
+synaptic export <format> [--graph <path>] [--out <path>] [--repo <tag>]
                           [--push <uri>] [--user <u>] [--password <p>]
 ```
 
@@ -33,7 +33,7 @@ codegraph export <format> [--graph <path>] [--out <path>] [--repo <tag>]
 
 Flags:
 
-- `--graph <path>` source graph. Default: `codegraph-out/graph.json`.
+- `--graph <path>` source graph. Default: `synaptic-out/graph.json`.
 - `--out <path>` output file (single-file formats) or directory (`obsidian`/`wiki`). Default: alongside the source graph, using the conventional filename for that format.
 - `--repo <tag>` scope to one federated member by its `repo` tag before exporting (see [Workspaces-and-Federation]).
 - `--push <uri>` for `neo4j`/`falkordb` only: push live to a running database instead of writing the cypher script. Requires the `push` build feature.
@@ -181,7 +181,7 @@ The static script carries id + label on nodes only. The live push (see below) us
 Graphviz DOT. Renders a `digraph` (with `->`) when the graph is directed, otherwise a `graph` (with `--`). Layout hints `rankdir=LR` and `node [shape=box]` are emitted. Each node carries `label` and `kind` (the file type); each edge carries `label` (the relation).
 
 ```dot
-graph CodeGraph {
+graph Synaptic {
   rankdir=LR;
   node [shape=box];
   "a" [label="A", kind="code"];
@@ -193,7 +193,7 @@ Node ids and all attribute values are emitted as double-quoted DOT strings with 
 
 ## Obsidian vault (`--obsidian` / `export obsidian`)
 
-`to_obsidian` writes a directory (default `codegraph-out/obsidian/`) containing:
+`to_obsidian` writes a directory (default `synaptic-out/obsidian/`) containing:
 
 - One Markdown note per node, with YAML frontmatter (`id`, `file_type`, `community`, `source_file`) and neighbors as `[[wikilinks]]` grouped by relation. Incoming edges are grouped under `<relation> (in)`.
 - One `_Community-<id>.md` overview note per community, with cohesion, a member list, a Dataview live query (`LIST FROM "" WHERE community = N`), and links to related communities by shared-edge count.
@@ -203,7 +203,7 @@ Note filenames are sanitized from labels and deduped (colliding labels get a ` (
 
 ## Markdown wiki (`--wiki` / `export wiki`)
 
-`to_wiki` writes a directory (default `codegraph-out/wiki/`) of GitHub-wiki-style Markdown with `[[wikilinks]]`:
+`to_wiki` writes a directory (default `synaptic-out/wiki/`) of GitHub-wiki-style Markdown with `[[wikilinks]]`:
 
 - `index.md` listing communities and the top "key nodes" (highest degree).
 - One `community-<id>.md` article per community, with cohesion score, key concepts (highest-degree members), spanned source files, related communities by shared-edge count, and an audit trail (the EXTRACTED/INFERRED/AMBIGUOUS mix of the community's internal edges).
@@ -217,17 +217,17 @@ A Markdown analysis report. `export report` recomputes communities and analysis 
 
 ## Neo4j / FalkorDB live push (`push` feature)
 
-`export neo4j` and `export falkordb` write `graph.cypher` by default. With `--push <uri>` and a CodeGraph binary built with `--features push`, they stream the graph into a running database instead. Both use the richer (props + community) idempotent `MERGE` statements, so re-runs upsert and never duplicate.
+`export neo4j` and `export falkordb` write `graph.cypher` by default. With `--push <uri>` and a Synaptic binary built with `--features push`, they stream the graph into a running database instead. Both use the richer (props + community) idempotent `MERGE` statements, so re-runs upsert and never duplicate.
 
 ```
-codegraph export neo4j    --push bolt://localhost:7687 --password <pw>
-codegraph export falkordb --push falkordb://localhost:6379
+synaptic export neo4j    --push bolt://localhost:7687 --password <pw>
+synaptic export falkordb --push falkordb://localhost:6379
 ```
 
 Transports:
 
 - Neo4j uses `cypher-shell` (must be on PATH; speaks Bolt). The `;`-terminated script is piped to its stdin. The URI is a Bolt URL (e.g. `bolt://localhost:7687`). Auth: `--user` (default `neo4j`) and `--password` or `NEO4J_PASSWORD`.
-- FalkorDB uses the pure-Rust `redis` client, running each `MERGE` through `GRAPH.QUERY codegraph <stmt>`. The URI accepts `falkordb://`, `redis://`, `rediss://`, a bare `host:port`, or a bare `host` (default port 6379). Auth password is optional, taken from `--password` or `FALKORDB_PASSWORD`, and is set as a connection field (never interpolated into a URL), so passwords containing `@`/`:`/`/`/`%` connect correctly.
+- FalkorDB uses the pure-Rust `redis` client, running each `MERGE` through `GRAPH.QUERY synaptic <stmt>`. The URI accepts `falkordb://`, `redis://`, `rediss://`, a bare `host:port`, or a bare `host` (default port 6379). Auth password is optional, taken from `--password` or `FALKORDB_PASSWORD`, and is set as a connection field (never interpolated into a URL), so passwords containing `@`/`:`/`/`/`%` connect correctly.
 
 On success each prints the number of statements pushed. Without the `push` feature, `--push` fails with a clear message. See [Ingestion] and [MCP-Server] for related integrations.
 

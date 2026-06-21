@@ -1,6 +1,6 @@
 # Workspaces and Federation
 
-CodeGraph can turn a set of *member* sources into one **federated** graph.
+Synaptic can turn a set of *member* sources into one **federated** graph.
 A member is either a local package (a monorepo crate/package) or a separate
 repository (multi-repo). Each member is extracted into its own subgraph, node
 ids are namespaced as `tag::id`, the subgraphs are composed into one graph,
@@ -10,9 +10,9 @@ and the merged graph is re-clustered at the workspace level.
 Three layers cooperate:
 
 - The `workspace` subcommands build and manage a federated graph driven by a
-  `codegraph-workspace.toml` manifest (or auto-discovery).
+  `synaptic-workspace.toml` manifest (or auto-discovery).
 - The `global` subcommands maintain a persistent cross-repo store under
-  `~/.codegraph`.
+  `~/.synaptic`.
 - `merge-graphs` composes several existing `graph.json` files into one
   namespaced graph.
 
@@ -25,20 +25,20 @@ workspace root.
 
 ### `workspace init`
 
-Auto-discovers members and writes `codegraph-workspace.toml`. The workspace
+Auto-discovers members and writes `synaptic-workspace.toml`. The workspace
 name defaults to the root directory name, `default_branch` is `main`, and each
 discovered member is recorded as a root-relative member glob (path separators
 normalized to `/`).
 
 ```
-codegraph workspace init
+synaptic workspace init
 ```
 
 Optional sibling-repo discovery appends `[[repos]]` entries:
 
 ```
-codegraph workspace init --scan-repos
-codegraph workspace init --scan-repos ../ --depth 3 --max 50
+synaptic workspace init --scan-repos
+synaptic workspace init --scan-repos ../ --depth 3 --max 50
 ```
 
 - `--scan-repos [DIR]`: also scan a directory for sibling git repositories.
@@ -59,8 +59,8 @@ member; anything else (including an existing local path) is appended to the
 `[workspace].members` list.
 
 ```
-codegraph workspace add services/billing
-codegraph workspace add https://github.com/acme/identity
+synaptic workspace add services/billing
+synaptic workspace add https://github.com/acme/identity
 ```
 
 For a git URL, the member name is the last path segment minus a trailing `.git`.
@@ -72,8 +72,8 @@ parent directory for sibling repos and immediately federates the ones with a
 recognized manifest, writing the federated outputs.
 
 ```
-codegraph workspace discover
-codegraph workspace discover ../ --depth 3 --max 50
+synaptic workspace discover
+synaptic workspace discover ../ --depth 3 --max 50
 ```
 
 The scan root defaults to the parent of the current repo. The current repo is
@@ -81,14 +81,14 @@ excluded from the scan. Discovered repos are federated as local `path` members.
 
 ### `workspace build`
 
-Builds every member and federates them into `codegraph-out/graph.json` plus the
+Builds every member and federates them into `synaptic-out/graph.json` plus the
 standard outputs (see [Output-Formats]), and writes each member's export surface
-to `codegraph-out/surfaces/<repo>.json`.
+to `synaptic-out/surfaces/<repo>.json`.
 
 ```
-codegraph workspace build
-codegraph workspace build --directed
-codegraph workspace build --changed
+synaptic workspace build
+synaptic workspace build --directed
+synaptic workspace build --changed
 ```
 
 - `--directed`: produce a directed federated graph.
@@ -114,7 +114,7 @@ subdirectory containing `graph.json` (required) and optionally
 `export-surface.json`.
 
 ```
-codegraph workspace federate ./artifacts
+synaptic workspace federate ./artifacts
 ```
 
 Layout:
@@ -135,12 +135,12 @@ to the tag so cross-repo targets line up.
 ### `workspace sync`
 
 For each declared git `[[repos]]` member already cloned under
-`codegraph-out/workspace-repos/<tag>`, runs `git pull`, then performs an
+`synaptic-out/workspace-repos/<tag>`, runs `git pull`, then performs an
 incremental update (same logic as `build --changed`) and writes the federated
 outputs if anything rebuilt.
 
 ```
-codegraph workspace sync
+synaptic workspace sync
 ```
 
 ### `workspace status`
@@ -150,7 +150,7 @@ saved workspace state, without building. If remote `[[repos]]` are present it
 notes that `build --changed` forces a rebuild.
 
 ```
-codegraph workspace status
+synaptic workspace status
 ```
 
 ### `workspace list`
@@ -161,14 +161,14 @@ their git URL, subgraph URL, or path. When there is no workspace build-file but
 projects were discovered by manifest presence, it notes the discovery.
 
 ```
-codegraph workspace list
+synaptic workspace list
 ```
 
-## The `codegraph-workspace.toml` manifest
+## The `synaptic-workspace.toml` manifest
 
 The manifest declares the workspace and its members. When the file is absent, a
 workspace is auto-discovered instead. The conventional filename is
-`codegraph-workspace.toml` at the workspace root.
+`synaptic-workspace.toml` at the workspace root.
 
 ```toml
 [workspace]
@@ -205,7 +205,7 @@ Exactly one of `path`, `git`, or `subgraph` drives how it is built:
 - `path` (string, optional): a local, already-checked-out repo (relative to the
   root). Built locally.
 - `git` (string, optional): a git URL to clone into
-  `codegraph-out/workspace-repos/<tag>`, then built. Only `https`, `ssh`, `git`,
+  `synaptic-out/workspace-repos/<tag>`, then built. Only `https`, `ssh`, `git`,
   `file` schemes and scp-style `user@host:path` are accepted. A directory that
   already exists on disk is cloned directly (offline); `workspace sync` pulls
   updates.
@@ -217,7 +217,7 @@ Exactly one of `path`, `git`, or `subgraph` drives how it is built:
 
 ## Member auto-discovery
 
-When no `codegraph-workspace.toml` exists, members are auto-discovered from
+When no `synaptic-workspace.toml` exists, members are auto-discovered from
 build files at the workspace root:
 
 - Cargo: the root crate (if the root `Cargo.toml` has `[package]`) plus each
@@ -316,9 +316,9 @@ resolutions.
 ### Aliases: tsconfig `paths`, module-federation `remotes`, import maps
 
 Several JS/TS toolchains let one member reference another by an alias decoupled
-from the target's `package.json name`. CodeGraph collects all of them into one
+from the target's `package.json name`. Synaptic collects all of them into one
 alias map (`alias -> member tag`), built from a bounded walk over each member's
-source tree (skipping `node_modules`, `.git`, `codegraph-out`). A self-alias (an
+source tree (skipping `node_modules`, `.git`, `synaptic-out`). A self-alias (an
 alias pointing at its own member) is dropped.
 
 - **Import maps** (single-spa / SystemJS / native): the first `imports` object in
@@ -353,23 +353,23 @@ merged graph is re-clustered at the workspace level.
 ## The global cross-repo store
 
 The global store is a persistent, namespaced union of many repos' graphs kept
-under a store directory: the default is `~/.codegraph`
-(`%USERPROFILE%\.codegraph` on Windows, falling back to `.codegraph` in the CWD
+under a store directory: the default is `~/.synaptic`
+(`%USERPROFILE%\.synaptic` on Windows, falling back to `.synaptic` in the CWD
 if no home is set). It holds `global-graph.json` (the merged graph) and
 `global-manifest.json` (per-repo bookkeeping: source path, node/edge counts, and
 a source hash).
 
 ```
-codegraph global add codegraph-out/graph.json
-codegraph global add path/to/graph.json --as billing
-codegraph global remove billing
-codegraph global list
-codegraph global path
+synaptic global add synaptic-out/graph.json
+synaptic global add path/to/graph.json --as billing
+synaptic global remove billing
+synaptic global list
+synaptic global path
 ```
 
 - `global add <graph> [--as <tag>]`: add (or replace) a repo's `graph.json`
   under a tag. The default tag is the graph's grandparent directory name (so
-  `<repo>/codegraph-out/graph.json` becomes `<repo>`). The tag is sanitized.
+  `<repo>/synaptic-out/graph.json` becomes `<repo>`). The tag is sanitized.
   `add` is idempotent: a source whose hash is unchanged is skipped. Re-adding a
   repo prunes its previous nodes first, then unions the new version in and
   collapses shared externals onto the existing global externals.
@@ -385,14 +385,14 @@ Composes several existing `graph.json` files into one namespaced graph. Unlike
 the global store, inputs are composed verbatim with **no** external dedup.
 
 ```
-codegraph merge-graphs a/codegraph-out/graph.json b/codegraph-out/graph.json
-codegraph merge-graphs g1.json g2.json --out merged.json
+synaptic merge-graphs a/synaptic-out/graph.json b/synaptic-out/graph.json
+synaptic merge-graphs g1.json g2.json --out merged.json
 ```
 
 Each input's repo tag is derived from its grandparent directory name
-(`<repo>/codegraph-out/graph.json` becomes `<repo>`), falling back to the file
+(`<repo>/synaptic-out/graph.json` becomes `<repo>`), falling back to the file
 stem; repeated tags are disambiguated with a numeric suffix. The default output
-is `codegraph-out/merged-graph.json`. The command prints the merged node/edge
+is `synaptic-out/merged-graph.json`. The command prints the merged node/edge
 counts and the tags used.
 
 ## Repo scoping
@@ -406,10 +406,10 @@ it (cross-repo edges, whose other end is in another repo, are dropped).
 `--repo` is available on:
 
 ```
-codegraph query "billing ledger" --repo billing
-codegraph path NodeA NodeB --repo billing
-codegraph explain Ledger --repo billing
-codegraph export svg --repo billing
+synaptic query "billing ledger" --repo billing
+synaptic path NodeA NodeB --repo billing
+synaptic explain Ledger --repo billing
+synaptic export svg --repo billing
 ```
 
 See [Querying] for query/path/explain and [Output-Formats] for export.

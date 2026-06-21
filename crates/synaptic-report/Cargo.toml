@@ -1,0 +1,15 @@
+[package]
+name = "synaptic-report"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "GRAPH_REPORT.md generation for Synaptic."
+
+[dependencies]
+synaptic-core = { workspace = true }
+synaptic-graph = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+serde_json = { workspace = true }

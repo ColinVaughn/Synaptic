@@ -1,8 +1,8 @@
 # PR Dashboard
 
-`codegraph prs` is a graph-aware pull-request dashboard. It lists open PRs with their CI and review state, and overlays each PR's graph "blast radius" (how many graph nodes and communities its changed files touch) so you can see merge-order risk at a glance.
+`synaptic prs` is a graph-aware pull-request dashboard. It lists open PRs with their CI and review state, and overlays each PR's graph "blast radius" (how many graph nodes and communities its changed files touch) so you can see merge-order risk at a glance.
 
-It is a deterministic CLI: it shells out to the GitHub CLI (`gh`) and to `git`, and reads `codegraph-out/graph.json` for blast radius. It makes no LLM calls. For LLM-ranked triage, use the MCP server's `triage_prs` tool instead (see [MCP-Server]).
+It is a deterministic CLI: it shells out to the GitHub CLI (`gh`) and to `git`, and reads `synaptic-out/graph.json` for blast radius. It makes no LLM calls. For LLM-ranked triage, use the MCP server's `triage_prs` tool instead (see [MCP-Server]).
 
 Requires the `gh` CLI to be installed and authenticated (`gh auth login`). If `gh` is unavailable or unauthenticated, the dashboard reports an error.
 
@@ -11,13 +11,13 @@ See also: [Commands], [Analysis-and-Reports].
 ## Usage
 
 ```
-codegraph prs [NUMBER] [--repo OWNER/NAME] [--base BRANCH] [--graph PATH] [--triage] [--conflicts]
+synaptic prs [NUMBER] [--repo OWNER/NAME] [--base BRANCH] [--graph PATH] [--triage] [--conflicts]
 ```
 
 - `NUMBER` shows the detail view for one PR; omit it for the dashboard.
 - `--repo OWNER/NAME` targets another repository (default: the current directory's repo).
 - `--base BRANCH` filters to a base branch (default: the repository's default branch, auto-detected via `gh repo view`, then `git symbolic-ref`, then `main`).
-- `--graph PATH` points at a `graph.json` for blast radius (default: the standard `codegraph-out/graph.json`).
+- `--graph PATH` points at a `graph.json` for blast radius (default: the standard `synaptic-out/graph.json`).
 - `--triage` and `--conflicts` are dashboard-level views (described below). They take precedence over `NUMBER`.
 
 ## Dashboard (default)
@@ -57,7 +57,7 @@ CI state is rolled up from the PR's `statusCheckRollup`: any failing conclusion 
 
 When a `graph.json` is available, each PR's changed files (from `gh pr diff <n> --name-only`) are matched against the source files of graph nodes (path-boundary-safe matching), and the touched communities plus affected node count are attached. This is shown as, for example, `blast_radius=37 nodes / 4 communities`. With no graph, blast radius is omitted.
 
-## Detail view (`codegraph prs NUMBER`)
+## Detail view (`synaptic prs NUMBER`)
 
 Shows one PR with its branch, status, author, age, CI/review state, its git worktree path (if any), blast radius with the touched community ids, and up to 20 changed files:
 
@@ -80,7 +80,7 @@ The single PR is fetched with `gh pr view`, so it works regardless of its base b
 ## `--triage`
 
 ```
-codegraph prs --triage [--base BRANCH] [--repo OWNER/NAME]
+synaptic prs --triage [--base BRANCH] [--repo OWNER/NAME]
 ```
 
 Ranked, actionable PRs targeting the base, with blast radius. It selects PRs on the correct base, drops those classified `WRONG-BASE` or `STALE` (not worth acting on now), and sorts by triage rank then age:
@@ -97,7 +97,7 @@ This is deterministic, with no LLM. It mirrors the filter and sort of the MCP `t
 ## `--conflicts`
 
 ```
-codegraph prs --conflicts [--base BRANCH] [--repo OWNER/NAME]
+synaptic prs --conflicts [--base BRANCH] [--repo OWNER/NAME]
 ```
 
 Reports PRs that touch the same graph community, which signals merge-order risk. It considers only PRs targeting the base that have graph impact data, groups them by shared community (most-overlapping first), and lists the overlapping PRs:

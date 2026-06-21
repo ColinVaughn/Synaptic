@@ -1,0 +1,23 @@
+[package]
+name = "synaptic-predict"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Change forecasting for Synaptic: predict the blast radius, public-API risk, and graph drift of a code change before applying it."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+synaptic-core = { workspace = true }
+synaptic-graph = { workspace = true }
+synaptic-query = { workspace = true }
+synaptic-history = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "predict"
+harness = false

@@ -1,4 +1,4 @@
-### CodeGraph
+### Synaptic
 
 **Getting started**
 - [Home](Home)
@@ -8,9 +8,9 @@
 **Concepts**
 - [Architecture](Architecture)
 - [Languages](Languages)
-- [CodeGraph vs Other Tools](CodeGraph-vs-Other-Tools)
+- [Synaptic vs Other Tools](Synaptic-vs-Other-Tools)
 
-**Using CodeGraph**
+**Using Synaptic**
 - [Commands](Commands)
 - [Extraction](Extraction)
 - [Querying](Querying)

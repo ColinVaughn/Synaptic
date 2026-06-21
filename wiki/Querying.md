@@ -1,17 +1,17 @@
 # Querying
 
-CodeGraph reads a built `graph.json` and answers four kinds of questions about it:
+Synaptic reads a built `graph.json` and answers four kinds of questions about it:
 `query` (relevant subgraph), `path` (shortest route between two nodes), `explain`
 (one node and its neighbours), and `affected` (reverse-impact: what depends on a
-node). All four are read-only and operate on the graph produced by `codegraph
+node). All four are read-only and operate on the graph produced by `synaptic
 extract` (see [Commands] and [Output-Formats]).
 
-By default each command loads `codegraph-out/graph.json`. Pass `--graph <path>`
+By default each command loads `synaptic-out/graph.json`. Pass `--graph <path>`
 to point at a different file.
 
 For *structural* queries (match on kind, visibility, lines of code, fan-in/out,
 relationships, variable-length paths, and aggregation), use the `search` command
-and its CGQL query language instead. CGQL is documented in full under
+and its SYNQL query language instead. SYNQL is documented in full under
 [Commands](Commands#search); `search` matches on structure rather than on the
 free-text relevance that `query` scores.
 
@@ -23,7 +23,7 @@ also expose `dialect`). See [SQL Auditing](SQL-Auditing).
 ## query
 
 ```
-codegraph query "user authentication" --max-nodes 30
+synaptic query "user authentication" --max-nodes 30
 ```
 
 `query` retrieves a subgraph relevant to free text. It scores every node by how
@@ -76,7 +76,7 @@ ties:
   favoring deep call chains over wide neighbourhoods.
 
 ```
-codegraph query "request handler" --dfs --max-nodes 50
+synaptic query "request handler" --dfs --max-nodes 50
 ```
 
 ### --max-nodes
@@ -96,7 +96,7 @@ edits — what you are working on right now — and the boost is weighted by eac
 file's churn (lines changed).
 
 ```
-codegraph query "collider mesh" --since main
+synaptic query "collider mesh" --since main
 ```
 
 Changed nodes are marked `(changed)` in the ranked list and float toward the top,
@@ -106,7 +106,7 @@ changed-file nodes as seeds, so the branch's changed surface appears even when t
 query matches little ("what did this branch change"):
 
 ```
-codegraph query "anything" --since main --seed-changed
+synaptic query "anything" --since main --seed-changed
 ```
 
 Resolution runs `git`; if the directory is not a git repo, the ref does not
@@ -147,13 +147,13 @@ that span them, so seeds and the subgraph come only from that member. See
 [Workspaces-and-Federation].
 
 ```
-codegraph query "payment" --repo billing-service
+synaptic query "payment" --repo billing-service
 ```
 
 ## path
 
 ```
-codegraph path AuthService Database
+synaptic path AuthService Database
 ```
 
 `path` finds the shortest undirected path between two nodes and prints it as a
@@ -178,7 +178,7 @@ to itself.
 ## explain
 
 ```
-codegraph explain AuthService
+synaptic explain AuthService
 ```
 
 `explain` shows one node plus every node it is directly connected to. It prints
@@ -205,7 +205,7 @@ nothing resolves it prints `Node not found: <node>`.
 ## affected
 
 ```
-codegraph affected login_user --depth 2
+synaptic affected login_user --depth 2
 ```
 
 `affected` is reverse-impact analysis: it reports the nodes that (transitively)
@@ -253,7 +253,7 @@ commands use a simpler resolver: exact id, then exact label.)
   they do not propagate impact.
 
 ```
-codegraph affected Database --relation reads_from --relation depends_on --depth 3
+synaptic affected Database --relation reads_from --relation depends_on --depth 3
 ```
 
 ### Output

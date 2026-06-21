@@ -1,6 +1,6 @@
 # Languages
 
-CodeGraph extracts structure from a broad set of languages and config formats.
+Synaptic extracts structure from a broad set of languages and config formats.
 Most languages are parsed with a tree-sitter grammar; a few that lack a usable
 grammar use a regex extractor instead, and the single-file web component formats
 extract their script block and delegate to the JavaScript/TypeScript extractor.
@@ -221,7 +221,7 @@ crate plus a regex recovery pass. Object nodes for `CREATE TABLE` / `VIEW` /
 `indexes`, `protected_by` (RLS), and `grants`; tables carry `rls_enabled` /
 `rls_forced` state. Application code that runs SQL is linked to the tables it
 touches (`queries` / `writes_to` / `calls_proc`). This SQL-aware graph powers the
-[SQL Auditing](SQL-Auditing) rules (`codegraph sql audit` / `advise`).
+[SQL Auditing](SQL-Auditing) rules (`synaptic sql audit` / `advise`).
 
 ## Regex-based languages
 

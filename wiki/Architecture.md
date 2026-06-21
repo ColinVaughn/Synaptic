@@ -1,6 +1,6 @@
 # Architecture
 
-CodeGraph is a Rust workspace: **22 library crates** under `crates/*` plus the `codegraph`
+Synaptic is a Rust workspace: **22 library crates** under `crates/*` plus the `synaptic`
 CLI under `bin/`. The workspace uses edition 2021 and a pinned Rust 1.95 toolchain, with
 dependencies centralized in the root `Cargo.toml`.
 
@@ -34,29 +34,29 @@ and [MCP Server](MCP-Server).
 
 | Crate | Responsibility |
 |---|---|
-| `codegraph-core` | The shared data contract: `NodeId`, `FileType`, `Confidence`, `Node`, `Edge`, `Hyperedge`, the `graph.json` node-link DTO, id generation, and schema validation |
-| `codegraph-detect` | File discovery, classification, ignore handling (`.codegraphignore` / `.gitignore`), manifest building, and sensitive-file detection |
-| `codegraph-extract` | Tree-sitter (and regex) extractors that turn source files into core nodes/edges; languages gated behind `lang-*` features; per-file AST cache |
-| `codegraph-graph` | Graph assembly: build, symbol resolution, dedup (MinHash/LSH), clustering and community detection, betweenness, analysis |
-| `codegraph-semantic` | The LLM semantic pass: documents and papers to concept nodes, plus the optional dedup tiebreaker |
-| `codegraph-llm` | Pluggable LLM client layer: provider registry with env auto-detect, response cache, JSON repair, token-budget chunking, adaptive retry |
-| `codegraph-query` | Query (IDF-scored subgraph retrieval), shortest path, node explanation, and reverse impact |
-| `codegraph-output` | Output writers: `graph.json`, HTML viewers, SVG, GraphML, Cypher, DOT, Mermaid call-flow, D3 tree, Obsidian, wiki, and live database push |
-| `codegraph-report` | The `GRAPH_REPORT.md` generator |
-| `codegraph-ingest` | External-source ingestion: URL (SSRF-guarded), MCP config, Cargo, Postgres, SCIP, office, media |
-| `codegraph-server` | The MCP server (read-only graph and PR tools) over stdio and HTTP, plus a small REST surface |
-| `codegraph-prs` | Graph-aware PR dashboard: classification, CI rollup, blast radius, conflict grouping |
-| `codegraph-incremental` | Changed-files rebuild engine plus git integration (hooks, merge driver, watch, concurrency lock) |
-| `codegraph-workspace` | Multi-repo / monorepo federation: member discovery, namespacing, cross-repo resolution, global store, `merge-graphs` |
-| `codegraph-skillgen` | Generates and installs the host-assistant integration: the Claude skill file + `.claude/settings.json` hooks, the always-on instruction blocks (`AGENTS.md`/`GEMINI.md`/etc.), and the Codex MCP server + `SessionStart` hook config (project `.codex/` or global `~/.codex/`) |
-| `codegraph-cgql` | The CGQL query engine: a small Cypher-inspired language over the graph (kind/visibility/loc/fan-in-out, variable-length paths, `count(...)`), used by `codegraph search` and the `structural_search` tool |
-| `codegraph-history` | Time-travel diff: builds the graph at a git revision in a throwaway worktree (cached per commit) and diffs two revisions (`codegraph diff`, `time_travel_diff`) |
-| `codegraph-refactor` | Safe-refactor plans (rename/move/extract) for an agent to apply, plus post-edit graph-invariant verification |
-| `codegraph-predict` | Change forecasting: blast radius, at-risk tests, public-API risk, change-risk score, co-change, and the analytic edit forecast (`codegraph predict`) |
-| `codegraph-sandbox` | Speculative execution: apply a change in a throwaway worktree and run the at-risk tests + a build/type-check (`codegraph speculate`) |
-| `codegraph-eval` | Forecast evaluation: the prediction ledger and the replay calibration harness (`codegraph eval replay`) |
-| `codegraph-sqlaudit` | SQL performance & security auditor: a rule engine over a SQL-aware graph (columns, indexes, RLS policies, grants, code-to-SQL edges) powering `codegraph sql audit`/`advise` and the `audit_sql` / `advise_sql` MCP tools |
-| `bin/codegraph` | The CLI that wires the crates into commands |
+| `synaptic-core` | The shared data contract: `NodeId`, `FileType`, `Confidence`, `Node`, `Edge`, `Hyperedge`, the `graph.json` node-link DTO, id generation, and schema validation |
+| `synaptic-detect` | File discovery, classification, ignore handling (`.synapticignore` / `.gitignore`), manifest building, and sensitive-file detection |
+| `synaptic-extract` | Tree-sitter (and regex) extractors that turn source files into core nodes/edges; languages gated behind `lang-*` features; per-file AST cache |
+| `synaptic-graph` | Graph assembly: build, symbol resolution, dedup (MinHash/LSH), clustering and community detection, betweenness, analysis |
+| `synaptic-semantic` | The LLM semantic pass: documents and papers to concept nodes, plus the optional dedup tiebreaker |
+| `synaptic-llm` | Pluggable LLM client layer: provider registry with env auto-detect, response cache, JSON repair, token-budget chunking, adaptive retry |
+| `synaptic-query` | Query (IDF-scored subgraph retrieval), shortest path, node explanation, and reverse impact |
+| `synaptic-output` | Output writers: `graph.json`, HTML viewers, SVG, GraphML, Cypher, DOT, Mermaid call-flow, D3 tree, Obsidian, wiki, and live database push |
+| `synaptic-report` | The `GRAPH_REPORT.md` generator |
+| `synaptic-ingest` | External-source ingestion: URL (SSRF-guarded), MCP config, Cargo, Postgres, SCIP, office, media |
+| `synaptic-server` | The MCP server (read-only graph and PR tools) over stdio and HTTP, plus a small REST surface |
+| `synaptic-prs` | Graph-aware PR dashboard: classification, CI rollup, blast radius, conflict grouping |
+| `synaptic-incremental` | Changed-files rebuild engine plus git integration (hooks, merge driver, watch, concurrency lock) |
+| `synaptic-workspace` | Multi-repo / monorepo federation: member discovery, namespacing, cross-repo resolution, global store, `merge-graphs` |
+| `synaptic-skillgen` | Generates and installs the host-assistant integration: the Claude skill file + `.claude/settings.json` hooks, the always-on instruction blocks (`AGENTS.md`/`GEMINI.md`/etc.), and the Codex MCP server + `SessionStart` hook config (project `.codex/` or global `~/.codex/`) |
+| `synaptic-synql` | The SYNQL query engine: a small Cypher-inspired language over the graph (kind/visibility/loc/fan-in-out, variable-length paths, `count(...)`), used by `synaptic search` and the `structural_search` tool |
+| `synaptic-history` | Time-travel diff: builds the graph at a git revision in a throwaway worktree (cached per commit) and diffs two revisions (`synaptic diff`, `time_travel_diff`) |
+| `synaptic-refactor` | Safe-refactor plans (rename/move/extract) for an agent to apply, plus post-edit graph-invariant verification |
+| `synaptic-predict` | Change forecasting: blast radius, at-risk tests, public-API risk, change-risk score, co-change, and the analytic edit forecast (`synaptic predict`) |
+| `synaptic-sandbox` | Speculative execution: apply a change in a throwaway worktree and run the at-risk tests + a build/type-check (`synaptic speculate`) |
+| `synaptic-eval` | Forecast evaluation: the prediction ledger and the replay calibration harness (`synaptic eval replay`) |
+| `synaptic-sqlaudit` | SQL performance & security auditor: a rule engine over a SQL-aware graph (columns, indexes, RLS policies, grants, code-to-SQL edges) powering `synaptic sql audit`/`advise` and the `audit_sql` / `advise_sql` MCP tools |
+| `bin/synaptic` | The CLI that wires the crates into commands |
 
 ## Data model
 

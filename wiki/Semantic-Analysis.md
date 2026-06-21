@@ -1,9 +1,9 @@
 # Semantic Analysis
 
-The semantic pass enriches the graph with LLM-derived concepts and resolves ambiguous duplicates that the deterministic pipeline cannot. It is opt-in via `codegraph extract --semantic`, needs an LLM backend API key, and makes paid API calls (except for local/subscription backends).
+The semantic pass enriches the graph with LLM-derived concepts and resolves ambiguous duplicates that the deterministic pipeline cannot. It is opt-in via `synaptic extract --semantic`, needs an LLM backend API key, and makes paid API calls (except for local/subscription backends).
 
 ```
-codegraph extract . --semantic
+synaptic extract . --semantic
 ```
 
 When `--semantic` is set but no backend key is detected, or backend init fails, the pass is skipped with a note and extraction continues normally. The pass is never run by `update`, `watch`, or the git hooks; those preserve existing semantic nodes but do not generate new ones (see [Incremental-Updates]).
@@ -29,7 +29,7 @@ LLM usage (extraction pass): 41200 input + 5300 output tokens (~$0.2031 estimate
 
 ## Supported LLM backends
 
-CodeGraph selects one backend from the environment. Backends fall into three groups:
+Synaptic selects one backend from the environment. Backends fall into three groups:
 
 - OpenAI-compatible Chat Completions: OpenAI, Gemini (its OpenAI-compat layer), Kimi (Moonshot), DeepSeek, Azure OpenAI, and Ollama (local).
 - Native Anthropic Messages API (`POST /v1/messages`).
@@ -38,7 +38,7 @@ CodeGraph selects one backend from the environment. Backends fall into three gro
 
 ### Selection and priority
 
-The backend is resolved from environment variables in this priority order: gemini, kimi, claude, openai, deepseek, azure, bedrock, ollama. The first one whose credentials are present wins. Set `CODEGRAPH_BACKEND` to force a specific backend by name (`gemini`, `kimi`, `claude`, `openai`, `deepseek`, `azure`, `bedrock`, `ollama`, `claude-cli`). `claude-cli` is never auto-detected; `CODEGRAPH_BACKEND=claude-cli` is the only way to select it.
+The backend is resolved from environment variables in this priority order: gemini, kimi, claude, openai, deepseek, azure, bedrock, ollama. The first one whose credentials are present wins. Set `SYNAPTIC_BACKEND` to force a specific backend by name (`gemini`, `kimi`, `claude`, `openai`, `deepseek`, `azure`, `bedrock`, `ollama`, `claude-cli`). `claude-cli` is never auto-detected; `SYNAPTIC_BACKEND=claude-cli` is the only way to select it.
 
 ### Backends and their environment variables
 
@@ -59,12 +59,12 @@ Notes:
 - Azure requires both a key and an endpoint. It addresses the model as a deployment path with an `api-key` header; `AZURE_OPENAI_DEPLOYMENT` is the deployment name, and `AZURE_OPENAI_API_VERSION` overrides the REST API version (default `2024-12-01-preview`).
 - Ollama is local and keyless; setting `OLLAMA_BASE_URL` opts it in. It runs serially.
 - Bedrock uses AWS environment credentials only (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`, and `AWS_REGION` / `AWS_DEFAULT_REGION`, default region `us-east-1`); AWS profile and instance-role resolution are not supported.
-- `CODEGRAPH_LLM_TEMPERATURE` overrides the request temperature for OpenAI-compatible backends; `none`/`omit`/`default` omits the parameter. OpenAI reasoning models (o1/o3/o4, gpt-5) always omit temperature automatically.
+- `SYNAPTIC_LLM_TEMPERATURE` overrides the request temperature for OpenAI-compatible backends; `none`/`omit`/`default` omits the parameter. OpenAI reasoning models (o1/o3/o4, gpt-5) always omit temperature automatically.
 - claude-cli routes through the locally-installed Claude Code CLI (`claude -p --output-format json`), so Pro/Max subscribers can run the pass on their plan.
 
 ## Response cache
 
-A semantic cache stores the extraction result on disk under `codegraph-out/cache/semantic`, keyed by the corpus content (and per-file by content + relative path). An unchanged corpus on a rebuild reuses the cached result and makes no API call. A cache hit reports zero tokens and zero cost.
+A semantic cache stores the extraction result on disk under `synaptic-out/cache/semantic`, keyed by the corpus content (and per-file by content + relative path). An unchanged corpus on a rebuild reuses the cached result and makes no API call. A cache hit reports zero tokens and zero cost.
 
 ## Cost awareness
 

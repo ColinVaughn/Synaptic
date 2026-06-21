@@ -1,10 +1,36 @@
 # Changelog
 
-All notable changes to CodeGraph are documented here. The format is based on
+All notable changes to Synaptic are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+> Entries at or before 0.2.12 were released under the project's former name,
+> **CodeGraph**, and reference the old `codegraph` command and crate names. They
+> are preserved verbatim as historical record.
+
 ## [Unreleased]
+
+## [0.3.0] - 2026-06-21
+
+### Changed
+- **Project renamed from CodeGraph to Synaptic.** This is a full rebrand and a
+  breaking change for existing setups:
+  - **Binary:** the CLI is now `synaptic`, with `syn` as a built-in short alias
+    (both ship from the same crate). The old `codegraph` binary no longer exists.
+  - **Crates:** every `codegraph-*` workspace crate is renamed `synaptic-*`.
+  - **Query language:** CGQL is now **SynQL** (Synaptic Query Language); saved
+    queries use the `.synql` extension under `synaptic-out/synql/` (was
+    `codegraph-out/cgql/`).
+  - **Environment variables:** all `CODEGRAPH_*` variables are now `SYNAPTIC_*`
+    (e.g. `SYNAPTIC_API_KEY`, `SYNAPTIC_BACKEND`, `SYNAPTIC_QUERY_LOG`). There is
+    no fallback to the old names.
+  - **Files & dirs:** the default output directory is `synaptic-out` (was
+    `codegraph-out`); the ignore file is `.synapticignore` (was `.codegraphignore`).
+  - **MCP server:** `serverInfo.name` is now `synaptic`; generated assistant
+    skills/configs invoke the `synaptic` binary.
+- Migration: rebuild your graph (`synaptic extract .`), rename any committed
+  `codegraph-out/` and `.codegraphignore` to their `synaptic` equivalents, and
+  update env vars and assistant integrations to the new names.
 
 ## [0.2.12] - 2026-06-20
 

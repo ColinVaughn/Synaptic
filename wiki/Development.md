@@ -25,7 +25,7 @@ cargo test --workspace --all-features
 A release build of just the binary:
 
 ```sh
-cargo build --release --locked -p codegraph
+cargo build --release --locked -p synaptic
 ```
 
 ## Per-language testing
@@ -34,7 +34,7 @@ Every language extractor can be built and tested in isolation so a grammar bump 
 silently drops nodes or edges fails on its own:
 
 ```sh
-cargo test -p codegraph-extract --no-default-features --features lang-rust
+cargo test -p synaptic-extract --no-default-features --features lang-rust
 ```
 
 CI runs this across a matrix of grammar-backed languages. See [Languages](Languages).
@@ -54,8 +54,8 @@ packages each with the README/LICENSE/CHANGELOG, and publishes a GitHub Release.
 
 ## Benchmarks
 
-Several crates ship Criterion benchmarks (for example `codegraph-extract`,
-`codegraph-detect`, `codegraph-output`). Run them with:
+Several crates ship Criterion benchmarks (for example `synaptic-extract`,
+`synaptic-detect`, `synaptic-output`). Run them with:
 
 ```sh
 cargo bench
@@ -65,23 +65,23 @@ cargo bench
 
 ```
 crates/
-  codegraph-core/         data model + graph.json DTO + validation
-  codegraph-detect/       discovery, classification, ignore rules
-  codegraph-extract/      tree-sitter + regex extractors (lang-* features)
-  codegraph-graph/        build, dedup, clustering, analysis
-  codegraph-semantic/     LLM semantic pass
-  codegraph-llm/          LLM client + provider registry
-  codegraph-query/        query / path / explain / affected
-  codegraph-output/       graph.json + viewers + exports
-  codegraph-report/       GRAPH_REPORT.md
-  codegraph-ingest/       external-source ingestion
-  codegraph-server/       MCP server + REST
-  codegraph-prs/          PR dashboard
-  codegraph-incremental/  incremental rebuild, watch, hooks
-  codegraph-workspace/    multi-repo federation
-  codegraph-skillgen/     assistant skill + hooks generation
+  synaptic-core/         data model + graph.json DTO + validation
+  synaptic-detect/       discovery, classification, ignore rules
+  synaptic-extract/      tree-sitter + regex extractors (lang-* features)
+  synaptic-graph/        build, dedup, clustering, analysis
+  synaptic-semantic/     LLM semantic pass
+  synaptic-llm/          LLM client + provider registry
+  synaptic-query/        query / path / explain / affected
+  synaptic-output/       graph.json + viewers + exports
+  synaptic-report/       GRAPH_REPORT.md
+  synaptic-ingest/       external-source ingestion
+  synaptic-server/       MCP server + REST
+  synaptic-prs/          PR dashboard
+  synaptic-incremental/  incremental rebuild, watch, hooks
+  synaptic-workspace/    multi-repo federation
+  synaptic-skillgen/     assistant skill + hooks generation
 bin/
-  codegraph/              the CLI
+  synaptic/              the CLI
 ```
 
 See [Architecture](Architecture) for what each crate does and how the pipeline fits together.
