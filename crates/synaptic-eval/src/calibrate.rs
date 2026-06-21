@@ -8,7 +8,7 @@
 //! predicted co-change, so this turns "is the predictor's confidence meaningful"
 //! into a measured number rather than a claim.
 
-/// One (predicted probability in [0,1], observed boolean outcome) sample.
+/// One (predicted probability in \[0,1\], observed boolean outcome) sample.
 #[derive(Debug, Clone, Copy)]
 pub struct Sample {
     pub confidence: f64,
@@ -60,7 +60,7 @@ pub fn brier(samples: &[Sample]) -> f64 {
     sum / samples.len() as f64
 }
 
-/// Bin samples into `n_bins` equal-width buckets over [0,1] and compute, per
+/// Bin samples into `n_bins` equal-width buckets over \[0,1\] and compute, per
 /// bucket, the mean confidence and the observed hit rate.
 pub fn reliability(samples: &[Sample], n_bins: usize) -> CalibrationReport {
     let n_bins = n_bins.max(1);

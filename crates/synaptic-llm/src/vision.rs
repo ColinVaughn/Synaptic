@@ -157,7 +157,7 @@ pub fn strip_pixels(refs: &[ImageRef]) -> Vec<ImageRef> {
 }
 
 /// Whether `backend`'s configured model can see images. Ollama is the opt-in
-/// special case ([`OLLAMA_VISION_ENV`]=`1`); everything else uses the registry
+/// special case (`OLLAMA_VISION_ENV`=`1`); everything else uses the registry
 /// `vision` flag.
 pub fn backend_supports_vision(backend: &str, get: &impl Fn(&str) -> Option<String>) -> bool {
     if backend == "ollama" {

@@ -12,7 +12,7 @@
 //! Project-reference targets use the **root-relative resolved path** as their id
 //! (`file_node_id`), so a reference lands on the referenced project's own file
 //! node when it is in the corpus. Synaptic keys file nodes by their portable
-//! relative ids (see [`crate::paths::resolve_relative_path`]).
+//! relative ids (see `crate::paths::resolve_relative_path`).
 
 #[cfg(feature = "lang-dotnet")]
 use std::collections::{HashMap, HashSet};

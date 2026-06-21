@@ -2,7 +2,7 @@
 //! file on a rebuild skips tree-sitter parsing. The cached value is the
 //! serialized [`ExtractionResult`] under `<cache_dir>/ast/v{version}/<key>.<ext>`,
 //! where `<ext>` is `mp` (MessagePack, the default `cache-binary` feature) or
-//! `json` when that feature is off -- see [`CACHE_EXT`].
+//! `json` when that feature is off -- see `CACHE_EXT`.
 //! The path is part of the key because node ids and scoping
 //! embed it, so two files with identical bytes at different paths must not share
 //! an entry. Entries are namespaced by [`AST_CACHE_VERSION`] so a release *or* an

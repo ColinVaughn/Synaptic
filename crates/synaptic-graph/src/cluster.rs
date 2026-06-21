@@ -1,6 +1,6 @@
 //! Community clustering: the public `cluster()` entry point plus `cohesion_score`,
 //! `remap_communities_to_previous`, and `apply_communities`. Wraps the in-house
-//! Louvain/Leiden algorithms in [`crate::community`] with
+//! Louvain/Leiden algorithms in `crate::community` with
 //! post-processing (hub exclusion, splitting, deterministic renumber).
 
 use std::cmp::Reverse;

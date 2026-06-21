@@ -25,7 +25,7 @@ struct Session {
     tx: broadcast::Sender<()>,
 }
 
-/// Thread-safe map of session id → [`Session`].
+/// Thread-safe map of session id → `Session`.
 #[derive(Default)]
 pub struct SessionStore {
     inner: Mutex<HashMap<String, Session>>,
@@ -52,7 +52,7 @@ impl SessionStore {
         id
     }
 
-    /// [`create_at`] using the real clock.
+    /// [`create_at`](Self::create_at) using the real clock.
     pub fn create(&self) -> String {
         self.create_at(Instant::now())
     }
@@ -82,7 +82,7 @@ impl SessionStore {
         }
     }
 
-    /// [`touch_at`] using the real clock.
+    /// [`touch_at`](Self::touch_at) using the real clock.
     pub fn touch(&self, id: &str) -> bool {
         self.touch_at(id, Instant::now())
     }

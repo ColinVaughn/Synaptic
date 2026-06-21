@@ -19,7 +19,7 @@ pub struct RenameOptions {
     pub id: Option<String>,
     /// Disambiguate by file-path substring.
     pub file: Option<String>,
-    /// Minimum per-site confidence score [0,1] to land in `edits` (else `review`).
+    /// Minimum per-site confidence score \[0,1\] to land in `edits` (else `review`).
     pub min_confidence: f32,
     /// Max reverse-reachability depth for the blast radius.
     pub depth: usize,
