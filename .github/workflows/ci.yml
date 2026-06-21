@@ -1,16 +1,27 @@
 name: CI
 on: [push, pull_request]
 
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref so a quick succession of pushes to a PR
+# doesn't pile up redundant matrix runs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   test:
     strategy:
@@ -18,10 +29,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.95.0
-      - run: cargo test --workspace --all-features
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features --locked
 
   # End-to-end MCP protocol conformance against the real `synaptic serve`
   # binary over stdio (handshake + structured tool calls), on every OS. Isolates
@@ -33,10 +46,25 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.95.0
-      - run: cargo test -p synaptic --test mcp_e2e --all-features
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p synaptic --test mcp_e2e --all-features --locked
+
+  # Catch broken intra-doc links and doc-comment examples that the test/lint jobs
+  # don't surface. Does not gate on the dependency graph (--no-deps).
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --no-deps --all-features --locked
 
   # One job per language grammar: each `lang-*` feature is built and tested in
   # isolation, so a grammar bump that silently drops nodes/edges (or breaks a
@@ -81,7 +109,9 @@ jobs:
           - svelte
           - astro
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.95.0
-      - run: cargo test -p synaptic-extract --no-default-features --features lang-${{ matrix.lang }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p synaptic-extract --no-default-features --features lang-${{ matrix.lang }} --locked

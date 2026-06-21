@@ -1,0 +1,31 @@
+name: Dependency review
+
+# Gate pull requests on newly introduced dependencies: blocks the PR if it adds a
+# dependency with a known high-severity (or worse) advisory or a disallowed
+# license, before the dep ever lands on master. Complements cargo-audit (which
+# catches advisories already in the tree) by catching them at PR time. Free on
+# public repos via the GitHub dependency graph.
+on: pull_request
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          # Post a summary comment only when the check fails, to avoid noise on
+          # clean PRs.
+          comment-summary-in-pr: on-failure

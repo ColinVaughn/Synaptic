@@ -1,0 +1,22 @@
+version: 2
+updates:
+  # Cargo dependencies across the workspace. Grouped into a single weekly PR so
+  # routine bumps don't fan out into dozens of separate PRs.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo:
+        patterns: ["*"]
+
+  # Keep the pinned GitHub Actions (checkout, rust-cache, install-action, etc.)
+  # current; this is also how the @vN pins stay fresh and patched safely.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
