@@ -3,7 +3,7 @@
 //! questions and the no-community surprise fallback. Equivalent to the standard
 //! normalized betweenness / edge-betweenness centrality measures.
 //!
-//! For graphs over [`SAMPLE_THRESHOLD`] nodes, node betweenness is
+//! For graphs over `SAMPLE_THRESHOLD` nodes, node betweenness is
 //! approximated from the first `min(SAMPLE_K, n)` source nodes (sorted-id order)
 //! and rescaled by `n/k` — deterministic `k`-sampling without RNG
 //! (the analysis layer forbids RNG for reproducibility).

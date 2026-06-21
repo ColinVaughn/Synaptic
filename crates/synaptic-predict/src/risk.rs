@@ -46,7 +46,7 @@ struct Feature {
 }
 
 /// Score a change from its risk factors. Each feature saturates at a cap, is
-/// weighted, and the weighted sum (in [0,1]) becomes a 0..100 score with low /
+/// weighted, and the weighted sum (in \[0,1\]) becomes a 0..100 score with low /
 /// medium / high bands. `factors` lists the features that contributed most.
 pub fn assess_risk(f: &RiskFactors) -> RiskScore {
     // Caps are where a feature stops adding risk; weights sum to 1.0. Diffusion

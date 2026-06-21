@@ -1,5 +1,5 @@
 //! URL ingestion. Fetches a URL through the SSRF-guarded
-//! [`safe_fetch`](crate::security::safe_fetch) and writes a file into the target
+//! [`safe_fetch`] and writes a file into the target
 //! dir for the normal extraction pass to pick up ("shape A").
 //!
 //! Webpage/arXiv/tweet/GitHub → HTML scraped to markdown with YAML frontmatter;

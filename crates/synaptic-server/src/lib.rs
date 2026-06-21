@@ -429,7 +429,7 @@ impl Server {
     }
 
     /// `query_graph` text render. The MCP `tools/call` path renders text and
-    /// structured output from a single [`query_filtered`] retrieval; this stays
+    /// structured output from a single `query_filtered` retrieval; this stays
     /// for the REST surface and direct callers.
     pub fn tool_query_graph(
         &self,
@@ -563,7 +563,7 @@ impl Server {
 
     /// `get_source` — the actual source lines for a symbol. Resolves the node,
     /// reads its file under the source-root jail, and returns a window starting
-    /// at the node's recorded line (`source_location` = "L<n>"): it stops at the
+    /// at the node's recorded line (`source_location` = `"L<n>"`): it stops at the
     /// symbol's end line when the node carries a span (bounded by `context_lines`),
     /// otherwise returns `context_lines` lines from the start.
     pub fn tool_get_source(&self, label: &str, context_lines: usize) -> String {
@@ -1635,7 +1635,7 @@ impl Server {
 
     /// Whether the loaded graph.json changed on disk since load (cheap, read-only).
     /// `false` when there's no path or the file vanished (serve-stale-on-error),
-    /// matching [`maybe_reload`](Server::maybe_reload)'s own decision.
+    /// matching `maybe_reload`'s own decision.
     pub fn is_stale(&self) -> bool {
         let Some(path) = &self.graph_path else {
             return false;
