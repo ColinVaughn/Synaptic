@@ -10,14 +10,35 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-21
+
 ### Added
-- `self-update` command: opt-in self-replacement from the latest GitHub release,
-  with SHA-256 checksum verification and a confirmation prompt before the binary
-  is swapped (`--yes` to skip, `--check` to report availability only). An opt-in
-  background check (`self-update --enable`) prints a one-line "update available"
-  notice at most once per day; it is off by default, writes to
-  `~/.synaptic/update.toml`, and can be force-disabled with
-  `SYNAPTIC_UPDATE_CHECK=0`. Release archives now publish a `.sha256` sidecar.
+- **Self-update.** A `self-update` command updates the binary in place from the
+  latest GitHub release: it downloads the prebuilt archive for your platform,
+  verifies its SHA-256 checksum, and prompts before swapping the running binary
+  (and its `syn` alias). `--yes` skips the prompt, `--check` only reports
+  availability. An **opt-in** background check (`self-update --enable`) prints a
+  one-line "update available" notice at most once per day; it is off by default,
+  writes to `~/.synaptic/update.toml`, honors `GITHUB_TOKEN` for the API rate
+  limit, and can be force-disabled with `SYNAPTIC_UPDATE_CHECK=0`. Release
+  archives now publish a `.sha256` sidecar for verification. See the
+  [Updating](https://github.com/ColinVaughn/Synaptic/wiki/Updating) wiki page.
+- **Auto-freshen for `serve`.** The MCP server now detects files added, changed,
+  or removed since the last extraction and runs an incremental rebuild before
+  answering a query, so files an agent writes mid-session are queryable without a
+  separate `watch` or `update`. The staleness check is debounced (so a burst of
+  queries walks the tree once) and runs on both the stdio and HTTP transports.
+  On by default; opt out with `SYNAPTIC_SERVE_AUTOFRESH=0`, tune the debounce
+  with `SYNAPTIC_SERVE_AUTOFRESH_DEBOUNCE_MS` (default 1000), and cap the catch-up
+  with `SYNAPTIC_SERVE_AUTOFRESH_MAX_FILES` (default 500; 0 = unlimited, skipped
+  above the cap so a branch switch does not block a query on a near-full rebuild).
+
+### Changed
+- Incremental rebuilds (`update`, `watch`, and the new `serve` auto-freshen) now
+  allow a bounded graph shrink, so symbol removals (for example deleting a
+  method) propagate. The strict shrink guard still applies to full rebuilds.
+- `extract` and `update` persist a build-provenance manifest (reusing their
+  existing file scan) so `serve` can detect what changed since the last build.
 
 ## [0.3.0] - 2026-06-21
 
