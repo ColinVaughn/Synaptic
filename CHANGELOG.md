@@ -10,6 +10,15 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- `self-update` command: opt-in self-replacement from the latest GitHub release,
+  with SHA-256 checksum verification and a confirmation prompt before the binary
+  is swapped (`--yes` to skip, `--check` to report availability only). An opt-in
+  background check (`self-update --enable`) prints a one-line "update available"
+  notice at most once per day; it is off by default, writes to
+  `~/.synaptic/update.toml`, and can be force-disabled with
+  `SYNAPTIC_UPDATE_CHECK=0`. Release archives now publish a `.sha256` sidecar.
+
 ## [0.3.0] - 2026-06-21
 
 ### Changed

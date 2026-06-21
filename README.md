@@ -249,6 +249,13 @@ Neo4j/FalkorDB export), and `office` / `gws` / `media` (spreadsheet / Google-Wor
 audio-video ingest), e.g. `cargo install --path bin/synaptic --features pg,push`. See
 [Installation](https://github.com/ColinVaughn/Synaptic/wiki/Installation) and [Configuration](https://github.com/ColinVaughn/Synaptic/wiki/Configuration).
 
+Once installed, update in place with `synaptic self-update` (verifies a SHA-256
+checksum and prompts before replacing the binary). Opt in to a background
+"update available" notice with `synaptic self-update --enable` — off by default,
+runs at most once a day, and never blocks normal commands. `cargo install` /
+source builds can self-update too, but the swap installs the default-feature
+prebuilt binary.
+
 ## Quickstart
 
 ```sh
@@ -311,6 +318,7 @@ A code-only corpus runs fully offline; the optional LLM semantic pass over docs 
 | `hook <action>` | Manage git hooks + the `graph.json` merge driver |
 | `install` / `uninstall [platform]` | Install the Synaptic skill for a host assistant |
 | `cache <action>` | Maintain the on-disk extraction cache |
+| `self-update` | Update the binary from the latest GitHub release (opt-in). Flags: `--enable`/`--disable` (background notice), `--check`, `--yes` |
 
 The full reference with every flag is in [Commands](https://github.com/ColinVaughn/Synaptic/wiki/Commands). Run
 `synaptic <command> --help` for the flag list at the terminal.

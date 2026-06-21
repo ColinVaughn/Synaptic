@@ -47,15 +47,19 @@ jobs:
           cp README.md LICENSE CHANGELOG.md "$dist/"
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a "${dist}.zip" "$dist"
+            certutil -hashfile "${dist}.zip" SHA256 | sed -n '2p' | tr -d ' \r' > "${dist}.zip.sha256"
           else
             tar czf "${dist}.tar.gz" "$dist"
+            shasum -a 256 "${dist}.tar.gz" | awk '{print $1}' > "${dist}.tar.gz.sha256"
           fi
       - uses: actions/upload-artifact@v7
         with:
           name: synaptic-${{ matrix.target }}
           path: |
             synaptic-${{ matrix.target }}.tar.gz
+            synaptic-${{ matrix.target }}.tar.gz.sha256
             synaptic-${{ matrix.target }}.zip
+            synaptic-${{ matrix.target }}.zip.sha256
           if-no-files-found: ignore
 
   release:
