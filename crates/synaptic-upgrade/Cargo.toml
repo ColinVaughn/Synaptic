@@ -1,0 +1,26 @@
+[package]
+# Crate name avoids the substrings "update"/"setup"/"install"/"patch": the
+# Windows installer-detection heuristic force-elevates (UAC) any executable whose
+# file name contains them, which would break this crate's own test binary. The
+# user-facing command is still `synaptic self-update`.
+name = "synaptic-upgrade"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Opt-in self-update for the Synaptic CLI (GitHub Releases)."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+semver = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
+zip = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+self-replace = { workspace = true }
+tempfile = { workspace = true }
