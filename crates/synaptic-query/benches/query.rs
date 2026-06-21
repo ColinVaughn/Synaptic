@@ -11,7 +11,8 @@
 
 use std::time::Duration;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
 use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
 use synaptic_graph::KnowledgeGraph;
 use synaptic_query::{query_modal, QueryIndex, TraversalMode};

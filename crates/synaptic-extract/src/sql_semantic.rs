@@ -271,15 +271,16 @@ fn enrich_columns(sql: &str, result: &mut ExtractionResult) {
             .constraints
             .iter()
             .filter_map(|c| {
-                if let TableConstraint::PrimaryKey { columns, .. } = c {
-                    Some(columns)
+                if let TableConstraint::PrimaryKey(pk) = c {
+                    Some(&pk.columns)
                 } else {
                     None
                 }
             })
             .flatten()
-            .map(|ident| {
-                ident
+            .map(|ic| {
+                ic.column
+                    .expr
                     .to_string()
                     .trim_matches(|c| c == '"' || c == '`' || c == '[' || c == ']')
                     .to_lowercase()
@@ -289,14 +290,9 @@ fn enrich_columns(sql: &str, result: &mut ExtractionResult) {
         let mut fk_constraint_cols: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         for c in &ct.constraints {
-            if let TableConstraint::ForeignKey {
-                columns,
-                foreign_table,
-                ..
-            } = c
-            {
-                let target = object_name(foreign_table).to_lowercase();
-                for col in columns {
+            if let TableConstraint::ForeignKey(fk) = c {
+                let target = object_name(&fk.foreign_table).to_lowercase();
+                for col in &fk.columns {
                     let key = col
                         .to_string()
                         .trim_matches(|ch| ch == '"' || ch == '`' || ch == '[' || ch == ']')
@@ -312,15 +308,10 @@ fn enrich_columns(sql: &str, result: &mut ExtractionResult) {
                 .options
                 .iter()
                 .any(|o| matches!(o.option, ColumnOption::NotNull));
-            let inline_pk = col.options.iter().any(|o| {
-                matches!(
-                    o.option,
-                    ColumnOption::Unique {
-                        is_primary: true,
-                        ..
-                    }
-                )
-            });
+            let inline_pk = col
+                .options
+                .iter()
+                .any(|o| matches!(o.option, ColumnOption::PrimaryKey(_)));
             let is_pk = inline_pk || pk_constraint_cols.contains(&name_lower);
             let mut extra = Map::new();
             extra.insert("_origin".into(), json!("ast"));
@@ -333,8 +324,8 @@ fn enrich_columns(sql: &str, result: &mut ExtractionResult) {
                 .options
                 .iter()
                 .find_map(|o| match &o.option {
-                    ColumnOption::ForeignKey { foreign_table, .. } => {
-                        Some(object_name(foreign_table).to_lowercase())
+                    ColumnOption::ForeignKey(fk) => {
+                        Some(object_name(&fk.foreign_table).to_lowercase())
                     }
                     _ => None,
                 })
@@ -701,7 +692,7 @@ fn enrich_indexes(sql: &str, result: &mut ExtractionResult) {
         add_node(result, idx_id.clone(), &idx_label, NodeKind::Index, extra);
         add_edge(result, table_id, idx_id.clone(), "has_index", "index");
         for c in &ci.columns {
-            let col_lower = index_column_name(&c.expr);
+            let col_lower = index_column_name(&c.column.expr);
             if col_lower.is_empty() {
                 continue;
             }

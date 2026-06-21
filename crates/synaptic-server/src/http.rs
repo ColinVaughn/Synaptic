@@ -124,7 +124,7 @@ fn router(state: HttpState) -> Router {
         // REST surface (C3d): read-only JSON wrappers over the engine.
         .route("/api/stats", get(rest_stats))
         .route("/api/god-nodes", get(rest_god_nodes))
-        .route("/api/node/:label", get(rest_node))
+        .route("/api/node/{label}", get(rest_node))
         .route("/api/query", get(rest_query))
         .route("/api/repos", get(rest_repos))
         .with_state(state)

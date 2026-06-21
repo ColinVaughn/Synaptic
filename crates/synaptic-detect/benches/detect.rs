@@ -11,8 +11,9 @@
 
 use std::path::{Path, PathBuf};
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use ignore::WalkBuilder;
+use std::hint::black_box;
 use synaptic_detect::{detect, noise::is_noise_dir};
 
 /// The workspace `crates/` dir (this crate is `crates/synaptic-detect`).

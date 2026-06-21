@@ -119,7 +119,7 @@ impl SessionStore {
 /// nanosecond-derived id only if the RNG is somehow unavailable.
 fn random_id() -> String {
     let mut buf = [0u8; 16];
-    if getrandom::getrandom(&mut buf).is_err() {
+    if getrandom::fill(&mut buf).is_err() {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())

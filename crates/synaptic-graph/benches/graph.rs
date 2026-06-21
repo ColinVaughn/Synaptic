@@ -18,9 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 use synaptic_core::{Confidence, Edge, FileType, ImportRecord, Node, NodeId, RawCall};
 use synaptic_graph::{
     analyze, build_from_parts, cluster, deduplicate_entities, find_import_cycles, god_nodes,
