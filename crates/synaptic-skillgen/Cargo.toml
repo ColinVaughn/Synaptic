@@ -1,0 +1,14 @@
+[package]
+name = "synaptic-skillgen"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Generate + install the Synaptic 'skill' that drives a host AI assistant (per-platform markdown + always-on registration)."
+
+[dependencies]
+serde_json = { workspace = true }
+toml_edit = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

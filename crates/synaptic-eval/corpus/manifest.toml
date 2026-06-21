@@ -1,0 +1,31 @@
+# Registry of corpus fixtures scored by `synaptic eval corpus`. Each fixture is
+# a small, real, hand-labeled mini-repo; `family` groups them for pooled
+# per-language reporting.
+
+[[fixture]]
+dir = "systems-rust"
+family = "systems-rust"
+
+[[fixture]]
+dir = "scripting-python"
+family = "scripting-python"
+
+[[fixture]]
+dir = "web-ts"
+family = "web-ts"
+
+[[fixture]]
+dir = "oo-java"
+family = "oo-java"
+
+[[fixture]]
+dir = "systems-go"
+family = "systems-go"
+
+[[fixture]]
+dir = "deep-python"
+family = "scripting-python"
+
+[[fixture]]
+dir = "cross-lang-ts-rust"
+family = "cross-lang"

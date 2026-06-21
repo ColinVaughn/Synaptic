@@ -1,6 +1,6 @@
 # MCP Server
 
-`codegraph serve` exposes a loaded graph to an AI assistant over the Model
+`synaptic serve` exposes a loaded graph to an AI assistant over the Model
 Context Protocol. It speaks JSON-RPC 2.0 directly (no external MCP runtime
 dependency). The server is read-only over the graph; the PR and working-changes
 tools shell out to `gh`/`git` to read state but never write.
@@ -19,7 +19,7 @@ The `initialize` reply negotiates the protocol version: if the client requests
 one the server supports (`2025-11-25`, `2025-06-18`, `2025-03-26`, or
 `2024-11-05`) the server echoes it back, otherwise it returns its latest,
 `2025-11-25`. A client that sends no `protocolVersion` gets `2025-11-25`. Server
-info is `{ "name": "codegraph", "version": <crate version>, "description": <one-line summary> }`.
+info is `{ "name": "synaptic", "version": <crate version>, "description": <one-line summary> }`.
 
 Over HTTP, requests sent after initialization carry an `MCP-Protocol-Version`
 header. A present-but-unsupported value is rejected with `400 Bad Request`; an
@@ -46,19 +46,19 @@ edge confidence mean).
 ## Running the server
 
 ```
-codegraph serve [--graph <path>] [--http <addr>] [--api-key <key>] [--source-root <dir>] [--allow-exec]
+synaptic serve [--graph <path>] [--http <addr>] [--api-key <key>] [--source-root <dir>] [--allow-exec]
 ```
 
 - `--graph <path>` selects the `graph.json` to load. Default is the standard
-  output location (`codegraph-out/graph.json`). If the file is missing, serve
-  exits with an error pointing you to run `codegraph extract` first.
+  output location (`synaptic-out/graph.json`). If the file is missing, serve
+  exits with an error pointing you to run `synaptic extract` first.
 - No `--http`: serve over **stdio** (the default transport).
 - `--http <addr>`: serve over **HTTP** at `host:port` (for example
   `127.0.0.1:8765`).
 - `--api-key <key>`: require this key on HTTP requests. May also be set via the
-  `CODEGRAPH_API_KEY` environment variable (the flag takes precedence).
+  `SYNAPTIC_API_KEY` environment variable (the flag takes precedence).
 - `--source-root <dir>`: the trusted root for resolving a node's source file in
-  `get_source`. Default is the directory above `codegraph-out/` (the repo root);
+  `get_source`. Default is the directory above `synaptic-out/` (the repo root);
   it falls back to the current directory when that cannot be derived.
 - `--allow-exec`: expose the command-running `speculate` tool (off by default).
   This makes the server **no longer read-only** — `speculate` executes the
@@ -68,13 +68,13 @@ codegraph serve [--graph <path>] [--http <addr>] [--api-key <key>] [--source-roo
 ### stdio transport
 
 ```
-codegraph serve
+synaptic serve
 ```
 
 Newline-delimited JSON-RPC 2.0 on stdin/stdout: one request per line, one
 response line per request. Notifications (requests with no `id`) get no reply.
 Blank lines and unparseable lines are ignored. A status line is printed to
-stderr (`[codegraph] MCP server ready on stdio`) so it never pollutes the
+stderr (`[synaptic] MCP server ready on stdio`) so it never pollutes the
 JSON-RPC stream on stdout.
 
 This is the mode an assistant launches as a subprocess. See
@@ -82,17 +82,17 @@ This is the mode an assistant launches as a subprocess. See
 
 ### Registering with Codex
 
-`codegraph install codex` wires this stdio server into Codex automatically: a
-`[mcp_servers.codegraph]` entry in the project `.codex/config.toml` (Codex CLI),
-or a per-repo `[mcp_servers.codegraph-<repo>]` in the global `~/.codex/config.toml`
-with `codegraph install codex --global` (Codex desktop app, which only reads the
-global config). `codegraph` must be on your `PATH`. See
+`synaptic install codex` wires this stdio server into Codex automatically: a
+`[mcp_servers.synaptic]` entry in the project `.codex/config.toml` (Codex CLI),
+or a per-repo `[mcp_servers.synaptic-<repo>]` in the global `~/.codex/config.toml`
+with `synaptic install codex --global` (Codex desktop app, which only reads the
+global config). `synaptic` must be on your `PATH`. See
 [Assistant-Integration](Assistant-Integration#codex).
 
 ### HTTP transport
 
 ```
-codegraph serve --http 127.0.0.1:8765 --api-key s3cret
+synaptic serve --http 127.0.0.1:8765 --api-key s3cret
 ```
 
 Streamable-HTTP on the `/mcp` route:
@@ -107,7 +107,7 @@ Streamable-HTTP on the `/mcp` route:
 - `DELETE /mcp` -- terminates a session (204 if it existed, 404 if unknown, 400
   if no session id header).
 
-A startup line is printed to stderr: `[codegraph] MCP server on
+A startup line is printed to stderr: `[synaptic] MCP server on
 http://<addr>/mcp`.
 
 #### Sessions
@@ -125,7 +125,7 @@ A background reaper drops sessions idle longer than 1 hour (3600s).
 
 #### Authentication
 
-If `--api-key` (or `CODEGRAPH_API_KEY`) is set and non-blank, every request to
+If `--api-key` (or `SYNAPTIC_API_KEY`) is set and non-blank, every request to
 both `/mcp` and `/api/*` must supply it. A blank/absent key disables auth. The
 key may be supplied as either:
 
@@ -211,8 +211,8 @@ Returns a header (`Traversal: <mode> | Start: [<seeds>] | <n> nodes found`, plus
 `Recency:` line when `since` is used) followed by `NODE` lines (`[score]`, an
 optional `(changed)` marker, label, file type, source file) and `EDGE` lines
 (`source --relation--> target`), plus a `structuredContent` mirror (see below).
-When the `CODEGRAPH_QUERY_LOG` environment variable points to a path, each query
-is appended to it as JSONL (disable with `CODEGRAPH_QUERY_LOG_DISABLE=1`).
+When the `SYNAPTIC_QUERY_LOG` environment variable points to a path, each query
+is appended to it as JSONL (disable with `SYNAPTIC_QUERY_LOG_DISABLE=1`).
 
 ### get_node
 
@@ -403,7 +403,7 @@ Forecast the consequences of a change before editing: which graph nodes the
 changed files define, the reverse-impact blast radius that depends on them, which
 edited symbols are public API (callers outside the file or module may break), and
 a verify checklist. Pure-graph and read-only; for new-cycle / removed-API
-detection use `time_travel_diff` or the `codegraph predict` CLI (those build
+detection use `time_travel_diff` or the `synaptic predict` CLI (those build
 worktrees). `openWorldHint: true` (shells out to `git diff` when `files` is
 omitted).
 
@@ -460,13 +460,13 @@ not recognized.
 
 ### structural_search
 
-Structural search over the graph with CGQL (a small Cypher-inspired query
+Structural search over the graph with SYNQL (a small Cypher-inspired query
 language), or a named architectural pattern. Not text search: it matches on
 kind/visibility/loc/fan-in/out/etc. `.name` is the bare symbol (no parentheses);
 use `=~` for a regex/substring match.
 
 Parameters:
-- `query` (string) -- a CGQL query, e.g. `MATCH (c:class) WHERE c.loc > 500 RETURN c`.
+- `query` (string) -- a SYNQL query, e.g. `MATCH (c:class) WHERE c.loc > 500 RETURN c`.
   Omit when using `pattern`.
 - `pattern` (string) -- a built-in pattern name instead of a query: `singleton`,
   `factory`, `observer`, `service-locator`, `god-class`.
@@ -516,7 +516,7 @@ dependencies, removed APIs, drift, new cycles, and hotspots.
 
 Plan-only: a confidence-scored rename plan (edit sites, blast radius, collision
 check) for an agent to apply. Never edits source. After applying the edits, run
-`codegraph refactor verify` on the CLI to check the post-edit graph.
+`synaptic refactor verify` on the CLI to check the post-edit graph.
 
 Parameters:
 - `name` (string, required) -- the symbol to rename (its name, or a node id).
@@ -584,13 +584,13 @@ method returns error code `-32601`. An unknown resource or prompt returns
 `resources/list` reports six read-only resources, each fetched with
 `resources/read` by `uri`:
 
-- `codegraph://report` (text/markdown) -- the `GRAPH_REPORT.md` next to the
+- `synaptic://report` (text/markdown) -- the `GRAPH_REPORT.md` next to the
   loaded graph, if present.
-- `codegraph://stats` (text/plain) -- the same content as `graph_stats`.
-- `codegraph://god-nodes` (text/plain) -- the top 10 god nodes.
-- `codegraph://surprises` (text/plain) -- surprising cross-community connections.
-- `codegraph://audit` (text/plain) -- the edge-confidence breakdown.
-- `codegraph://questions` (text/plain) -- suggested questions to ask the graph.
+- `synaptic://stats` (text/plain) -- the same content as `graph_stats`.
+- `synaptic://god-nodes` (text/plain) -- the top 10 god nodes.
+- `synaptic://surprises` (text/plain) -- surprising cross-community connections.
+- `synaptic://audit` (text/plain) -- the edge-confidence breakdown.
+- `synaptic://questions` (text/plain) -- suggested questions to ask the graph.
 
 See [Analysis-and-Reports](Analysis-and-Reports) and
 [Semantic-Analysis](Semantic-Analysis) for what these surface.
@@ -600,12 +600,12 @@ See [Analysis-and-Reports](Analysis-and-Reports) and
 `resources/templates/list` reports two templates, so any node or community is
 addressable as a resource by URI:
 
-- `codegraph://node/{label}` (text/plain) -- metadata for one node by label, id,
+- `synaptic://node/{label}` (text/plain) -- metadata for one node by label, id,
   or bare name (the same content as `get_node`).
-- `codegraph://community/{id}` (text/plain) -- members of one community by id.
+- `synaptic://community/{id}` (text/plain) -- members of one community by id.
 
 `resources/read` resolves these templated URIs directly (for example
-`codegraph://node/AuthService`).
+`synaptic://node/AuthService`).
 
 ### Resource subscriptions
 
@@ -613,7 +613,7 @@ The server advertises `resources.subscribe`. `resources/subscribe` and
 `resources/unsubscribe` are accepted and acknowledged. Over the HTTP transport, a
 session that has opened the `GET /mcp` SSE stream receives a
 `notifications/resources/updated` event (with `params.uri` =
-`codegraph://stats`) when the graph hot-reloads on disk, signaling that resource
+`synaptic://stats`) when the graph hot-reloads on disk, signaling that resource
 contents have changed and should be re-read. (The stdio transport is
 request/response only and does not push.)
 
@@ -625,7 +625,7 @@ sanitized before interpolation.
 
 | Prompt | Arguments | What it asks for |
 |---|---|---|
-| `onboard` | none | Orient in the codebase via `graph_stats`, `god_nodes`, and `codegraph://questions`. |
+| `onboard` | none | Orient in the codebase via `graph_stats`, `god_nodes`, and `synaptic://questions`. |
 | `explain_subsystem` | `topic` (required) | Explain a subsystem using `query_graph`, `get_source`, and `find_callers`/`find_callees`. |
 | `assess_pr` | `pr_number` (required) | Assess a PR's risk via `get_pr_impact` and `affected`. |
 | `trace_flow` | `from`, `to` (required) | Trace a path with `shortest_path` and `get_source`. |
@@ -685,7 +685,7 @@ curl -H "X-API-Key: s3cret" "http://127.0.0.1:8765/api/query?q=authentication&to
 ## See also
 
 - [Assistant-Integration](Assistant-Integration) -- wire the server into an
-  assistant with `codegraph install`.
+  assistant with `synaptic install`.
 - [Querying](Querying) -- the query semantics shared with the CLI.
 - [PR-Dashboard](PR-Dashboard) -- the PR tools in detail.
 - [Commands](Commands) -- the full CLI reference.

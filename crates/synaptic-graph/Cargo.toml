@@ -1,0 +1,25 @@
+[package]
+name = "synaptic-graph"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Graph assembly for Synaptic: build extraction into a petgraph KnowledgeGraph."
+
+[dependencies]
+synaptic-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+petgraph = { workspace = true }
+strsim = { workspace = true }
+blake3 = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+synaptic-extract = { workspace = true }
+
+[[bench]]
+name = "graph"
+harness = false

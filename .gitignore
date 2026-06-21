@@ -1,7 +1,7 @@
 /target
 **/*.rs.bk
 # Generated graph artifacts (extract / workspace build / per-member AST cache).
-codegraph-out/
+synaptic-out/
 # Local design notes (not tracked).
 /design/
 # Local planning notes (not tracked).

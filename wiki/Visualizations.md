@@ -1,8 +1,8 @@
 # Visualizations
 
-CodeGraph renders the knowledge graph into several browser-viewable artifacts. All of them are self-contained HTML or SVG files that embed the graph data directly and load any libraries from a CDN, so you can open them by double-clicking (the interactive HTML viewers need a network connection for the CDN libraries).
+Synaptic renders the knowledge graph into several browser-viewable artifacts. All of them are self-contained HTML or SVG files that embed the graph data directly and load any libraries from a CDN, so you can open them by double-clicking (the interactive HTML viewers need a network connection for the CDN libraries).
 
-Each is written during `codegraph extract` and can be regenerated individually with `codegraph export <format>`. See [Output-Formats] for the full artifact list and the `export` flags (`--graph`, `--out`, `--repo`).
+Each is written during `synaptic extract` and can be regenerated individually with `synaptic export <format>`. See [Output-Formats] for the full artifact list and the `export` flags (`--graph`, `--out`, `--repo`).
 
 | Artifact | Format | What it shows |
 | --- | --- | --- |

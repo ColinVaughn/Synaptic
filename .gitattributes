@@ -1,3 +1,3 @@
 # Skill drift snapshots are byte-compared against an LF render, so they must
 # stay LF on every platform regardless of core.autocrlf.
-crates/codegraph-skillgen/expected/*.md text eol=lf
+crates/synaptic-skillgen/expected/*.md text eol=lf

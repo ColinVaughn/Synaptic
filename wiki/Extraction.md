@@ -1,14 +1,14 @@
 # Extraction
 
-`codegraph extract` turns a directory of source code into a knowledge graph. It
+`synaptic extract` turns a directory of source code into a knowledge graph. It
 discovers files, parses each supported language into nodes and edges, resolves
 cross-file references, clusters the result into communities, and writes a set of
-artifacts under `codegraph-out/`.
+artifacts under `synaptic-out/`.
 
 ```
-codegraph extract .
-codegraph extract path/to/project
-codegraph extract . --directed --wiki
+synaptic extract .
+synaptic extract path/to/project
+synaptic extract . --directed --wiki
 ```
 
 This page covers the discovery and parsing stages: which files are found, which
@@ -27,7 +27,7 @@ LLM-driven concept layer, see [Semantic-Analysis].
 5. Optionally run the LLM semantic pass over documents and papers (`--semantic`).
 6. Build the graph, resolve cross-file calls, deduplicate entities, cluster into
    communities, and analyze.
-7. Write artifacts into `codegraph-out/`.
+7. Write artifacts into `synaptic-out/`.
 
 ## Node metadata: kind, visibility, span, signature
 
@@ -75,7 +75,7 @@ Discovery walks the root with the `ignore` crate's directory walker. The walk:
 
 - Visits dotfiles and dotted directories (hidden files are not skipped by
   default; the noise and sensitive rules below handle exclusions).
-- Honors `.gitignore`, git exclude files, and `.codegraphignore` (see below).
+- Honors `.gitignore`, git exclude files, and `.synapticignore` (see below).
 - Follows symlinks, but prunes any symlink whose real target resolves outside
   the scan root (an escape and cycle guard).
 - Prunes known noise directories so it never descends into them.
@@ -89,15 +89,15 @@ is deterministic regardless of thread scheduling.
 ## Skipped directories (noise)
 
 The following directory names are pruned wherever they appear (build output,
-caches, dependency trees, and CodeGraph's own output):
+caches, dependency trees, and Synaptic's own output):
 
 ```
 venv  .venv  env  .env  node_modules  __pycache__  .git  dist  build
 target  out  site-packages  lib64  .pytest_cache  .mypy_cache  .ruff_cache
-.tox  .eggs  codegraph-out  coverage  lcov-report  visual-tests  visual-test
+.tox  .eggs  synaptic-out  coverage  lcov-report  visual-tests  visual-test
 __snapshots__  snapshots  storybook-static  dist-protected  .next  .nuxt
 .turbo  .angular  .idea  .cache  .parcel-cache  .svelte-kit  .terraform
-.serverless  .codegraph  .worktrees
+.serverless  .synaptic  .worktrees
 ```
 
 Additional rules:
@@ -115,22 +115,22 @@ package-lock.json  yarn.lock  pnpm-lock.yaml  Cargo.lock  poetry.lock
 Gemfile.lock  composer.lock  go.sum  go.work.sum
 ```
 
-## `.codegraphignore` and `.gitignore`
+## `.synapticignore` and `.gitignore`
 
 Both ignore files are honored, layered per-directory up to the VCS root:
 
 - `.gitignore` rules apply (along with git exclude files). Global gitignore is
   not consulted.
-- `.codegraphignore` uses the same gitignore syntax (globs, `!` negations).
-- On conflicting rules, `.codegraphignore` takes precedence over `.gitignore`
-  (for example a `!keep.py` re-include in `.codegraphignore` wins over a
+- `.synapticignore` uses the same gitignore syntax (globs, `!` negations).
+- On conflicting rules, `.synapticignore` takes precedence over `.gitignore`
+  (for example a `!keep.py` re-include in `.synapticignore` wins over a
   `keep.py` exclude in `.gitignore`).
 - A subdirectory's `.gitignore` still applies even when a root
-  `.codegraphignore` exists. The two layer; one does not disable the other.
+  `.synapticignore` exists. The two layer; one does not disable the other.
 - A negation cannot rescue a file beneath an already-excluded directory (this is
   standard gitignore semantics).
 
-Example `.codegraphignore`:
+Example `.synapticignore`:
 
 ```
 # Skip generated code but keep one file
@@ -170,7 +170,7 @@ the same way.
 Extraction uses an on-disk per-file cache so an unchanged file skips re-parsing
 on a rebuild.
 
-- **Location:** `codegraph-out/cache/ast/v{version}/<key>.mp`. Each entry is the
+- **Location:** `synaptic-out/cache/ast/v{version}/<key>.mp`. Each entry is the
   serialized extraction result for one file, stored as MessagePack (the default
   `cache-binary` feature; ~36% faster to decode and ~14% smaller than JSON, which
   matters most on column-heavy SQL schemas). Built with `--no-default-features`
@@ -190,7 +190,7 @@ on a rebuild.
 - **Best-effort I/O:** any read, write, or parse error on a cache entry falls
   back to a fresh extraction. A corrupt cache never blocks a build.
 
-Other caches live under `codegraph-out/cache/` as well: the semantic LLM cache
+Other caches live under `synaptic-out/cache/` as well: the semantic LLM cache
 (`cache/semantic`) and the change-detection manifest (`cache/manifest.json`),
 which records per-file hashes so a later build can report what was added,
 changed, or removed since last time. See [Incremental-Updates].
@@ -198,16 +198,16 @@ changed, or removed since last time. See [Incremental-Updates].
 Clear the cache with:
 
 ```
-codegraph cache clear .
-codegraph cache clear . --recursive
+synaptic cache clear .
+synaptic cache clear . --recursive
 ```
 
-`cache clear` only ever removes the regenerable `codegraph-out/cache` subtree
+`cache clear` only ever removes the regenerable `synaptic-out/cache` subtree
 (and, with `--recursive`, the same subtree under nested project roots).
 
-## What `codegraph-out/` is
+## What `synaptic-out/` is
 
-`codegraph-out/` is the output directory created in the scan root. It holds:
+`synaptic-out/` is the output directory created in the scan root. It holds:
 
 - `cache/` - the AST cache, semantic cache, and change-detection manifest.
 - The generated graph and reports: `graph.json`, `graph.html`,
@@ -215,14 +215,14 @@ codegraph cache clear . --recursive
   `callflow.html`, `tree.html`, `graph.svg`, and `graph-3d.html`.
 - `obsidian/` when `--obsidian` is passed, `wiki/` when `--wiki` is passed.
 
-`codegraph-out` is itself a pruned noise directory, so re-running extraction
+`synaptic-out` is itself a pruned noise directory, so re-running extraction
 never indexes a previous run's output.
 
 ## Relevant flags
 
 - `--directed` - build a directed graph (affects layout and analysis).
-- `--obsidian` - also write an Obsidian vault under `codegraph-out/obsidian/`.
-- `--wiki` - also write a wiki page set under `codegraph-out/wiki/`.
+- `--obsidian` - also write an Obsidian vault under `synaptic-out/obsidian/`.
+- `--wiki` - also write a wiki page set under `synaptic-out/wiki/`.
 - `--semantic` - opt in to the LLM semantic pass over documents and papers.
   Requires a configured backend; skipped with a note if none is detected. See
   [Semantic-Analysis].

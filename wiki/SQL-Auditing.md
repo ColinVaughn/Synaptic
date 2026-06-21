@@ -1,20 +1,20 @@
 # SQL Auditing
 
-CodeGraph models SQL as a first-class part of the code graph and audits it for
+Synaptic models SQL as a first-class part of the code graph and audits it for
 **performance** and **security** problems. Extraction turns `.sql` files into
 table / column / index / view / trigger / procedure / policy / role nodes, links
 the application code that runs SQL to the tables it touches, and the
-`codegraph sql` command (plus the `audit_sql` / `advise_sql` MCP tools) runs a
+`synaptic sql` command (plus the `audit_sql` / `advise_sql` MCP tools) runs a
 rule engine over that graph.
 
 Two ways to use it:
 
-- **Audit** the SQL already in a repo: `codegraph sql audit`.
-- **Advise** on a candidate query before it is written: `codegraph sql advise --query "..."`.
+- **Audit** the SQL already in a repo: `synaptic sql audit`.
+- **Advise** on a candidate query before it is written: `synaptic sql advise --query "..."`.
 
 ## The SQL-aware graph
 
-`codegraph extract` parses `.sql` with the [`sqlparser`](https://crates.io/crates/sqlparser)
+`synaptic extract` parses `.sql` with the [`sqlparser`](https://crates.io/crates/sqlparser)
 crate (multi-dialect) plus a regex recovery pass for the security DDL that
 dialect parsers disagree on. T-SQL/SQL Server files (detected by bracket
 identifiers, `NVARCHAR`, `GO`, etc.) take a dedicated regex path that recovers
@@ -53,26 +53,26 @@ what makes "how is this SQL linked into the code" a graph traversal:
 
 ```sh
 # what code reads or writes the orders table?
-codegraph affected orders --relation queries --relation writes_to
+synaptic affected orders --relation queries --relation writes_to
 ```
 
 These edges are `INFERRED` (best-effort string detection), like the other
 [cross-language edges](Cross-Language-Edges).
 
-## Querying the SQL layer (CGQL)
+## Querying the SQL layer (SYNQL)
 
-Because the SQL layer is first-class, [CGQL](Querying) can query it directly. SQL
+Because the SQL layer is first-class, [SYNQL](Querying) can query it directly. SQL
 objects match by `kind`, and tables expose `rls_enabled` / `dialect`:
 
 ```sh
 # tables with row-level security disabled
-codegraph search 'MATCH (t:table) WHERE t.rls_enabled = "false" RETURN t'
+synaptic search 'MATCH (t:table) WHERE t.rls_enabled = "false" RETURN t'
 
 # every column in the schema
-codegraph search 'MATCH (c:column) RETURN c'
+synaptic search 'MATCH (c:column) RETURN c'
 
 # policies protecting a table
-codegraph search 'MATCH (t:table)-[:protected_by]->(p:policy) RETURN t, p'
+synaptic search 'MATCH (t:table)-[:protected_by]->(p:policy) RETURN t, p'
 ```
 
 ## The rules
@@ -124,13 +124,13 @@ conventions; injection and N+1 are best-effort), so each finding carries a
 
 ```sh
 # audit the SQL in the current graph
-codegraph sql audit                          # writes codegraph-out/sql/{findings.json, audit.md}
-codegraph sql audit --severity high          # only high+critical
-codegraph sql audit --json                   # machine-readable to stdout
-codegraph sql audit --repo backend           # scope to one federated member
+synaptic sql audit                          # writes synaptic-out/sql/{findings.json, audit.md}
+synaptic sql audit --severity high          # only high+critical
+synaptic sql audit --json                   # machine-readable to stdout
+synaptic sql audit --repo backend           # scope to one federated member
 
 # critique a candidate query before writing it
-codegraph sql advise --query "SELECT * FROM orders WHERE tenant_id = 1"
+synaptic sql advise --query "SELECT * FROM orders WHERE tenant_id = 1"
 ```
 
 `sql audit` reads the call-site source (via `--root`, default `.`) so the N+1
@@ -156,8 +156,8 @@ which queries really do a sequential scan, raising `PERF-PLAN-001` at high
 confidence:
 
 ```sh
-cargo install --path bin/codegraph --features live-explain
-codegraph sql audit --explain --db-url postgresql://user@host/db
+cargo install --path bin/synaptic --features live-explain
+synaptic sql audit --explain --db-url postgresql://user@host/db
 ```
 
 The plan parser is Postgres-shaped; MySQL/SQLite connect but report fewer signals.
@@ -170,7 +170,7 @@ The plan parser is Postgres-shaped; MySQL/SQLite connect but report fewer signal
 - Code -> SQL linkage detects raw SQL strings in the languages above; ORM/query
   builders and SQL assembled across multiple statements are not yet modeled.
 - Graph size: column (and index) nodes dominate a SQL graph. On a column-heavy
-  schema, `codegraph extract --no-columns` keeps the table / RLS / policy /
+  schema, `synaptic extract --no-columns` keeps the table / RLS / policy /
   grant / view facts but drops the per-column detail (and the column-level rules
   that depend on it), shrinking `graph.json`.
 - Detection is best-effort and confidence-scored; treat findings as a prioritized

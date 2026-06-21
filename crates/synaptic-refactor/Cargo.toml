@@ -1,0 +1,26 @@
+[package]
+name = "synaptic-refactor"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Safe refactor for Synaptic: plan a rename, score confidence, verify the graph after edits."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+regex = { workspace = true }
+synaptic-core = { workspace = true }
+synaptic-graph = { workspace = true }
+synaptic-query = { workspace = true }
+synaptic-extract = { workspace = true }
+synaptic-incremental = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "refactor"
+harness = false

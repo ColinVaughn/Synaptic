@@ -1,6 +1,6 @@
 name: release
 
-# Build prebuilt `codegraph` binaries for Linux/macOS/Windows and attach them to
+# Build prebuilt `synaptic` binaries for Linux/macOS/Windows and attach them to
 # the GitHub Release when a `v*` tag is pushed. Run manually via workflow_dispatch
 # to smoke-test the build matrix without cutting a release.
 on:
@@ -31,16 +31,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build --release --locked -p codegraph --target ${{ matrix.target }}
+      - run: cargo build --release --locked -p synaptic --target ${{ matrix.target }}
       - name: Package
         shell: bash
         run: |
-          dist="codegraph-${{ matrix.target }}"
+          dist="synaptic-${{ matrix.target }}"
           mkdir "$dist"
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "target/${{ matrix.target }}/release/codegraph.exe" "$dist/"
+            cp "target/${{ matrix.target }}/release/synaptic.exe" "$dist/"
+            cp "target/${{ matrix.target }}/release/syn.exe" "$dist/"
           else
-            cp "target/${{ matrix.target }}/release/codegraph" "$dist/"
+            cp "target/${{ matrix.target }}/release/synaptic" "$dist/"
+            cp "target/${{ matrix.target }}/release/syn" "$dist/"
           fi
           cp README.md LICENSE CHANGELOG.md "$dist/"
           if [ "${{ runner.os }}" = "Windows" ]; then
@@ -50,10 +52,10 @@ jobs:
           fi
       - uses: actions/upload-artifact@v6
         with:
-          name: codegraph-${{ matrix.target }}
+          name: synaptic-${{ matrix.target }}
           path: |
-            codegraph-${{ matrix.target }}.tar.gz
-            codegraph-${{ matrix.target }}.zip
+            synaptic-${{ matrix.target }}.tar.gz
+            synaptic-${{ matrix.target }}.zip
           if-no-files-found: ignore
 
   release:

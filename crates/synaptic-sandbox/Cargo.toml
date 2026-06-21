@@ -1,0 +1,21 @@
+[package]
+name = "synaptic-sandbox"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Speculative execution for Synaptic: apply a proposed change in a throwaway git worktree and run the at-risk tests + a build/type-check to report ground-truth pass/fail."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+synaptic-history = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "speculate"
+harness = false

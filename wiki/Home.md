@@ -1,31 +1,40 @@
-# CodeGraph
+# Synaptic
 
-CodeGraph turns any folder of code into a persistent, queryable knowledge graph, then lets
+<p align="center">
+  <a href="https://discord.gg/ytX7R2PbNz"><img src="https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&logoColor=white&style=for-the-badge" alt="Join our Discord"></a>
+  <a href="https://github.com/ColinVaughn/Synaptic/releases"><img src="https://img.shields.io/github/v/release/ColinVaughn/Synaptic?style=for-the-badge" alt="Latest release"></a>
+</p>
+
+<p align="center">
+  <a href="https://discord.gg/ytX7R2PbNz"><img src="https://invidget.switchblade.xyz/ytX7R2PbNz" alt="Synaptic Discord invite"></a>
+</p>
+
+Synaptic turns any folder of code into a persistent, queryable knowledge graph, then lets
 you (or an AI assistant) query that compact graph instead of re-reading the whole codebase.
 It extracts symbols and relationships across 30+ languages with tree-sitter, clusters them
 into communities, surfaces the structurally important pieces, and writes machine-readable
 graphs, human-readable reports, and interactive visualizations.
 
-It is a single static Rust binary (`codegraph`) with no runtime, plus an MCP server so a
+It is a single static Rust binary (`synaptic`) with no runtime, plus an MCP server so a
 coding assistant can consult the graph before grepping or reading files.
 
 ## 60-second tour
 
 ```sh
-codegraph extract .                      # build codegraph-out/ for the current directory
-codegraph query "authentication flow"    # get a relevant subgraph back
-codegraph explain parse_config           # show a node and its neighbours
-codegraph affected parse_config          # what would changing it break?
-codegraph search "MATCH (c:class) WHERE c.loc > 500 RETURN c"   # structural query (CGQL)
-codegraph diff HEAD~10 HEAD              # how the graph changed between two revisions
-codegraph refactor rename old_name --to new_name   # a safe, confidence-scored rename plan
-codegraph serve                          # expose the graph to an assistant over MCP
+synaptic extract .                      # build synaptic-out/ for the current directory
+synaptic query "authentication flow"    # get a relevant subgraph back
+synaptic explain parse_config           # show a node and its neighbours
+synaptic affected parse_config          # what would changing it break?
+synaptic search "MATCH (c:class) WHERE c.loc > 500 RETURN c"   # structural query (SYNQL)
+synaptic diff HEAD~10 HEAD              # how the graph changed between two revisions
+synaptic refactor rename old_name --to new_name   # a safe, confidence-scored rename plan
+synaptic serve                          # expose the graph to an assistant over MCP
 ```
 
 See [Quickstart](Quickstart) for a fuller walk-through and [Installation](Installation) to
 get the binary.
 
-## What CodeGraph gives you
+## What Synaptic gives you
 
 - A canonical `graph.json` you can query without reading source.
 - A Markdown report of god nodes, surprising connections, import cycles, and suggested
@@ -34,21 +43,21 @@ get the binary.
   ([Output Formats](Output-Formats), [Visualizations](Visualizations)).
 - Graph queries: relevant-subgraph search, shortest path, and reverse impact
   ([Querying](Querying)).
-- Structural search with CGQL, a Cypher-inspired query language matching on
+- Structural search with SYNQL, a Cypher-inspired query language matching on
   kind/visibility/loc/fan-in-out plus named architectural patterns ([Commands](Commands)).
 - Time-travel diff between two git revisions: added/removed dependencies, removed
   APIs, architectural drift, new cycles, and change hotspots ([Commands](Commands)).
 - Safe refactor: confidence-scored `rename`/`move`/`extract` plans for an agent to
   apply, with a graph-invariant `verify` afterwards ([Commands](Commands)).
-- Change forecasting: `codegraph predict` reports a change's blast radius, public
+- Change forecasting: `synaptic predict` reports a change's blast radius, public
   APIs at risk, the tests that exercise it, new cycles, and a verify checklist
   before you edit; `--edit "<kind>:<symbol>"` forecasts a described edit before any
   code is written ([Commands](Commands)).
-- Speculative execution: `codegraph speculate` applies a pending change in a
+- Speculative execution: `synaptic speculate` applies a pending change in a
   throwaway git worktree and actually runs the at-risk tests plus a build/type-
   check, reporting real pass/fail (the ground-truth half of prediction; CLI-only
   by default, exposed over MCP only with `serve --allow-exec`) ([Commands](Commands)).
-- Forecast evaluation: `codegraph eval replay` replays history, re-predicts each
+- Forecast evaluation: `synaptic eval replay` replays history, re-predicts each
   commit from its parent state, and scores the prediction against git ground
   truth (co-edited tests, removed APIs) so forecast quality is regression-testable
   and CI-gateable ([Commands](Commands)).
@@ -62,9 +71,9 @@ get the binary.
 **Getting started:** [Installation](Installation) - [Quickstart](Quickstart)
 
 **Concepts:** [Architecture](Architecture) - [Languages](Languages) -
-[CodeGraph vs Other Tools](CodeGraph-vs-Other-Tools)
+[Synaptic vs Other Tools](Synaptic-vs-Other-Tools)
 
-**Using CodeGraph:** [Commands](Commands) - [Extraction](Extraction) - [Querying](Querying)
+**Using Synaptic:** [Commands](Commands) - [Extraction](Extraction) - [Querying](Querying)
 - [SQL Auditing](SQL-Auditing) - [Analysis and Reports](Analysis-and-Reports) -
 [Output Formats](Output-Formats) - [Visualizations](Visualizations)
 
@@ -84,3 +93,18 @@ get the binary.
   `AMBIGUOUS`).
 - **Deterministic.** The same input produces the same graph; ids and community numbers are
   stable across rebuilds.
+
+## Community
+
+Questions, ideas, or want to show what you built? Join us on
+[Discord](https://discord.gg/ytX7R2PbNz).
+
+## Star History
+
+<a href="https://star-history.com/#ColinVaughn/Synaptic&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=ColinVaughn/Synaptic&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=ColinVaughn/Synaptic&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=ColinVaughn/Synaptic&type=Date" />
+  </picture>
+</a>
