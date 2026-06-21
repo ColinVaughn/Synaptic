@@ -89,6 +89,13 @@ Reference them with your client's MCP prefix (Claude Code:
 toolset, and each tool documents its parameters. If the server is not already
 connected, start it with `synaptic serve`.
 
+When a symbol name is shared by several files, pin it to one with a `name@file`
+qualifier (e.g. `announce@core/foo.ts`) on any name-taking tool or CLI command
+(`get_node`, `find_callers`, `affected`, `synaptic explain`, and the rest). If it
+is still ambiguous, the error lists each candidate with its file and degree, so you
+pick the right node in one call. `god_nodes` also annotates each hub with how many
+tests exercise it: `0 test(s)` flags an untested, high-blast-radius symbol.
+
 Reach for the graph on "what calls X", "what breaks if I change Y", "how does A
 reach B", and to read a symbol's code. Don't reconstruct those by reading files.
 Impact analysis crosses language boundaries: a change to a Rust function exported

@@ -94,7 +94,9 @@ pub(crate) enum Cmd {
     },
     /// Shortest path between two nodes (by id or label).
     Path {
+        /// Start node: id, label, or bare name. If shared by several files, qualify as "name@file-substring".
         from: String,
+        /// End node: id, label, or bare name. If shared by several files, qualify as "name@file-substring".
         to: String,
         #[arg(long)]
         graph: Option<PathBuf>,
@@ -104,7 +106,7 @@ pub(crate) enum Cmd {
     },
     /// Show a node and its neighbours.
     Explain {
-        /// Node id or label.
+        /// Node id or label. If the name is shared by several files, qualify it as "name@file-substring" (e.g. "announce@core/foo.ts").
         node: String,
         #[arg(long)]
         graph: Option<PathBuf>,
@@ -137,7 +139,7 @@ pub(crate) enum Cmd {
     },
     /// Nodes that (transitively) depend on a node (reverse-impact).
     Affected {
-        /// Node id, label, bare name, source file, or unique label substring.
+        /// Node id, label, bare name, source file, or unique label substring. If the name is shared by several files, qualify it as "name@file-substring".
         node: String,
         #[arg(long)]
         graph: Option<PathBuf>,
