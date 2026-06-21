@@ -20,3 +20,9 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+    ignore:
+      # dtolnay/rust-toolchain's @<version> ref pins the REQUESTED Rust toolchain
+      # (kept in lockstep with rust-toolchain.toml / the crate MSRV), not an
+      # action version to keep current. Left to Dependabot it bumps to the latest
+      # Rust release tag, which breaks every CI job. Bump it by hand with the MSRV.
+      - dependency-name: "dtolnay/rust-toolchain"
