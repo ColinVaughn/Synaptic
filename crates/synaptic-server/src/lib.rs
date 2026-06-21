@@ -2817,6 +2817,13 @@ SQL-bearing code, audit_sql reviews the schema and advise_sql critiques a candid
 For a multi-repo graph, call list_repos then pass the repo argument to scope. The PR tools \
 (list_prs / get_pr_impact / triage_prs) need the `gh` CLI.\n\
 \n\
+Disambiguating a name: every tool that takes a name resolves it leniently (id, \
+label, bare name). When a name is shared by several files, pin it to one with a \
+'name@file-substring' qualifier (e.g. 'announce@core/foo.ts') -- this works on \
+get_node, get_source, get_neighbors, describe_node, find_callers, find_callees, \
+shortest_path, affected, and predict_edit. If a name is still ambiguous, the error \
+lists each candidate's id, file, and degree so you can pick one without another call.\n\
+\n\
 Terms: a 'god node' is a high-degree hub (structurally central); a 'community' is a \
 cluster of densely-connected nodes (roughly a module); edge confidence is EXTRACTED \
 (observed in code), INFERRED, or AMBIGUOUS.";
@@ -2851,14 +2858,14 @@ fn tools_list(allow_exec: bool) -> Value {
             }, "required": ["nodes", "edges"] }
         },
         { "name": "get_node", "description": "Show one node's metadata: type, source file, community, degree, plus kind (class/function/method/etc.), visibility, and LOC when available. Use after query_graph to inspect a specific symbol.",
-          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name (e.g. 'login_user', 'AuthService'); resolved leniently." } }, "required": ["label"] } },
+          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name (e.g. 'login_user', 'AuthService'); resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." } }, "required": ["label"] } },
         { "name": "get_source", "description": "Return the actual source code for a symbol (the lines at its location), so you do not have to open the file. Use after query_graph or get_node to read a function or class body directly.",
           "inputSchema": { "type": "object", "properties": {
-              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." },
+              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." },
               "context_lines": { "type": "integer", "description": "How many lines to return from the symbol start (default 40, max 400)." }
           }, "required": ["label"] } },
         { "name": "get_neighbors", "description": "List a node's directly connected nodes and the relation on each edge. Answers 'what does X call/use' and 'what calls X'.",
-          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." }, "relation_filter": { "type": "string", "description": "Optional: keep only this edge relation (substring match). Common relations: calls, imports, inherits, implements, references, contains, depends_on." } }, "required": ["label"] } },
+          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." }, "relation_filter": { "type": "string", "description": "Optional: keep only this edge relation (substring match). Common relations: calls, imports, inherits, implements, references, contains, depends_on. If nothing matches, the result names the relations the node does have, so an empty list is not mistaken for a missing node." } }, "required": ["label"] } },
         { "name": "get_community", "description": "List the members of a community: a cluster of densely-connected nodes, roughly a module or subsystem. Use to see what belongs together. Paginates: a large community returns one page at a time.",
           "inputSchema": { "type": "object", "properties": {
               "community_id": { "type": "integer", "description": "Community id, as reported by graph_stats, god_nodes, or a node's 'Community' field." },
@@ -2872,7 +2879,8 @@ fn tools_list(allow_exec: bool) -> Value {
           } },
           "outputSchema": { "type": "object", "properties": {
               "god_nodes": { "type": "array", "items": { "type": "object", "properties": {
-                  "label": {"type":"string"}, "degree": {"type":"integer"}, "id": {"type":"string"} } } }
+                  "label": {"type":"string"}, "degree": {"type":"integer"}, "id": {"type":"string"},
+                  "test_count": {"type":"integer", "description": "How many tests transitively exercise this hub; 0 flags an untested high-blast-radius symbol."} } } }
           }, "required": ["god_nodes"] } },
         { "name": "graph_stats", "description": "Graph size and health: node/edge/community counts and the EXTRACTED/INFERRED/AMBIGUOUS edge-confidence breakdown. Good first call to confirm a graph is loaded and how large it is.",
           "inputSchema": { "type": "object", "properties": {} },
@@ -2885,10 +2893,10 @@ fn tools_list(allow_exec: bool) -> Value {
         { "name": "repo_stats", "description": "Node/edge counts for one federated member repo.",
           "inputSchema": { "type": "object", "properties": { "repo": { "type": "string", "description": "Repo tag, as listed by list_repos." } }, "required": ["repo"] } },
         { "name": "shortest_path", "description": "Shortest path between two nodes, showing the chain of relations. Answers 'how does A reach B' or 'is X connected to Y'.",
-          "inputSchema": { "type": "object", "properties": { "source": { "type": "string", "description": "Start node: label, id, or bare name." }, "target": { "type": "string", "description": "End node: label, id, or bare name." }, "max_hops": { "type": "integer", "description": "Optional cap on path length in hops (default 8)." } }, "required": ["source", "target"] } },
+          "inputSchema": { "type": "object", "properties": { "source": { "type": "string", "description": "Start node: label, id, or bare name. If shared by several files, qualify as 'name@file-substring' (e.g. 'announce@core/foo.ts')." }, "target": { "type": "string", "description": "End node: label, id, or bare name. If shared by several files, qualify as 'name@file-substring' (e.g. 'announce@core/foo.ts')." }, "max_hops": { "type": "integer", "description": "Optional cap on path length in hops (default 8)." } }, "required": ["source", "target"] } },
         { "name": "affected", "description": "Reverse-impact: the nodes that transitively depend on a symbol, i.e. what could break if you change it. Walks calls/imports/inheritance edges plus cross-language coupling (subprocess `invokes`, FFI `binds_native`, HTTP/gRPC `calls_service`/`handled_by`) backward, so the blast radius spans language boundaries. Answers 'what is the blast radius of changing X'.",
           "inputSchema": { "type": "object", "properties": {
-              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." },
+              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." },
               "depth": { "type": "integer", "description": "Max hops to walk backward (default 3, max 16)." },
               "relations": { "type": "array", "items": { "type": "string" }, "description": "Optional edge relations to follow; defaults to the structural-impact set: calls, references, imports, imports_from, re_exports, inherits, extends, implements, uses, mixes_in, embeds, depends_on, reads_from, plus the cross-language relations invokes, binds_native, calls_service, handled_by." },
               "limit": { "type": "integer", "description": "Max dependents listed before a '+N more' summary (default 50). A per-depth breakdown and the true total are always shown. Ignored when verbose=true." },
@@ -2903,13 +2911,13 @@ fn tools_list(allow_exec: bool) -> Value {
           }, "required": ["seed","affected"] } },
         { "name": "find_callers", "description": "List the nodes that call, use, or reference this symbol (incoming edges only). Answers 'who calls X'. The count and a per-relation breakdown are always in the header; the list is capped with a '+N more' summary on a hub.",
           "inputSchema": { "type": "object", "properties": {
-              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." },
+              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." },
               "limit": { "type": "integer", "description": "Max callers listed before a '+N more' summary (default 50). Ignored when verbose=true." },
               "verbose": { "type": "boolean", "description": "Emit the full, uncapped caller list instead of the summarized top-N (default false)." }
           }, "required": ["label"] } },
         { "name": "find_callees", "description": "List the nodes this symbol calls, uses, or references (outgoing edges only). Answers 'what does X call'. The count and a per-relation breakdown are always in the header; the list is capped with a '+N more' summary on a hub.",
           "inputSchema": { "type": "object", "properties": {
-              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." },
+              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." },
               "limit": { "type": "integer", "description": "Max callees listed before a '+N more' summary (default 50). Ignored when verbose=true." },
               "verbose": { "type": "boolean", "description": "Emit the full, uncapped callee list instead of the summarized top-N (default false)." }
           }, "required": ["label"] } },
@@ -2954,7 +2962,7 @@ fn tools_list(allow_exec: bool) -> Value {
           } } },
         { "name": "describe_node", "description": "Compact 'takes X, returns Y, calls Z' description of a symbol, composed from its captured signature and outgoing call edges (graph-only, no source read). Useful for generating tool/function descriptions or quickly understanding a function's shape. Resolve `label` by bare name, full label, id, or file.",
           "inputSchema": { "type": "object", "properties": {
-              "label": { "type": "string", "description": "Symbol to describe (bare name, label, node id, or source file)." }
+              "label": { "type": "string", "description": "Symbol to describe (bare name, label, node id, or source file). If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." }
           }, "required": ["label"] },
           "outputSchema": { "type": "object", "properties": {
               "found": { "type": "boolean" },
@@ -3000,7 +3008,7 @@ fn tools_list(allow_exec: bool) -> Value {
               "kind": { "type": "string", "description": "The edit kind: delete, signature, or visibility." },
               "depth": { "type": "integer", "description": "Reverse-impact hop bound (default 3, max 16)." }
           }, "required": ["symbol", "kind"] } },
-        { "name": "audit_sql", "description": "Audit the codebase's SQL for performance and security problems over the SQL-aware graph: row-level-security gaps, over-broad grants, likely SQL injection, missing indexes on filter/foreign-key columns, SELECT *, non-sargable predicates, and missing primary keys. Returns findings with severity, location, and a fix for each.",
+        { "name": "audit_sql", "description": "Audit the codebase's SQL for performance and security problems over the SQL-aware graph: row-level-security gaps, over-broad grants, likely SQL injection, missing indexes on filter/foreign-key columns, SELECT *, non-sargable predicates, and missing primary keys. Findings are ranked by severity, then by confidence within a tier (so high-confidence security findings lead and low-confidence name heuristics sink); each carries a severity, confidence, location, and a fix.",
           "inputSchema": { "type": "object", "properties": {
               "severity": { "type": "string", "enum": ["critical","high","medium","low","info"], "description": "Only return findings at least this severe (default: all)." },
               "limit": { "type": "integer", "description": "Max findings returned before a '+N more' summary (default 20). Ignored when verbose=true." },
@@ -3348,6 +3356,52 @@ mod tests {
         ] {
             assert!(!text.contains(t), "AI tell {t:?} in tool surface");
         }
+    }
+
+    #[test]
+    fn tool_surface_documents_at_file_disambiguation() {
+        // The `name@file` qualifier works on every name-taking tool; the schema and
+        // instructions must advertise it (not just predict_edit) so an agent reading
+        // tools/list discovers it. Guards the discoverability fix.
+        let tools = tools_list(true);
+        let arr = tools.as_array().unwrap();
+        let find = |name: &str| {
+            arr.iter()
+                .find(|t| t["name"] == name)
+                .unwrap_or_else(|| panic!("tool {name} missing"))
+        };
+        for (name, param) in [
+            ("get_node", "label"),
+            ("get_source", "label"),
+            ("get_neighbors", "label"),
+            ("describe_node", "label"),
+            ("affected", "label"),
+            ("find_callers", "label"),
+            ("find_callees", "label"),
+            ("shortest_path", "source"),
+            ("shortest_path", "target"),
+            ("predict_edit", "symbol"),
+        ] {
+            let desc = find(name)["inputSchema"]["properties"][param]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{name}.{param} has no description"));
+            assert!(
+                desc.contains("@file"),
+                "{name}.{param} should document the @file qualifier: {desc}"
+            );
+        }
+        // The onboarding instructions explain it cross-cuttingly.
+        assert!(
+            SERVER_INSTRUCTIONS.contains("name@file-substring"),
+            "instructions should explain @file disambiguation"
+        );
+        // god_nodes structured output advertises the per-hub test count.
+        let props =
+            &find("god_nodes")["outputSchema"]["properties"]["god_nodes"]["items"]["properties"];
+        assert!(
+            props.get("test_count").is_some(),
+            "god_nodes outputSchema should declare test_count"
+        );
     }
 
     #[test]

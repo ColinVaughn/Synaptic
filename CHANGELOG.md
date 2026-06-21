@@ -10,6 +10,35 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-06-21
+
+A discoverability follow-up to 0.3.4: the `name@file` qualifier and the `god_nodes`
+test-coverage annotation now appear in the surfaces an agent actually reads -- MCP
+tool schemas, the server `initialize` instructions, the generated skill, and CLI
+`--help` -- not just the wiki. No behavior change; the 0.3.4 functionality is the
+same, this makes it findable.
+
+### Changed
+- **The `name@file-substring` disambiguation qualifier is now documented on every
+  name-taking tool**, not just `predict_edit`. It is spelled out in the MCP
+  parameter schemas for `get_node`, `get_source`, `get_neighbors`, `describe_node`,
+  `shortest_path`, `affected`, `find_callers`, and `find_callees`; in the server's
+  `initialize` instructions; in the generated skill (`SKILL.md` / `AGENTS.md` /
+  etc.); and in the `explain` / `path` / `affected` CLI help.
+- **`god_nodes` advertises its per-hub test count in the structured output schema**
+  (`test_count`), and the skill notes that `0 test(s)` flags an untested,
+  high-blast-radius hub.
+- Tool-description clarity: `get_neighbors` documents the empty-`relation_filter`
+  hint, and `audit_sql` documents the severity-then-confidence ranking.
+- A guard test now fails if a name-taking tool's schema drops the `@file` hint or
+  the `god_nodes` schema loses `test_count`.
+
+### Fixed
+- **Docs:** the wiki "Seed resolution" section described a pre-unification resolver
+  (claiming `query` / `path` / `explain` used a simpler exact-id-then-exact-label
+  lookup) and the old `No unique node match` message. It now documents the shared
+  cascade, the `name@file` qualifier, and the candidate list with file + degree.
+
 ## [0.3.4] - 2026-06-21
 
 A second round of agent-feedback usability fixes (tested against a real external

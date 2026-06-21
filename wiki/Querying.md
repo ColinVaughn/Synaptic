@@ -215,8 +215,9 @@ X.
 
 ### Seed resolution (the fallback cascade)
 
-`affected` resolves its node argument through a conservative cascade, stopping at
-the first match and never guessing on a tie:
+The commands that take a node argument (`explain`, `path`, `affected`) resolve it
+through one shared conservative cascade, stopping at the first match and never
+guessing on a tie:
 
 1. Exact node id.
 2. Unique case-insensitive exact label.
@@ -225,9 +226,14 @@ the first match and never guessing on a tie:
 4. Unique case-insensitive source file path.
 5. Unique case-insensitive substring of a label.
 
-If any step would match more than one node, or nothing matches at all, it prints
-`No unique node match for <node>` and stops. (The `query`/`path`/`explain`
-commands use a simpler resolver: exact id, then exact label.)
+When a name is shared by several files, pin it to one by appending a file
+qualifier: `name@file-substring` (e.g. `announce@core/foo.ts`). The whole query is
+tried as-is first, so a name that itself contains `@` still resolves literally.
+
+If a step matches more than one node, the command lists the candidates with each
+one's id, file, and degree (so you can pick the right one without a second lookup)
+instead of guessing; if nothing matches at all it prints `No node matches '<node>'`.
+The same cascade and messaging back the equivalent MCP tools.
 
 ### --relation and --depth
 
