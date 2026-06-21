@@ -89,7 +89,18 @@ pub fn merge_incremental(
     let preserved_edges: Vec<Edge> = existing
         .links
         .iter()
-        .filter(|e| live_ids.contains(&e.source) && live_ids.contains(&e.target))
+        .filter(|e| {
+            // Both endpoints must still be live, AND the edge must not originate
+            // from an evicted (re-extracted or deleted) file. A re-extracted
+            // file's edges come back fresh via `fresh_edges` and the post-merge
+            // resolution passes, so keeping the old ones here would union-merge
+            // stale outgoing edges onto surviving nodes (e.g. a call retargeted
+            // announce() -> log() would leave a phantom announce edge because
+            // the callee node still lives). This mirrors the node rule above.
+            live_ids.contains(&e.source)
+                && live_ids.contains(&e.target)
+                && !evict_sources.contains(&e.source_file)
+        })
         .cloned()
         .collect();
 
@@ -491,6 +502,13 @@ mod tests {
         }
     }
 
+    fn edge_sf(s: &str, t: &str, rel: &str, sf: &str) -> Edge {
+        Edge {
+            source_file: sf.into(),
+            ..edge(s, t, rel)
+        }
+    }
+
     fn graph_data(nodes: Vec<Node>, links: Vec<Edge>) -> GraphData {
         GraphData {
             directed: true,
@@ -549,6 +567,67 @@ mod tests {
         let ids: HashSet<&str> = nodes.iter().map(|n| n.id.0.as_str()).collect();
         assert!(ids.contains("a_fn") && !ids.contains("b_fn"));
         assert!(edges.is_empty(), "edge to deleted node dropped: {edges:?}");
+    }
+
+    #[test]
+    fn merge_replaces_outgoing_edges_of_reextracted_file() {
+        // A node that survives a re-extract must not keep its *old* outgoing
+        // edges. When a.py is re-extracted its fresh edges come back via
+        // `fresh_edges` (and post-merge resolution), so every prior edge whose
+        // `source_file` was evicted must be dropped -- not union-merged with the
+        // fresh set. Otherwise changing a call announce() -> log() leaves a
+        // phantom caller->announce edge because the callee node still lives,
+        // which inflates affected/predict_impact blast radius.
+        let existing = graph_data(
+            vec![
+                node("caller", "caller()", "a.py", Some("ast")),
+                node("announce", "announce()", "lib.py", Some("ast")),
+                node("log", "log()", "lib.py", Some("ast")),
+            ],
+            vec![edge_sf("caller", "announce", "calls", "a.py")],
+        );
+        // Re-extract a.py: caller now calls log() instead of announce().
+        let fresh = vec![node("caller", "caller()", "a.py", Some("ast"))];
+        let fresh_edges = vec![edge_sf("caller", "log", "calls", "a.py")];
+        let evict: HashSet<String> = ["a.py".to_string()].into_iter().collect();
+        let (_, edges, _) = merge_incremental(&existing, fresh, fresh_edges, &evict, false);
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.source.0 == "caller" && e.target.0 == "log"),
+            "fresh caller->log edge present: {edges:?}"
+        );
+        assert!(
+            !edges
+                .iter()
+                .any(|e| e.source.0 == "caller" && e.target.0 == "announce"),
+            "stale caller->announce edge from re-extracted a.py must be dropped: {edges:?}"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_cross_file_edge_whose_source_file_is_unchanged() {
+        // The flip side of the rule above: an edge from a file that was NOT
+        // re-extracted must survive even when one endpoint lives in a
+        // re-extracted file (its target id is stable). Pruning is keyed on the
+        // edge's own `source_file`, not its endpoints.
+        let existing = graph_data(
+            vec![
+                node("a_fn", "a()", "a.py", Some("ast")),
+                node("b_fn", "b()", "b.py", Some("ast")),
+            ],
+            // b.py calls into a.py; b.py is untouched this round.
+            vec![edge_sf("b_fn", "a_fn", "calls", "b.py")],
+        );
+        let fresh = vec![node("a_fn", "a()", "a.py", Some("ast"))];
+        let evict: HashSet<String> = ["a.py".to_string()].into_iter().collect();
+        let (_, edges, _) = merge_incremental(&existing, fresh, vec![], &evict, false);
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.source.0 == "b_fn" && e.target.0 == "a_fn"),
+            "edge from unchanged b.py preserved: {edges:?}"
+        );
     }
 
     #[test]

@@ -34,8 +34,10 @@ fn repo_str(s: &EditSite) -> String {
     }
 }
 
-/// A rename edit line: the symbol's text changes, so show `old -> new`.
-fn site_line(s: &EditSite) -> String {
+/// A rename edit line: the symbol's text changes, so show `old -> new`. Public so
+/// the MCP `plan_rename` tool renders edit sites identically to the CLI `plan.md`
+/// (one renderer, no drift).
+pub fn site_line(s: &EditSite) -> String {
     format!(
         "- `{}` -- rename `{}` -> `{}` ({}, {}){}",
         loc_str(s),

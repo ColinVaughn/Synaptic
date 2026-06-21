@@ -501,6 +501,23 @@ mod tests {
     }
 
     #[test]
+    fn hotspot_from_node_churn_only_has_zero_lines_but_nonzero_nodes() {
+        // A file with graph-node churn but no line delta in numstat still ranks
+        // as a hotspot (score folds in node churn). Such a row carries +0/-0
+        // *lines*, so any display must also surface node churn or it reads blank.
+        let old = kg(vec![n("a", "a.py")], vec![]);
+        let new = kg(vec![n("a", "a.py"), n("b", "a.py")], vec![]);
+        let hs = hotspots(&old, &new, &[], &[NodeId("b".into())], &[], 10);
+        let h = hs
+            .iter()
+            .find(|h| h.file == "a.py")
+            .expect("a.py is a hotspot from node churn");
+        assert_eq!((h.lines_added, h.lines_removed), (0, 0), "no line delta");
+        assert_eq!(h.nodes_added, 1, "node churn is what makes it a hotspot");
+        assert!(h.score > 0.0, "survives the score>0 filter via node churn");
+    }
+
+    #[test]
     fn new_cycles_reports_only_introduced_cycles() {
         // old: x.py -> y.py (no cycle). new: also y.py -> x.py (2-cycle).
         let nodes = || vec![n("x", "x.py"), n("y", "y.py")];

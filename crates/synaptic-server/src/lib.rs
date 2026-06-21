@@ -199,6 +199,25 @@ fn query_log_path() -> Option<PathBuf> {
     std::env::var("SYNAPTIC_QUERY_LOG").ok().map(PathBuf::from)
 }
 
+/// Append a `Title (N):` section listing up to `cap` rename edit sites, with a
+/// `+N more` summary when truncated. Shared by `plan_rename`'s Edits and Review
+/// lists; the per-site rendering is reused from the CLI so the two never drift.
+fn append_capped_sites(o: &mut String, title: &str, sites: &[synaptic_refactor::EditSite], cap: usize) {
+    if sites.is_empty() {
+        return;
+    }
+    o.push_str(&format!("\n{title} ({}):", sites.len()));
+    for s in sites.iter().take(cap) {
+        o.push_str(&format!("\n  {}", synaptic_refactor::emit::site_line(s)));
+    }
+    if sites.len() > cap {
+        o.push_str(&format!(
+            "\n  ... (+{} more; pass verbose=true for the full list)",
+            sites.len() - cap
+        ));
+    }
+}
+
 impl Server {
     /// Build a server from already-parsed graph data.
     pub fn from_graph_data(gd: GraphData, graph_path: Option<PathBuf>) -> Server {
@@ -966,16 +985,16 @@ impl Server {
     }
 
     /// `find_callers` — who calls/uses this node (incoming call-like edges).
-    pub fn tool_find_callers(&self, label: &str) -> String {
-        self.directional("Callers", label, "in")
+    pub fn tool_find_callers(&self, label: &str, limit: usize, verbose: bool) -> String {
+        self.directional("Callers", label, "in", limit, verbose)
     }
 
     /// `find_callees` — what this node calls/uses (outgoing call-like edges).
-    pub fn tool_find_callees(&self, label: &str) -> String {
-        self.directional("Callees", label, "out")
+    pub fn tool_find_callees(&self, label: &str, limit: usize, verbose: bool) -> String {
+        self.directional("Callees", label, "out", limit, verbose)
     }
 
-    fn directional(&self, title: &str, label: &str, dir: &str) -> String {
+    fn directional(&self, title: &str, label: &str, dir: &str, limit: usize, verbose: bool) -> String {
         let id = match self.resolve_or_msg(label) {
             Ok(id) => id,
             Err(msg) => return msg,
@@ -983,24 +1002,47 @@ impl Server {
         let Some(ex) = explain(&self.kg, &id) else {
             return format!("No node matches '{}'.", sanitize_label(label));
         };
-        let mut out = format!("{title} of {}:", sanitize_label(&ex.label));
-        let mut any = false;
+        // Collect the call-like neighbors in the requested direction, plus a
+        // per-relation tally for the summary header.
+        let mut hits: Vec<(&str, &str)> = Vec::new();
+        let mut by_rel: BTreeMap<&str, usize> = BTreeMap::new();
         for nb in &ex.neighbors {
-            // Call-like relations only; direction filtered.
             let rel = nb.relation.to_lowercase();
             let call_like =
                 rel.contains("call") || rel.contains("use") || rel.contains("reference");
             if nb.direction == dir && call_like {
-                any = true;
-                out.push_str(&format!(
-                    "\n  {} [{}]",
-                    sanitize_label(&nb.label),
-                    sanitize_label(&nb.relation)
-                ));
+                hits.push((&nb.label, &nb.relation));
+                *by_rel.entry(nb.relation.as_str()).or_default() += 1;
             }
         }
-        if !any {
-            out.push_str("\n  (none)");
+        let seed = sanitize_label(&ex.label);
+        if hits.is_empty() {
+            return format!("{title} of {seed}:\n  (none)");
+        }
+        // Per-relation breakdown only when it adds information (>1 kind), mirroring
+        // affected's per-depth breakdown.
+        let breakdown = if by_rel.len() > 1 {
+            let parts = by_rel
+                .iter()
+                .map(|(r, c)| format!("{}: {c}", sanitize_label(r)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" [{parts}]")
+        } else {
+            String::new()
+        };
+        // Top-N by default; verbose dumps all. Mirrors `affected`.
+        let cap = if verbose { usize::MAX } else { limit.max(1) };
+        let total = hits.len();
+        let mut out = format!("{total} {title} of {seed}{breakdown}:");
+        for (lbl, rel) in hits.iter().take(cap) {
+            out.push_str(&format!("\n  {} [{}]", sanitize_label(lbl), sanitize_label(rel)));
+        }
+        if total > cap {
+            out.push_str(&format!(
+                "\n  ... (+{} more; pass verbose=true for the full list)",
+                total - cap
+            ));
         }
         out
     }
@@ -1087,7 +1129,12 @@ impl Server {
     /// against `base` (default: the detected default branch). `git diff <base>`
     /// covers the branch's committed work plus uncommitted edits, the same set a
     /// PR would. Uses `git`, not `gh`, so it works offline and before any PR.
-    pub fn tool_working_changes_impact(&self, base: Option<&str>) -> String {
+    pub fn tool_working_changes_impact(
+        &self,
+        base: Option<&str>,
+        limit: usize,
+        verbose: bool,
+    ) -> String {
         let base = self.resolve_base(base, None);
         let diff = self.runner.run("git", &["diff", "--name-only", &base]);
         let files: Vec<String> = diff
@@ -1108,7 +1155,69 @@ impl Server {
         for f in &files {
             out.push_str(&format!("\n  {}", sanitize_label(f)));
         }
+        // Opt-in: list the top touched nodes (most-connected first) and the
+        // touched communities with human-readable labels. Default output stays
+        // files-only to preserve behavior.
+        if verbose {
+            self.append_working_impact_detail(&mut out, &files, limit);
+        }
         out
+    }
+
+    /// Append `Top nodes` (touched nodes ranked by edge degree) and
+    /// `Communities` (labeled) detail to a `working_changes_impact` report.
+    fn append_working_impact_detail(&self, out: &mut String, files: &[String], limit: usize) {
+        use std::collections::HashMap;
+        // Touched nodes: those whose source_file path-matches a changed file
+        // (same boundary-safe match `graph_impact` uses).
+        let touched: Vec<&synaptic_core::Node> = self
+            .kg
+            .nodes()
+            .filter(|n| {
+                files
+                    .iter()
+                    .any(|f| synaptic_prs::path_match(&n.source_file, f))
+            })
+            .collect();
+        if touched.is_empty() {
+            return;
+        }
+        // Degree = incident edges (in + out), one pass over the edge list.
+        let mut degree: HashMap<&str, usize> = HashMap::new();
+        for e in self.kg.edges() {
+            *degree.entry(e.source.0.as_str()).or_default() += 1;
+            *degree.entry(e.target.0.as_str()).or_default() += 1;
+        }
+        let deg = |n: &synaptic_core::Node| degree.get(n.id.0.as_str()).copied().unwrap_or(0);
+        let mut ranked = touched.clone();
+        ranked.sort_by(|a, b| deg(b).cmp(&deg(a)).then_with(|| a.label.cmp(&b.label)));
+
+        out.push_str(&format!("\nTop nodes ({}):", touched.len()));
+        for n in ranked.iter().take(limit) {
+            let kind = n.kind().map(|k| k.as_str()).unwrap_or("node");
+            out.push_str(&format!(
+                "\n  {} [{}] {} ({} edges)",
+                sanitize_label(&n.label),
+                sanitize_label(kind),
+                sanitize_label(&n.source_file),
+                deg(n)
+            ));
+        }
+        if touched.len() > limit {
+            out.push_str(&format!("\n  ... (+{} more)", touched.len() - limit));
+        }
+
+        let labels = synaptic_prs::build_community_labels(
+            touched.iter().map(|n| (n.label.as_str(), n.community)),
+            5,
+        );
+        if !labels.is_empty() {
+            out.push_str(&format!("\nCommunities ({}):", labels.len()));
+            for (cid, lbls) in &labels {
+                let shown: Vec<String> = lbls.iter().map(|l| sanitize_label(l)).collect();
+                out.push_str(&format!("\n  community {cid}: {}", shown.join(", ")));
+            }
+        }
     }
 
     /// `predict_impact` - forecast the consequences of a change before applying
@@ -1886,9 +1995,12 @@ impl Server {
             r.drift.communities_after
         ));
         for h in r.hotspots.iter().take(top) {
+            // Include graph-node churn: a file can be a hotspot purely from node
+            // adds/removes with no line delta, which rendered as a meaningless
+            // "+0/-0 lines" row. Matches the CLI `diff` output.
             o.push_str(&format!(
-                "  hotspot {} (+{}/-{} lines)\n",
-                h.file, h.lines_added, h.lines_removed
+                "  hotspot {} (+{}/-{} lines, +{}/-{} nodes)\n",
+                h.file, h.lines_added, h.lines_removed, h.nodes_added, h.nodes_removed
             ));
         }
         o
@@ -1901,6 +2013,8 @@ impl Server {
         to: &str,
         id: Option<&str>,
         file: Option<&str>,
+        limit: usize,
+        verbose: bool,
     ) -> String {
         // `name` may be a node id; pin it only when --id is not given.
         let (old, opt_id) = match (id, self.kg.node(&synaptic_core::NodeId(name.to_string()))) {
@@ -1943,6 +2057,13 @@ impl Server {
                 plan.collision.severity, plan.new_name
             ));
         }
+        // Emit the actual edit sites (file:line:col, old -> new, reason,
+        // confidence) so an agent can apply the rename without a second
+        // round-trip to the CLI's plan.md. Capped like `affected`; verbose dumps
+        // all. The site renderer is shared with the CLI so the two never drift.
+        let cap = if verbose { usize::MAX } else { limit.max(1) };
+        append_capped_sites(&mut o, "Edits", &plan.edits, cap);
+        append_capped_sites(&mut o, "Review", &plan.review, cap);
         o.push_str("\n  (plan-only; Synaptic did not edit source)");
         o
     }
@@ -2143,12 +2264,18 @@ impl Server {
                     b("verbose"),
                 )
             }
-            "find_callers" => self.tool_find_callers(&s("label")),
-            "find_callees" => self.tool_find_callees(&s("label")),
+            "find_callers" => {
+                self.tool_find_callers(&s("label"), u("limit", 50) as usize, b("verbose"))
+            }
+            "find_callees" => {
+                self.tool_find_callees(&s("label"), u("limit", 50) as usize, b("verbose"))
+            }
             "list_prs" => self.tool_list_prs(opt("base"), opt("repo")),
             "get_pr_impact" => self.tool_get_pr_impact(u("pr_number", 0), opt("repo")),
             "triage_prs" => self.tool_triage_prs(opt("base"), opt("repo")),
-            "working_changes_impact" => self.tool_working_changes_impact(opt("base")),
+            "working_changes_impact" => {
+                self.tool_working_changes_impact(opt("base"), u("limit", 20) as usize, b("verbose"))
+            }
             "predict_impact" => {
                 let files: Vec<String> = args
                     .get("files")
@@ -2189,7 +2316,14 @@ impl Server {
             "time_travel_diff" => {
                 self.tool_time_travel_diff(&s("rev1"), opt("rev2"), u("top", 20) as usize)
             }
-            "plan_rename" => self.tool_plan_rename(&s("name"), &s("to"), opt("id"), opt("file")),
+            "plan_rename" => self.tool_plan_rename(
+                &s("name"),
+                &s("to"),
+                opt("id"),
+                opt("file"),
+                u("limit", 50) as usize,
+                b("verbose"),
+            ),
             // An unknown tool is a tool-result with isError, NOT a JSON-RPC
             // protocol error (return text content).
             other => {
@@ -2616,18 +2750,30 @@ fn tools_list(allow_exec: bool) -> Value {
               "total": {"type":"integer"}, "truncated": {"type":"boolean"},
               "by_depth": { "type": "object", "additionalProperties": {"type":"integer"} }
           }, "required": ["seed","affected"] } },
-        { "name": "find_callers", "description": "List the nodes that call, use, or reference this symbol (incoming edges only). Answers 'who calls X'.",
-          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." } }, "required": ["label"] } },
-        { "name": "find_callees", "description": "List the nodes this symbol calls, uses, or references (outgoing edges only). Answers 'what does X call'.",
-          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." } }, "required": ["label"] } },
+        { "name": "find_callers", "description": "List the nodes that call, use, or reference this symbol (incoming edges only). Answers 'who calls X'. The count and a per-relation breakdown are always in the header; the list is capped with a '+N more' summary on a hub.",
+          "inputSchema": { "type": "object", "properties": {
+              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." },
+              "limit": { "type": "integer", "description": "Max callers listed before a '+N more' summary (default 50). Ignored when verbose=true." },
+              "verbose": { "type": "boolean", "description": "Emit the full, uncapped caller list instead of the summarized top-N (default false)." }
+          }, "required": ["label"] } },
+        { "name": "find_callees", "description": "List the nodes this symbol calls, uses, or references (outgoing edges only). Answers 'what does X call'. The count and a per-relation breakdown are always in the header; the list is capped with a '+N more' summary on a hub.",
+          "inputSchema": { "type": "object", "properties": {
+              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." },
+              "limit": { "type": "integer", "description": "Max callees listed before a '+N more' summary (default 50). Ignored when verbose=true." },
+              "verbose": { "type": "boolean", "description": "Emit the full, uncapped callee list instead of the summarized top-N (default false)." }
+          }, "required": ["label"] } },
         { "name": "list_prs", "description": "Open pull requests targeting the base branch with their CI/review state. Requires the `gh` CLI authenticated for the repo.",
           "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch to filter to (default: the repo's default branch)." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } } } },
         { "name": "get_pr_impact", "description": "One PR's detail plus its graph blast radius: which graph nodes and communities its changed files touch. Requires the `gh` CLI.",
           "inputSchema": { "type": "object", "properties": { "pr_number": { "type": "integer", "description": "PR number." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } }, "required": ["pr_number"] } },
         { "name": "triage_prs", "description": "Open PRs ranked by actionability (status plus graph blast radius) so the model can prioritize review and merge order. Requires the `gh` CLI.",
           "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch (default: the repo's default branch)." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } } } },
-        { "name": "working_changes_impact", "description": "Graph blast radius of your branch's changes against a base branch (committed plus uncommitted, the same set a PR would have): which graph nodes and communities they touch, before opening a PR. Uses git, no gh needed.",
-          "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch to diff against (default: the repo's default branch)." } } } },
+        { "name": "working_changes_impact", "description": "Graph blast radius of your branch's changes against a base branch (committed plus uncommitted, the same set a PR would have): which graph nodes and communities they touch, before opening a PR. Uses git, no gh needed. Default output lists the changed files plus counts; pass verbose=true to also list the top touched nodes (ranked by connectivity) and the touched communities with labels.",
+          "inputSchema": { "type": "object", "properties": {
+              "base": { "type": "string", "description": "Base branch to diff against (default: the repo's default branch)." },
+              "verbose": { "type": "boolean", "description": "Also list the top touched nodes and labeled communities, not just files (default false)." },
+              "limit": { "type": "integer", "description": "Max touched nodes listed when verbose (default 20)." }
+          } } },
         { "name": "structural_search", "description": "Structural search over the graph with SYNQL, or a named architectural pattern. Not text search: matches on kind/visibility/loc/fan-in/out/etc. `.name` is the bare symbol (no parentheses); use `=~` for a regex/substring match. Example query: 'MATCH (c:class) WHERE c.loc > 500 RETURN c'. Example name match: 'MATCH (f:function) WHERE f.name =~ \"announce\" RETURN f'. Patterns: singleton, factory, observer, service-locator, god-class.",
           "inputSchema": { "type": "object", "properties": {
               "query": { "type": "string", "description": "A SYNQL query. Omit when using `pattern`." },
@@ -2674,12 +2820,14 @@ fn tools_list(allow_exec: bool) -> Value {
               "rev2": { "type": "string", "description": "Target revision (default: the current working tree)." },
               "top": { "type": "integer", "description": "Max rows per ranked section (default 20)." }
           }, "required": ["rev1"] } },
-        { "name": "plan_rename", "description": "Plan-only: a confidence-scored rename plan (edit sites, blast radius, collision check) for an agent to apply. Never edits source. Use `synaptic refactor verify` on the CLI after applying.",
+        { "name": "plan_rename", "description": "Plan-only: a confidence-scored rename plan for an agent to apply. Returns the actual edit sites (file:line:col, old -> new, reason, confidence) plus the review-needed sites, so you can apply the rename without a second round-trip. Never edits source. Use `synaptic refactor verify` on the CLI after applying.",
           "inputSchema": { "type": "object", "properties": {
               "name": { "type": "string", "description": "The symbol to rename (its name, or a node id)." },
               "to": { "type": "string", "description": "The new name." },
               "id": { "type": "string", "description": "Disambiguate by node id when several definitions share the name." },
-              "file": { "type": "string", "description": "Disambiguate by file-path substring." }
+              "file": { "type": "string", "description": "Disambiguate by file-path substring." },
+              "limit": { "type": "integer", "description": "Max sites listed per section (Edits, Review) before a '+N more' summary (default 50). Ignored when verbose=true." },
+              "verbose": { "type": "boolean", "description": "List every edit/review site instead of the summarized top-N (default false)." }
           }, "required": ["name", "to"] } },
         { "name": "predict_impact", "description": "Forecast the consequences of a change BEFORE editing: which graph nodes the changed files define, the reverse-impact blast radius that depends on them, which edited symbols are public API (callers outside the file/module may break), and a verify checklist. Pure-graph and read-only; use time_travel_diff or the `synaptic predict` CLI for new-cycle / removed-API detection.",
           "inputSchema": { "type": "object", "properties": {
@@ -4036,6 +4184,92 @@ mod tests {
     }
 
     #[test]
+    fn find_callers_caps_at_limit_and_verbose_uncaps() {
+        // A hub with 60 callers must summarize by default and dump all on verbose,
+        // mirroring `affected`.
+        let mut nodes = vec![node("hub", "hub", Some(0))];
+        let mut links = Vec::new();
+        for i in 0..60u32 {
+            let cid = format!("c{i}");
+            nodes.push(node(&cid, &cid, Some(0)));
+            links.push(edge(&cid, "hub", "calls"));
+        }
+        let gd = GraphData {
+            nodes,
+            links,
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None);
+
+        let capped = call_tool(&mut s, "find_callers", json!({"label": "hub"}));
+        assert!(
+            capped.starts_with("60 Callers of hub:"),
+            "true total in header: {capped}"
+        );
+        assert!(
+            capped.contains("+10 more"),
+            "default limit 50 summarizes the tail: {capped}"
+        );
+
+        let full = call_tool(&mut s, "find_callers", json!({"label": "hub", "verbose": true}));
+        assert!(!full.contains("more"), "verbose uncaps: {full}");
+        assert_eq!(
+            full.matches("[calls]").count(),
+            60,
+            "verbose lists every caller"
+        );
+
+        let limited = call_tool(&mut s, "find_callers", json!({"label": "hub", "limit": 5}));
+        assert!(limited.contains("+55 more"), "custom limit honored: {limited}");
+    }
+
+    #[test]
+    fn find_callees_header_shows_relation_breakdown() {
+        // AuthService calls login_user and uses Database: two relation kinds, so
+        // the header carries a per-relation breakdown.
+        let mut s = server();
+        let out = call_tool(&mut s, "find_callees", json!({"label": "AuthService"}));
+        assert!(
+            out.starts_with("2 Callees of AuthService [calls: 1, uses: 1]:"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn plan_rename_sites_render_with_location_and_cap() {
+        fn site(file: &str, line: u32) -> synaptic_refactor::EditSite {
+            synaptic_refactor::EditSite {
+                file: file.into(),
+                span: Some(synaptic_core::Span {
+                    start_line: line,
+                    start_col: 5,
+                    end_line: line,
+                    end_col: 9,
+                }),
+                line: Some(line),
+                old: "foo".into(),
+                new: "bar".into(),
+                confidence: Confidence::Extracted,
+                reason: "call site".into(),
+                needs_review: false,
+                repo: None,
+            }
+        }
+        let sites = vec![site("a.rs", 1), site("b.rs", 2), site("c.rs", 3)];
+        let mut o = String::new();
+        append_capped_sites(&mut o, "Edits", &sites, 2);
+        assert!(o.starts_with("\nEdits (3):"), "true count in header: {o}");
+        assert!(o.contains("a.rs:1:5"), "file:line:col present: {o}");
+        assert!(o.contains("`foo` -> `bar`"), "old -> new present: {o}");
+        assert!(o.contains("+1 more"), "capped with summary: {o}");
+
+        // An empty list emits no section at all.
+        let mut empty = String::new();
+        append_capped_sites(&mut empty, "Review", &[], 50);
+        assert!(empty.is_empty(), "no section for an empty list: {empty:?}");
+    }
+
+    #[test]
     fn affected_lists_transitive_dependents() {
         // login_user calls check; AuthService calls login_user.
         // Changing `check` affects login_user (1 hop) and AuthService (2 hops).
@@ -4268,11 +4502,31 @@ mod tests {
             ..Default::default()
         };
         let s = Server::from_graph_data(gd, None).with_runner(Box::new(GitRunner));
-        let out = s.tool_working_changes_impact(Some("main"));
+        let out = s.tool_working_changes_impact(Some("main"), 20, false);
         assert!(out.contains("auth.py"), "names the changed file: {out}");
         assert!(
             out.contains("1 communities touched"),
             "reports impact: {out}"
+        );
+        // Default output is files-only; node/community detail is opt-in.
+        assert!(
+            !out.contains("Top nodes"),
+            "default output stays files-only: {out}"
+        );
+
+        // Verbose lists the touched nodes and labeled communities.
+        let verbose = s.tool_working_changes_impact(Some("main"), 20, true);
+        assert!(
+            verbose.contains("Top nodes (1):"),
+            "verbose lists touched nodes: {verbose}"
+        );
+        assert!(
+            verbose.contains("AuthService [node] auth.py (0 edges)"),
+            "node line carries kind/file/degree: {verbose}"
+        );
+        assert!(
+            verbose.contains("community 0: AuthService"),
+            "verbose labels the touched community: {verbose}"
         );
 
         // No diff -> graceful message, no panic.
@@ -4284,7 +4538,7 @@ mod tests {
         }
         let s2 = server().with_runner(Box::new(EmptyRunner));
         assert!(s2
-            .tool_working_changes_impact(Some("main"))
+            .tool_working_changes_impact(Some("main"), 20, false)
             .contains("No changes"));
     }
 

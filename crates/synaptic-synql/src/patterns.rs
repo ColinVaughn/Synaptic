@@ -37,10 +37,19 @@ pub fn list_patterns() -> Vec<(&'static str, &'static str)> {
 /// Run a named pattern, returning a single-column (`node`) result.
 pub fn run_pattern(kg: &KnowledgeGraph, name: &str) -> Result<QueryResult, SynqlError> {
     match name {
-        "god-class" => crate::run(
-            kg,
-            "MATCH (c:class) WHERE c.loc > 500 AND c.fan_out > 20 RETURN c",
-        ),
+        "god-class" => {
+            let mut r = crate::run(
+                kg,
+                "MATCH (c:class) WHERE c.loc > 500 AND c.fan_out > 20 RETURN c",
+            )?;
+            // Normalize the SYNQL binding (`c`) to the single `node` column this
+            // function documents and every detector-based pattern returns, so
+            // callers see a consistent column name across all patterns.
+            if r.columns.len() == 1 {
+                r.columns[0] = "node".to_string();
+            }
+            Ok(r)
+        }
         "singleton" => Ok(single(detect_singleton(kg))),
         "factory" => Ok(single(detect_factory(kg))),
         "observer" => Ok(single(detect_observer(kg))),
@@ -322,6 +331,22 @@ mod tests {
             ids(run_pattern(&kg, "service-locator").unwrap()),
             vec!["Locator"]
         );
+    }
+
+    #[test]
+    fn all_patterns_expose_a_consistent_node_column() {
+        // Every pattern -- the detector-based ones and the SYNQL `god-class`
+        // query -- must return a single column named `node`. god-class
+        // previously leaked the query binding `c`, an inconsistency visible to
+        // CLI/MCP callers.
+        let kg = graph(vec![node("C", NodeKind::Class, Some(0))], vec![]);
+        for p in ["god-class", "singleton", "factory", "observer"] {
+            assert_eq!(
+                run_pattern(&kg, p).unwrap().columns,
+                vec!["node".to_string()],
+                "pattern {p} must return a single `node` column"
+            );
+        }
     }
 
     #[test]

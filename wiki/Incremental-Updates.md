@@ -26,7 +26,7 @@ What it does:
 1. Acquires a per-repo rebuild lock under `synaptic-out/`. If another rebuild holds the lock, the changed paths are appended to a pending queue and `update` returns; the lock holder drains the queue and covers them. A lockfile older than 600 seconds (a crashed holder) is treated as stale and stolen.
 2. Loads the existing `synaptic-out/graph.json` (inheriting its `directed` flag).
 3. Re-extracts the target files in parallel, using the on-disk extraction cache.
-4. Merges the fresh AST into the existing graph: fresh nodes replace nodes with the same id; unchanged files' AST and all semantic nodes survive; nodes whose source file was evicted are dropped; edges survive only when both endpoints are still live; hyperedges carry over.
+4. Merges the fresh AST into the existing graph: fresh nodes replace nodes with the same id; unchanged files' AST and all semantic nodes survive; nodes whose source file was evicted are dropped; an existing edge survives only when both endpoints are still live **and** the edge did not originate from a re-extracted file (a re-extracted file's edges come back fresh, so they are replaced rather than union-merged with the old set); hyperedges carry over.
 5. Re-resolves cross-file symbols, re-runs entity dedup, re-clusters communities (remapping ids to the previous build for stability), then writes all artifacts.
 
 Outputs: the rebuilt graph plus the standard artifact set (`graph.json`, `graph.html`, `GRAPH_REPORT.md`, `graph.graphml`, `graph.cypher`, `graph.dot`, `callflow.html`, `tree.html`, `graph.svg`, `graph-3d.html`).
@@ -68,6 +68,19 @@ Detected 2 changed code file(s) → rebuilding…
 ```
 
 Stop with Ctrl-C.
+
+## `synaptic serve` auto-freshen (on-query catch-up)
+
+The MCP server (`synaptic serve`) keeps its graph current **without** a live filesystem watcher. There is no background process tailing your edits — instead the graph is refreshed lazily, on the next query.
+
+How it works:
+
+- Each MCP tool call (and the CLI, via the same manifest) first does a cheap staleness check: it compares the working tree against the manifest recorded when the graph was last built (file mtime plus content hash). If files were added, changed, or removed since then, it runs an incremental `update` for exactly those files before answering the query, so the answer reflects your latest edits.
+- The check is **debounced** (`SYNAPTIC_SERVE_AUTOFRESH_DEBOUNCE_MS`, default 1000 ms): a burst of queries walks the tree at most once per window.
+- It is **skipped for large change sets** (`SYNAPTIC_SERVE_AUTOFRESH_MAX_FILES`, default 500): a branch switch that touches hundreds of files should not block a single query on a near-full rebuild. Use the post-checkout hook or `synaptic update --full` for those.
+- Auto-freshen is on by default and can be disabled with `SYNAPTIC_SERVE_AUTOFRESH=0` (also `false`/`no`/`off`).
+
+The practical consequence: a file you edit but never query does not land on disk on its own — `synaptic-out/graph.json` updates on the **next** MCP/CLI query that triggers the staleness walk, not the instant you save. For an agent loop this is transparent (every query refreshes first); if you need the graph written out without issuing a query, run `synaptic update` or use `watch`/`hook` for eager rebuilds.
 
 ## `synaptic hook`
 

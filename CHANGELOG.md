@@ -10,6 +10,48 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-06-21
+
+### Fixed
+- **Stale edges accumulated on incremental re-extract.** When a file was
+  re-extracted, an outgoing edge from a surviving node was kept as long as both
+  its endpoints still existed, even though the edge originated from the
+  re-extracted file. So retargeting a call (for example `announce()` to `log()`)
+  left the old edge behind, and these phantom edges silently inflated the blast
+  radius reported by `affected`, `predict_impact`, and `affected_tests`. A
+  re-extracted file's edges are now replaced rather than union-merged: an existing
+  edge survives only when both endpoints are live **and** the edge did not
+  originate from an evicted (re-extracted or deleted) file.
+- **`time_travel_diff` / `synaptic diff` hotspots that changed only graph nodes**
+  (with no line delta) rendered over MCP as a meaningless `+0/-0 lines` row. The
+  MCP output now includes node churn (`+A/-B nodes`), matching the CLI.
+- **`structural_search` column name was inconsistent.** The `god-class` pattern
+  returned a column named `c` (the query binding) while every other pattern
+  returned `node`; all patterns now return a single `node` column.
+
+### Added
+- **`find_callers` / `find_callees` pagination.** Both tools now lead with the
+  true total and a per-relation breakdown (for example `208 Callers of announce
+  [calls: 180, references: 28]:`) and cap the list with a `+N more` summary on a
+  hub. New `limit` (default 50) and `verbose` (uncapped) parameters, matching
+  `affected`.
+- **`plan_rename` returns the actual edit sites over MCP.** In addition to the
+  summary, the tool now lists each edit site (`file:line:col`, `old -> new`,
+  reason, confidence) under `Edits` and the lower-confidence ones under `Review`,
+  so an agent can apply a rename without a second round-trip to the CLI's
+  `plan.md`. New `limit`/`verbose` parameters cap each section. The per-site
+  renderer is now shared with the CLI so the two cannot drift.
+- **`working_changes_impact` node/community detail.** A new `verbose` flag
+  additionally lists the top touched nodes (ranked by connectivity) and the
+  touched communities with labels; `limit` (default 20) caps the node list.
+  Default output is unchanged (changed files plus counts).
+
+### Documentation
+- Documented the MCP server's on-query auto-freshen ("when updates happen") in
+  the Incremental-Updates and MCP-Server wiki pages: it is not a live filesystem
+  watcher but a debounced, manifest-based catch-up that runs on the next query,
+  and corrected the incremental edge-merge description to match the fix above.
+
 ## [0.3.1] - 2026-06-21
 
 ### Added
