@@ -17,7 +17,7 @@ pub fn find_asset<'a>(release: &'a Release, name: &str) -> Option<&'a Asset> {
 }
 
 /// Verify `bytes` hashes to the hex digest at the start of `expected`
-/// (sidecar files are often "<hex>  <filename>"). Case-insensitive.
+/// (sidecar files are often `"<hex>  <filename>"`). Case-insensitive.
 pub fn verify_sha256(bytes: &[u8], expected: &str) -> bool {
     let want = match expected.split_whitespace().next() {
         Some(t) => t.to_ascii_lowercase(),
