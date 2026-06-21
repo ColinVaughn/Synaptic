@@ -928,7 +928,7 @@ impl Server {
 
     /// `god_nodes` — a page of the degree-ranked hub list (`offset` then `top_n`).
     /// Used by the resource endpoint; the tool dispatch renders both channels from
-    /// [`Self::god_nodes_page`] directly so the test-count walk runs only once.
+    /// `god_nodes_page` directly so the test-count walk runs only once.
     pub fn tool_god_nodes(&self, top_n: usize, offset: usize) -> String {
         let (rows, start) = self.god_nodes_page(top_n, offset);
         Self::render_god_nodes_text(&rows, start)
