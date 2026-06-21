@@ -8,8 +8,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use synaptic_core::{Confidence, NodeId};
 use serde::{Deserialize, Serialize};
+use synaptic_core::{Confidence, NodeId};
 
 use crate::graph::KnowledgeGraph;
 
@@ -1159,8 +1159,8 @@ pub fn analyze(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synaptic_core::{Edge, FileType, GraphData, Node};
     use serde_json::Map;
+    use synaptic_core::{Edge, FileType, GraphData, Node};
 
     struct N {
         id: &'static str,

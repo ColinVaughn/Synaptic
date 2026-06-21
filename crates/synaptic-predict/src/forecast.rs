@@ -457,9 +457,9 @@ fn summary_line(f: &ChangeForecast) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
     use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeKind, Visibility};
     use synaptic_history::{DriftReport, ModuleDep, RemovedApi};
-    use serde_json::Map;
 
     fn node(id: &str, label: &str, file: &str, vis: Option<Visibility>) -> Node {
         let mut n = Node {

@@ -2,15 +2,15 @@
 
 use crate::commands::extract::write_outputs;
 use anyhow::{Context, Result};
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::PathBuf;
 use synaptic_core::GraphData;
 use synaptic_graph::analyze;
 use synaptic_incremental::{
     drain_pending, merge_changed_paths, queue_pending, rebuild, try_acquire_lock, ChangeSet,
     RebuildOptions,
 };
-use std::collections::BTreeMap;
-use std::fs;
-use std::path::PathBuf;
 
 pub(crate) fn run_update(
     paths: Vec<PathBuf>,

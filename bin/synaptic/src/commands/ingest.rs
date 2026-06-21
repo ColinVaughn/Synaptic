@@ -3,6 +3,9 @@
 use crate::cli::IngestSource;
 use crate::commands::extract::write_outputs;
 use anyhow::{Context, Result};
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
 use synaptic_core::GraphData;
 use synaptic_graph::{
     analyze, apply_communities, build_from_parts, cluster, BuildOptions, ClusterOptions,
@@ -10,9 +13,6 @@ use synaptic_graph::{
 use synaptic_ingest::{
     ingest_mcp_config, ingest_scip_json, ingest_url, introspect_cargo, Ingested,
 };
-use std::collections::BTreeMap;
-use std::fs;
-use std::path::Path;
 // `PathBuf` is used only by `ingested_dir`, which is gated on these features.
 #[cfg(any(feature = "office", feature = "gws", feature = "media"))]
 use std::path::PathBuf;

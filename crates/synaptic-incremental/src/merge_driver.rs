@@ -135,8 +135,8 @@ pub fn run_merge_driver(current: &Path, other: &Path) -> Result<usize, MergeDriv
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synaptic_core::{Confidence, Edge, FileType};
     use serde_json::Map;
+    use synaptic_core::{Confidence, Edge, FileType};
 
     fn node(id: &str, label: &str) -> Node {
         Node {

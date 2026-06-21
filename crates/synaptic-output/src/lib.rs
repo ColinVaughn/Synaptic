@@ -8,8 +8,8 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use synaptic_graph::KnowledgeGraph;
 use serde_json::Value;
+use synaptic_graph::KnowledgeGraph;
 
 mod common;
 pub mod cypher;
@@ -366,9 +366,9 @@ pub(crate) fn json_for_html(value: &[Value]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
     use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
     use synaptic_graph::{apply_communities, cluster, ClusterOptions};
-    use serde_json::Map;
 
     fn sample_kg() -> KnowledgeGraph {
         let node = |id: &str, sf: &str| Node {

@@ -99,8 +99,8 @@ fn plan_rename_surfaces_module_level_importer() {
     // `imports_from` edge to a stub (the symbol-level walk misses it). plan_rename
     // must still surface that importer as a review site and in the blast radius,
     // not silently report zero. Graph-only (scan_text off) to isolate the path.
-    use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
     use serde_json::Map;
+    use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
 
     let mut imp = Edge {
         source: NodeId("testfile".into()),
@@ -286,8 +286,8 @@ fn same_file_calls_are_recovered_as_references() {
 
 #[test]
 fn cross_repo_reference_sites_carry_repo_tag() {
-    use synaptic_core::{Confidence, Edge, GraphData, Node, NodeId, NodeKind, Span};
     use serde_json::Map;
+    use synaptic_core::{Confidence, Edge, GraphData, Node, NodeId, NodeKind, Span};
 
     let mut def = Node {
         id: NodeId("lib::User".into()),

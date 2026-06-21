@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use synaptic_core::{Edge, GraphData, Hyperedge, Node, NodeId};
 use petgraph::graph::{Graph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use petgraph::{Directed, Direction};
+use synaptic_core::{Edge, GraphData, Hyperedge, Node, NodeId};
 
 /// A built knowledge graph: a `petgraph` of `Node`s and `Edge`s plus the
 /// `NodeId → NodeIndex` lookup, hyperedges, and provenance. Internally always
@@ -226,8 +226,8 @@ impl KnowledgeGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synaptic_core::{Confidence, FileType};
     use serde_json::Map;
+    use synaptic_core::{Confidence, FileType};
 
     fn node(id: &str, label: &str, sf: &str) -> Node {
         Node {

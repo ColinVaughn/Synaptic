@@ -2,12 +2,12 @@
 
 use crate::commands::common::{default_graph_path, load_graph};
 use anyhow::Result;
+use std::path::PathBuf;
 use synaptic_prs::{
     compute_pr_impact, detect_default_branch, fetch_pr, fetch_pr_files, fetch_prs, fetch_worktrees,
     format_conflicts, format_pr_detail, format_prs_text, format_triage, select_actionable,
     today_epoch_days, ImpactIndex, SystemCommands,
 };
-use std::path::PathBuf;
 
 pub(crate) fn run_prs(
     number: Option<u64>,

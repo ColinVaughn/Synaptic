@@ -200,8 +200,8 @@ fn add_edges(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synaptic_core::{Confidence, FileType};
     use serde_json::Map;
+    use synaptic_core::{Confidence, FileType};
 
     fn node(id: &str, label: &str, sf: &str) -> Node {
         Node {

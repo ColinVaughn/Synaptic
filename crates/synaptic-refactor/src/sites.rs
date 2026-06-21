@@ -6,11 +6,11 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
+use regex::Regex;
+use serde::{Deserialize, Serialize};
 use synaptic_core::{Confidence, NodeId, Span};
 use synaptic_extract::cached_extract_source;
 use synaptic_graph::{norm_source_file, KnowledgeGraph};
-use regex::Regex;
-use serde::{Deserialize, Serialize};
 
 use crate::resolve::{normalize, Candidate};
 

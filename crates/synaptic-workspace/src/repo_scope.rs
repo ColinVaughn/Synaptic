@@ -4,8 +4,8 @@
 
 use std::collections::BTreeMap;
 
-use synaptic_core::{GraphData, NodeId};
 use serde::Serialize;
+use synaptic_core::{GraphData, NodeId};
 
 /// Per-repo counts for `list_repos` / `repo_stats`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -81,8 +81,8 @@ pub fn filter_repo(g: &GraphData, repo: &str) -> GraphData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synaptic_core::{Confidence, Edge, FileType, Node};
     use serde_json::Map;
+    use synaptic_core::{Confidence, Edge, FileType, Node};
 
     fn node(id: &str, repo: &str) -> Node {
         Node {

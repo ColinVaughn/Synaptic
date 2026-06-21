@@ -303,9 +303,9 @@ pub fn write_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
     use synaptic_core::{Confidence, Edge, FileType, GraphData, Node};
     use synaptic_graph::{analyze, apply_communities, cluster, ClusterOptions};
-    use serde_json::Map;
 
     fn kg() -> (KnowledgeGraph, BTreeMap<u32, Vec<NodeId>>) {
         let node = |id: &str, sf: &str| Node {

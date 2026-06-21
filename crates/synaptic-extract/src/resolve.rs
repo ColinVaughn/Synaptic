@@ -15,8 +15,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use synaptic_core::{Edge, FileType, Node, NodeId};
 use serde_json::{json, Map, Value};
+use synaptic_core::{Edge, FileType, Node, NodeId};
 
 use crate::paths::file_node_id;
 use crate::tsconfig::AliasResolver;

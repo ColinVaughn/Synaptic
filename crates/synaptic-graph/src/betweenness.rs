@@ -150,8 +150,8 @@ pub fn edge_betweenness(kg: &KnowledgeGraph) -> HashMap<(NodeId, NodeId), f64> {
 mod tests {
     use super::*;
     use crate::graph::KnowledgeGraph;
-    use synaptic_core::{Confidence, Edge, FileType, GraphData, Node};
     use serde_json::Map;
+    use synaptic_core::{Confidence, Edge, FileType, GraphData, Node};
 
     /// Build an undirected KG from `(id, edges-to)` adjacency.
     fn kg(ids: &[&str], edges: &[(&str, &str)]) -> KnowledgeGraph {

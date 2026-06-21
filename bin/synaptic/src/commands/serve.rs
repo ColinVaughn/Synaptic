@@ -2,8 +2,8 @@
 
 use crate::commands::common::default_graph_path;
 use anyhow::{Context, Result};
-use synaptic_server::{serve_http, Server};
 use std::path::{Path, PathBuf};
+use synaptic_server::{serve_http, Server};
 
 pub(crate) fn run_serve(
     graph: Option<PathBuf>,
@@ -13,12 +13,8 @@ pub(crate) fn run_serve(
     allow_exec: bool,
 ) -> Result<()> {
     let path = default_graph_path(graph);
-    let mut server = Server::load(path.clone()).with_context(|| {
-        format!(
-            "loading {} (run `synaptic extract` first?)",
-            path.display()
-        )
-    })?;
+    let mut server = Server::load(path.clone())
+        .with_context(|| format!("loading {} (run `synaptic extract` first?)", path.display()))?;
     let root = source_root.unwrap_or_else(|| default_source_root(&path));
     server = server.with_source_root(root).with_allow_exec(allow_exec);
     if allow_exec {

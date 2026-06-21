@@ -14,9 +14,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 #[cfg(feature = "lang-sql")]
-use synaptic_core::{make_id, NodeId};
-#[cfg(feature = "lang-sql")]
 use regex::Regex;
+#[cfg(feature = "lang-sql")]
+use synaptic_core::{make_id, NodeId};
 #[cfg(feature = "lang-sql")]
 use tree_sitter::{Node as TsNode, Parser};
 

@@ -11,8 +11,8 @@
 
 use std::time::Duration;
 
-use synaptic_prs::{compute_pr_impact, path_match, ImpactIndex};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use synaptic_prs::{compute_pr_impact, path_match, ImpactIndex};
 
 const NODE_SCALES: [usize; 2] = [1_000, 10_000];
 /// PRs per triage batch (the CLI/server `--limit` default).

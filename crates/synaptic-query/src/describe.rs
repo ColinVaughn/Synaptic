@@ -121,9 +121,9 @@ fn summarize(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
     use synaptic_core::{Edge, GraphData, Node, NodeId, NodeKind, Param, Signature};
     use synaptic_graph::KnowledgeGraph;
-    use serde_json::Map;
 
     fn fn_node(id: &str, label: &str, sig: Option<Signature>) -> Node {
         let mut n = Node {

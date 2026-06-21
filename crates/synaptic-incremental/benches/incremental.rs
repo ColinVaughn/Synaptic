@@ -14,11 +14,11 @@
 
 use std::collections::HashSet;
 
-use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
-use synaptic_incremental::{merge_incremental, topology, union_graphs};
 use criterion::{
     black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
 };
+use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
+use synaptic_incremental::{merge_incremental, topology, union_graphs};
 
 fn node(i: usize, id_prefix: &str) -> Node {
     Node {

@@ -63,9 +63,9 @@ pub async fn llm_tiebreak(
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use serde_json::Map;
     use synaptic_core::FileType;
     use synaptic_llm::{Completion, LlmError};
-    use serde_json::Map;
 
     struct YesNoMock;
 

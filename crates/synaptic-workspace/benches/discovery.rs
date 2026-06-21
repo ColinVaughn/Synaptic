@@ -8,8 +8,8 @@
 
 use std::path::Path;
 
-use synaptic_workspace::discover::discover_members;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use synaptic_workspace::discover::discover_members;
 
 fn write(dir: &Path, rel: &str, body: &str) {
     let p = dir.join(rel);

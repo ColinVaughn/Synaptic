@@ -128,9 +128,9 @@ pub fn reliability(samples: &[Sample], n_bins: usize) -> CalibrationReport {
     }
 }
 
-use synaptic_predict::{co_change, CoChangeOptions};
 use std::path::Path;
 use std::process::Command;
+use synaptic_predict::{co_change, CoChangeOptions};
 
 /// Turn commit history into calibration samples by leave-one-out co-change.
 ///

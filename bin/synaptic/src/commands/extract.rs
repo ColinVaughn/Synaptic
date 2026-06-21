@@ -1,6 +1,9 @@
 //! `extract` command(s) split from main.rs.
 
 use anyhow::{Context, Result};
+use rayon::prelude::*;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use synaptic_core::NodeId;
 use synaptic_detect::{detect, FileType, Manifest};
 use synaptic_extract::{
@@ -22,9 +25,6 @@ use synaptic_output::{
 };
 use synaptic_report::write_report;
 use synaptic_semantic::{label_communities, llm_tiebreak, run_semantic_pass};
-use rayon::prelude::*;
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 
 pub(crate) fn run_extract(
     root: &Path,

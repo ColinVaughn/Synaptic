@@ -12,9 +12,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 #[cfg(feature = "lang-asp")]
-use synaptic_core::{make_id, NodeId};
-#[cfg(feature = "lang-asp")]
 use regex::Regex;
+#[cfg(feature = "lang-asp")]
+use synaptic_core::{make_id, NodeId};
 
 #[cfg(feature = "lang-asp")]
 use crate::common::Builder;

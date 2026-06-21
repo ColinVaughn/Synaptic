@@ -9,7 +9,6 @@ mod commands;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Cmd};
-use synaptic_incremental::run_merge_driver;
 use commands::cache::run_cache;
 use commands::diff::run_diff;
 use commands::eval::run_eval;
@@ -31,6 +30,7 @@ use commands::speculate::run_speculate;
 use commands::update::run_update;
 use commands::watch::run_watch;
 use commands::workspace::run_workspace;
+use synaptic_incremental::run_merge_driver;
 
 /// Entry point shared by the `synaptic` and `syn` binaries.
 pub fn run_cli() -> Result<()> {

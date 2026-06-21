@@ -4,9 +4,9 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
 use synaptic_core::{Confidence, NodeId};
 use synaptic_graph::KnowledgeGraph;
-use serde::{Deserialize, Serialize};
 
 use crate::resolve::{self, Candidate, Selection};
 use crate::sites::{self, EditSite};

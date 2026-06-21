@@ -13,9 +13,9 @@
 
 use std::path::{Path, PathBuf};
 
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use synaptic_extract::python::python_config;
 use synaptic_extract::{cached_extract_source, extract_source, ExtractionResult};
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use tree_sitter::Parser;
 
 // Per-language samples

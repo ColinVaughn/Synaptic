@@ -1,8 +1,8 @@
 //! Performance rules: indexing, SELECT *, sargability, DML safety, N+1.
 use std::sync::LazyLock;
 
-use synaptic_core::NodeKind;
 use regex::Regex;
+use synaptic_core::NodeKind;
 
 use crate::findings::{Category, Finding, Severity};
 use crate::graphview::{columns_of, indexed_columns, nodes_of_kind, policies_of};

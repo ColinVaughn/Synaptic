@@ -16,8 +16,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use synaptic_core::{Confidence, FileType, GraphData, NodeId};
 use serde::{Deserialize, Serialize};
+use synaptic_core::{Confidence, FileType, GraphData, NodeId};
 
 use crate::coordinate::{Coordinate, Ecosystem};
 use crate::{Result, WorkspaceError, MAX_GRAPH_BYTES, SURFACE_SCHEMA_VERSION};
@@ -469,8 +469,8 @@ mod tests {
     use super::*;
     use crate::coordinate::Ecosystem;
     use crate::federate::compose;
-    use synaptic_core::{Edge, Node};
     use serde_json::Map;
+    use synaptic_core::{Edge, Node};
 
     fn coord(name: &str, eco: Ecosystem) -> Coordinate {
         Coordinate {

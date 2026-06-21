@@ -13,9 +13,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
-use synaptic_core::{Edge, FileType, Node, NodeId};
 use regex::Regex;
 use strsim::{damerau_levenshtein, jaro_winkler};
+use synaptic_core::{Edge, FileType, Node, NodeId};
 
 use crate::minhash::{MinHash, MinHashLsh};
 

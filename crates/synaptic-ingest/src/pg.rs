@@ -10,8 +10,8 @@
 //! ([`SystemPostgres`], behind the `pg` cargo feature) touches a database, and
 //! that path is untestable offline (as accepted for this source).
 
-use synaptic_core::{sanitize_label, sanitize_metadata, Confidence, Edge, FileType, Node, NodeId};
 use serde_json::{json, Map, Value};
+use synaptic_core::{sanitize_label, sanitize_metadata, Confidence, Edge, FileType, Node, NodeId};
 
 use crate::Ingested;
 

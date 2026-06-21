@@ -12,9 +12,9 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 
 #[cfg(feature = "lang-dart")]
-use synaptic_core::{make_id, FileType, NodeId};
-#[cfg(feature = "lang-dart")]
 use regex::Regex;
+#[cfg(feature = "lang-dart")]
+use synaptic_core::{make_id, FileType, NodeId};
 #[cfg(feature = "lang-dart")]
 use tree_sitter::{Node as TsNode, Parser};
 

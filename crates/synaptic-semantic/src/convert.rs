@@ -3,9 +3,9 @@
 //! (not `"ast"`) so the build-stage ghost remap can collapse a semantic node
 //! that duplicates an AST symbol onto the AST node.
 
+use serde_json::{Map, Value};
 use synaptic_core::{make_id, Confidence, Edge, FileType, Node, NodeId};
 use synaptic_llm::Fragment;
-use serde_json::{Map, Value};
 
 const CORE_NODE_KEYS: &[&str] = &[
     "id",
@@ -139,8 +139,8 @@ mod tests {
     fn semantic_concepts_flow_through_dedup_fuzzy_merge() {
         // Converted LLM concept output runs through synaptic-graph's fuzzy dedup
         // pass (a no-op on code-only graphs); near-identical concepts collapse to one.
-        use synaptic_graph::deduplicate_entities;
         use std::collections::HashMap;
+        use synaptic_graph::deduplicate_entities;
         let frag = Fragment::from_value(&json!({
             "nodes": [
                 {"id": "a_alg", "label": "Distributed Consensus Algorithm", "file_type": "concept", "source_file": "a.md"},

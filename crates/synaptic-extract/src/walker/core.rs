@@ -5,9 +5,9 @@ use super::{first_docstring, COMMENT_TOKENS, MAX_DEPTH, RATIONALE_MARKERS};
 use crate::config::{HeritageStyle, ImportStyle, TypeRefStyle};
 use crate::paths::file_node_id;
 use crate::result::RawCall;
-use synaptic_core::{make_id, Confidence, Edge, FileType, Node, NodeId};
 use serde_json::Map;
 use std::collections::{HashMap, HashSet};
+use synaptic_core::{make_id, Confidence, Edge, FileType, Node, NodeId};
 use tree_sitter::Node as TsNode;
 
 impl<'tree> Extractor<'_, '_, 'tree> {

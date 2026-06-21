@@ -15,8 +15,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use synaptic_detect::{detect, Manifest, ALL_FILE_TYPES};
 use serde::{Deserialize, Serialize};
+use synaptic_detect::{detect, Manifest, ALL_FILE_TYPES};
 
 use crate::export_surface::ExportSurface;
 use crate::workspace_build::{

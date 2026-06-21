@@ -90,9 +90,7 @@ fn build_audit_report(
                 if let Some(p) = synaptic_sqlaudit::LiveExplain::new(url) {
                     return synaptic_sqlaudit::audit_with_plan(kg, opts, &p);
                 }
-                eprintln!(
-                    "[synaptic] could not init live EXPLAIN; reporting static findings only"
-                );
+                eprintln!("[synaptic] could not init live EXPLAIN; reporting static findings only");
             } else {
                 eprintln!("[synaptic] --explain needs --db-url; reporting static findings only");
             }

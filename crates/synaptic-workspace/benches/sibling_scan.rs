@@ -7,8 +7,8 @@
 
 use std::path::Path;
 
-use synaptic_workspace::scan::{discover_sibling_repos, ScanOptions};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use synaptic_workspace::scan::{discover_sibling_repos, ScanOptions};
 
 fn write(dir: &Path, rel: &str, body: &str) {
     let p = dir.join(rel);

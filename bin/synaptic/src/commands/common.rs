@@ -1,10 +1,10 @@
 //! `common` command(s) split from main.rs.
 
 use anyhow::{Context, Result};
-use synaptic_core::{GraphData, NodeId};
-use synaptic_graph::KnowledgeGraph;
 use std::fs;
 use std::path::{Path, PathBuf};
+use synaptic_core::{GraphData, NodeId};
+use synaptic_graph::KnowledgeGraph;
 
 /// Run a single-file writer against `path` and report it.
 pub(crate) fn write_file(
@@ -22,12 +22,8 @@ pub(crate) fn default_graph_path(graph: Option<PathBuf>) -> PathBuf {
 }
 
 pub(crate) fn load_graph(path: &Path) -> Result<KnowledgeGraph> {
-    let text = fs::read_to_string(path).with_context(|| {
-        format!(
-            "reading {} (run `synaptic extract` first?)",
-            path.display()
-        )
-    })?;
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("reading {} (run `synaptic extract` first?)", path.display()))?;
     let gd: GraphData = serde_json::from_str(&text).context("parsing graph.json")?;
     Ok(KnowledgeGraph::from_graph_data(gd))
 }

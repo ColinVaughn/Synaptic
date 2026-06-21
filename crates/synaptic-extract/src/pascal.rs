@@ -12,9 +12,9 @@
 use std::sync::LazyLock;
 
 #[cfg(feature = "lang-pascal")]
-use synaptic_core::{make_id, NodeId};
-#[cfg(feature = "lang-pascal")]
 use regex::Regex;
+#[cfg(feature = "lang-pascal")]
+use synaptic_core::{make_id, NodeId};
 
 #[cfg(feature = "lang-pascal")]
 use crate::common::Builder;

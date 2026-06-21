@@ -12,13 +12,13 @@
 
 use std::path::{Path, PathBuf};
 
+use std::collections::BTreeMap;
 use synaptic_core::{GraphData, NodeId};
 use synaptic_graph::{
     apply_communities, cluster, mark_cross_repo_edges, resolve_parameterized_routes,
     resolve_route_handlers, resolve_sql_queries, ClusterOptions, KnowledgeGraph,
 };
 use synaptic_incremental::{rebuild, ChangeSet, RebuildOptions};
-use std::collections::BTreeMap;
 
 use crate::coordinate::{Coordinate, Ecosystem};
 use crate::discover::{discover_members, members_from_globs, Member};

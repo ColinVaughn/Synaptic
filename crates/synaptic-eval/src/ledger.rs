@@ -144,9 +144,9 @@ mod tests {
     use super::*;
     use synaptic_predict::{forecast_changes, ForecastOptions};
 
+    use serde_json::Map;
     use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId, Visibility};
     use synaptic_graph::KnowledgeGraph;
-    use serde_json::Map;
 
     fn node(id: &str, label: &str, file: &str, vis: Option<Visibility>) -> Node {
         let mut n = Node {

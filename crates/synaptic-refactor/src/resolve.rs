@@ -2,9 +2,9 @@
 //! share it. A target is always a *definition* node (a class/function/type/...),
 //! never a bare reference: references are edges, not nodes, in this graph.
 
+use serde::{Deserialize, Serialize};
 use synaptic_core::{FileType, NodeKind, Span};
 use synaptic_graph::KnowledgeGraph;
-use serde::{Deserialize, Serialize};
 
 /// `foo()` -> `foo`, `.bar()` -> `bar`, case-insensitive. Mirrors the resolver's
 /// label normalization (see `synaptic_graph::symbol_resolution`) so candidate
@@ -85,8 +85,8 @@ pub fn select_target(cands: &[Candidate], id: Option<&str>, file: Option<&str>) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synaptic_core::{GraphData, Node, NodeId};
     use serde_json::Map;
+    use synaptic_core::{GraphData, Node, NodeId};
 
     pub(crate) fn class_node(id: &str, label: &str, file: &str) -> Node {
         let mut n = Node {

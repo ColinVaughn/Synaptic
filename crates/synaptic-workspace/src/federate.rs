@@ -13,9 +13,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde_json::Value;
 use synaptic_core::{GraphData, NodeId};
 use synaptic_incremental::union_graphs;
-use serde_json::Value;
 
 /// Namespace one subgraph under `tag`: `id` → `tag::id`, set `repo`, stash the
 /// original id as `local_id`, repo-prefix non-empty `source_file`s, and remap
@@ -149,8 +149,8 @@ pub fn compose_no_dedup(subgraphs: Vec<(String, GraphData)>) -> GraphData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synaptic_core::{Confidence, Edge, FileType, Node};
     use serde_json::Map;
+    use synaptic_core::{Confidence, Edge, FileType, Node};
 
     fn node(id: &str, label: &str, source_file: &str) -> Node {
         Node {

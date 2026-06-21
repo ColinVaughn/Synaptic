@@ -16,8 +16,8 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use synaptic_graph::KnowledgeGraph;
 use serde_json::json;
+use synaptic_graph::KnowledgeGraph;
 
 use crate::common::{community_color, degrees, xml_escape};
 

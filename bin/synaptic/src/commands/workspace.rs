@@ -3,10 +3,10 @@
 use crate::cli::WorkspaceAction;
 use crate::commands::extract::write_outputs;
 use anyhow::{Context, Result};
-use synaptic_graph::analyze;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use synaptic_graph::analyze;
 
 /// Last path segment of a git URL, minus a trailing `.git`, as a repo name.
 pub(crate) fn derive_repo_name(url: &str) -> String {

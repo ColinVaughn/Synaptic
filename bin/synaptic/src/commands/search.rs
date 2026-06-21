@@ -3,9 +3,9 @@
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::PathBuf;
 
-use synaptic_synql::{explain, patterns, run, QueryResult};
-use synaptic_graph::KnowledgeGraph;
 use serde_json::{json, Value};
+use synaptic_graph::KnowledgeGraph;
+use synaptic_synql::{explain, patterns, run, QueryResult};
 
 use crate::commands::common::{default_graph_path, load_scoped_graph};
 

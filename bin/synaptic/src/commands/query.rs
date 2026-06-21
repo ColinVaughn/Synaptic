@@ -4,14 +4,14 @@ use crate::commands::common::{
     default_graph_path, label_or_id, load_graph, load_scoped_graph, resolve_or_message,
 };
 use anyhow::Result;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use synaptic_core::NodeId;
 use synaptic_graph::KnowledgeGraph;
 use synaptic_query::{
     affected_nodes, explain, query_modal, shortest_path, QueryIndex, Recency, RecencyMode,
     TraversalMode, DEFAULT_AFFECTED_RELATIONS,
 };
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 
 /// `query` recency-boost strength (mirrors the MCP server's RECENCY_BOOST).
 const RECENCY_BOOST: f64 = 4.0;

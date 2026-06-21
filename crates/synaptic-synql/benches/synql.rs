@@ -1,8 +1,8 @@
-use synaptic_synql::run;
-use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId, NodeKind, Span};
-use synaptic_graph::KnowledgeGraph;
 use criterion::{criterion_group, criterion_main, Criterion};
 use serde_json::Map;
+use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId, NodeKind, Span};
+use synaptic_graph::KnowledgeGraph;
+use synaptic_synql::run;
 
 fn synthetic(n: usize) -> KnowledgeGraph {
     let mut nodes = Vec::with_capacity(n);

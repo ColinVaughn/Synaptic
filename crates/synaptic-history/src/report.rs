@@ -2,9 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
 use synaptic_core::{FileType, NodeId};
 use synaptic_graph::{find_import_cycles, graph_diff, KnowledgeGraph};
-use serde::{Deserialize, Serialize};
 
 use crate::DiffOptions;
 
@@ -399,8 +399,8 @@ pub fn assemble(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synaptic_core::{Confidence, Edge, GraphData, Node};
     use serde_json::Map;
+    use synaptic_core::{Confidence, Edge, GraphData, Node};
 
     fn n(id: &str, sf: &str) -> Node {
         Node {

@@ -27,6 +27,7 @@ pub use watch::{should_ignore_path, ChangeBatch, DEBOUNCE_MS};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
 use synaptic_core::{Edge, GraphData, Hyperedge, Node, NodeId};
 use synaptic_detect::{classify_file, detect, FileType};
 use synaptic_extract::cached_extract_source;
@@ -37,7 +38,6 @@ use synaptic_graph::{
     resolve_route_handlers, resolve_sql_queries, resolve_symbols, BuildOptions, ClusterOptions,
     KnowledgeGraph,
 };
-use rayon::prelude::*;
 
 /// AST-extracted node — origin stamped by the extractors (`_origin == "ast"`).
 /// Semantic/concept nodes are NOT ast and so survive an AST-only rebuild.
@@ -436,8 +436,8 @@ pub fn rebuild(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synaptic_core::{Confidence, FileType as CoreFt};
     use serde_json::{json, Map};
+    use synaptic_core::{Confidence, FileType as CoreFt};
 
     fn node(id: &str, label: &str, sf: &str, origin: Option<&str>) -> Node {
         let mut extra = Map::new();

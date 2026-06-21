@@ -7,9 +7,9 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use serde_json::{json, Value};
 use synaptic_core::NodeId;
 use synaptic_graph::KnowledgeGraph;
-use serde_json::{json, Value};
 
 const SOURCE_EXTS: &[&str] = &[
     ".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".go", ".rs", ".java",
@@ -179,9 +179,9 @@ pub fn to_tree_html(kg: &KnowledgeGraph, path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
     use synaptic_core::{Confidence, Edge, FileType, GraphData, Node};
     use synaptic_graph::KnowledgeGraph;
-    use serde_json::Map;
 
     fn n(id: &str, label: &str) -> Node {
         Node {

@@ -1,5 +1,5 @@
-use synaptic_core::{Edge, Node};
 use serde::{Deserialize, Serialize};
+use synaptic_core::{Edge, Node};
 
 // The extraction-fact contract types live in `synaptic-core` so the graph crate
 // can consume them without depending on `extract`. Re-exported here for callers

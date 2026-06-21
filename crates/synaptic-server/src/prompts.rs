@@ -1,7 +1,7 @@
 //! MCP prompts: user-selectable, parameterized workflows over the graph tools.
 
-use synaptic_core::sanitize_label;
 use serde_json::{json, Value};
+use synaptic_core::sanitize_label;
 
 /// The `prompts/list` payload.
 pub fn prompts_list() -> Value {

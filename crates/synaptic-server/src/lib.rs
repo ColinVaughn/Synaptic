@@ -35,6 +35,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
+use serde_json::{json, Value};
 use synaptic_core::{sanitize_label, GraphData, NodeId};
 use synaptic_graph::{
     god_nodes, graph_stats, suggest_questions, surprising_connections, GodNode, GraphStats,
@@ -54,7 +55,6 @@ use synaptic_query::{
 use synaptic_sandbox::{
     render_markdown as render_speculate_md, speculate, Change, SpeculateOptions,
 };
-use serde_json::{json, Value};
 
 const SUPPORTED_PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
@@ -2640,8 +2640,8 @@ fn resource_templates() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synaptic_core::{Confidence, Edge, FileType};
     use serde_json::Map;
+    use synaptic_core::{Confidence, Edge, FileType};
 
     fn sql_graph() -> GraphData {
         serde_json::from_value(serde_json::json!({

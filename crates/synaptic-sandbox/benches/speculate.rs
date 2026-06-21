@@ -2,10 +2,10 @@
 //! command detection and Markdown rendering. The worktree/process execution
 //! itself is IO-bound and not a meaningful criterion target.
 
+use criterion::{criterion_group, criterion_main, Criterion};
 use synaptic_sandbox::{
     detect_commands, render_markdown, CommandResult, CommandStatus, Outcome, SpeculateReport,
 };
-use criterion::{criterion_group, criterion_main, Criterion};
 
 fn big_report() -> SpeculateReport {
     let tests: Vec<CommandResult> = (0..200)

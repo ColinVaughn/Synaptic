@@ -130,8 +130,8 @@ pub fn to_cypher(kg: &KnowledgeGraph, path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::tests_support::{kg_with_label, sample_kg};
-    use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
     use serde_json::Map;
+    use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
 
     #[test]
     fn cypher_emits_idempotent_merge_nodes_and_rels() {

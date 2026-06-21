@@ -2,7 +2,6 @@
 //! column/index nodes (via sqlparser), and RLS/policy/grant facts (regex). All
 //! best-effort: a parse failure leaves the base object graph untouched.
 
-use synaptic_core::{make_id, Confidence, Edge, FileType, Node, NodeId, NodeKind};
 use regex::Regex;
 use serde_json::{json, Map, Value};
 use sqlparser::ast::{ColumnOption, Expr, Statement, TableConstraint};
@@ -10,6 +9,7 @@ use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
+use synaptic_core::{make_id, Confidence, Edge, FileType, Node, NodeId, NodeKind};
 
 use crate::result::ExtractionResult;
 

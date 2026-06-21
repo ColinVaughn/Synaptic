@@ -9,11 +9,11 @@
 
 use std::time::Duration;
 
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use serde_json::json;
 use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
 use synaptic_query::TraversalMode;
 use synaptic_server::Server;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use serde_json::json;
 
 const SCALES: [usize; 2] = [1_000, 5_000];
 

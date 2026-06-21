@@ -20,8 +20,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use synaptic_core::{GraphData, NodeId};
 use serde::{Deserialize, Serialize};
+use synaptic_core::{GraphData, NodeId};
 
 use crate::scoring::pct;
 
@@ -147,8 +147,8 @@ pub fn calibrate_cross_language(graph: &GraphData) -> CrossLanguageReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synaptic_core::{Confidence, Edge, FileType, Node};
     use serde_json::{json, Map};
+    use synaptic_core::{Confidence, Edge, FileType, Node};
 
     fn file_node(id: &str, label: &str) -> Node {
         Node {

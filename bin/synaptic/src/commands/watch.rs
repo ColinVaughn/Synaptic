@@ -2,9 +2,9 @@
 
 use crate::commands::update::run_update;
 use anyhow::{Context, Result};
+use std::path::Path;
 use synaptic_detect::FileType;
 use synaptic_incremental::{should_ignore_path, ChangeBatch, DEBOUNCE_MS};
-use std::path::Path;
 
 /// Watch the working tree and rebuild incrementally on change. Debounces a burst
 /// of saves (`DEBOUNCE_MS`) into one rebuild, ignores the output/VCS/build

@@ -1,9 +1,9 @@
 //! Read-only SQL-shaped views over the KnowledgeGraph. All lookups are by the
 //! kinds/edges Phase 1 persists (table/column/index/policy/role nodes;
 //! has_column/has_index/indexes/protected_by/grants/queries/writes_to edges).
+use std::collections::HashSet;
 use synaptic_core::{Node, NodeId, NodeKind};
 use synaptic_graph::KnowledgeGraph;
-use std::collections::HashSet;
 
 /// All nodes of one SQL kind.
 pub fn nodes_of_kind(kg: &KnowledgeGraph, kind: NodeKind) -> Vec<&Node> {

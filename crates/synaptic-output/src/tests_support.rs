@@ -1,8 +1,8 @@
 //! Shared fixtures for the writer test modules.
 
+use serde_json::Map;
 use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
 use synaptic_graph::{apply_communities, cluster, ClusterOptions, KnowledgeGraph};
-use serde_json::Map;
 
 fn node(id: &str, label: &str, sf: &str) -> Node {
     Node {

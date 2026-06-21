@@ -298,8 +298,8 @@ fn removed_apis(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId, Visibility};
     use serde_json::Map;
+    use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId, Visibility};
 
     fn node(id: &str, label: &str, file: &str, vis: Option<Visibility>) -> Node {
         let mut n = Node {

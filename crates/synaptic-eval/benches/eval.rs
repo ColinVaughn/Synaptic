@@ -4,11 +4,11 @@
 
 use std::collections::BTreeSet;
 
+use criterion::{criterion_group, criterion_main, Criterion};
+use serde_json::Map;
 use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
 use synaptic_eval::{score_sets, Scores};
 use synaptic_graph::KnowledgeGraph;
-use criterion::{criterion_group, criterion_main, Criterion};
-use serde_json::Map;
 
 fn node(id: &str, file: &str) -> Node {
     Node {

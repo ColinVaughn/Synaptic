@@ -15,9 +15,9 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::LazyLock;
 
-use synaptic_core::make_id;
 use regex::Regex;
 use serde_json::Value;
+use synaptic_core::make_id;
 
 use crate::{file_stem, make_edge, make_node, Ingested};
 

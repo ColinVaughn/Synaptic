@@ -2,14 +2,14 @@
 
 use crate::commands::common::{load_scoped_graph, write_file};
 use anyhow::{Context, Result};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use synaptic_graph::{analyze, apply_communities, cluster, ClusterOptions, KnowledgeGraph};
 use synaptic_output::{
     to_cypher, to_dot, to_force3d, to_graphml, to_html, to_json, to_mermaid, to_obsidian, to_svg,
     to_tree_html, to_wiki,
 };
 use synaptic_report::write_report;
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 
 /// `synaptic export <format>`: regenerate one output from an existing
 /// graph.json without re-extracting, or push it live to Neo4j/FalkorDB.

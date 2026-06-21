@@ -6,8 +6,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use synaptic_core::{Confidence, Edge, Node, NodeId, NodeKind};
 use serde_json::Map;
+use synaptic_core::{Confidence, Edge, Node, NodeId, NodeKind};
 
 /// Retarget command-stub `invokes` edges to a unique matching in-repo file node,
 /// dropping the now-orphan stub. A command resolves when exactly one file node
@@ -520,8 +520,8 @@ pub fn mark_cross_repo_edges(nodes: &[Node], mut edges: Vec<Edge>) -> Vec<Edge> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synaptic_core::{Confidence, FileType};
     use serde_json::{json, Map};
+    use synaptic_core::{Confidence, FileType};
 
     fn command_stub(name: &str) -> Node {
         let mut extra = Map::new();

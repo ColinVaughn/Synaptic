@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use synaptic_core::{NodeId, NodeKind};
 use synaptic_graph::KnowledgeGraph;
 
-use crate::{SynqlError, QueryResult};
+use crate::{QueryResult, SynqlError};
 
 /// The built-in patterns: `(name, description)`.
 pub fn list_patterns() -> Vec<(&'static str, &'static str)> {
@@ -194,8 +194,8 @@ fn detect_service_locator(kg: &KnowledgeGraph) -> Vec<NodeId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, Span, Visibility};
     use serde_json::Map;
+    use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, Span, Visibility};
 
     fn node(id: &str, kind: NodeKind, community: Option<u32>) -> Node {
         let mut n = Node {

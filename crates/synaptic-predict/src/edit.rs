@@ -319,8 +319,8 @@ pub fn assess_edit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
     use serde_json::Map;
+    use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
 
     fn node(id: &str, label: &str, file: &str) -> Node {
         Node {

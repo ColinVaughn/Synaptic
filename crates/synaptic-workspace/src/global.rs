@@ -14,9 +14,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use synaptic_core::{GraphData, NodeId};
 use synaptic_incremental::union_graphs;
-use serde::{Deserialize, Serialize};
 
 use crate::federate::{dedup_externals, prefix_graph};
 use crate::{load_graph, sanitize_tag, write_graph, Result, WorkspaceError};
@@ -205,8 +205,8 @@ fn prune_repo(g: &mut GraphData, tag: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synaptic_core::{FileType, Node};
     use serde_json::Map;
+    use synaptic_core::{FileType, Node};
 
     fn node(id: &str, label: &str, source_file: &str) -> Node {
         Node {

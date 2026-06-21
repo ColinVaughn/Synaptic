@@ -6,9 +6,9 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
+use serde::Serialize;
 use synaptic_core::{Node, NodeId};
 use synaptic_graph::{find_import_cycles, norm_source_file, KnowledgeGraph};
-use serde::Serialize;
 
 use crate::plan::RenamePlan;
 use crate::relocate::RelocatePlan;

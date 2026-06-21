@@ -5,9 +5,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use regex::Regex;
 use synaptic_core::NodeId;
 use synaptic_graph::KnowledgeGraph;
-use regex::Regex;
 
 use crate::ast::*;
 use crate::QueryResult;
@@ -495,8 +495,8 @@ pub fn explain_plan(q: &Query) -> String {
 mod tests {
     use super::*;
     use crate::parser::parse;
-    use synaptic_core::{Confidence, Edge, GraphData, Node, NodeId, NodeKind, Span, Visibility};
     use serde_json::Map;
+    use synaptic_core::{Confidence, Edge, GraphData, Node, NodeId, NodeKind, Span, Visibility};
 
     fn node(id: &str, label: &str, kind: NodeKind, loc: u32) -> Node {
         let mut n = Node {

@@ -10,9 +10,9 @@ pub mod describe;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use serde::Serialize;
 use synaptic_core::NodeId;
 use synaptic_graph::KnowledgeGraph;
-use serde::Serialize;
 
 pub use describe::{describe_node, NodeDescription};
 
@@ -1041,8 +1041,8 @@ impl ReverseImpactIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synaptic_core::{Confidence, Edge, FileType, GraphData, Node};
     use serde_json::Map;
+    use synaptic_core::{Confidence, Edge, FileType, GraphData, Node};
 
     fn build(nodes: &[(&str, &str)], edges: &[(&str, &str, &str)]) -> KnowledgeGraph {
         let gd = GraphData {

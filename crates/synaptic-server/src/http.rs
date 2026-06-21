@@ -532,8 +532,8 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
-    use synaptic_core::GraphData;
     use serde_json::Map;
+    use synaptic_core::GraphData;
     use tower::ServiceExt;
 
     fn test_state(api_key: Option<&str>) -> HttpState {

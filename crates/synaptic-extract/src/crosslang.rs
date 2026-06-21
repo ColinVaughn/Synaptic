@@ -10,9 +10,9 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
-use synaptic_core::{make_id, Confidence, Edge, FileType, Node, NodeId, NodeKind};
 use regex::Regex;
 use serde_json::{json, Map};
+use synaptic_core::{make_id, Confidence, Edge, FileType, Node, NodeId, NodeKind};
 
 use crate::paths::file_node_id;
 use crate::result::ExtractionResult;

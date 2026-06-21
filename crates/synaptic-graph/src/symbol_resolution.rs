@@ -13,8 +13,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use synaptic_core::{Confidence, Edge, ImportRecord, Node, NodeId, RawCall};
 use serde_json::{json, Map};
+use synaptic_core::{Confidence, Edge, ImportRecord, Node, NodeId, RawCall};
 
 use crate::graph::KnowledgeGraph;
 

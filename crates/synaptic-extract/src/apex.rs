@@ -12,9 +12,9 @@
 use std::sync::LazyLock;
 
 #[cfg(feature = "lang-apex")]
-use synaptic_core::{make_id, FileType, NodeId};
-#[cfg(feature = "lang-apex")]
 use regex::Regex;
+#[cfg(feature = "lang-apex")]
+use synaptic_core::{make_id, FileType, NodeId};
 
 #[cfg(feature = "lang-apex")]
 use crate::common::Builder;

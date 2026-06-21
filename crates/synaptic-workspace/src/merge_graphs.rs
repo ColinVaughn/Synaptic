@@ -65,8 +65,8 @@ pub fn merge_graph_files(paths: &[PathBuf], out: &Path) -> Result<MergeReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synaptic_core::{FileType, GraphData, Node, NodeId};
     use serde_json::Map;
+    use synaptic_core::{FileType, GraphData, Node, NodeId};
 
     fn node(id: &str) -> Node {
         Node {

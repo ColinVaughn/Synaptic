@@ -6,9 +6,9 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
 use synaptic_core::{Confidence, NodeId, Span};
 use synaptic_graph::{norm_source_file, KnowledgeGraph};
-use serde::{Deserialize, Serialize};
 
 use crate::plan::{BlastRadius, Collision, RenameOptions};
 use crate::resolve::{self, Candidate, Selection};

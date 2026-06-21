@@ -89,8 +89,8 @@ fn corpus_key(docs: &[(String, String)]) -> String {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use synaptic_llm::Completion;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use synaptic_llm::Completion;
 
     /// Mock backend: returns one concept node per `<untrusted_source>` block,
     /// keyed by the doc's path. Counts calls.

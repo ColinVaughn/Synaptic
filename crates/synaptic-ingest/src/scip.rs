@@ -30,8 +30,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use synaptic_core::{sanitize_label, sanitize_metadata, Confidence, Edge, FileType, Node, NodeId};
 use serde_json::{json, Map, Value};
+use synaptic_core::{sanitize_label, sanitize_metadata, Confidence, Edge, FileType, Node, NodeId};
 
 use crate::Ingested;
 

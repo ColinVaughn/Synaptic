@@ -43,8 +43,8 @@ pub use pg::SystemPostgres;
 
 use std::path::Path;
 
-use synaptic_core::{sanitize_label, Confidence, Edge, FileType, Node, NodeId};
 use serde_json::{json, Map};
+use synaptic_core::{sanitize_label, Confidence, Edge, FileType, Node, NodeId};
 
 /// Nodes + edges produced by a "shape B" source (mcp-config, cargo).
 #[derive(Debug, Default, Clone, PartialEq)]

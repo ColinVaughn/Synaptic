@@ -9,13 +9,13 @@
 //!
 //! Run: `cargo bench -p synaptic-output`
 
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
 use synaptic_graph::KnowledgeGraph;
 use synaptic_output::{
     to_cypher_string, to_force3d_html, to_graphml_string, to_html_string, to_json_value,
     to_mermaid_string, to_svg_string, to_tree_html_string,
 };
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 fn node(i: usize) -> Node {
     Node {
