@@ -34,6 +34,8 @@ pub use session::{SessionStore, DEFAULT_SESSION_IDLE};
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use synaptic_core::{sanitize_label, GraphData, NodeId};
@@ -122,6 +124,58 @@ pub struct Server {
     /// opt-in (`serve --allow-exec`). When off, `speculate` is neither advertised
     /// in tools/list nor runnable.
     allow_exec: bool,
+    /// On-query catch-up config (repo root, output dir, debounce, caps). `None`
+    /// disables auto-freshen (e.g. no source root, or no graph path).
+    freshen: Option<FreshenConfig>,
+    /// Last time the catch-up staleness walk ran, for debouncing. Interior
+    /// mutability so the cheap gate can run under the HTTP shared read lock.
+    last_fresh_check: Mutex<Option<Instant>>,
+}
+
+/// Configuration for the serve catch-up path: detect files an agent
+/// added/changed since the graph was built and incrementally rebuild before
+/// answering, so live-coded files are queryable without a separate `watch`.
+#[derive(Debug, Clone)]
+struct FreshenConfig {
+    /// Repo root scanned for source changes (the source root).
+    root: PathBuf,
+    /// Output dir holding `graph.json`, the manifest, and the rebuild lock.
+    out_dir: PathBuf,
+    /// Whether auto-freshen is on (env `SYNAPTIC_SERVE_AUTOFRESH`).
+    enabled: bool,
+    /// Minimum gap between staleness walks, so a burst of queries walks once.
+    debounce: Duration,
+    /// Skip auto-freshen when more than this many files changed (a branch switch
+    /// shouldn't block a query on a near-full rebuild); 0 = unlimited.
+    max_files: usize,
+}
+
+impl FreshenConfig {
+    /// Derive config from the repo root + graph path, honoring env overrides.
+    /// Returns `None` (disabling auto-freshen) when there is no graph path to
+    /// locate the output dir.
+    fn from_env(root: PathBuf, graph_path: Option<&Path>) -> Option<FreshenConfig> {
+        let out_dir = graph_path?.parent()?.to_path_buf();
+        let enabled = std::env::var("SYNAPTIC_SERVE_AUTOFRESH")
+            .map(|v| !matches!(v.trim(), "0" | "false" | "no" | "off"))
+            .unwrap_or(true);
+        let debounce = std::env::var("SYNAPTIC_SERVE_AUTOFRESH_DEBOUNCE_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or(Duration::from_millis(1000));
+        let max_files = std::env::var("SYNAPTIC_SERVE_AUTOFRESH_MAX_FILES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(500);
+        Some(FreshenConfig {
+            root,
+            out_dir,
+            enabled,
+            debounce,
+            max_files,
+        })
+    }
 }
 
 fn reload_key_for(path: &Path) -> Option<(u64, u64)> {
@@ -168,6 +222,8 @@ impl Server {
             log_path: query_log_path(),
             source_root: None,
             allow_exec: false,
+            freshen: None,
+            last_fresh_check: Mutex::new(None),
         }
     }
 
@@ -188,6 +244,7 @@ impl Server {
     /// Set the trusted source root for `get_source` (and other code-reading
     /// tools). Stored as-is; resolution canonicalizes per request.
     pub fn with_source_root(mut self, root: PathBuf) -> Server {
+        self.freshen = FreshenConfig::from_env(root.clone(), self.graph_path.as_deref());
         self.source_root = Some(root);
         self
     }
@@ -222,15 +279,122 @@ impl Server {
         }
         if let Ok(bytes) = std::fs::read(&path) {
             if let Ok(gd) = serde_json::from_slice::<GraphData>(&bytes) {
-                self.kg = KnowledgeGraph::from_graph_data(gd);
-                self.communities = communities_of(&self.kg);
-                self.query_index = QueryIndex::build(&self.kg);
-                self.affected_index =
-                    ReverseImpactIndex::build(&self.kg, DEFAULT_AFFECTED_RELATIONS);
-                self.stats = graph_stats(&self.kg);
-                self.god_nodes_all = god_nodes(&self.kg, usize::MAX);
+                self.reindex_from(KnowledgeGraph::from_graph_data(gd));
                 self.reload_key = Some(key);
             }
+        }
+    }
+
+    /// Swap in a new graph and rebuild every derived index (query/affected/stats/
+    /// god-nodes). Shared by [`maybe_reload`](Server::maybe_reload) and the
+    /// catch-up path so both refresh the server's view identically.
+    fn reindex_from(&mut self, kg: KnowledgeGraph) {
+        self.kg = kg;
+        self.communities = communities_of(&self.kg);
+        self.query_index = QueryIndex::build(&self.kg);
+        self.affected_index = ReverseImpactIndex::build(&self.kg, DEFAULT_AFFECTED_RELATIONS);
+        self.stats = graph_stats(&self.kg);
+        self.god_nodes_all = god_nodes(&self.kg, usize::MAX);
+    }
+
+    /// Cheap, read-lock-safe staleness gate for the catch-up path: debounced so a
+    /// burst of queries walks the tree at most once per window. Returns the
+    /// repo-relative paths an agent added/changed/removed since the graph was
+    /// built, or `None` when auto-freshen is off, within the debounce window,
+    /// nothing changed, or the change set is too large.
+    fn needs_freshen(&self) -> Option<synaptic_incremental::ChangeReport> {
+        let cfg = self.freshen.as_ref()?;
+        if !cfg.enabled {
+            return None;
+        }
+        // Debounce: walk the tree at most once per window. Interior mutability so
+        // this gate runs under the HTTP shared read lock.
+        {
+            let mut last = self.last_fresh_check.lock().ok()?;
+            if let Some(t) = *last {
+                if t.elapsed() < cfg.debounce {
+                    return None;
+                }
+            }
+            *last = Some(Instant::now());
+        }
+        let report = synaptic_incremental::detect_changes(&cfg.out_dir, &cfg.root);
+        if report.is_empty() {
+            return None;
+        }
+        let changed = report.changed_paths().len();
+        if cfg.max_files != 0 && changed > cfg.max_files {
+            eprintln!(
+                "[synaptic] {} files changed since the graph was built (> autofresh max {}); \
+                 run `synaptic update` to refresh -- serving the current graph.",
+                changed, cfg.max_files
+            );
+            return None;
+        }
+        Some(report)
+    }
+
+    /// Run a synchronous incremental rebuild under the rebuild lock, persist
+    /// `graph.json` + the provenance manifest, and refresh the in-memory indices.
+    /// Reuses the detect result and freshly built manifest from `report` so the
+    /// whole catch-up walks the tree only once. Best-effort: lock contention or a
+    /// rebuild error leaves the current graph in place.
+    fn apply_freshen(&mut self, report: synaptic_incremental::ChangeReport) {
+        let Some(cfg) = self.freshen.clone() else {
+            return;
+        };
+        let Some(graph_path) = self.graph_path.clone() else {
+            return;
+        };
+        // Serialize with `watch`/`update`: if another rebuild holds the lock,
+        // leave the current graph in place -- that rebuild rewrites graph.json and
+        // the mtime hot-reload picks it up on a later request.
+        let _lock = match synaptic_incremental::try_acquire_lock(&cfg.out_dir) {
+            Ok(Some(guard)) => guard,
+            Ok(None) => return,
+            Err(e) => {
+                eprintln!("[synaptic] auto-freshen: could not acquire rebuild lock: {e}");
+                return;
+            }
+        };
+        let existing = self.kg.to_graph_data();
+        let opts = synaptic_incremental::RebuildOptions {
+            root: cfg.root.clone(),
+            directed: self.kg.directed,
+            force: false,
+        };
+        let changes = synaptic_incremental::ChangeSet::Incremental(report.changed_paths());
+        // Reuse the scan from detect_changes instead of walking the tree again.
+        let outcome = match synaptic_incremental::rebuild_with_detect(
+            &opts,
+            &changes,
+            Some(&existing),
+            &report.det,
+        ) {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("[synaptic] auto-freshen: rebuild failed: {e}");
+                return;
+            }
+        };
+        // Advance provenance even when topology is unchanged (a comment-only edit
+        // still moves the manifest, so we don't re-detect it on every query). The
+        // manifest was already built by detect_changes; just persist it.
+        if let Err(e) = report
+            .current
+            .save(&synaptic_incremental::manifest_path(&cfg.out_dir))
+        {
+            eprintln!("[synaptic] auto-freshen: could not write manifest: {e}");
+        }
+        if outcome.changed {
+            // Persist graph.json so other processes and our own next mtime check
+            // agree, then update reload_key so that check is a no-op.
+            if let Ok(bytes) = serde_json::to_vec_pretty(&outcome.kg.to_graph_data()) {
+                if std::fs::write(&graph_path, &bytes).is_ok() {
+                    self.reload_key = reload_key_for(&graph_path);
+                }
+            }
+            self.reindex_from(outcome.kg);
         }
     }
 
@@ -1566,6 +1730,9 @@ impl Server {
         let method = req.get("method").and_then(Value::as_str).unwrap_or("");
         if request_needs_reload(method) {
             self.maybe_reload();
+            if let Some(report) = self.needs_freshen() {
+                self.apply_freshen(report);
+            }
         }
         self.dispatch_request(req)
     }
@@ -2734,6 +2901,110 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string()
+    }
+
+    #[test]
+    fn autofresh_picks_up_a_new_file_on_query() {
+        use std::fs;
+        // A graph built from alpha.py only. After serving, an agent writes a new
+        // beta.py and queries it: the on-query catch-up must extract beta.py so
+        // the new symbol is queryable without any external watch/update.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let out = root.join("synaptic-out");
+        fs::create_dir_all(&out).unwrap();
+        fs::write(root.join("alpha.py"), "def alpha_func():\n    return 1\n").unwrap();
+
+        let opts = synaptic_incremental::RebuildOptions {
+            root: root.clone(),
+            directed: false,
+            force: false,
+        };
+        let outcome =
+            synaptic_incremental::rebuild(&opts, &synaptic_incremental::ChangeSet::Full, None)
+                .unwrap();
+        let graph_path = out.join("graph.json");
+        fs::write(
+            &graph_path,
+            serde_json::to_vec(&outcome.kg.to_graph_data()).unwrap(),
+        )
+        .unwrap();
+        synaptic_incremental::persist_manifest(&out, &root).unwrap();
+
+        let mut server = Server::load(graph_path)
+            .unwrap()
+            .with_source_root(root.clone());
+        assert!(
+            !server.kg.nodes().any(|n| n.label.contains("beta_func")),
+            "beta_func absent before the file is written"
+        );
+
+        fs::write(root.join("beta.py"), "def beta_func():\n    return 2\n").unwrap();
+        let text = call_tool(
+            &mut server,
+            "query_graph",
+            json!({ "question": "beta_func" }),
+        );
+        assert!(
+            text.contains("beta_func"),
+            "new file's symbol must be queryable after auto-freshen: {text}"
+        );
+    }
+
+    #[test]
+    fn autofresh_applies_a_symbol_removal_on_query() {
+        use std::fs;
+        // Removing a method from a still-existing file is a bounded shrink; the
+        // on-query catch-up must apply it so the deleted symbol leaves the graph.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let out = root.join("synaptic-out");
+        fs::create_dir_all(&out).unwrap();
+        fs::write(
+            root.join("m.py"),
+            "def keep_func():\n    return 1\n\n\ndef gone_func():\n    return 2\n",
+        )
+        .unwrap();
+
+        let opts = synaptic_incremental::RebuildOptions {
+            root: root.clone(),
+            directed: false,
+            force: false,
+        };
+        let outcome =
+            synaptic_incremental::rebuild(&opts, &synaptic_incremental::ChangeSet::Full, None)
+                .unwrap();
+        let graph_path = out.join("graph.json");
+        fs::write(
+            &graph_path,
+            serde_json::to_vec(&outcome.kg.to_graph_data()).unwrap(),
+        )
+        .unwrap();
+        synaptic_incremental::persist_manifest(&out, &root).unwrap();
+
+        let mut server = Server::load(graph_path)
+            .unwrap()
+            .with_source_root(root.clone());
+        assert!(
+            server.kg.nodes().any(|n| n.label.contains("gone_func")),
+            "symbol present before the edit"
+        );
+
+        // Delete gone_func() from the file, then query.
+        fs::write(root.join("m.py"), "def keep_func():\n    return 1\n").unwrap();
+        let _ = call_tool(
+            &mut server,
+            "query_graph",
+            json!({ "question": "keep_func" }),
+        );
+        assert!(
+            !server.kg.nodes().any(|n| n.label.contains("gone_func")),
+            "removed symbol must leave the graph after auto-freshen"
+        );
+        assert!(
+            server.kg.nodes().any(|n| n.label.contains("keep_func")),
+            "kept symbol remains"
+        );
     }
 
     #[test]

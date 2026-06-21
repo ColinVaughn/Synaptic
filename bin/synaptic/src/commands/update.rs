@@ -83,6 +83,13 @@ pub(crate) fn run_update(
     let outcome = rebuild(&opts, &changes, existing.as_ref())
         .map_err(|e| anyhow::anyhow!("rebuild failed: {e}"))?;
 
+    // Refresh the serve catch-up provenance regardless of topology change: a
+    // content edit that leaves the topology identical still advances the manifest
+    // so `serve` doesn't re-detect the same file forever.
+    if let Err(e) = synaptic_incremental::persist_manifest(&out_dir, &root) {
+        eprintln!("note: could not write serve provenance manifest: {e}");
+    }
+
     if !outcome.changed {
         println!(
             "No changes — graph is up to date ({} nodes).",

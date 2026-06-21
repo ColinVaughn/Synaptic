@@ -13,7 +13,10 @@
 Turn any folder of code into a persistent, queryable **knowledge graph**, then work over that
 graph instead of re-reading the codebase. Synaptic extracts symbols and relationships across
 30+ languages with [tree-sitter](https://tree-sitter.github.io/), clusters them into
-communities, and surfaces the structurally important pieces.
+communities, and surfaces the structurally important pieces. It scales with your codebase:
+from a single small folder to a large **monorepo**, or a fleet of **separate repositories
+federated into one graph** — with real cross-repo edge resolution that keeps architecture
+visible across repo boundaries.
 
 On top of the graph it answers structural and architectural queries, traces reverse impact
 ("what would this change break?"), forecasts and speculatively runs a change before you make

@@ -431,6 +431,13 @@ pub(crate) fn run_extract(
             eprintln!("note: could not write change-detection manifest: {e}");
         }
     }
+    // Serve catch-up provenance: a code+markdown manifest at a stable location
+    // (survives `cache clear`) that `synaptic serve` diffs against to learn which
+    // files an agent added/changed since this build. Distinct from the cache-dir
+    // manifest above, which only drives the "changes since last build" line.
+    if let Err(e) = synaptic_incremental::persist_manifest_with(&out_dir, &det) {
+        eprintln!("note: could not write serve provenance manifest: {e}");
+    }
     println!("Wrote {}/{{{}}}", out_dir.display(), extras);
     Ok(())
 }

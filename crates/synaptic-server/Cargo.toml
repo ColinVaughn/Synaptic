@@ -11,6 +11,7 @@ serde_json = { workspace = true }
 synaptic-core = { workspace = true }
 synaptic-graph = { workspace = true }
 synaptic-query = { workspace = true }
+synaptic-incremental = { workspace = true }
 synaptic-prs = { workspace = true }
 synaptic-synql = { workspace = true }
 synaptic-history = { workspace = true }
