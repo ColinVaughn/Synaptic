@@ -8,7 +8,8 @@
 
 use std::path::Path;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
 use synaptic_workspace::discover::discover_members;
 
 fn write(dir: &Path, rel: &str, body: &str) {

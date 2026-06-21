@@ -103,7 +103,7 @@ fn bench_plan(c: &mut Criterion) {
     c.bench_function("plan_rename_hot_target", |b| {
         b.iter(|| {
             let plan = plan_rename(&kg, "User", "Account", dir.path(), &opts).unwrap();
-            criterion::black_box(plan.blast_radius.edit_count)
+            std::hint::black_box(plan.blast_radius.edit_count)
         })
     });
 }

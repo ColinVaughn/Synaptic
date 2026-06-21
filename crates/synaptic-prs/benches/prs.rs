@@ -11,7 +11,8 @@
 
 use std::time::Duration;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
 use synaptic_prs::{compute_pr_impact, path_match, ImpactIndex};
 
 const NODE_SCALES: [usize; 2] = [1_000, 10_000];
