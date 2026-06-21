@@ -10,7 +10,20 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
-## [0.3.2] - 2026-06-21
+## [0.3.3] - 2026-06-21
+
+### Fixed
+- **Stale edges still accumulated on incremental re-extract (follow-up to
+  0.3.2).** The 0.3.2 fix keyed edge eviction on the *edge's* `source_file`, but a
+  resolved cross-file call edge can carry a `source_file` normalized differently
+  (for example absolute vs repo-relative) from the node it originates from, so the
+  stale edge slipped past the filter and a retargeted call (`announce()` ->
+  `log()`) still left the old edge behind in the live graph and on disk. Eviction
+  is now keyed on the **source node's** file -- the same predicate node eviction
+  uses -- so a re-extracted file's outgoing edges are reliably dropped and
+  regenerated regardless of how the edge's own `source_file` was normalized. This
+  is the path the MCP `serve` auto-freshen takes, so the fix reaches edits made
+  mid-session.
 
 ### Fixed
 - **Stale edges accumulated on incremental re-extract.** When a file was

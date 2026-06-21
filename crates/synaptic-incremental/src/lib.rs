@@ -55,8 +55,10 @@ fn is_ast(node: &Node) -> bool {
 /// - an existing node is **preserved** iff it isn't being replaced, isn't a
 ///   stale AST node being dropped by a full rebuild, and its `source_file` was
 ///   not evicted (so semantic nodes and unchanged files' AST survive);
-/// - an existing edge is preserved iff both endpoints are still live (which
-///   keeps prior cross-file `calls` edges whose endpoints both survive);
+/// - an existing edge is preserved iff both endpoints are still live AND its
+///   source node's file was not evicted (so prior cross-file edges from
+///   *unchanged* files survive, but a re-extracted file's own outgoing edges are
+///   dropped and regenerated rather than union-merged onto the surviving node);
 /// - hyperedges are carried over verbatim.
 ///
 /// Returns `(nodes, edges, hyperedges)` ready for [`build_from_parts`].
@@ -86,19 +88,33 @@ pub fn merge_incremental(
         live_ids.insert(n.id.clone());
     }
 
+    // Node ids whose *defining file* was evicted (re-extracted or deleted). Their
+    // stale OUTGOING edges must be dropped: a re-extracted file's edges come back
+    // fresh via `fresh_edges` and the post-merge resolution passes, so keeping the
+    // old ones would union-merge stale edges onto a re-extracted node (e.g. a call
+    // retargeted announce() -> log() would leave a phantom announce edge because
+    // the callee node still lives). This is keyed on the source NODE's
+    // `source_file` -- the same predicate node eviction uses -- NOT the edge's own
+    // `source_file`, because a resolved cross-file edge can carry a
+    // differently-normalized source_file (absolute vs repo-relative) than the node
+    // it originates from, which would slip past an edge-keyed filter.
+    let evicted_node_ids: HashSet<NodeId> = existing
+        .nodes
+        .iter()
+        .filter(|n| evict_sources.contains(&n.source_file))
+        .map(|n| n.id.clone())
+        .collect();
+
     let preserved_edges: Vec<Edge> = existing
         .links
         .iter()
         .filter(|e| {
-            // Both endpoints must still be live, AND the edge must not originate
-            // from an evicted (re-extracted or deleted) file. A re-extracted
-            // file's edges come back fresh via `fresh_edges` and the post-merge
-            // resolution passes, so keeping the old ones here would union-merge
-            // stale outgoing edges onto surviving nodes (e.g. a call retargeted
-            // announce() -> log() would leave a phantom announce edge because
-            // the callee node still lives). This mirrors the node rule above.
+            // Keep an edge iff both endpoints survive AND it does not originate
+            // from an evicted file (by source node, with the edge's own
+            // source_file as a belt-and-suspenders fallback).
             live_ids.contains(&e.source)
                 && live_ids.contains(&e.target)
+                && !evicted_node_ids.contains(&e.source)
                 && !evict_sources.contains(&e.source_file)
         })
         .cloned()
@@ -530,7 +546,9 @@ mod tests {
                 node("b_fn", "b()", "b.py", Some("ast")),
                 node("concept_x", "Auth Flow", "doc.md", Some("semantic")),
             ],
-            vec![edge("a_fn", "b_fn", "calls")],
+            // Edge from the UNCHANGED file b.py into a.py: a legitimately
+            // preserved cross-file edge (its source node is not re-extracted).
+            vec![edge_sf("b_fn", "a_fn", "calls", "b.py")],
         );
         // a.py changed: re-extract yields a_fn + a_new; b.py untouched.
         let fresh = vec![
@@ -546,10 +564,11 @@ mod tests {
         );
         assert!(ids.contains("b_fn"), "unchanged b.py preserved");
         assert!(ids.contains("concept_x"), "semantic node preserved");
-        // The a_fn->b_fn calls edge survives (both endpoints live).
+        // The b_fn->a_fn edge from unchanged b.py survives (its source node was
+        // not re-extracted, and both endpoints are live).
         assert!(edges
             .iter()
-            .any(|e| e.source.0 == "a_fn" && e.target.0 == "b_fn"));
+            .any(|e| e.source.0 == "b_fn" && e.target.0 == "a_fn"));
     }
 
     #[test]
@@ -602,6 +621,39 @@ mod tests {
                 .iter()
                 .any(|e| e.source.0 == "caller" && e.target.0 == "announce"),
             "stale caller->announce edge from re-extracted a.py must be dropped: {edges:?}"
+        );
+    }
+
+    #[test]
+    fn merge_drops_edges_from_reextracted_node_even_if_edge_source_file_differs() {
+        // Root cause of the end-to-end regression: a resolved cross-file call edge
+        // can carry a `source_file` normalized differently from the node it
+        // originates from (e.g. absolute vs repo-relative), so keying eviction on
+        // the EDGE's source_file misses it. Eviction must key on the source NODE's
+        // file instead -- the probe node lives in the re-extracted file, so its
+        // stale outgoing edges must be dropped regardless of the edge's own
+        // source_file string.
+        let existing = graph_data(
+            vec![
+                node("caller", "caller()", "src/a.ts", Some("ast")),
+                node("announce", "announce()", "src/lib.ts", Some("ast")),
+                node("log", "log()", "src/lib.ts", Some("ast")),
+            ],
+            // The stale edge's source_file is an ABSOLUTE path, not the
+            // repo-relative "src/a.ts" that eviction normalizes to.
+            vec![edge_sf("caller", "announce", "calls", "/abs/root/src/a.ts")],
+        );
+        let fresh = vec![node("caller", "caller()", "src/a.ts", Some("ast"))];
+        let fresh_edges = vec![edge_sf("caller", "log", "calls", "src/a.ts")];
+        let evict: HashSet<String> = ["src/a.ts".to_string()].into_iter().collect();
+        let (_, edges, _) = merge_incremental(&existing, fresh, fresh_edges, &evict, false);
+        assert!(
+            edges.iter().any(|e| e.target.0 == "log"),
+            "fresh edge present: {edges:?}"
+        );
+        assert!(
+            !edges.iter().any(|e| e.target.0 == "announce"),
+            "stale edge from a re-extracted node must drop despite a differing edge.source_file: {edges:?}"
         );
     }
 
@@ -816,6 +868,151 @@ mod tests {
         assert!(
             l4.contains("a()") && l4.contains("c()"),
             "a.py survives: {l4:?}"
+        );
+    }
+
+    /// Sorted `calls` targets (by label) out of the node labelled `caller`.
+    fn call_targets(kg: &KnowledgeGraph, caller: &str) -> Vec<String> {
+        let Some(cid) = kg.nodes().find(|n| n.label == caller).map(|n| n.id.clone()) else {
+            return vec![];
+        };
+        let mut v: Vec<String> = kg
+            .edges()
+            .filter(|e| e.source == cid && e.relation == "calls")
+            .map(|e| {
+                kg.node(&e.target)
+                    .map(|n| n.label.clone())
+                    .unwrap_or_else(|| e.target.0.clone())
+            })
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    #[test]
+    fn incremental_retargeting_a_call_replaces_the_old_edge() {
+        // End-to-end repro of the edge-accumulation bug through the FULL rebuild
+        // path (extraction -> merge -> symbol resolution), not just
+        // merge_incremental: probe() in main.py calls a cross-file function;
+        // retargeting that call across two incremental rebuilds must leave only
+        // the latest edge, never the union announce+warn+log.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "lib.py",
+            "def announce():\n    return 1\n\n\ndef warn():\n    return 2\n\n\ndef log():\n    return 3\n",
+        );
+        let main_calling = |callee: &str| {
+            format!("from lib import announce, warn, log\n\n\ndef probe():\n    {callee}()\n")
+        };
+        write(root, "main.py", &main_calling("announce"));
+        let opts = RebuildOptions {
+            root: root.to_path_buf(),
+            directed: false,
+            force: false,
+        };
+
+        let r1 = rebuild(&opts, &ChangeSet::Full, None).unwrap();
+        assert_eq!(
+            call_targets(&r1.kg, "probe()"),
+            vec!["announce()".to_string()],
+            "step 1: probe calls announce only"
+        );
+        let mut existing = r1.kg.to_graph_data();
+
+        // Step 2: retarget announce -> warn.
+        write(root, "main.py", &main_calling("warn"));
+        let r2 = rebuild(
+            &opts,
+            &ChangeSet::Incremental(vec![PathBuf::from("main.py")]),
+            Some(&existing),
+        )
+        .unwrap();
+        assert_eq!(
+            call_targets(&r2.kg, "probe()"),
+            vec!["warn()".to_string()],
+            "step 2: the announce edge must be replaced, not unioned"
+        );
+        existing = r2.kg.to_graph_data();
+
+        // Step 3: retarget warn -> log.
+        write(root, "main.py", &main_calling("log"));
+        let r3 = rebuild(
+            &opts,
+            &ChangeSet::Incremental(vec![PathBuf::from("main.py")]),
+            Some(&existing),
+        )
+        .unwrap();
+        assert_eq!(
+            call_targets(&r3.kg, "probe()"),
+            vec!["log()".to_string()],
+            "step 3: only the latest call edge survives (no announce/warn residue)"
+        );
+    }
+
+    #[test]
+    fn incremental_retargeting_a_ts_call_replaces_the_old_edge() {
+        // Same repro as above but in TypeScript (the language of the a11ycore
+        // repo where the bug was reported). TS call edges can be emitted at
+        // extraction rather than via cross-file symbol resolution, so this
+        // exercises a different code path than the Python case.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "lib.ts",
+            "export function announce(): void {}\nexport function warn(): void {}\nexport function log(): void {}\n",
+        );
+        let main_calling = |callee: &str| {
+            format!(
+                "import {{ announce, warn, log }} from './lib';\n\nexport function probe(): void {{\n  {callee}();\n}}\n"
+            )
+        };
+        write(root, "main.ts", &main_calling("announce"));
+        let opts = RebuildOptions {
+            root: root.to_path_buf(),
+            directed: false,
+            force: false,
+        };
+
+        let r1 = rebuild(&opts, &ChangeSet::Full, None).unwrap();
+        let t1 = call_targets(&r1.kg, "probe()");
+        assert!(
+            t1.iter().any(|t| t.contains("announce")),
+            "step 1: probe calls announce: {t1:?}"
+        );
+        let mut existing = r1.kg.to_graph_data();
+
+        write(root, "main.ts", &main_calling("warn"));
+        let r2 = rebuild(
+            &opts,
+            &ChangeSet::Incremental(vec![PathBuf::from("main.ts")]),
+            Some(&existing),
+        )
+        .unwrap();
+        let t2 = call_targets(&r2.kg, "probe()");
+        assert!(
+            t2.iter().any(|t| t.contains("warn")) && !t2.iter().any(|t| t.contains("announce")),
+            "step 2: announce edge replaced by warn, not unioned: {t2:?}"
+        );
+        existing = r2.kg.to_graph_data();
+
+        write(root, "main.ts", &main_calling("log"));
+        let r3 = rebuild(
+            &opts,
+            &ChangeSet::Incremental(vec![PathBuf::from("main.ts")]),
+            Some(&existing),
+        )
+        .unwrap();
+        let t3 = call_targets(&r3.kg, "probe()");
+        assert!(
+            t3.iter().any(|t| t.contains("log"))
+                && !t3
+                    .iter()
+                    .any(|t| t.contains("announce") || t.contains("warn")),
+            "step 3: only the latest call edge survives (no announce/warn residue): {t3:?}"
         );
     }
 }
