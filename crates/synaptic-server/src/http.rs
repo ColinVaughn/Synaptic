@@ -263,6 +263,15 @@ async fn handle_post(State(st): State<HttpState>, headers: HeaderMap, body: Byte
             write_server(&server).maybe_reload();
             reloaded = true;
         }
+        // On-query catch-up: detect files added/changed since the build (cheap,
+        // debounced, under the read lock) and incrementally rebuild under the
+        // write lock before dispatching, so live-coded files are queryable.
+        if needs_reload {
+            if let Some(report) = read_server(&server).needs_freshen() {
+                write_server(&server).apply_freshen(report);
+                reloaded = true;
+            }
+        }
         (reloaded, read_server(&server).dispatch_request(&req))
     })
     .await

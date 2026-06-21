@@ -15,11 +15,16 @@
 #![forbid(unsafe_code)]
 
 pub mod concurrency;
+pub mod freshen;
 pub mod hooks;
 pub mod merge_driver;
 pub mod watch;
 pub use concurrency::{
     drain_pending, merge_changed_paths, queue_pending, try_acquire_lock, RebuildLock,
+};
+pub use freshen::{
+    detect_changes, graph_input_files, is_extractable_markdown, manifest_path, persist_manifest,
+    persist_manifest_with, ChangeReport,
 };
 pub use merge_driver::{run_merge_driver, union_graphs, MergeDriverError};
 pub use watch::{should_ignore_path, ChangeBatch, DEBOUNCE_MS};
@@ -29,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 use synaptic_core::{Edge, GraphData, Hyperedge, Node, NodeId};
-use synaptic_detect::{classify_file, detect, FileType};
+use synaptic_detect::{classify_file, detect, DetectResult, FileType};
 use synaptic_extract::cached_extract_source;
 use synaptic_graph::{
     apply_communities, build_from_parts, cluster, deduplicate_entities, guard_shrink,
@@ -179,16 +184,25 @@ pub fn rebuild(
     changes: &ChangeSet,
     existing: Option<&GraphData>,
 ) -> Result<RebuildOutcome, IncrementalError> {
-    // Canonicalize the root so `detect`'s yielded paths and our `root.join(rel)`
-    // share one representation (matters for the changed-path to code-file match,
-    // and keeps rel ids/source_files identical to a full `synaptic extract`).
-    let root = opts
-        .root
-        .canonicalize()
-        .unwrap_or_else(|_| opts.root.clone());
-    let root = root.as_path();
+    // `detect` canonicalizes the root internally and exposes it as `scan_root`.
+    let det = detect(&opts.root);
+    rebuild_with_detect(opts, changes, existing, &det)
+}
+
+/// Like [`rebuild`] but reuses an existing detect result instead of walking the
+/// tree again -- for the serve catch-up, which already scanned to discover the
+/// change set. `det.scan_root` is the canonicalized root, so the produced graph
+/// is identical to a fresh `rebuild` (the scan is the only thing reused).
+pub fn rebuild_with_detect(
+    opts: &RebuildOptions,
+    changes: &ChangeSet,
+    existing: Option<&GraphData>,
+    det: &DetectResult,
+) -> Result<RebuildOutcome, IncrementalError> {
+    // The canonical root keeps `root.join(rel)` and rel ids/source_files
+    // identical to a full `synaptic extract` (matters for changed-path matching).
+    let root = det.scan_root.as_path();
     let root_str = root.to_string_lossy().into_owned();
-    let det = detect(root);
     let code_files: Vec<PathBuf> = det.of(FileType::Code).to_vec();
     // Markdown is a Document (not Code), but it gets structural heading
     // extraction too, so extract it alongside code in every rebuild path
@@ -197,12 +211,7 @@ pub fn rebuild(
     let md_files: Vec<PathBuf> = det
         .of(FileType::Document)
         .iter()
-        .filter(|p| {
-            matches!(
-                p.extension().and_then(|e| e.to_str()),
-                Some("md") | Some("mdx") | Some("qmd")
-            )
-        })
+        .filter(|p| freshen::is_extractable_markdown(p))
         .cloned()
         .collect();
     let extract_set: HashSet<&Path> = code_files
@@ -391,8 +400,18 @@ pub fn rebuild(
     }
 
     // Refuse a silent shrink (unless forced or an explicit deletion happened).
+    // An incremental rebuild is scoped to explicitly-changed files, so any shrink
+    // is bounded to them and expected (e.g. an edit that removes a method), and
+    // is authorized here; the strict guard still protects full rebuilds, where a
+    // shrink signals a catastrophic empty extraction.
+    let incremental = matches!(changes, ChangeSet::Incremental(_));
     let existing_n = existing.map(|g| g.nodes.len()).unwrap_or(0);
-    guard_shrink(kg.node_count(), existing_n, opts.force, had_deletions)?;
+    guard_shrink(
+        kg.node_count(),
+        existing_n,
+        opts.force,
+        had_deletions || incremental,
+    )?;
 
     // No-change short-circuit: identical topology means reuse the previous
     // community assignment, skip re-clustering, and tell the caller nothing needs
@@ -615,6 +634,42 @@ mod tests {
 
     fn labels(kg: &KnowledgeGraph) -> HashSet<String> {
         kg.nodes().map(|n| n.label.clone()).collect()
+    }
+
+    #[test]
+    fn incremental_allows_removing_a_symbol_from_an_existing_file() {
+        // Editing a file to drop a whole symbol is a net node shrink, but it is
+        // bounded to that explicitly-changed file and expected, so an incremental
+        // rebuild must apply it. The shrink guard only protects full rebuilds
+        // (the catastrophic empty-extraction case).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "a.py",
+            "def keep():\n    return 1\n\n\ndef drop_me():\n    return 2\n",
+        );
+        let opts = RebuildOptions {
+            root: root.to_path_buf(),
+            directed: false,
+            force: false,
+        };
+        let r1 = rebuild(&opts, &ChangeSet::Full, None).unwrap();
+        let existing = r1.kg.to_graph_data();
+        assert!(labels(&r1.kg).contains("drop_me()"), "symbol present at first");
+
+        // Remove drop_me() from the still-existing file.
+        write(root, "a.py", "def keep():\n    return 1\n");
+        let r2 = rebuild(
+            &opts,
+            &ChangeSet::Incremental(vec![PathBuf::from("a.py")]),
+            Some(&existing),
+        )
+        .expect("incremental rebuild must apply a bounded shrink, not error");
+        let l = labels(&r2.kg);
+        assert!(!l.contains("drop_me()"), "removed symbol is gone: {l:?}");
+        assert!(l.contains("keep()"), "kept symbol survives: {l:?}");
+        assert!(r2.changed, "topology changed");
     }
 
     #[test]
