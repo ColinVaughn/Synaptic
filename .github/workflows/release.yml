@@ -1,8 +1,9 @@
 name: release
 
 # Build prebuilt `synaptic` binaries for Linux/macOS/Windows and attach them to
-# the GitHub Release when a `v*` tag is pushed. Run manually via workflow_dispatch
-# to smoke-test the build matrix without cutting a release.
+# the GitHub Release when a `v*` tag is pushed, and sync the `wiki/` directory to
+# the GitHub wiki. Run manually via workflow_dispatch to smoke-test the build
+# matrix (and re-sync the wiki) without cutting a release.
 on:
   push:
     tags: ["v*"]
@@ -47,15 +48,19 @@ jobs:
           cp README.md LICENSE CHANGELOG.md "$dist/"
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a "${dist}.zip" "$dist"
+            certutil -hashfile "${dist}.zip" SHA256 | sed -n '2p' | tr -d ' \r' > "${dist}.zip.sha256"
           else
             tar czf "${dist}.tar.gz" "$dist"
+            shasum -a 256 "${dist}.tar.gz" | awk '{print $1}' > "${dist}.tar.gz.sha256"
           fi
       - uses: actions/upload-artifact@v7
         with:
           name: synaptic-${{ matrix.target }}
           path: |
             synaptic-${{ matrix.target }}.tar.gz
+            synaptic-${{ matrix.target }}.tar.gz.sha256
             synaptic-${{ matrix.target }}.zip
+            synaptic-${{ matrix.target }}.zip.sha256
           if-no-files-found: ignore
 
   release:
@@ -71,3 +76,42 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+
+  publish-wiki:
+    # Sync wiki/ (as committed on the released ref) to the GitHub wiki repo, but
+    # only commit when it actually differs from what is already published.
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v7
+      - name: Sync wiki/ to the GitHub wiki
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ ! -d wiki ]; then
+            echo "no wiki/ directory; nothing to publish"
+            exit 0
+          fi
+          tmp="$(mktemp -d)"
+          # Build the authenticated clone URL without a literal user@host token.
+          auth="https://x-access-token:${GH_TOKEN}"
+          repo="${auth}@github.com/${GITHUB_REPOSITORY}.wiki.git"
+          if ! git clone --depth 1 "$repo" "$tmp"; then
+            echo "::error::wiki repo not found. Create the first page in the GitHub UI once, then re-run."
+            exit 1
+          fi
+          # Mirror wiki/ into the wiki repo: delete pages removed from source,
+          # but never touch the wiki repo's own .git.
+          rsync -a --delete --exclude '.git' wiki/ "$tmp/"
+          cd "$tmp"
+          bot="github-actions[bot]"
+          git config user.name "$bot"
+          git config user.email "41898282+${bot}@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Wiki already up to date; nothing to publish."
+          else
+            git commit -m "docs(wiki): sync from ${GITHUB_REF_NAME} (${GITHUB_SHA})"
+            git push origin HEAD
+          fi

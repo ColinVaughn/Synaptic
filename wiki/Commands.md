@@ -31,6 +31,7 @@ Most read commands operate on `synaptic-out/graph.json` by default; build it fir
 | [`global`](#global) | Manage the cross-repo global graph store (`~/.synaptic`). |
 | [`merge-graphs`](#merge-graphs) | Compose several `graph.json` files into one namespaced graph. |
 | [`cache`](#cache) | Maintain the on-disk extraction cache. |
+| [`self-update`](#self-update) | Update the binary from the latest GitHub release (opt-in). |
 
 There is also an internal `merge-driver` command. It is hidden from `--help` and invoked by git, not users; see [`hook`](#hook).
 
@@ -992,6 +993,40 @@ synaptic cache clear . --recursive
 ```
 
 See [Extraction](Extraction).
+
+## self-update
+
+Update the `synaptic` binary in place from the latest [GitHub Release](../../releases). This is **opt-in**: Synaptic never checks for updates or replaces the binary unless you run this command or enable the background notice below. See [Updating](Updating) for the full walkthrough.
+
+Syntax:
+
+```sh
+synaptic self-update [--enable | --disable] [--check] [--yes]
+```
+
+| Name | Default | Description |
+| --- | --- | --- |
+| `--enable` | off | Turn on the once-a-day "update available" notice and exit. Writes `~/.synaptic/update.toml`; no network. |
+| `--disable` | off | Turn the background notice off and exit. |
+| `--check` | off | Report whether a newer release exists, then exit without downloading. |
+| `--yes` / `-y` | off | Skip the confirmation prompt before downloading and replacing. |
+
+`--enable` and `--disable` cannot be combined with each other or with `--check`/`--yes` — they only toggle the background notice and exit.
+
+With no flags, `self-update` queries the latest release and compares it to the running version. If it is not newer it prints `Synaptic is up to date (<version>)` and exits. If it is newer it shows the version delta and release notes, prompts `Download and replace the current binary? [y/N]`, then (on confirmation, or with `--yes`) downloads the prebuilt archive for your platform, verifies its SHA-256 checksum when one is published, and atomically replaces the running binary plus its `syn` alias. The new version takes effect on the next invocation.
+
+If no prebuilt binary exists for your platform, `self-update` prints the releases URL and exits without changing anything. A source/`cargo install` build can self-update, but the swap installs the default-feature prebuilt binary (rebuild from source to keep extra Cargo features).
+
+Examples:
+
+```sh
+synaptic self-update            # interactive: check, confirm, replace
+synaptic self-update --check    # just report availability (scriptable)
+synaptic self-update --yes      # unattended update
+synaptic self-update --enable   # opt in to the daily reminder
+```
+
+The background notice is throttled to once per 24 hours, prints a single line to stderr, swallows network errors, and can be force-disabled with `SYNAPTIC_UPDATE_CHECK=0`. See [Updating](Updating) and [Configuration](Configuration).
 
 ## merge-driver (internal)
 

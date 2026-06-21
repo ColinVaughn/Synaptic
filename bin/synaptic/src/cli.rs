@@ -475,6 +475,25 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         action: SqlAction,
     },
+    /// Update the Synaptic binary to the latest GitHub release (opt-in).
+    /// Bare: check and, if newer, prompt to download + replace. `--enable` /
+    /// `--disable` toggle the background "update available" notice (off by
+    /// default; persisted to ~/.synaptic/update.toml). `--check` reports
+    /// availability without downloading.
+    SelfUpdate {
+        /// Enable the background update-available notice and exit.
+        #[arg(long, conflicts_with_all = ["disable", "check", "yes"])]
+        enable: bool,
+        /// Disable the background update-available notice and exit.
+        #[arg(long, conflicts_with_all = ["enable", "check", "yes"])]
+        disable: bool,
+        /// Report whether an update is available, then exit (no download).
+        #[arg(long)]
+        check: bool,
+        /// Skip the confirmation prompt before downloading and replacing.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]

@@ -25,6 +25,26 @@ Tagged releases attach prebuilt binaries for Linux (`x86_64`), macOS (`x86_64` a
 `aarch64`), and Windows (`x86_64`) to the [GitHub Releases](../../releases) page. Each
 archive bundles the `synaptic` binary plus the README, LICENSE, and CHANGELOG.
 
+## Updating
+
+Once installed, update in place with:
+
+```sh
+synaptic self-update
+```
+
+This checks the latest [GitHub Release](../../releases), and if it is newer, prompts you
+before downloading the prebuilt archive for your platform, verifying its checksum, and
+replacing the running binary (and its `syn` alias). Updating is **opt-in** — Synaptic never
+checks or replaces itself on its own. To get a once-a-day "update available" reminder on
+ordinary commands, opt in with `synaptic self-update --enable` (off by default, throttled,
+and printed only to stderr).
+
+A `cargo install` / source build can self-update too, but the swap installs the
+default-feature prebuilt binary; rebuild from source if you depend on extra features. See
+[Updating](Updating) for the full walkthrough and [`self-update`](Commands#self-update) for
+the flag reference.
+
 ## Optional features
 
 Several integrations are gated behind Cargo features and are **off by default**, so the

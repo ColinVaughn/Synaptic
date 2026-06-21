@@ -16,6 +16,7 @@ pub(crate) mod prs;
 pub(crate) mod query;
 pub(crate) mod refactor;
 pub(crate) mod search;
+pub(crate) mod self_update;
 pub(crate) mod serve;
 pub(crate) mod skill;
 pub(crate) mod speculate;

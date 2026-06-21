@@ -42,6 +42,7 @@ synaptic-predict = { path = "crates/synaptic-predict" }
 synaptic-sandbox = { path = "crates/synaptic-sandbox" }
 synaptic-eval = { path = "crates/synaptic-eval" }
 synaptic-sqlaudit = { path = "crates/synaptic-sqlaudit" }
+synaptic-upgrade = { path = "crates/synaptic-upgrade" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 rayon = "1"
@@ -103,6 +104,11 @@ strsim = "0.11"
 tiktoken-rs = "0.12"
 sha2 = "0.11"
 hmac = "0.13"
+semver = "1"
+self-replace = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = "1"
+tar = "0.4"
 tempfile = "3"
 criterion = "0.8"
 proptest = "1"

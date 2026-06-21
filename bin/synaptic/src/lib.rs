@@ -24,6 +24,7 @@ use commands::prs::run_prs;
 use commands::query::{run_affected, run_explain, run_path, run_query};
 use commands::refactor::run_refactor;
 use commands::search::run_search;
+use commands::self_update::run_self_update;
 use commands::serve::run_serve;
 use commands::skill::run_skill;
 use commands::speculate::run_speculate;
@@ -49,6 +50,14 @@ pub fn run_cli() -> Result<()> {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    // Opt-in background update notice (off by default; throttled to once a day;
+    // swallows all errors). Skipped for `self-update` itself so the check can't
+    // nag mid-update.
+    if !matches!(cli.cmd, Cmd::SelfUpdate { .. }) {
+        if let Some(note) = synaptic_upgrade::check::maybe_notify(env!("CARGO_PKG_VERSION")) {
+            eprintln!("{note}");
+        }
+    }
     match cli.cmd {
         Cmd::Extract {
             path,
@@ -259,5 +268,11 @@ fn run() -> Result<()> {
         }),
         Cmd::Eval { action } => run_eval(action),
         Cmd::Sql { action } => commands::sql::run_sql(action),
+        Cmd::SelfUpdate {
+            enable,
+            disable,
+            check,
+            yes,
+        } => run_self_update(enable, disable, check, yes),
     }
 }

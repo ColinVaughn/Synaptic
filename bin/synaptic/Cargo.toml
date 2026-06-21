@@ -59,6 +59,7 @@ synaptic-predict = { workspace = true }
 synaptic-sandbox = { workspace = true }
 synaptic-eval = { workspace = true }
 synaptic-sqlaudit = { workspace = true }
+synaptic-upgrade = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 rayon = { workspace = true }
