@@ -38,6 +38,7 @@ use axum::{
     Json, Router,
 };
 use serde_json::{json, Value};
+use tokio::sync::broadcast;
 
 use crate::session::{SessionStore, DEFAULT_SESSION_IDLE};
 use crate::Server;
@@ -205,11 +206,13 @@ async fn handle_post(State(st): State<HttpState>, headers: HeaderMap, body: Byte
     // Reload only when graph.json actually changed; brief write lock.
     let needs_reload = matches!(method, "tools/call" | "resources/read");
     let server = st.server.clone();
-    let Ok(resp) = tokio::task::spawn_blocking(move || {
+    let Ok((reloaded, resp)) = tokio::task::spawn_blocking(move || {
+        let mut reloaded = false;
         if needs_reload && read_server(&server).is_stale() {
             write_server(&server).maybe_reload();
+            reloaded = true;
         }
-        read_server(&server).dispatch_request(&req)
+        (reloaded, read_server(&server).dispatch_request(&req))
     })
     .await
     else {
@@ -219,6 +222,10 @@ async fn handle_post(State(st): State<HttpState>, headers: HeaderMap, body: Byte
         )
             .into_response();
     };
+    // The graph (and thus every resource's content) changed: push to subscribers.
+    if reloaded {
+        st.sessions.notify_all_resources_changed();
+    }
     match resp {
         Some(v) => match new_session {
             Some(id) => (StatusCode::OK, [("mcp-session-id", id)], Json(v)).into_response(),
@@ -228,7 +235,9 @@ async fn handle_post(State(st): State<HttpState>, headers: HeaderMap, body: Byte
     }
 }
 
-/// `GET /mcp` — open the server→client SSE stream (keep-alive heartbeat).
+/// `GET /mcp` — open the server→client SSE stream: keep-alive heartbeat plus
+/// `notifications/resources/updated` pushes when the graph reloads (a tracked
+/// session subscribes to its broadcast channel).
 async fn handle_sse(State(st): State<HttpState>, headers: HeaderMap) -> Response {
     if let Some(resp) = guard(&headers, &st) {
         return resp;
@@ -242,18 +251,19 @@ async fn handle_sse(State(st): State<HttpState>, headers: HeaderMap) -> Response
             session_id = Some(id);
         }
     }
-    // No server-initiated messages yet, so the stream only emits keep-alive
-    // comments. Bounded so an abandoned (or sessionless) GET can't hold a
-    // connection for the process lifetime: ends once a tracked session is
-    // reaped, or after a hard cap (~the idle timeout).
+    // Bounded so an abandoned (or sessionless) GET can't hold a connection for
+    // the process lifetime: ends once a tracked session is reaped, or after a
+    // hard cap (~the idle timeout) of emitted events.
     const PING: Duration = Duration::from_secs(15);
-    let max_pings = (DEFAULT_SESSION_IDLE.as_secs() / PING.as_secs()).max(1);
+    let max_events = (DEFAULT_SESSION_IDLE.as_secs() / PING.as_secs()).max(1);
     let sessions = st.sessions.clone();
-    let body = futures_util::stream::unfold(0u64, move |count| {
+    // A tracked session subscribes; a sessionless GET only heartbeats.
+    let rx = session_id.as_ref().and_then(|id| sessions.subscribe(id));
+    let body = futures_util::stream::unfold((0u64, rx), move |(count, mut rx)| {
         let sessions = sessions.clone();
         let session_id = session_id.clone();
         async move {
-            if count >= max_pings {
+            if count >= max_events {
                 return None;
             }
             // End promptly once a tracked session has been reaped.
@@ -262,16 +272,44 @@ async fn handle_sse(State(st): State<HttpState>, headers: HeaderMap) -> Response
                     return None;
                 }
             }
-            tokio::time::sleep(PING).await;
-            Some((
-                Ok::<_, Infallible>(Event::default().comment("keep-alive")),
-                count + 1,
-            ))
+            let event = match rx.as_mut() {
+                Some(r) => {
+                    tokio::select! {
+                        biased;
+                        signal = r.recv() => match signal {
+                            // Graph reloaded (or we lagged behind one): notify.
+                            Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                                resource_updated_event()
+                            }
+                            // Sender gone (session dropped): end the stream.
+                            Err(broadcast::error::RecvError::Closed) => return None,
+                        },
+                        _ = tokio::time::sleep(PING) => Event::default().comment("keep-alive"),
+                    }
+                }
+                None => {
+                    tokio::time::sleep(PING).await;
+                    Event::default().comment("keep-alive")
+                }
+            };
+            Some((Ok::<_, Infallible>(event), (count + 1, rx)))
         }
     });
     Sse::new(body)
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+/// The server-initiated JSON-RPC notification telling a client a subscribed
+/// resource changed. The graph reload changes every resource's content; the
+/// stats URI is a representative signal to re-read.
+fn resource_updated_event() -> Event {
+    let note = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/resources/updated",
+        "params": { "uri": "codegraph://stats" }
+    });
+    Event::default().data(note.to_string())
 }
 
 /// `DELETE /mcp` — terminate a session.
@@ -732,6 +770,80 @@ mod tests {
             .and_then(|h| h.to_str().ok())
             .unwrap_or("");
         assert!(ct.starts_with("text/event-stream"), "content-type: {ct}");
+    }
+
+    /// End-to-end subscription push: open the SSE stream for a session, change
+    /// graph.json on disk, fire a tools/call that triggers the hot-reload, and
+    /// assert a `notifications/resources/updated` frame arrives on the stream.
+    #[tokio::test]
+    async fn sse_pushes_resource_updated_on_reload() {
+        use futures_util::StreamExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.json");
+        let g1 = r#"{"directed":false,"multigraph":false,"graph":{},"nodes":[{"id":"a","label":"A","file_type":"code","source_file":"a.py"}],"links":[],"hyperedges":[]}"#;
+        std::fs::write(&path, g1).unwrap();
+
+        let app = router(state_with_server(Server::load(path.clone()).unwrap()));
+
+        // initialize -> session id.
+        let init = app
+            .clone()
+            .oneshot(Request::post("/mcp").body(init_body()).unwrap())
+            .await
+            .unwrap();
+        let sid = init
+            .headers()
+            .get("mcp-session-id")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        // Open the SSE stream (this subscribes the session to its channel).
+        let sse = app
+            .clone()
+            .oneshot(
+                Request::get("/mcp")
+                    .header("accept", "text/event-stream")
+                    .header("mcp-session-id", &sid)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sse.status(), StatusCode::OK);
+
+        // Change graph.json on disk (extra node -> different size, so is_stale).
+        let g2 = r#"{"directed":false,"multigraph":false,"graph":{},"nodes":[{"id":"a","label":"A","file_type":"code","source_file":"a.py"},{"id":"b","label":"B","file_type":"code","source_file":"b.py"}],"links":[],"hyperedges":[]}"#;
+        std::fs::write(&path, g2).unwrap();
+
+        // A data request hot-reloads the graph and notifies subscribers.
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp")
+                    .header("mcp-session-id", &sid)
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"graph_stats"}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // The broadcast buffers the signal, so the first SSE frame is the push.
+        let mut stream = sse.into_body().into_data_stream();
+        let frame = tokio::time::timeout(Duration::from_secs(3), stream.next())
+            .await
+            .expect("an SSE frame within 3s")
+            .expect("stream not ended")
+            .expect("frame bytes");
+        let text = String::from_utf8_lossy(&frame);
+        assert!(
+            text.contains("notifications/resources/updated"),
+            "expected a resource-updated push, got: {text}"
+        );
     }
 
     #[tokio::test]

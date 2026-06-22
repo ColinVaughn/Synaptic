@@ -908,7 +908,11 @@ impl Server {
                 let requested = params.get("protocolVersion").and_then(Value::as_str);
                 Ok(json!({
                     "protocolVersion": negotiate_protocol(requested),
-                    "capabilities": { "tools": {}, "resources": {}, "prompts": {} },
+                    "capabilities": {
+                        "tools": {},
+                        "resources": { "subscribe": true },
+                        "prompts": {}
+                    },
                     "serverInfo": { "name": "codegraph", "version": env!("CARGO_PKG_VERSION") },
                     "instructions": SERVER_INSTRUCTIONS,
                 }))
@@ -926,6 +930,9 @@ impl Server {
             }
             "resources/list" => Ok(json!({ "resources": resources_list() })),
             "resources/templates/list" => Ok(json!({ "resourceTemplates": resource_templates() })),
+            // Subscriptions are acknowledged here; the HTTP transport does the
+            // actual push over SSE when the graph reloads (see http::handle_sse).
+            "resources/subscribe" | "resources/unsubscribe" => Ok(json!({})),
             "tools/call" => self.dispatch_tool(&params),
             "resources/read" => self.dispatch_resource(&params),
             other => Err((-32601, format!("Method not found: {other}"))),
@@ -1680,6 +1687,27 @@ mod tests {
         // offset 1 skips the top hub and numbers from its absolute rank.
         let paged = call_tool(&mut s, "god_nodes", json!({"top_n": 1, "offset": 1}));
         assert_eq!(paged, "God nodes:\n  2. Database - 1 edges");
+    }
+
+    #[test]
+    fn subscribe_acked_and_capability_advertised() {
+        let mut s = server();
+        let init = s
+            .handle_request(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
+            .unwrap();
+        assert_eq!(
+            init["result"]["capabilities"]["resources"]["subscribe"],
+            true
+        );
+
+        let ack = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":2,"method":"resources/subscribe",
+                "params":{"uri":"codegraph://stats"}
+            }))
+            .unwrap();
+        assert!(ack.get("error").is_none(), "subscribe should ack: {ack}");
+        assert_eq!(ack["result"], json!({}));
     }
 
     #[test]
