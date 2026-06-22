@@ -1170,18 +1170,45 @@ fn nodes_found(text: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// Truncate rendered text to roughly `token_budget` tokens (~4 chars/token),
-/// appending a note when cut.
+/// Process-wide cl100k_base tokenizer, built once on first use. `None` if it
+/// could not be loaded (then [`truncate_to_tokens`] falls back to a heuristic).
+fn bpe() -> Option<&'static tiktoken_rs::CoreBPE> {
+    use std::sync::OnceLock;
+    static BPE: OnceLock<Option<tiktoken_rs::CoreBPE>> = OnceLock::new();
+    BPE.get_or_init(|| tiktoken_rs::cl100k_base().ok()).as_ref()
+}
+
+/// Truncate rendered text to at most `token_budget` real tokens (cl100k_base),
+/// appending a note when cut. Every token decodes to at least one byte, so text
+/// shorter than the budget in bytes cannot exceed it in tokens - that common
+/// case skips tokenizing entirely. Falls back to a 4-chars/token heuristic if
+/// the tokenizer is unavailable.
 fn truncate_to_tokens(text: String, token_budget: usize) -> String {
-    let cap = token_budget.saturating_mul(4);
-    if text.len() <= cap {
+    if text.len() <= token_budget {
         return text;
     }
-    let mut end = cap;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
+    let Some(bpe) = bpe() else {
+        let cap = token_budget.saturating_mul(4);
+        if text.len() <= cap {
+            return text;
+        }
+        let mut end = cap;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        return format!(
+            "{}\n... (truncated to ~{token_budget} tokens)",
+            &text[..end]
+        );
+    };
+    let toks = bpe.encode_with_special_tokens(&text);
+    if toks.len() <= token_budget {
+        return text;
     }
-    format!("{}\n… (truncated to ~{token_budget} tokens)", &text[..end])
+    let kept = bpe
+        .decode(toks[..token_budget].to_vec())
+        .unwrap_or_default();
+    format!("{kept}\n... (truncated to ~{token_budget} tokens)")
 }
 
 /// Server-level orientation returned in the MCP `initialize` result. It frames
@@ -1854,6 +1881,25 @@ mod tests {
             neigh.contains("login_user") && neigh.contains("[calls]"),
             "{neigh}"
         );
+    }
+
+    #[test]
+    fn truncate_uses_real_token_count() {
+        // A long ASCII body; a 5-token budget must cut it to ~5 real tokens.
+        let body = "alpha beta gamma delta epsilon zeta eta theta iota kappa ".repeat(20);
+        let out = truncate_to_tokens(body.clone(), 5);
+        assert!(out.contains("truncated"), "should truncate: {out}");
+        let kept = out.split('\n').next().unwrap();
+        let bpe = tiktoken_rs::cl100k_base().unwrap();
+        let n = bpe.encode_with_special_tokens(kept).len();
+        assert!(n <= 6, "kept ~5 tokens, got {n}");
+    }
+
+    #[test]
+    fn truncate_keeps_short_text_intact() {
+        // Under budget in bytes -> returned verbatim, no tokenizing, no note.
+        let short = "NODE a [code] a.py\n".to_string();
+        assert_eq!(truncate_to_tokens(short.clone(), 2000), short);
     }
 
     #[test]
