@@ -12,13 +12,23 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use tokio::sync::broadcast;
+
 /// Default idle timeout (reference default: 3600s).
 pub const DEFAULT_SESSION_IDLE: Duration = Duration::from_secs(3600);
 
-/// Thread-safe map of session id → last-activity instant.
+/// Per-session state: last activity (for the reaper) plus a broadcast channel
+/// the transport listens on to push `notifications/resources/updated` when the
+/// graph reloads.
+struct Session {
+    last: Instant,
+    tx: broadcast::Sender<()>,
+}
+
+/// Thread-safe map of session id → [`Session`].
 #[derive(Default)]
 pub struct SessionStore {
-    inner: Mutex<HashMap<String, Instant>>,
+    inner: Mutex<HashMap<String, Session>>,
 }
 
 impl SessionStore {
@@ -29,7 +39,7 @@ impl SessionStore {
     /// Acquire the inner map, recovering the guard if the lock was poisoned by a
     /// prior panic. The data is still valid; a single panic must not poison the
     /// session store and take down every subsequent request.
-    fn guard(&self) -> std::sync::MutexGuard<'_, HashMap<String, Instant>> {
+    fn guard(&self) -> std::sync::MutexGuard<'_, HashMap<String, Session>> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -37,7 +47,8 @@ impl SessionStore {
     /// record it as active at `now`.
     pub fn create_at(&self, now: Instant) -> String {
         let id = random_id();
-        self.guard().insert(id.clone(), now);
+        let (tx, _) = broadcast::channel(8);
+        self.guard().insert(id.clone(), Session { last: now, tx });
         id
     }
 
@@ -49,11 +60,25 @@ impl SessionStore {
     /// Update a session's last-activity to `now`; returns false for unknown ids.
     pub fn touch_at(&self, id: &str, now: Instant) -> bool {
         let mut map = self.guard();
-        if let Some(slot) = map.get_mut(id) {
-            *slot = now;
+        if let Some(s) = map.get_mut(id) {
+            s.last = now;
             true
         } else {
             false
+        }
+    }
+
+    /// Subscribe to a session's resource-change signal, or `None` if unknown.
+    /// The transport awaits this receiver and pushes a notification on each send.
+    pub fn subscribe(&self, id: &str) -> Option<broadcast::Receiver<()>> {
+        self.guard().get(id).map(|s| s.tx.subscribe())
+    }
+
+    /// Signal every live session that the graph (and thus its resources) changed.
+    /// A session with no current subscriber simply drops the signal.
+    pub fn notify_all_resources_changed(&self) {
+        for s in self.guard().values() {
+            let _ = s.tx.send(());
         }
     }
 
@@ -77,7 +102,7 @@ impl SessionStore {
     pub fn reap(&self, now: Instant, idle: Duration) -> usize {
         let mut map = self.guard();
         let before = map.len();
-        map.retain(|_, last| now.saturating_duration_since(*last) <= idle);
+        map.retain(|_, s| now.saturating_duration_since(s.last) <= idle);
         before - map.len()
     }
 
@@ -149,6 +174,21 @@ mod tests {
         let a = s.create();
         let b = s.create();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn session_broadcast_delivers_to_subscriber() {
+        let s = SessionStore::new();
+        let id = s.create();
+        let mut rx = s.subscribe(&id).expect("a live session subscribes");
+        s.notify_all_resources_changed();
+        // try_recv is synchronous: no runtime needed to verify delivery.
+        assert!(
+            rx.try_recv().is_ok(),
+            "subscriber receives the change signal"
+        );
+        // Unknown id -> no receiver.
+        assert!(s.subscribe("nope").is_none());
     }
 
     #[test]
