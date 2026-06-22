@@ -43,8 +43,10 @@ the same graph always produces the same report.
 
 Headline counts: nodes, edges, communities, and the edge-confidence breakdown as
 percentages of EXTRACTED, INFERRED, and AMBIGUOUS edges. When INFERRED edges
-carry confidence scores, the average score is shown. The commit the graph was
-built at is included when known.
+carry confidence scores, the average score is shown. On a federated (multi-repo)
+graph a **Cross-repo** line reports how many edges span repositories and how many
+of those are cross-language coupling (HTTP/RPC/FFI/WebSocket). The commit the graph
+was built at is included when known.
 
 Confidence tiers come from extraction: EXTRACTED edges are read directly from
 source, INFERRED edges are deduced, and AMBIGUOUS edges are low-confidence guesses

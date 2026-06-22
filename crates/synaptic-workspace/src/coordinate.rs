@@ -6,7 +6,7 @@
 //! name. (JVM/.NET imports spell a package namespace, not this build coordinate —
 //! see the synthesized namespace in `export_surface`.)
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use toml::Value as Toml;
@@ -143,10 +143,10 @@ fn gradle_name(root: &Path) -> Option<String> {
     root.file_name().map(|s| s.to_string_lossy().into_owned())
 }
 
-/// .NET project name: `<AssemblyName>` or `<RootNamespace>` from the first
-/// `*.csproj`/`*.fsproj`/`*.vbproj`, else the project file stem.
-fn dotnet_name(root: &Path) -> Option<String> {
-    let proj = std::fs::read_dir(root)
+/// The first project file (`*.csproj`/`*.fsproj`/`*.vbproj`) directly in `dir`,
+/// lexically smallest for determinism.
+fn first_dotnet_proj(dir: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| {
@@ -155,8 +155,47 @@ fn dotnet_name(root: &Path) -> Option<String> {
                 Some("csproj") | Some("fsproj") | Some("vbproj")
             )
         })
-        .min()?; // deterministic
-    let text = std::fs::read_to_string(&proj).ok()?;
+        .min()
+}
+
+/// The first Visual Studio solution (`*.sln`) directly in `dir`, lexically
+/// smallest for determinism.
+pub(crate) fn first_sln(dir: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("sln"))
+        .min()
+}
+
+/// Project files (`*.csproj`/`*.fsproj`/`*.vbproj`) referenced by a `.sln`. `dir`
+/// is the directory the solution sits in; returned paths are `dir`-joined with
+/// backslashes normalized. Parses `Project("{type}") = "Name", "path", "{GUID}"`
+/// rows (the quoted path is field index 5 when splitting the line on `"`).
+pub(crate) fn sln_project_files(dir: &Path, sln: &Path) -> Vec<PathBuf> {
+    let Some(text) = read(sln) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.starts_with("Project(") {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('"').collect();
+        if let Some(path) = fields.get(5) {
+            let rel = path.replace('\\', "/");
+            if rel.ends_with(".csproj") || rel.ends_with(".fsproj") || rel.ends_with(".vbproj") {
+                out.push(dir.join(rel));
+            }
+        }
+    }
+    out
+}
+
+/// `<AssemblyName>`/`<RootNamespace>` of a .NET project file, else its file stem.
+fn dotnet_proj_name(proj: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(proj).ok()?;
     if let Ok(doc) = roxmltree::Document::parse(&text) {
         for tag in ["AssemblyName", "RootNamespace"] {
             if let Some(v) = doc
@@ -171,6 +210,23 @@ fn dotnet_name(root: &Path) -> Option<String> {
         }
     }
     proj.file_stem().map(|s| s.to_string_lossy().into_owned())
+}
+
+/// .NET project name for a member root. Tries, in order: a project file directly
+/// in `root`; the first project a root `.sln` references (the standard layout —
+/// solution at the repo root, projects in subdirectories); the `.sln` file stem.
+/// Each project name is its `<AssemblyName>`/`<RootNamespace>` or file stem.
+fn dotnet_name(root: &Path) -> Option<String> {
+    if let Some(proj) = first_dotnet_proj(root) {
+        return dotnet_proj_name(&proj);
+    }
+    let sln = first_sln(root)?;
+    if let Some(proj) = sln_project_files(root, &sln).into_iter().min() {
+        if let Some(name) = dotnet_proj_name(&proj) {
+            return Some(name);
+        }
+    }
+    sln.file_stem().map(|s| s.to_string_lossy().into_owned())
 }
 
 /// The package coordinate of the member rooted at `member_root`, or `None` if no
@@ -342,6 +398,46 @@ mod tests {
         let c = package_coordinate(d.path()).unwrap();
         assert_eq!(c.ecosystem, Ecosystem::DotNet);
         assert_eq!(c.name, "Acme.Svc");
+    }
+
+    #[test]
+    fn dotnet_coordinate_from_solution_with_subdir_projects() {
+        // The standard .NET layout: a `.sln` at the repo root, projects in
+        // subdirectories (no `.csproj` directly at the root). The coordinate is
+        // taken from the first solution project's AssemblyName/RootNamespace.
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        std::fs::create_dir_all(r.join("App")).unwrap();
+        write(
+            r,
+            "Acme.sln",
+            "Microsoft Visual Studio Solution File\n\
+             Project(\"{GUID}\") = \"App\", \"App\\App.csproj\", \"{X}\"\nEndProject\n",
+        );
+        write(
+            &r.join("App"),
+            "App.csproj",
+            r#"<Project><PropertyGroup><AssemblyName>Acme.App</AssemblyName></PropertyGroup></Project>"#,
+        );
+        let c = package_coordinate(r).unwrap();
+        assert_eq!(c.ecosystem, Ecosystem::DotNet);
+        assert_eq!(c.name, "Acme.App");
+    }
+
+    #[test]
+    fn dotnet_coordinate_falls_back_to_solution_stem() {
+        // A `.sln` whose referenced project is missing/unreadable still yields a
+        // coordinate from the solution file stem, so a surface is built.
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        write(
+            r,
+            "Gadget.sln",
+            "Project(\"{GUID}\") = \"Gone\", \"Gone\\Gone.csproj\", \"{X}\"\n",
+        );
+        let c = package_coordinate(r).unwrap();
+        assert_eq!(c.ecosystem, Ecosystem::DotNet);
+        assert_eq!(c.name, "Gadget");
     }
 
     #[test]

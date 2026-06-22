@@ -87,6 +87,7 @@ OpenAI, DeepSeek, Azure OpenAI, Bedrock, Ollama. Set `SYNAPTIC_BACKEND` to force
 | `synaptic-out/cache/semantic/` | written | Semantic-pass response cache |
 | `~/.synaptic/` | read/written | Global cross-repo store (`global-graph.json`, `global-manifest.json`) |
 | `~/.synaptic/update.toml` | read/written | Opt-in self-update state: `enabled` (background notice) and `last_check` (24h throttle). Written by `synaptic self-update --enable`/`--disable`. See [Updating](Updating) |
+| `~/.synaptic/skills.toml` | read/written | Registry of installed agent skills (`repo`, `host`, `version`, content hashes). Written by `synaptic install`/`uninstall`; read by `self-update` / `install --refresh` to re-render skills to the current version. See [Assistant Integration](Assistant-Integration#versioning-and-auto-refresh) |
 | `.claude/settings.json` | read/written | `PreToolUse` hooks installed by `synaptic install` (Claude). See [Assistant Integration](Assistant-Integration) |
 | `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` and per-platform skill files | written | Assistant instruction sections written by `install` |
 | `.codex/config.toml` / `.codex/hooks.json` (+ `~/.codex/config.toml`) | read/written | Codex MCP server + `SessionStart` hook from `synaptic install codex` (project, or global with `--global`). See [Assistant Integration](Assistant-Integration) |

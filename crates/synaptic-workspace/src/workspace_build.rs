@@ -110,6 +110,14 @@ fn finalize(
     let (rn, re) = resolve_parameterized_routes(hn, he);
     resolved.nodes = rn;
     resolved.links = mark_cross_repo_edges(&resolved.nodes, re);
+    // Cross-language coupling that spans repos (HTTP/RPC/FFI/WebSocket) is flagged
+    // on the edge, not by the import resolver, so count it for the summary here.
+    let mut report = report;
+    report.cross_language = resolved
+        .links
+        .iter()
+        .filter(|e| e.cross_repo && e.relation != "imports_from" && e.relation != "re_exports")
+        .count();
     let mut kg = KnowledgeGraph::from_graph_data(resolved);
     let communities = cluster(&kg, &ClusterOptions::default());
     apply_communities(&mut kg, &communities);

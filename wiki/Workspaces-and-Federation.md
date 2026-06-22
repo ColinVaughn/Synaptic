@@ -103,8 +103,13 @@ state only after the artifacts are durably written. See
 [Incremental-Updates].
 
 The build prints a summary: federated node/edge/community/member counts, the
-cross-repo report (`extracted`, `inferred`, `external_package`), and per-member
-node/edge counts.
+cross-repo report (`extracted`, `inferred`, `cross-language`, `external_package`),
+and per-member node/edge counts. `extracted`/`inferred` count import/coordinate
+resolution (see [Cross-repo symbol resolution](#cross-repo-symbol-resolution));
+`cross-language` counts the HTTP/RPC/FFI/WebSocket boundaries that span repos (see
+[Cross-Language-Edges](Cross-Language-Edges)) — these are flagged on the edge, so
+a graph with only WebSocket or route coupling no longer reads as "0 cross-repo
+links".
 
 ### `workspace federate`
 
@@ -240,8 +245,11 @@ workspaces are expanded up to a bounded depth.
 
 `!`-prefixed patterns are not treated as literal globs. A member directory must
 contain a recognized manifest (`Cargo.toml`, `package.json`, `go.mod`,
-`pyproject.toml`, `pom.xml`, `build.gradle(.kts)`, or a `*.csproj`/`*.fsproj`/
-`*.vbproj`) to be kept.
+`pyproject.toml`, `pom.xml`, `build.gradle(.kts)`, a `*.csproj`/`*.fsproj`/
+`*.vbproj`, or a `*.sln`) to be kept. The `.sln` covers the standard .NET layout
+(a solution at the repo root with its projects in subdirectories, and no
+`.csproj` directly at the root) — without it such a repo would be skipped for
+"no recognized manifest" and dropped from a multi-repo federation.
 
 If no build file declares any member, a manifest-presence fallback scans the
 root (gitignore- and noise-aware, bounded depth) for directories that contain a
@@ -263,7 +271,7 @@ Cargo to npm to Go to Python to Maven to Gradle to .NET:
 | `python` | `pyproject.toml` | `[project].name`, else `[tool.poetry].name` |
 | `jvm` | `pom.xml` | `groupId:artifactId` (artifactId alone if no groupId) |
 | `gradle` | `settings.gradle(.kts)` | `rootProject.name`, else the dir name |
-| `dotnet` | `*.csproj`/`*.fsproj`/`*.vbproj` | `AssemblyName`, else `RootNamespace`, else the project-file stem |
+| `dotnet` | `*.csproj`/`*.fsproj`/`*.vbproj`, else a root `*.sln` | `AssemblyName`, else `RootNamespace`, else the project-file stem. With only a `.sln` at the root, the first project it references supplies the name (falling back to the `.sln` stem) |
 
 A member with no recognized manifest has no coordinate (and so contributes no
 export surface in co-located mode).
@@ -311,7 +319,9 @@ that match no member are retagged as third-party `external_package` nodes so
 nothing dangles; orphaned rewired stubs are dropped.
 
 The build reports counts of `extracted`, `inferred`, and `external_package`
-resolutions.
+resolutions, plus a `cross-language` count for the HTTP/RPC/FFI/WebSocket
+boundaries that span repos (flagged on the edge by the cross-language pass, not by
+this import resolver — see [Cross-Language-Edges](Cross-Language-Edges)).
 
 ### Aliases: tsconfig `paths`, module-federation `remotes`, import maps
 

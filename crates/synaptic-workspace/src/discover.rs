@@ -48,11 +48,13 @@ pub fn has_recognized_manifest(dir: &Path) -> bool {
     if FILES.iter().any(|f| dir.join(f).is_file()) {
         return true;
     }
+    // .NET: a project file directly in `dir`, or a solution (`.sln`) at the repo
+    // root with its projects in subdirectories (the standard layout).
     std::fs::read_dir(dir).is_ok_and(|rd| {
         rd.filter_map(|e| e.ok()).any(|e| {
             matches!(
                 e.path().extension().and_then(|x| x.to_str()),
-                Some("csproj") | Some("fsproj") | Some("vbproj")
+                Some("csproj") | Some("fsproj") | Some("vbproj") | Some("sln")
             )
         })
     })
@@ -288,41 +290,17 @@ fn gradle_members(root: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// .NET `.sln` `Project(...) = "Name", "path\proj.csproj", "{GUID}"` rows. The
-/// member dir is the project file's parent. Backslashes are normalized.
+/// .NET `.sln` members: the parent directory of each project file the solution
+/// references (shared `.sln` parser in [`crate::coordinate`]).
 fn dotnet_members(root: &Path) -> Vec<PathBuf> {
-    let Some(sln) = std::fs::read_dir(root).ok().and_then(|rd| {
-        rd.filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("sln"))
-            .min()
-    }) else {
+    let Some(sln) = crate::coordinate::first_sln(root) else {
         return Vec::new();
     };
-    let Some(text) = read(&sln) else {
-        return Vec::new();
-    };
-    let mut dirs = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if !line.starts_with("Project(") {
-            continue;
-        }
-        // Project("{type}") = "Name", "path\proj.csproj", "{GUID}"
-        // splitting on `"` puts the quoted fields at odd indices: [1]=type,
-        // [3]=Name, [5]=project path.
-        let fields: Vec<&str> = line.split('"').collect();
-        if let Some(path) = fields.get(5) {
-            let rel = path.replace('\\', "/");
-            if rel.ends_with(".csproj") || rel.ends_with(".fsproj") || rel.ends_with(".vbproj") {
-                if let Some(parent) = root.join(&rel).parent() {
-                    if parent.is_dir() {
-                        dirs.push(parent.to_path_buf());
-                    }
-                }
-            }
-        }
-    }
-    dirs
+    crate::coordinate::sln_project_files(root, &sln)
+        .into_iter()
+        .filter_map(|proj| proj.parent().map(Path::to_path_buf))
+        .filter(|parent| parent.is_dir())
+        .collect()
 }
 
 /// Lexically-normalize `p` (resolve `.`/`..` without touching the filesystem).
@@ -847,15 +825,47 @@ mod tests {
             ("gr/build.gradle", "x"),
             ("net/Svc.csproj", "<Project/>"),
             ("netvb/Svc.vbproj", "<Project/>"),
+            (
+                "netsln/App.sln",
+                "Project(\"{G}\") = \"x\", \"x\\x.csproj\", \"{P}\"\n",
+            ),
         ] {
             touch(r, rel, body);
         }
         for dir in [
-            "rust", "rustws", "js", "go", "py", "mvn", "gr", "net", "netvb",
+            "rust", "rustws", "js", "go", "py", "mvn", "gr", "net", "netvb", "netsln",
         ] {
             assert!(has_recognized_manifest(&r.join(dir)), "{dir}");
         }
         touch(r, "plain/readme.txt", "hi");
         assert!(!has_recognized_manifest(&r.join("plain")));
+    }
+
+    #[test]
+    fn solution_repo_with_subdir_projects_is_one_member_with_coordinate() {
+        // The standard .NET repo layout (solution at root, .csproj in subdirs, no
+        // root .csproj) must federate as a single member carrying a coordinate,
+        // not be dropped for lacking a root manifest.
+        use crate::coordinate::Ecosystem;
+        let d = tempfile::tempdir().unwrap();
+        let repo = d.path().join("desktop-app");
+        touch(
+            &repo,
+            "Acme.sln",
+            "Project(\"{G}\") = \"Acme.App\", \"App\\Acme.App.csproj\", \"{P}\"\nEndProject\n",
+        );
+        touch(
+            &repo,
+            "App/Acme.App.csproj",
+            r#"<Project><PropertyGroup><AssemblyName>Acme.App</AssemblyName></PropertyGroup></Project>"#,
+        );
+        let members = discover_project_roots(d.path());
+        let m = members
+            .iter()
+            .find(|m| m.tag == "desktop-app")
+            .unwrap_or_else(|| panic!("repo not discovered: {members:?}"));
+        let coord = m.coordinate.as_ref().expect("repo has a coordinate");
+        assert_eq!(coord.ecosystem, Ecosystem::DotNet);
+        assert_eq!(coord.name, "Acme.App");
     }
 }

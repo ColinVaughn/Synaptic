@@ -819,3 +819,195 @@ fn scan_sql_stores_snippet_on_edge() {
         "snippet: {snip}"
     );
 }
+
+// --- WebSocket coupling ---
+
+/// The `calls_service`/`handled_by` edge for a `wsmsg`/`wsendpoint` boundary node
+/// whose label matches `label`, if any.
+#[allow(dead_code)]
+fn ws_edge<'a>(
+    r: &'a synaptic_extract::ExtractionResult,
+    node_type: &str,
+    label: &str,
+) -> Option<&'a synaptic_core::Edge> {
+    let node = r.nodes.iter().find(|n| {
+        n.extra.get("_node_type").and_then(|v| v.as_str()) == Some(node_type) && n.label == label
+    })?;
+    r.edges
+        .iter()
+        .find(|e| e.source == node.id || e.target == node.id)
+}
+
+#[cfg(feature = "lang-javascript")]
+#[test]
+fn js_ws_command_send_is_a_client_message() {
+    // `client.send({ cmd: 'subscribe' })` -> the enclosing fn calls_service a
+    // `wsmsg:subscribe` node. No `WebSocket` import needed in this file: the
+    // `.send({cmd})` shape is the signal.
+    let src = b"async function subscribe(topic) {\n  await client.send({ cmd: 'subscribe', value: topic });\n}\n";
+    let r = extract_source("client.js", src).unwrap();
+    let node = r
+        .nodes
+        .iter()
+        .find(|n| n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("ws_message"))
+        .expect("a ws_message node");
+    assert_eq!(node.label, "ws #subscribe");
+    let f_subscribe = r.nodes.iter().find(|n| n.label == "subscribe()").unwrap();
+    let edge = r
+        .edges
+        .iter()
+        .find(|e| e.relation == "calls_service" && e.target == node.id)
+        .expect("calls_service edge to the ws message");
+    assert_eq!(edge.source, f_subscribe.id, "attributed to the sender fn");
+    assert_eq!(edge.confidence, Confidence::Inferred);
+    // `.request({ cmd: 'fetch' })` counts too.
+    let src2 = b"async function poll() {\n  return client.request({ cmd: \"fetch\" });\n}\n";
+    let r2 = extract_source("c.js", src2).unwrap();
+    assert!(r2.nodes.iter().any(|n| n.label == "ws #fetch"
+        && n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("ws_message")));
+    // A plain `res.send(body)` (no command object) must NOT create a ws message.
+    let plain = b"function h(req, res) {\n  res.send({ ok: true });\n}\n";
+    let rp = extract_source("h.js", plain).unwrap();
+    assert!(
+        !rp.nodes
+            .iter()
+            .any(|n| n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("ws_message")),
+        "no command key -> no ws message node"
+    );
+}
+
+#[cfg(feature = "lang-csharp")]
+#[test]
+fn csharp_ws_server_case_and_endpoint() {
+    // WebSocketSharp server: an endpoint from AddWebSocketService and handlers from
+    // the `case "..."` arms. Both meet the JS client's `wsendpoint`/`wsmsg` ids.
+    let src = br#"
+public class FeedServer {
+  public void Start() {
+    Server = new WebSocketServer("ws://127.0.0.1:45000");
+    Server.AddWebSocketService<Feed>("/feed");
+  }
+  public void OnMessage(string text) {
+    switch (cmd) {
+      case "subscribe": DoSubscribe(); break;
+      case "fetch": DoFetch(); break;
+    }
+  }
+}
+"#;
+    let r = extract_source("feedServer.cs", src).unwrap();
+    // Endpoint node, handled_by the registering method.
+    let ep = r
+        .nodes
+        .iter()
+        .find(|n| n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("ws_endpoint"))
+        .expect("a ws_endpoint node");
+    assert_eq!(ep.label, "ws /feed");
+    assert!(r
+        .edges
+        .iter()
+        .any(|e| e.relation == "handled_by" && e.source == ep.id));
+    // Per-command handler nodes for subscribe + fetch.
+    let msgs: Vec<&str> = r
+        .nodes
+        .iter()
+        .filter(|n| n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("ws_message"))
+        .map(|n| n.label.as_str())
+        .collect();
+    assert!(msgs.contains(&"ws #subscribe"), "{msgs:?}");
+    assert!(msgs.contains(&"ws #fetch"), "{msgs:?}");
+    let subscribe = r.nodes.iter().find(|n| n.label == "ws #subscribe").unwrap();
+    assert!(
+        r.edges
+            .iter()
+            .any(|e| e.relation == "handled_by" && e.source == subscribe.id),
+        "server case is a handled_by"
+    );
+}
+
+#[cfg(feature = "lang-csharp")]
+#[test]
+fn csharp_non_ws_switch_is_ignored() {
+    // A `case "..."` outside any WebSocket context must not mint ws message nodes.
+    let src = br#"
+public class Parser {
+  public void Handle(string cmd) {
+    switch (cmd) { case "add": break; case "sub": break; }
+  }
+}
+"#;
+    let r = extract_source("Parser.cs", src).unwrap();
+    assert!(
+        !r.nodes
+            .iter()
+            .any(|n| n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("ws_message")),
+        "non-websocket switch must not produce ws messages"
+    );
+}
+
+#[cfg(feature = "lang-javascript")]
+#[test]
+fn js_ws_endpoint_from_url_and_id_matches_csharp() {
+    // The client URL path keys the same endpoint node id as the C# server's
+    // AddWebSocketService path (make_id is case-insensitive on the path).
+    let src = b"function openSocket(port) {\n  const url = `ws://127.0.0.1:${port}/feed`;\n  client = new WebSocket(url);\n}\n";
+    let r = extract_source("socketClient.js", src).unwrap();
+    let ep = r
+        .nodes
+        .iter()
+        .find(|n| n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("ws_endpoint"))
+        .expect("a ws_endpoint node");
+    assert_eq!(ep.label, "ws /feed");
+    assert!(r
+        .edges
+        .iter()
+        .any(|e| e.relation == "calls_service" && e.target == ep.id));
+    // Same boundary id as the C# server (case-insensitive path via make_id).
+    let cs = br#"class S { void Start() { Server.AddWebSocketService<Feed>("/feed"); } }"#;
+    let rc = extract_source("S.cs", cs).unwrap();
+    let cs_ep = rc
+        .nodes
+        .iter()
+        .find(|n| n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("ws_endpoint"))
+        .unwrap();
+    assert_eq!(
+        ep.id, cs_ep.id,
+        "client and server meet at one endpoint node"
+    );
+}
+
+#[cfg(feature = "lang-javascript")]
+#[test]
+fn js_socketio_emit_and_on() {
+    // socket.io custom events: emit -> client message, on -> server handler.
+    // Reserved lifecycle events (connection/disconnect) are skipped.
+    let src = b"import io from 'socket.io-client';\nfunction wire(socket) {\n  socket.on('price_update', updatePrice);\n  socket.emit('start_job', {});\n  socket.on('connect', noop);\n}\n";
+    let r = extract_source("rt.js", src).unwrap();
+    let labels: Vec<&str> = r
+        .nodes
+        .iter()
+        .filter(|n| n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("ws_message"))
+        .map(|n| n.label.as_str())
+        .collect();
+    assert!(labels.contains(&"ws #price_update"), "{labels:?}");
+    assert!(labels.contains(&"ws #start_job"), "{labels:?}");
+    assert!(
+        !labels.contains(&"ws #connect"),
+        "reserved socket.io event excluded: {labels:?}"
+    );
+}
+
+#[cfg(feature = "lang-python")]
+#[test]
+fn python_socketio_handler_and_emit() {
+    let src = b"import socketio\nsio = socketio.Server()\n\n@sio.on('join_room')\ndef on_join(sid, data):\n    sio.emit('room_joined', data)\n";
+    let r = extract_source("rt.py", src).unwrap();
+    let labels: Vec<&str> = r
+        .nodes
+        .iter()
+        .filter(|n| n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("ws_message"))
+        .map(|n| n.label.as_str())
+        .collect();
+    assert!(labels.contains(&"ws #join_room"), "{labels:?}");
+    assert!(labels.contains(&"ws #room_joined"), "{labels:?}");
+}

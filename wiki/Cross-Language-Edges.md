@@ -27,6 +27,9 @@ land on the same node:
 - a **route** node, keyed by normalized path (`/api/users`), for HTTP;
 - a **`grpc_service`** node, keyed by lowercased service name (`grpc:greeter`);
 - a **`pyo3_module`** node, keyed by module name (`pyo3:mymod`);
+- a **`ws_endpoint`** node, keyed by socket path (`ws:/feed`), and a
+  **`ws_message`** node, keyed by message type / event (`ws #connect`), for
+  WebSockets;
 - a **command** stub for an unresolved subprocess target, and
   `native_library` / `native_addon` / `jni_symbol` stubs for FFI sinks.
 
@@ -101,6 +104,31 @@ the common `<Name>Client` shape is not mistaken for gRPC, and a denylist
 excludes well-known non-gRPC `<Name>Client` types (`reqwest`, `redis`,
 `postgres`, ...). When one file holds two service impls that share a method
 name, each method resolves within its own `impl` block.
+
+### WebSocket
+
+A WebSocket couples a client and a server that exchange JSON command messages
+(or socket.io events) over a long-lived socket — coupling the AST walk does not
+see and that no HTTP/RPC detector covers. Two boundary-node kinds are minted,
+both reusing `calls_service` (client) / `handled_by` (server) so the cross-repo
+flagging applies unchanged:
+
+- a **`ws_endpoint`** node, keyed by the socket URL path (`ws:/feed`); named
+  paths only — a bare `/` is too generic to key on;
+- a **`ws_message`** node, keyed by the lowercased application message type /
+  event name (`ws #connect`). It is intentionally endpoint-independent, because
+  the connection URL and the message sites routinely live in different files
+  (a connector module vs. the domain modules that send commands).
+
+Covered stacks: JS/TS raw `ws` (`socket.send({ cmd: 'connect' })` /
+`.request({...})` plus a `case "connect":` dispatch) and socket.io
+(`emit`/`on`); C# WebSocketSharp / `System.Net.WebSockets` (`AddWebSocketService`
++ `case` arms); Python `websockets` + python-socketio (`@sio.on` / `emit`); Rust
+tungstenite (endpoint only — per-frame dispatch is not regex-tractable).
+socket.io lifecycle events (`connection`, `connect`, `disconnect`, ...) are
+excluded. So a JS client that sends `{ cmd: 'subscribe' }` and a C# service whose
+`case "subscribe":` handles it meet at one `ws #subscribe` node, and editing the
+handler surfaces the client as an affected dependent across the repo boundary.
 
 ### Parameterized routes
 

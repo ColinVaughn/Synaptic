@@ -62,8 +62,8 @@ pub(crate) fn print_build_summary(build: &synaptic_workspace::workspace_build::W
     );
     let cr = &build.cross_repo;
     println!(
-        "Cross-repo links: {} extracted, {} inferred · {} external package(s)",
-        cr.extracted, cr.inferred, cr.external_packages
+        "Cross-repo links: {} extracted, {} inferred, {} cross-language · {} external package(s)",
+        cr.extracted, cr.inferred, cr.cross_language, cr.external_packages
     );
     for m in &build.members {
         println!(

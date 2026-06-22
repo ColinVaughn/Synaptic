@@ -212,6 +212,11 @@ pub(crate) enum Cmd {
         /// the per-project `.codex/` the CLI reads.
         #[arg(long)]
         global: bool,
+        /// Re-render every skill recorded in `~/.synaptic/skills.toml` to the
+        /// current version (the platform arg is ignored). Hand-edited skills are
+        /// left untouched. This is what `self-update` runs automatically.
+        #[arg(long)]
+        refresh: bool,
     },
     /// Remove the Synaptic skill for a platform (or `--all`).
     Uninstall {

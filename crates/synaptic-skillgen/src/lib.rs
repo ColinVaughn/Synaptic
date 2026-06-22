@@ -17,9 +17,11 @@
 
 pub mod codex_config;
 pub mod drift;
+pub mod registry;
 pub mod settings_hooks;
 
 pub use drift::{bless, check_drift, render_all, RenderedArtifact};
+pub use registry::{record_install, record_uninstall, refresh_all, registry_path, RefreshSummary};
 pub use settings_hooks::{install_settings_hook, uninstall_settings_hook};
 
 use std::path::{Path, PathBuf};
@@ -240,7 +242,7 @@ impl Platform {
     }
 
     /// Repo-relative path of the dedicated skill file, if the platform uses one.
-    fn skill_dest(self) -> Option<&'static str> {
+    pub(crate) fn skill_dest(self) -> Option<&'static str> {
         match self {
             Platform::Claude => Some(".claude/skills/synaptic/SKILL.md"),
             // The rest consume a single always-on instructions file directly.
@@ -254,7 +256,7 @@ impl Platform {
     }
 
     /// The always-on instructions file this platform reads.
-    fn always_on_file(self) -> &'static str {
+    pub(crate) fn always_on_file(self) -> &'static str {
         match self {
             Platform::Claude => "CLAUDE.md",
             // Codex reads AGENTS.md too, like the generic Agents platform.
@@ -267,7 +269,9 @@ impl Platform {
     }
 }
 
-/// Render the skill markdown for a platform (fills `@@SLOT@@`s).
+/// Render the skill markdown for a platform (fills `@@SLOT@@`s). This is the pure,
+/// version-agnostic render the drift snapshots lock; the on-disk install adds a
+/// version stamp via [`stamped_skill`].
 pub fn render_skill(platform: Platform) -> String {
     let out = SKILL_TEMPLATE.replace("@@HOST@@", platform.display());
     debug_assert!(
@@ -275,6 +279,53 @@ pub fn render_skill(platform: Platform) -> String {
         "unfilled slot remains in skill template"
     );
     out
+}
+
+/// The version stamped into installed skill files (the workspace version).
+pub fn skill_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// The version-stamp comment written into installed skill artifacts. Added at
+/// install/refresh time (not in [`render_skill`] / [`always_on_section`]), so the
+/// committed drift snapshots stay version-agnostic while on-disk skills carry the
+/// version that produced them.
+fn version_stamp() -> String {
+    format!("<!-- synaptic-skill v{} -->", skill_version())
+}
+
+/// [`render_skill`] with the version stamp inserted just after the YAML
+/// frontmatter (prepended if there is none). This is what `install` writes to the
+/// per-platform skill file.
+pub fn stamped_skill(platform: Platform) -> String {
+    let body = render_skill(platform);
+    let stamp = version_stamp();
+    if let Some(rest) = body.strip_prefix("---\n") {
+        if let Some(close) = rest.find("\n---\n") {
+            let split = "---\n".len() + close + "\n---\n".len();
+            return format!("{}{}\n{}", &body[..split], stamp, &body[split..]);
+        }
+    }
+    format!("{stamp}\n\n{body}")
+}
+
+/// The always-on section with the version stamp inserted right after the start
+/// marker. The marker line itself is unchanged, so [`replace_or_append_section`]
+/// and [`extract_block`] still locate the block.
+pub fn stamped_always_on() -> String {
+    let section = always_on_section();
+    match section.split_once('\n') {
+        Some((first, rest)) => format!("{first}\n{}\n{rest}", version_stamp()),
+        None => section,
+    }
+}
+
+/// Extract our marker block (inclusive of the start/end markers) from a host
+/// instructions file's content, if present.
+pub fn extract_block(file: &str) -> Option<String> {
+    let s = file.find(MARK_START)?;
+    let e = file[s..].find(MARK_END)?;
+    Some(file[s..s + e + MARK_END.len()].to_string())
 }
 
 /// Insert (or replace) the marker block in `existing`, returning the new content
@@ -337,7 +388,7 @@ pub fn install(platform: Platform, repo_root: &Path) -> std::io::Result<Vec<Path
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&path, render_skill(platform))?;
+        std::fs::write(&path, stamped_skill(platform))?;
         written.push(path);
     }
     written.push(inject_always_on(platform, repo_root)?);
@@ -387,7 +438,7 @@ fn inject_always_on(platform: Platform, repo_root: &Path) -> std::io::Result<Pat
         std::fs::create_dir_all(parent)?;
     }
     let existing = std::fs::read_to_string(&ao_path).unwrap_or_default();
-    let updated = replace_or_append_section(&existing, &always_on_section());
+    let updated = replace_or_append_section(&existing, &stamped_always_on());
     std::fs::write(&ao_path, updated)?;
     Ok(ao_path)
 }

@@ -38,6 +38,21 @@ fn confidence_breakdown(kg: &KnowledgeGraph) -> (usize, usize, usize, Option<f64
     (ext, inf, amb, inf_avg)
 }
 
+/// Cross-repo edge count and its cross-language subset (non-import coupling).
+/// Both zero on a single-repo graph.
+fn cross_repo_breakdown(kg: &KnowledgeGraph) -> (usize, usize) {
+    let (mut total, mut cross_lang) = (0usize, 0usize);
+    for e in kg.edges() {
+        if e.cross_repo {
+            total += 1;
+            if e.relation != "imports_from" && e.relation != "re_exports" {
+                cross_lang += 1;
+            }
+        }
+    }
+    (total, cross_lang)
+}
+
 /// Incident-edge count per node (self-loops ignored).
 fn node_degrees(kg: &KnowledgeGraph) -> HashMap<NodeId, usize> {
     let mut deg: HashMap<NodeId, usize> = kg.nodes().map(|n| (n.id.clone(), 0)).collect();
@@ -87,6 +102,14 @@ pub fn graph_report(
             let _ = write!(line, " ({inf} INFERRED edges, avg confidence {avg:.2})");
         }
         let _ = writeln!(s, "{line}");
+    }
+    // Federated graphs only: cross-repo coupling and its cross-language subset.
+    let (cross_repo, cross_lang) = cross_repo_breakdown(kg);
+    if cross_repo > 0 {
+        let _ = writeln!(
+            s,
+            "- **Cross-repo:** {cross_repo} edge(s) span repositories ({cross_lang} cross-language: HTTP/RPC/FFI/WebSocket)"
+        );
     }
     let _ = writeln!(
         s,

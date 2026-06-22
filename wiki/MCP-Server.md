@@ -310,7 +310,10 @@ Parameters: none.
 
 Returns `Graph: <n> nodes, <n> edges, <n> communities` and
 `Edges: <n> EXTRACTED, <n> INFERRED, <n> AMBIGUOUS`, plus a `structuredContent`
-mirror.
+mirror. On a federated (multi-repo) graph it adds a `Cross-repo: <n> edge(s) span
+repositories (<n> cross-language: HTTP/RPC/FFI/WebSocket boundaries)` line, and the
+structured output carries `cross_repo` / `cross_language` counts (both 0, and the
+line omitted, for a single-repo graph).
 
 ### list_repos
 
@@ -616,7 +619,7 @@ formatted text:
 
 | Tool | `structuredContent` shape |
 |---|---|
-| `graph_stats` | `{ nodes, edges, communities, extracted, inferred, ambiguous }` |
+| `graph_stats` | `{ nodes, edges, communities, extracted, inferred, ambiguous, cross_repo, cross_language }` |
 | `god_nodes` | `{ god_nodes: [{ label, degree, id, test_count }] }` |
 | `affected` | `{ seed, affected: [{ label, depth, via_relation }] }` |
 | `query_graph` | `{ nodes: [{ label, file_type, source_file, score, changed }], edges: [{ source, relation, target }] }` (nodes sorted by `score`; `changed` is true when `since` was given and the node's file changed) |

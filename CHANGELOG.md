@@ -10,6 +10,60 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-06-21
+
+Two multi-repo federation gaps for .NET/WebSocket products: .NET solution repos
+were dropped from federation, and WebSocket coupling between repos was invisible.
+
+### Added
+- **Versioned, self-refreshing agent skills.** Installed skill files now carry a
+  version stamp (`<!-- synaptic-skill vX.Y.Z -->`), and `synaptic install` records
+  each install in `~/.synaptic/skills.toml`. `synaptic self-update` then re-renders
+  every recorded skill to the new version automatically (it spawns the freshly
+  installed binary so the new content is used), and `synaptic install --refresh`
+  does the same on demand. Skills that are byte-identical to what we wrote are
+  refreshed in place; hand-edited skills are detected by content hash and left
+  untouched (reported so you can re-run `synaptic install <host>` to overwrite);
+  entries whose files are gone are dropped. The build-time drift snapshots are
+  unaffected — the stamp is added at write time, so a version bump never churns
+  `expected/`.
+- **WebSocket cross-language edges.** A new detector links a client that opens a
+  socket and exchanges JSON command messages (or socket.io events) to the server
+  that handles them, across languages and repos. It mints two boundary-node
+  kinds — a `ws_endpoint` (keyed by socket path) and a `ws_message` (keyed by the
+  application message type / event name) — and connects clients via
+  `calls_service` and handlers via `handled_by`, so reverse-impact and
+  `affected` / `predict_impact` traverse the socket boundary. Covered: JS/TS raw
+  `ws` (`.send({cmd})` / `case` dispatch) and socket.io (`emit`/`on`); C#
+  WebSocketSharp / `System.Net.WebSockets` (`AddWebSocketService` + `case`);
+  Python `websockets` + python-socketio; Rust tungstenite (endpoint only). All
+  edges are `INFERRED`. The command-keyed node is endpoint-independent because the
+  connection URL and the message sites routinely live in different files.
+
+### Fixed
+- **.NET solution repos are no longer dropped from multi-repo federation.** A repo
+  whose root holds only a `.sln` (with the `.csproj` projects in subdirectories —
+  the standard layout) failed the manifest check used by the sibling-repo scan and
+  was skipped entirely, and even when included it produced no coordinate, so no
+  export surface. `.sln` is now a recognized manifest, and the .NET coordinate
+  falls back to the first solution project's `AssemblyName`/`RootNamespace` (then
+  the `.sln` stem) when there is no root `.csproj`. Such a repo now federates as a
+  member with a `dotnet` coordinate and export surface.
+
+### Changed
+- The federated-build summary now reports **cross-language** cross-repo links
+  (`N extracted, M inferred, K cross-language`). The `extracted`/`inferred`
+  counters only ever covered import/coordinate resolution; HTTP/RPC/FFI/WebSocket
+  boundaries that span repos are flagged on the edge and were absent from the
+  summary, which made a graph with real cross-language coupling read as
+  "0 cross-repo links".
+- **`graph_stats` reports cross-repo coupling on a federated graph.** The MCP
+  `graph_stats` tool (text + structured output) and the `GRAPH_REPORT.md` overview
+  now include how many edges span repositories and how many of those are
+  cross-language, computed from the loaded graph — so the count is visible to an
+  agent or in the report, not only in the one-shot build summary. Both are 0 (and
+  the line omitted) for a single-repo graph.
+
 ## [0.3.6] - 2026-06-21
 
 A round-3 agent-feedback pass on a11ycore: a real import-resolution bug that hid a

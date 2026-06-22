@@ -22,7 +22,10 @@ fn codex_home() -> PathBuf {
     }
 }
 
-pub(crate) fn run_install(platform: &str, global: bool) -> Result<()> {
+pub(crate) fn run_install(platform: &str, global: bool, refresh: bool) -> Result<()> {
+    if refresh {
+        return run_refresh();
+    }
     let p = Platform::parse(platform)
         .with_context(|| format!("unknown platform '{platform}' ({PLATFORMS})"))?;
     let root = std::env::current_dir().context("resolving current directory")?;
@@ -46,6 +49,8 @@ pub(crate) fn run_install(platform: &str, global: bool) -> Result<()> {
     }
 
     let written = synaptic_skillgen::install(p, &root).context("installing skill")?;
+    // Record the install so `self-update` / `install --refresh` can re-render it.
+    synaptic_skillgen::record_install(&synaptic_skillgen::registry_path(), p, &root);
     println!("Installed the Synaptic skill:");
     for path in &written {
         println!("  {}", path.display());
@@ -81,9 +86,11 @@ pub(crate) fn run_uninstall(platform: &str, all: bool, global: bool) -> Result<(
         return Ok(());
     }
 
+    let registry = synaptic_skillgen::registry_path();
     if all {
         for p in Platform::all() {
             synaptic_skillgen::uninstall(p, &root).context("uninstalling skill")?;
+            synaptic_skillgen::record_uninstall(&registry, p, &root);
         }
         println!("Removed the Synaptic skill from all platforms.");
         return Ok(());
@@ -91,6 +98,33 @@ pub(crate) fn run_uninstall(platform: &str, all: bool, global: bool) -> Result<(
     let p = Platform::parse(platform)
         .with_context(|| format!("unknown platform '{platform}' ({PLATFORMS})"))?;
     synaptic_skillgen::uninstall(p, &root).context("uninstalling skill")?;
+    synaptic_skillgen::record_uninstall(&registry, p, &root);
     println!("Removed the Synaptic skill for {platform}.");
     Ok(())
+}
+
+/// `synaptic install --refresh`: re-render every recorded skill to the current
+/// version. Shared by `self-update`.
+fn run_refresh() -> Result<()> {
+    let summary = synaptic_skillgen::refresh_all(&synaptic_skillgen::registry_path());
+    print_refresh_summary(&summary);
+    Ok(())
+}
+
+/// Print a refresh summary: a one-line roll-up plus a note per skill left
+/// untouched because it was hand-edited.
+pub(crate) fn print_refresh_summary(summary: &synaptic_skillgen::RefreshSummary) {
+    match summary.line() {
+        Some(line) => println!("{line}"),
+        None => {
+            println!("No installed skills recorded yet (run `synaptic install <host>`).");
+            return;
+        }
+    }
+    for (repo, host) in &summary.refreshed {
+        println!("  refreshed {host} in {repo}");
+    }
+    for (repo, host, file) in &summary.skipped_edited {
+        println!("  modified, left as-is: {host} {file} in {repo} (run `synaptic install {host}` to overwrite)");
+    }
 }

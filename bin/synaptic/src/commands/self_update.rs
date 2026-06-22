@@ -56,7 +56,26 @@ pub(crate) fn run_self_update(enable: bool, disable: bool, check: bool, yes: boo
 
     updater::apply_update(&release, triple)?;
     println!("Updated to {latest}. Restart synaptic to use the new version.");
+    refresh_installed_skills();
     Ok(())
+}
+
+/// Re-render installed skills to the new version. The file at our own exe path was
+/// just replaced, so the running (old) process can't render the new content
+/// itself — spawn the new binary to do it. Best-effort: on failure, point the user
+/// at the manual command.
+fn refresh_installed_skills() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let ran = std::process::Command::new(&exe)
+        .args(["install", "--refresh"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ran {
+        eprintln!("(note) run `synaptic install --refresh` to update installed skill files");
+    }
 }
 
 /// Prompt on stderr, read a line from stdin, return true only for y/yes.

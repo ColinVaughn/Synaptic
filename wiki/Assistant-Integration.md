@@ -16,12 +16,14 @@ check`/`bless` guard the generated artifacts against drift (a dev/CI tool).
 
 ```
 synaptic install [platform] [--global]
+synaptic install --refresh
 ```
 
 `platform` defaults to `claude`. Files are written under the current directory
 (the repo root). The command prints each path it wrote. `--global` applies only
 to `codex` and targets the global `~/.codex/config.toml` instead of the project
-(see [Codex](#codex)).
+(see [Codex](#codex)). `--refresh` re-renders every previously-installed skill to
+the current version (see [Versioning and auto-refresh](#versioning-and-auto-refresh)).
 
 ```
 synaptic install
@@ -61,6 +63,7 @@ parent directories (for example `.github/`, `.kilocode/rules/`) are created.
 
    ```
    <!-- synaptic:start -->
+   <!-- synaptic-skill v0.3.7 -->
    ## Synaptic
 
    This repo has a Synaptic knowledge graph (`synaptic-out/graph.json`). Query it
@@ -73,7 +76,10 @@ parent directories (for example `.github/`, `.kilocode/rules/`) are created.
    The block is delimited by `<!-- synaptic:start -->` and
    `<!-- synaptic:end -->`. On reinstall it is replaced in place (never
    duplicated), and any prose around it is preserved. A new instructions file is
-   created if none exists.
+   created if none exists. The `<!-- synaptic-skill vX.Y.Z -->` line stamps the
+   version that produced the block (see
+   [Versioning and auto-refresh](#versioning-and-auto-refresh)); the Claude
+   `SKILL.md` carries the same stamp just under its frontmatter.
 
 3. **PreToolUse hooks** (Claude only): two entries merged into
    `.claude/settings.json` under `hooks.PreToolUse` (see below).
@@ -94,6 +100,34 @@ Install can be run repeatedly without piling up duplicates:
   so a reinstall keeps exactly two. Foreign hooks and unrelated top-level
   settings keys are preserved. A corrupt `settings.json` is treated as empty and
   rewritten.
+
+## Versioning and auto-refresh
+
+Installed skills are versioned so they can be updated as Synaptic improves,
+without you re-running `install` in every repo.
+
+- **Version stamp.** Each installed artifact carries a `<!-- synaptic-skill
+  vX.Y.Z -->` comment (under the `SKILL.md` frontmatter, and just inside the
+  always-on block's start marker) recording the Synaptic version that produced it.
+  The stamp is added at write time only — the build-time drift snapshots stay
+  version-agnostic, so a version bump never churns them.
+- **Install registry.** `synaptic install` records each `(repo, host)` it writes
+  in `~/.synaptic/skills.toml` (`%USERPROFILE%\.synaptic\skills.toml` on Windows),
+  with the version and a content hash of each artifact. `uninstall` removes the
+  entry.
+- **Auto-refresh on update.** After `synaptic self-update` replaces the binary, it
+  re-renders every recorded skill to the new version automatically. (Because the
+  running process is still the old binary, it spawns the freshly-installed one to
+  do the rendering.) Run it on demand with `synaptic install --refresh`.
+- **Hand-edits are preserved.** A refresh only rewrites an artifact that is
+  byte-identical to what Synaptic last wrote (verified by the recorded hash). If
+  you edited a skill, it is left untouched and reported — re-run `synaptic install
+  <host>` to overwrite. The always-on block is rewritten in place, so surrounding
+  prose is always preserved regardless. Entries whose files are gone are dropped.
+
+Refresh covers the Markdown skill artifacts (the `SKILL.md` and the always-on
+blocks). Codex MCP config / hooks and Claude `settings.json` hooks are not
+auto-rewritten — re-run `synaptic install` to refresh those.
 
 ## Codex
 

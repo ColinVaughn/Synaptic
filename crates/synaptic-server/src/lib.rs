@@ -1011,13 +1011,22 @@ impl Server {
             .count()
     }
 
-    /// `graph_stats` — counts + confidence breakdown.
+    /// `graph_stats` — counts + confidence breakdown (+ cross-repo coupling on a
+    /// federated graph).
     pub fn tool_graph_stats(&self) -> String {
         let s = &self.stats;
-        format!(
+        let mut out = format!(
             "Graph: {} nodes, {} edges, {} communities\nEdges: {} EXTRACTED, {} INFERRED, {} AMBIGUOUS",
             s.nodes, s.edges, s.communities, s.extracted, s.inferred, s.ambiguous
-        )
+        );
+        // Only meaningful on a federated (multi-repo) graph; silent otherwise.
+        if s.cross_repo > 0 {
+            out.push_str(&format!(
+                "\nCross-repo: {} edge(s) span repositories ({} cross-language: HTTP/RPC/FFI/WebSocket boundaries)",
+                s.cross_repo, s.cross_language
+            ));
+        }
+        out
     }
 
     /// `list_repos` — federated members with node/edge counts.
@@ -1831,7 +1840,8 @@ impl Server {
         let s = &self.stats;
         json!({
             "nodes": s.nodes, "edges": s.edges, "communities": s.communities,
-            "extracted": s.extracted, "inferred": s.inferred, "ambiguous": s.ambiguous
+            "extracted": s.extracted, "inferred": s.inferred, "ambiguous": s.ambiguous,
+            "cross_repo": s.cross_repo, "cross_language": s.cross_language
         })
     }
 
@@ -2938,11 +2948,12 @@ fn tools_list(allow_exec: bool) -> Value {
                   "label": {"type":"string"}, "degree": {"type":"integer"}, "id": {"type":"string"},
                   "test_count": {"type":"integer", "description": "How many tests transitively exercise this hub; 0 flags an untested high-blast-radius symbol."} } } }
           }, "required": ["god_nodes"] } },
-        { "name": "graph_stats", "description": "Graph size and health: node/edge/community counts and the EXTRACTED/INFERRED/AMBIGUOUS edge-confidence breakdown. Good first call to confirm a graph is loaded and how large it is.",
+        { "name": "graph_stats", "description": "Graph size and health: node/edge/community counts and the EXTRACTED/INFERRED/AMBIGUOUS edge-confidence breakdown. On a federated (multi-repo) graph it also reports how many edges span repositories (`cross_repo`) and how many of those are cross-language coupling (`cross_language`: HTTP/RPC/FFI/WebSocket boundaries). Good first call to confirm a graph is loaded and how large it is.",
           "inputSchema": { "type": "object", "properties": {} },
           "outputSchema": { "type": "object", "properties": {
               "nodes": {"type":"integer"}, "edges": {"type":"integer"}, "communities": {"type":"integer"},
-              "extracted": {"type":"integer"}, "inferred": {"type":"integer"}, "ambiguous": {"type":"integer"}
+              "extracted": {"type":"integer"}, "inferred": {"type":"integer"}, "ambiguous": {"type":"integer"},
+              "cross_repo": {"type":"integer"}, "cross_language": {"type":"integer"}
           }, "required": ["nodes","edges","communities"] } },
         { "name": "list_repos", "description": "For a federated (multi-repo) graph, list member repos (tags) with node/edge counts; empty for a single repo. Use before scoping a query to one repo.",
           "inputSchema": { "type": "object", "properties": {} } },
@@ -4316,11 +4327,51 @@ mod tests {
         let sc = &resp["result"]["structuredContent"];
         assert_eq!(sc["nodes"], json!(3));
         assert_eq!(sc["edges"], json!(2));
-        // Text content is still present for display.
-        assert!(resp["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("3 nodes"));
+        // Single-repo graph: no cross-repo coupling reported in text...
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("3 nodes"));
+        assert!(
+            !text.contains("Cross-repo"),
+            "no cross-repo line single-repo"
+        );
+        // ...but the structured fields are present and zero.
+        assert_eq!(sc["cross_repo"], json!(0));
+        assert_eq!(sc["cross_language"], json!(0));
+    }
+
+    #[test]
+    fn graph_stats_reports_cross_repo_and_cross_language() {
+        // A federated graph: one cross-repo import link + one cross-repo
+        // cross-language (handled_by) link. graph_stats reports both.
+        let mut import = edge("a", "b", "imports_from");
+        import.cross_repo = true;
+        let mut svc = edge("c", "ws", "handled_by");
+        svc.cross_repo = true;
+        let gd = GraphData {
+            nodes: vec![
+                node("a", "a.ts", Some(0)),
+                node("b", "b.ts", Some(0)),
+                node("c", "client.ts", Some(0)),
+                node("ws", "ws #connect", Some(0)),
+            ],
+            links: vec![import, svc],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        let text = call_tool(&mut s, "graph_stats", json!({}));
+        assert!(
+            text.contains("Cross-repo: 2 edge(s) span repositories (1 cross-language"),
+            "{text}"
+        );
+        let resp = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":"graph_stats","arguments":{}}
+            }))
+            .unwrap();
+        let sc = &resp["result"]["structuredContent"];
+        assert_eq!(sc["cross_repo"], json!(2));
+        assert_eq!(sc["cross_language"], json!(1));
     }
 
     #[test]

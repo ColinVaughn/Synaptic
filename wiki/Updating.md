@@ -40,6 +40,12 @@ Running `synaptic self-update` performs these steps:
    is skipped with a printed warning rather than failing.
 5. **Replace.** Extract the binary and atomically replace the currently running executable.
    The `syn` short alias next to it is updated too.
+6. **Refresh skills.** Re-render every agent skill recorded in
+   `~/.synaptic/skills.toml` to the new version. Because the running process is still the
+   old binary, this step spawns the freshly-installed one to do the rendering. Skills you
+   have hand-edited are left untouched and reported; see
+   [Versioning and auto-refresh](Assistant-Integration#versioning-and-auto-refresh). Run it
+   on its own anytime with `synaptic install --refresh`.
 
 The new version takes effect the next time you run Synaptic — the already-running process
 keeps the old code in memory, so the command finishes with
@@ -136,6 +142,7 @@ lookup.
 | Path / variable | Role |
 |---|---|
 | `~/.synaptic/update.toml` | Stores `enabled` (the opt-in flag) and `last_check` (the throttle timestamp). Written by `--enable`/`--disable`. On Windows this is `%USERPROFILE%\.synaptic\update.toml`; with no home directory it falls back to `.synaptic/update.toml` in the working directory. |
+| `~/.synaptic/skills.toml` | Registry of installed agent skills, read by the post-update refresh step (and `synaptic install --refresh`). Written by `synaptic install`/`uninstall`. See [Assistant Integration](Assistant-Integration#versioning-and-auto-refresh). |
 | `SYNAPTIC_UPDATE_CHECK` | Set to `0` to force the background notice off regardless of config. |
 | `GITHUB_TOKEN` | Optional. Raises the GitHub API rate limit for the release lookup. |
 

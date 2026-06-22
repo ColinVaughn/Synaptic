@@ -35,6 +35,7 @@ pub fn augment(path: &str, source: &[u8], result: &mut ExtractionResult) {
     scan_ffi_bindings(ext, path, text, result);
     scan_http(ext, path, text, result);
     scan_grpc(ext, path, text, result);
+    scan_websocket(ext, path, text, result);
     scan_sql(ext, path, text, result);
 }
 
@@ -1287,6 +1288,301 @@ fn emit_grpc_client(result: &mut ExtractionResult, path: &str, line: u32, svc: &
         cross_repo: false,
         extra: Map::new(),
     });
+}
+
+// --- WebSocket message + endpoint boundaries ---
+//
+// WebSocket coupling the per-language AST walk does not model: a client opens a
+// socket and exchanges JSON command messages (or socket.io events) with a server.
+// Two boundary-node kinds, both keyed so a client and a server meet at one node
+// after federation (no resolution pass for same-repo):
+//   - endpoint  `wsendpoint:<path>` -- the socket URL path itself (named paths
+//     only; a bare `/` is too generic to key on)
+//   - message   `wsmsg:<command>`   -- one application message type / event name
+// Client sites attach via `calls_service`; server handlers via `handled_by` -- the
+// same relations HTTP/gRPC use, so the federation cross-repo flagging applies
+// unchanged. Detection is regex/heuristic and INFERRED. Covered: JS/TS raw `ws`
+// (`.send({cmd})` + `case`) and socket.io (`emit`/`on`); C# WebSocketSharp /
+// System.Net.WebSockets (`AddWebSocketService` + `case`); Python `websockets` +
+// python-socketio; Rust tungstenite (endpoint only). The command-keyed node is
+// intentionally endpoint-independent because the URL and the message sites are
+// routinely in different files (e.g. a connector module vs. domain modules).
+
+/// `ws://` / `wss://` URL (any quote/template form); the path is taken with
+/// `norm_path`. Stops at a quote, backtick, or whitespace.
+fn ws_url_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"(?i)wss?://[^\s"'`]+"#).expect("valid regex"))
+}
+
+/// A client message send: `.send({ cmd: 'x' })` / `.request({ type: "x" })` etc.
+/// Requires a send-ish method AND a command-keyed object literal, so a plain
+/// `res.send(body)` or `arr.emit` is not mistaken for a WebSocket message.
+fn ws_send_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"\.\s*(?:send|request|sendCommand|sendMessage|postMessage|invoke)\s*\(\s*\{[\s\S]{0,200}?\b(?:cmd|command|action|messageType|msgType|type|event)\s*:\s*["'`]([A-Za-z0-9_.:+-]+)["'`]"#,
+        )
+        .expect("valid regex")
+    })
+}
+
+/// A server dispatch arm: `case "x":` / `case 'x':` (string-literal only). Scoped
+/// to files that look like WebSocket code (see `is_ws_file`).
+fn ws_case_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"\bcase\s+["']([A-Za-z0-9_.:+-]+)["']\s*:"#).expect("valid regex")
+    })
+}
+
+/// C# WebSocketSharp service registration: `AddWebSocketService<T>("/path")`.
+fn cs_ws_service_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"AddWebSocketService\s*<\s*\w+\s*>\s*\(\s*"([^"]+)""#).expect("valid regex")
+    })
+}
+
+/// socket.io / EventEmitter `.emit("evt"` (client send).
+fn sio_emit_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"\.\s*emit\s*\(\s*["'`]([A-Za-z0-9_.:+-]+)["'`]"#).expect("valid regex")
+    })
+}
+
+/// socket.io / EventEmitter `.on("evt"` / `@sio.on("evt")` (server handler).
+fn sio_on_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"\.\s*on\s*\(\s*["'`]([A-Za-z0-9_.:+-]+)["'`]"#).expect("valid regex")
+    })
+}
+
+/// True if the source looks like it uses a WebSocket / socket.io API. Used to
+/// scope the broader heuristics (`case`, `emit`/`on`) that would otherwise fire on
+/// ordinary switch statements and EventEmitters.
+fn is_ws_file(text: &str) -> bool {
+    const TOKENS: &[&str] = &[
+        "WebSocket",
+        "websocket",
+        "WEBSOCKET",
+        "socket.io",
+        "socketio",
+        "ClientWebSocket",
+        "AddWebSocketService",
+        "tungstenite",
+        "websockets",
+    ];
+    TOKENS.iter().any(|t| text.contains(t))
+}
+
+/// socket.io / ws lifecycle events that are not application messages.
+fn is_reserved_ws_event(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "connection"
+            | "connect"
+            | "disconnect"
+            | "disconnecting"
+            | "connect_error"
+            | "error"
+            | "message"
+            | "close"
+            | "open"
+            | "ping"
+            | "pong"
+            | "newlistener"
+            | "removelistener"
+    )
+}
+
+/// Whether a WebSocket boundary site is a client (caller) or a server (handler).
+#[derive(Clone, Copy)]
+enum WsRole {
+    Client,
+    Server,
+}
+
+fn scan_websocket(ext: &str, path: &str, text: &str, result: &mut ExtractionResult) {
+    match ext {
+        "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" => {
+            scan_ws_ecmascript(path, text, result)
+        }
+        "cs" => scan_ws_csharp(path, text, result),
+        "py" => scan_ws_python(path, text, result),
+        "rs" => scan_ws_rust(path, text, result),
+        _ => {}
+    }
+}
+
+/// JS/TS: client `.send({cmd})` (always), and -- in WebSocket/socket.io files --
+/// endpoints from `ws://` URLs, socket.io `emit`/`on`, and raw `case` dispatch.
+fn scan_ws_ecmascript(path: &str, text: &str, result: &mut ExtractionResult) {
+    for caps in ws_send_re().captures_iter(text) {
+        let cmd = &caps[1];
+        let line = line_of(text, caps.get(0).expect("group 0").start());
+        ws_message(result, path, line, cmd, WsRole::Client);
+    }
+    if !is_ws_file(text) {
+        return;
+    }
+    for m in ws_url_re().find_iter(text) {
+        let line = line_of(text, m.start());
+        ws_endpoint(result, path, line, m.as_str(), WsRole::Client);
+    }
+    for caps in sio_emit_re().captures_iter(text) {
+        let evt = &caps[1];
+        if is_reserved_ws_event(evt) {
+            continue;
+        }
+        let line = line_of(text, caps.get(0).expect("group 0").start());
+        ws_message(result, path, line, evt, WsRole::Client);
+    }
+    for caps in sio_on_re().captures_iter(text) {
+        let evt = &caps[1];
+        if is_reserved_ws_event(evt) {
+            continue;
+        }
+        let line = line_of(text, caps.get(0).expect("group 0").start());
+        ws_message(result, path, line, evt, WsRole::Server);
+    }
+    for caps in ws_case_re().captures_iter(text) {
+        let cmd = &caps[1];
+        let line = line_of(text, caps.get(0).expect("group 0").start());
+        ws_message(result, path, line, cmd, WsRole::Server);
+    }
+}
+
+/// C#: server `AddWebSocketService<T>("/path")` + `case "x":` handlers; client
+/// `ws://` URLs (ClientWebSocket).
+fn scan_ws_csharp(path: &str, text: &str, result: &mut ExtractionResult) {
+    if !is_ws_file(text) {
+        return;
+    }
+    for caps in cs_ws_service_re().captures_iter(text) {
+        let ep = &caps[1];
+        let line = line_of(text, caps.get(0).expect("group 0").start());
+        ws_endpoint(result, path, line, ep, WsRole::Server);
+    }
+    let is_client = text.contains("ClientWebSocket");
+    for m in ws_url_re().find_iter(text) {
+        let line = line_of(text, m.start());
+        let role = if is_client {
+            WsRole::Client
+        } else {
+            WsRole::Server
+        };
+        ws_endpoint(result, path, line, m.as_str(), role);
+    }
+    for caps in ws_case_re().captures_iter(text) {
+        let cmd = &caps[1];
+        let line = line_of(text, caps.get(0).expect("group 0").start());
+        ws_message(result, path, line, cmd, WsRole::Server);
+    }
+}
+
+/// Python: `websockets.connect`/socket.io client `emit`; `websockets.serve` and
+/// `@sio.on("evt")` handlers; `ws://` URLs for the endpoint.
+fn scan_ws_python(path: &str, text: &str, result: &mut ExtractionResult) {
+    if !is_ws_file(text) {
+        return;
+    }
+    let is_server = text.contains("websockets.serve") || text.contains(".serve(");
+    for m in ws_url_re().find_iter(text) {
+        let line = line_of(text, m.start());
+        let role = if is_server {
+            WsRole::Server
+        } else {
+            WsRole::Client
+        };
+        ws_endpoint(result, path, line, m.as_str(), role);
+    }
+    for caps in sio_emit_re().captures_iter(text) {
+        let evt = &caps[1];
+        if is_reserved_ws_event(evt) {
+            continue;
+        }
+        let line = line_of(text, caps.get(0).expect("group 0").start());
+        ws_message(result, path, line, evt, WsRole::Client);
+    }
+    for caps in sio_on_re().captures_iter(text) {
+        let evt = &caps[1];
+        if is_reserved_ws_event(evt) {
+            continue;
+        }
+        let line = line_of(text, caps.get(0).expect("group 0").start());
+        ws_message(result, path, line, evt, WsRole::Server);
+    }
+}
+
+/// Rust: tungstenite/tokio-tungstenite endpoints from `ws://` URLs. Per-command
+/// dispatch over a decoded frame is not regex-tractable, so Rust is endpoint-only.
+fn scan_ws_rust(path: &str, text: &str, result: &mut ExtractionResult) {
+    if !is_ws_file(text) {
+        return;
+    }
+    let is_server = text.contains("accept_async") || text.contains("accept_hdr_async");
+    for m in ws_url_re().find_iter(text) {
+        let line = line_of(text, m.start());
+        let role = if is_server {
+            WsRole::Server
+        } else {
+            WsRole::Client
+        };
+        ws_endpoint(result, path, line, m.as_str(), role);
+    }
+}
+
+/// Attach a WebSocket message-type boundary node `wsmsg:<command>` (keyed on the
+/// lowercased command, endpoint-independent). Client sites `calls_service` it;
+/// server handlers are reached from it via `handled_by`.
+fn ws_message(result: &mut ExtractionResult, path: &str, line: u32, command: &str, role: WsRole) {
+    let key = command.to_ascii_lowercase();
+    if key.is_empty() {
+        return;
+    }
+    let node = NodeId(make_id(&["wsmsg", &key]));
+    ensure_target(result, &node, &format!("ws #{command}"), "ws_message");
+    ws_link(result, path, line, node, role);
+}
+
+/// Attach a WebSocket endpoint boundary node `wsendpoint:<path>` (named paths
+/// only -- a bare `/` is too generic to key on).
+fn ws_endpoint(result: &mut ExtractionResult, path: &str, line: u32, raw_path: &str, role: WsRole) {
+    let np = norm_path(raw_path);
+    if np.is_empty() || np == "/" {
+        return;
+    }
+    let node = NodeId(make_id(&["wsendpoint", &np]));
+    ensure_target(result, &node, &format!("ws {np}"), "ws_endpoint");
+    ws_link(result, path, line, node, role);
+}
+
+/// Client: `enclosing fn -> node` (`calls_service`). Server: `node -> enclosing
+/// fn` (`handled_by`), mirroring the HTTP route handler direction.
+fn ws_link(result: &mut ExtractionResult, path: &str, line: u32, node: NodeId, role: WsRole) {
+    match role {
+        WsRole::Client => link(result, path, line, node, "calls_service", "ws"),
+        WsRole::Server => {
+            let handler = enclosing_function(result, line).unwrap_or_else(|| file_node_id(path));
+            result.edges.push(Edge {
+                source: node,
+                target: handler,
+                relation: "handled_by".to_string(),
+                confidence: Confidence::Inferred,
+                source_file: path.to_string(),
+                source_location: Some(format!("L{line}")),
+                confidence_score: Some(Confidence::Inferred.default_score()),
+                weight: 1.0,
+                context: Some("ws".to_string()),
+                cross_repo: false,
+                extra: Map::new(),
+            });
+        }
+    }
 }
 
 /// Byte offset just past the `}` matching the `{` at `open`. Skips braces inside

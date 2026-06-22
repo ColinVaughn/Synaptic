@@ -127,7 +127,11 @@ fn run() -> Result<()> {
             password,
         } => run_export(&format, graph, out, push, &user, password, repo),
         Cmd::Ingest { source } => run_ingest(source),
-        Cmd::Install { platform, global } => run_install(&platform, global),
+        Cmd::Install {
+            platform,
+            global,
+            refresh,
+        } => run_install(&platform, global, refresh),
         Cmd::Uninstall {
             platform,
             all,

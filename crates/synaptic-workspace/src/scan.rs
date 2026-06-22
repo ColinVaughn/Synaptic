@@ -222,6 +222,34 @@ mod tests {
     }
 
     #[test]
+    fn dotnet_solution_repo_is_discovered_with_coordinate() {
+        // A git repo whose root holds only a `.sln` (projects in subdirs) must be
+        // federated, not skipped as NoManifest.
+        use crate::coordinate::Ecosystem;
+        let d = tempfile::tempdir().unwrap();
+        touch(d.path(), "desktop-app/.git/HEAD", "ref: refs/heads/main\n");
+        touch(
+            d.path(),
+            "desktop-app/Acme.sln",
+            "Project(\"{G}\") = \"Acme.App\", \"App\\Acme.App.csproj\", \"{P}\"\n",
+        );
+        touch(
+            d.path(),
+            "desktop-app/App/Acme.App.csproj",
+            r#"<Project><PropertyGroup><AssemblyName>Acme.App</AssemblyName></PropertyGroup></Project>"#,
+        );
+        let res = discover_sibling_repos(d.path(), &ScanOptions::default(), None);
+        let repo = res
+            .repos
+            .iter()
+            .find(|r| r.name == "desktop-app")
+            .unwrap_or_else(|| panic!("not discovered; skipped={:?}", res.skipped));
+        let coord = repo.coordinate.as_ref().expect("has coordinate");
+        assert_eq!(coord.ecosystem, Ecosystem::DotNet);
+        assert_eq!(coord.name, "Acme.App");
+    }
+
+    #[test]
     fn depth_one_finds_only_direct_children() {
         let d = tempfile::tempdir().unwrap();
         make_layout(d.path());

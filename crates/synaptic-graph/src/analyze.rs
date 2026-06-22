@@ -1112,10 +1112,20 @@ pub struct GraphStats {
     pub extracted: usize,
     pub inferred: usize,
     pub ambiguous: usize,
+    /// Edges flagged `cross_repo` (only non-zero on a federated graph). The
+    /// import/coordinate-resolved links plus the cross-language ones below.
+    #[serde(default)]
+    pub cross_repo: usize,
+    /// The subset of `cross_repo` edges that are cross-language coupling
+    /// (HTTP/RPC/FFI/WebSocket: a `calls_service`/`handled_by`/`invokes`/
+    /// `binds_native` boundary spanning repos), as opposed to import links.
+    #[serde(default)]
+    pub cross_language: usize,
 }
 
-/// Compute [`GraphStats`] for a graph (node/edge/community counts + the
-/// EXTRACTED/INFERRED/AMBIGUOUS edge tally the `graph_stats` MCP tool reports).
+/// Compute [`GraphStats`] for a graph (node/edge/community counts, the
+/// EXTRACTED/INFERRED/AMBIGUOUS edge tally, and — on a federated graph — the
+/// cross-repo edge count with its cross-language subset).
 pub fn graph_stats(kg: &KnowledgeGraph) -> GraphStats {
     let mut communities: HashSet<u32> = HashSet::new();
     for n in kg.nodes() {
@@ -1124,11 +1134,20 @@ pub fn graph_stats(kg: &KnowledgeGraph) -> GraphStats {
         }
     }
     let (mut extracted, mut inferred, mut ambiguous) = (0usize, 0usize, 0usize);
+    let (mut cross_repo, mut cross_language) = (0usize, 0usize);
     for e in kg.edges() {
         match e.confidence {
             Confidence::Extracted => extracted += 1,
             Confidence::Inferred => inferred += 1,
             Confidence::Ambiguous => ambiguous += 1,
+        }
+        if e.cross_repo {
+            cross_repo += 1;
+            // Cross-language coupling is everything cross-repo that isn't an
+            // import link (mirrors the federation build summary).
+            if e.relation != "imports_from" && e.relation != "re_exports" {
+                cross_language += 1;
+            }
         }
     }
     GraphStats {
@@ -1138,6 +1157,8 @@ pub fn graph_stats(kg: &KnowledgeGraph) -> GraphStats {
         extracted,
         inferred,
         ambiguous,
+        cross_repo,
+        cross_language,
     }
 }
 

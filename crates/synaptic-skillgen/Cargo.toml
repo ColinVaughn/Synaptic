@@ -7,8 +7,11 @@ rust-version.workspace = true
 description = "Generate + install the Synaptic 'skill' that drives a host AI assistant (per-platform markdown + always-on registration)."
 
 [dependencies]
+serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 toml_edit = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

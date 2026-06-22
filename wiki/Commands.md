@@ -782,16 +782,19 @@ Syntax:
 
 ```sh
 synaptic install [PLATFORM] [--global]
+synaptic install --refresh
 ```
 
 | Name | Default | Description |
 | --- | --- | --- |
 | `PLATFORM` | `claude` | One of: `claude`, `agents`, `codex`, `opencode`, `gemini`, `cursor`, `copilot`, `kilo`. |
 | `--global` | off | Codex only: register the MCP server in the global `~/.codex/config.toml` (per-repo server) for the Codex desktop app, instead of the project `.codex/`. |
+| `--refresh` | off | Re-render every skill recorded in `~/.synaptic/skills.toml` to the current version (the `PLATFORM` arg is ignored). Hand-edited skills are left untouched. This is what `self-update` runs automatically. See [Assistant Integration](Assistant-Integration#versioning-and-auto-refresh). |
 
 `codex` gets extra wiring: a native MCP server and a `SessionStart` hook (project
 `.codex/` by default, or a global per-repo server with `--global` for the desktop
-app). Prints the files written.
+app). Prints the files written. Each install is recorded so a later
+`self-update` (or `install --refresh`) can re-render it to the new version.
 
 Examples:
 
@@ -799,6 +802,7 @@ Examples:
 synaptic install claude
 synaptic install codex            # Codex CLI (project .codex/)
 synaptic install codex --global   # Codex desktop app (global ~/.codex)
+synaptic install --refresh        # update all installed skills to this version
 ```
 
 See [Assistant-Integration](Assistant-Integration).
@@ -1020,7 +1024,7 @@ synaptic self-update [--enable | --disable] [--check] [--yes]
 
 `--enable` and `--disable` cannot be combined with each other or with `--check`/`--yes` — they only toggle the background notice and exit.
 
-With no flags, `self-update` queries the latest release and compares it to the running version. If it is not newer it prints `Synaptic is up to date (<version>)` and exits. If it is newer it shows the version delta and release notes, prompts `Download and replace the current binary? [y/N]`, then (on confirmation, or with `--yes`) downloads the prebuilt archive for your platform, verifies its SHA-256 checksum when one is published, and atomically replaces the running binary plus its `syn` alias. The new version takes effect on the next invocation.
+With no flags, `self-update` queries the latest release and compares it to the running version. If it is not newer it prints `Synaptic is up to date (<version>)` and exits. If it is newer it shows the version delta and release notes, prompts `Download and replace the current binary? [y/N]`, then (on confirmation, or with `--yes`) downloads the prebuilt archive for your platform, verifies its SHA-256 checksum when one is published, and atomically replaces the running binary plus its `syn` alias. It then re-renders every installed agent skill recorded in `~/.synaptic/skills.toml` to the new version (hand-edited skills are left untouched; run `synaptic install --refresh` to do this on its own). The new version takes effect on the next invocation.
 
 If no prebuilt binary exists for your platform, `self-update` prints the releases URL and exits without changing anything. A source/`cargo install` build can self-update, but the swap installs the default-feature prebuilt binary (rebuild from source to keep extra Cargo features).
 

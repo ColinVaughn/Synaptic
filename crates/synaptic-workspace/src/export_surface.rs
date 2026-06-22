@@ -173,6 +173,12 @@ pub struct CrossRepoReport {
     pub inferred: usize,
     /// External stubs retagged as third-party `external_package`.
     pub external_packages: usize,
+    /// Cross-language coupling edges that span repos: a client/route/RPC/FFI/
+    /// WebSocket boundary served in one repo and used from another (the
+    /// `calls_service`/`handled_by`/`invokes`/`binds_native` edges flagged
+    /// `cross_repo` by `mark_cross_repo_edges`). Counted separately from the
+    /// import-based `extracted`/`inferred` links above.
+    pub cross_language: usize,
 }
 
 /// A per-member lookup the resolver matches imports against.
