@@ -16,6 +16,7 @@ axum = { workspace = true }
 tokio = { workspace = true, features = ["net", "time"] }
 futures-util = { workspace = true }
 getrandom = { workspace = true }
+tiktoken-rs = { workspace = true }
 
 [dev-dependencies]
 tower = { workspace = true }
