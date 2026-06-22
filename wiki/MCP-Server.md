@@ -431,9 +431,13 @@ Parameters:
   default branch.
 - `verbose` (boolean, default false) -- also list the top touched nodes and labeled communities, not just files.
 - `limit` (integer, default 20) -- max touched nodes listed when `verbose`.
+- `code_only` (boolean, default false) -- count and list only code nodes,
+  excluding non-code files (`package.json`, lockfiles, `.md` docs) to sharpen the
+  blast radius.
 
 Returns `Working changes vs <base>: <n> files, <n> graph nodes, <n> communities
 touched` and the changed files, or `No changes vs <base> (or git unavailable).`
+With `code_only`, the count reads `<n> code graph nodes`.
 
 ### predict_impact
 
@@ -491,10 +495,16 @@ Parameters:
   (callers and type users break; bare imports go to review), or `visibility`
   (references from other files break when narrowing to private).
 - `depth` (integer) -- reverse-impact hop bound. Default 3, max 16.
+- `limit` (integer, default 20) -- max entries shown per section (will break /
+  review) before a `+N more` summary. Ignored when `verbose`.
+- `verbose` (boolean, default false) -- emit the full, uncapped lists instead of
+  the summarized top-N.
 
-Returns the summary plus the "will break" and "review" dependents (each with hop
-count, relation, label, file, and the reason), or a note if the symbol or kind is
-not recognized.
+Returns the summary plus the "will break" and "review" dependents. Each section
+header carries the total and a by-depth rollup (e.g. `1h: 274, 2h: 155`); each
+listed dependent shows its hop count, relation, label, file, and the reason. On a
+hub the list is capped with a `+N more` note unless `verbose`. Returns a note if
+the symbol or kind is not recognized.
 
 ### structural_search
 

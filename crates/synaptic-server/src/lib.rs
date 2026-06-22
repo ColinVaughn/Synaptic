@@ -1256,10 +1256,11 @@ impl Server {
         }
     }
 
-    fn graph_impact(&self, files: &[String]) -> (Vec<u32>, usize) {
+    fn graph_impact(&self, files: &[String], code_only: bool) -> (Vec<u32>, usize) {
         compute_pr_impact(
             self.kg
                 .nodes()
+                .filter(|n| !code_only || n.file_type == synaptic_core::FileType::Code)
                 .map(|n| (n.source_file.as_str(), n.community)),
             files,
         )
@@ -1274,6 +1275,7 @@ impl Server {
         base: Option<&str>,
         limit: usize,
         verbose: bool,
+        code_only: bool,
     ) -> String {
         let base = self.resolve_base(base, None);
         let diff = self.runner.run("git", &["diff", "--name-only", &base]);
@@ -1286,9 +1288,10 @@ impl Server {
         if files.is_empty() {
             return format!("No changes vs {base} (or git unavailable).");
         }
-        let (comms, nodes) = self.graph_impact(&files);
+        let (comms, nodes) = self.graph_impact(&files, code_only);
+        let scope = if code_only { " code" } else { "" };
         let mut out = format!(
-            "Working changes vs {base}: {} files, {nodes} graph nodes, {} communities touched",
+            "Working changes vs {base}: {} files, {nodes}{scope} graph nodes, {} communities touched",
             files.len(),
             comms.len()
         );
@@ -1299,20 +1302,28 @@ impl Server {
         // touched communities with human-readable labels. Default output stays
         // files-only to preserve behavior.
         if verbose {
-            self.append_working_impact_detail(&mut out, &files, limit);
+            self.append_working_impact_detail(&mut out, &files, limit, code_only);
         }
         out
     }
 
     /// Append `Top nodes` (touched nodes ranked by edge degree) and
     /// `Communities` (labeled) detail to a `working_changes_impact` report.
-    fn append_working_impact_detail(&self, out: &mut String, files: &[String], limit: usize) {
+    fn append_working_impact_detail(
+        &self,
+        out: &mut String,
+        files: &[String],
+        limit: usize,
+        code_only: bool,
+    ) {
         use std::collections::HashMap;
         // Touched nodes: those whose source_file path-matches a changed file
-        // (same boundary-safe match `graph_impact` uses).
+        // (same boundary-safe match `graph_impact` uses). With `code_only`, drop
+        // non-code nodes (config/docs) so the list matches the filtered count.
         let touched: Vec<&synaptic_core::Node> = self
             .kg
             .nodes()
+            .filter(|n| !code_only || n.file_type == synaptic_core::FileType::Code)
             .filter(|n| {
                 files
                     .iter()
@@ -1585,7 +1596,14 @@ impl Server {
     /// `predict_edit` - what breaks if you delete / change the signature of /
     /// narrow the visibility of a symbol. Classifies dependents into "will break"
     /// and "to review". Pure-graph and read-only (no edit plan is produced).
-    pub fn tool_predict_edit(&self, symbol: &str, kind: &str, depth: usize) -> String {
+    pub fn tool_predict_edit(
+        &self,
+        symbol: &str,
+        kind: &str,
+        depth: usize,
+        limit: usize,
+        verbose: bool,
+    ) -> String {
         let Some(kind_enum) = EditKind::parse(kind) else {
             return format!(
                 "Unknown edit kind '{}'. Use: delete, signature, visibility.",
@@ -1642,19 +1660,47 @@ impl Server {
                 sanitize_label(&d.reason)
             )
         };
+        // A "Nh: count" rollup over a dependent set, ascending by hop. Gives a
+        // blast-radius shape that survives the per-section truncation.
+        let by_depth = |items: &[synaptic_predict::EditDependent]| -> String {
+            let mut counts: std::collections::BTreeMap<usize, usize> = Default::default();
+            for d in items {
+                *counts.entry(d.depth).or_default() += 1;
+            }
+            counts
+                .iter()
+                .map(|(d, c)| format!("{d}h: {c}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        // Per-section display cap mirrors affected/predict_impact: `verbose` shows
+        // everything, otherwise each list is truncated to `limit` with a "+N more"
+        // note so the payload stays small.
+        let cap = if verbose { usize::MAX } else { limit.max(1) };
+        let push_section =
+            |out: &mut String, header: &str, items: &[synaptic_predict::EditDependent]| {
+                if items.is_empty() {
+                    return;
+                }
+                out.push_str(&format!(
+                    "\n{} ({}) by depth: {}",
+                    header,
+                    items.len(),
+                    by_depth(items)
+                ));
+                for d in items.iter().take(cap) {
+                    out.push_str(&line(d));
+                }
+                if items.len() > cap {
+                    out.push_str(&format!(
+                        "\n  ... (+{} more; pass verbose=true for the full list)",
+                        items.len() - cap
+                    ));
+                }
+            };
         let mut out = sanitize_label(&impact.summary);
-        if !impact.breaks.is_empty() {
-            out.push_str(&format!("\nWill break ({}):", impact.breaks.len()));
-            for d in &impact.breaks {
-                out.push_str(&line(d));
-            }
-        }
-        if !impact.review.is_empty() {
-            out.push_str(&format!("\nReview ({}):", impact.review.len()));
-            for d in &impact.review {
-                out.push_str(&line(d));
-            }
-        }
+        push_section(&mut out, "Will break", &impact.breaks);
+        push_section(&mut out, "Review", &impact.review);
         if impact.breaks.is_empty() && impact.review.is_empty() {
             out.push_str("\nNo dependents affected.");
         }
@@ -1680,7 +1726,7 @@ impl Server {
         if pr.files_changed.is_empty() {
             return format!("PR #{number}: no changed files found (may require gh auth).");
         }
-        let (comms, nodes) = self.graph_impact(&pr.files_changed);
+        let (comms, nodes) = self.graph_impact(&pr.files_changed, false);
         pr.communities_touched = comms;
         pr.nodes_affected = nodes;
         format_pr_detail(&pr, today_epoch_days(), 20)
@@ -2427,9 +2473,12 @@ impl Server {
             "list_prs" => self.tool_list_prs(opt("base"), opt("repo")),
             "get_pr_impact" => self.tool_get_pr_impact(u("pr_number", 0), opt("repo")),
             "triage_prs" => self.tool_triage_prs(opt("base"), opt("repo")),
-            "working_changes_impact" => {
-                self.tool_working_changes_impact(opt("base"), u("limit", 20) as usize, b("verbose"))
-            }
+            "working_changes_impact" => self.tool_working_changes_impact(
+                opt("base"),
+                u("limit", 20) as usize,
+                b("verbose"),
+                b("code_only"),
+            ),
             "predict_impact" => {
                 let files: Vec<String> = args
                     .get("files")
@@ -2460,9 +2509,13 @@ impl Server {
                     .unwrap_or_default();
                 self.tool_affected_tests(&files, opt("base"), u("depth", 3) as usize)
             }
-            "predict_edit" => {
-                self.tool_predict_edit(&s("symbol"), &s("kind"), u("depth", 3) as usize)
-            }
+            "predict_edit" => self.tool_predict_edit(
+                &s("symbol"),
+                &s("kind"),
+                u("depth", 3) as usize,
+                u("limit", 20) as usize,
+                b("verbose"),
+            ),
             "structural_search" => {
                 self.tool_structural_search(opt("query"), opt("pattern"), u("limit", 50) as usize)
             }
@@ -2808,7 +2861,10 @@ for detail. For change impact, affected gives the blast radius of editing a symb
 working_changes_impact does the same for your current git diff. Before editing a symbol \
 other code depends on, forecast the change: predict_impact gives the blast radius plus \
 the public APIs and tests at risk, affected_tests lists the tests to run, and \
-predict_edit says what a delete / signature / visibility change breaks. structural_search \
+predict_edit says what a delete / signature / visibility change breaks. To confirm a \
+forecast by actually running the at-risk tests, restart the server with --allow-exec to \
+enable the speculate tool (off by default, since it executes commands and so is not \
+read-only). structural_search \
 runs a SYNQL query or a named pattern (matches on kind / loc / fan-in-out, not text); \
 describe_node summarizes a symbol's shape; time_travel_diff reports how the architecture \
 changed between two git revisions (added/removed dependencies, removed APIs, drift, new \
@@ -2931,7 +2987,8 @@ fn tools_list(allow_exec: bool) -> Value {
           "inputSchema": { "type": "object", "properties": {
               "base": { "type": "string", "description": "Base branch to diff against (default: the repo's default branch)." },
               "verbose": { "type": "boolean", "description": "Also list the top touched nodes and labeled communities, not just files (default false)." },
-              "limit": { "type": "integer", "description": "Max touched nodes listed when verbose (default 20)." }
+              "limit": { "type": "integer", "description": "Max touched nodes listed when verbose (default 20)." },
+              "code_only": { "type": "boolean", "description": "Count and list only code nodes, excluding non-code files (package.json, lockfiles, .md docs) to sharpen the blast radius (default false)." }
           } } },
         { "name": "structural_search", "description": "Structural search over the graph with SYNQL, or a named architectural pattern. Not text search: matches on kind/visibility/loc/fan-in/out/etc. `.name` is the bare symbol (no parentheses); use `=~` for a regex/substring match. Example query: 'MATCH (c:class) WHERE c.loc > 500 RETURN c'. Example name match: 'MATCH (f:function) WHERE f.name =~ \"announce\" RETURN f'. Patterns: singleton, factory, observer, service-locator, god-class.",
           "inputSchema": { "type": "object", "properties": {
@@ -3006,7 +3063,9 @@ fn tools_list(allow_exec: bool) -> Value {
           "inputSchema": { "type": "object", "properties": {
               "symbol": { "type": "string", "description": "The symbol to edit: its name, bare name, or a node id. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." },
               "kind": { "type": "string", "description": "The edit kind: delete, signature, or visibility." },
-              "depth": { "type": "integer", "description": "Reverse-impact hop bound (default 3, max 16)." }
+              "depth": { "type": "integer", "description": "Reverse-impact hop bound (default 3, max 16)." },
+              "limit": { "type": "integer", "description": "Max entries shown per section (will break / review) before a '+N more' summary (default 20). Each section also prints a by-depth rollup. Ignored when verbose=true." },
+              "verbose": { "type": "boolean", "description": "Emit the full, uncapped lists instead of the summarized top-N (default false)." }
           }, "required": ["symbol", "kind"] } },
         { "name": "audit_sql", "description": "Audit the codebase's SQL for performance and security problems over the SQL-aware graph: row-level-security gaps, over-broad grants, likely SQL injection, missing indexes on filter/foreign-key columns, SELECT *, non-sargable predicates, and missing primary keys. Findings are ranked by severity, then by confidence within a tier (so high-confidence security findings lead and low-confidence name heuristics sink); each carries a severity, confidence, location, and a fix.",
           "inputSchema": { "type": "object", "properties": {
@@ -3590,6 +3649,12 @@ mod tests {
             instr.to_lowercase().contains("graph"),
             "should frame the toolset"
         );
+        // The gated speculate tool is invisible without --allow-exec, so the
+        // instructions point at how to enable it (discoverability).
+        assert!(
+            instr.contains("--allow-exec") && instr.contains("speculate"),
+            "instructions should explain how to enable speculate: {instr}"
+        );
     }
 
     #[test]
@@ -3701,6 +3766,47 @@ mod tests {
             json!({"symbol": "Nope", "kind": "delete"}),
         );
         assert!(miss.contains("No node matches"), "{miss}");
+    }
+
+    #[test]
+    fn predict_edit_summarizes_large_break_sets() {
+        // Five callers of `hub`; deleting it breaks all five. Like its siblings
+        // (affected/predict_impact), predict_edit must cap the list and roll up
+        // a "+N more" note unless verbose=true.
+        let mut nodes = vec![node("hub", "hub_fn", Some(0))];
+        let mut links = Vec::new();
+        for i in 0..5 {
+            let id = format!("c{i}");
+            nodes.push(node(&id, &format!("Caller{i}"), Some(0)));
+            links.push(edge(&id, "hub", "calls"));
+        }
+        let gd = GraphData {
+            nodes,
+            links,
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        // Capped at 2 with a "+3 more" rollup.
+        let capped = call_tool(
+            &mut s,
+            "predict_edit",
+            json!({"symbol": "hub_fn", "kind": "delete", "limit": 2}),
+        );
+        assert!(capped.contains("Will break (5)"), "total shown: {capped}");
+        assert!(capped.contains("+3 more"), "remaining rolled up: {capped}");
+        // A by-depth rollup of the break set (all five are 1 hop away).
+        assert!(
+            capped.contains("by depth") && capped.contains("1h: 5"),
+            "by-depth rollup present: {capped}"
+        );
+        // verbose shows everything, no truncation note.
+        let full = call_tool(
+            &mut s,
+            "predict_edit",
+            json!({"symbol": "hub_fn", "kind": "delete", "verbose": true}),
+        );
+        assert!(full.contains("Caller4"), "all dependents shown: {full}");
+        assert!(!full.contains("more"), "no truncation note: {full}");
     }
 
     #[test]
@@ -4833,7 +4939,7 @@ mod tests {
             ..Default::default()
         };
         let s = Server::from_graph_data(gd, None).with_runner(Box::new(GitRunner));
-        let out = s.tool_working_changes_impact(Some("main"), 20, false);
+        let out = s.tool_working_changes_impact(Some("main"), 20, false, false);
         assert!(out.contains("auth.py"), "names the changed file: {out}");
         assert!(
             out.contains("1 communities touched"),
@@ -4846,7 +4952,7 @@ mod tests {
         );
 
         // Verbose lists the touched nodes and labeled communities.
-        let verbose = s.tool_working_changes_impact(Some("main"), 20, true);
+        let verbose = s.tool_working_changes_impact(Some("main"), 20, true, false);
         assert!(
             verbose.contains("Top nodes (1):"),
             "verbose lists touched nodes: {verbose}"
@@ -4869,8 +4975,47 @@ mod tests {
         }
         let s2 = server().with_runner(Box::new(EmptyRunner));
         assert!(s2
-            .tool_working_changes_impact(Some("main"), 20, false)
+            .tool_working_changes_impact(Some("main"), 20, false, false)
             .contains("No changes"));
+    }
+
+    #[test]
+    fn working_changes_impact_code_only_filters_non_code() {
+        // A code file and a non-code config file both change. `code_only` should
+        // drop the config node from the blast-radius count and the node list.
+        struct GitRunner;
+        impl CommandRunner for GitRunner {
+            fn run(&self, program: &str, args: &[&str]) -> Option<String> {
+                if program == "git" && args.first() == Some(&"diff") {
+                    return Some("app.ts\npackage.json\n".to_string());
+                }
+                None
+            }
+        }
+        let mut code = node("app", "App", Some(0));
+        code.source_file = "app.ts".into();
+        let mut cfg = node("pkg", "package.json", Some(0));
+        cfg.source_file = "package.json".into();
+        cfg.file_type = FileType::Document;
+        let gd = GraphData {
+            nodes: vec![code, cfg],
+            ..Default::default()
+        };
+        let s = Server::from_graph_data(gd, None).with_runner(Box::new(GitRunner));
+        // Default counts both nodes (existing behavior preserved).
+        let all = s.tool_working_changes_impact(Some("main"), 20, true, false);
+        assert!(all.contains("2 graph nodes"), "default counts all: {all}");
+        assert!(all.contains("package.json [node]"), "lists config: {all}");
+        // code_only drops the non-code node from count and list.
+        let code_only = s.tool_working_changes_impact(Some("main"), 20, true, true);
+        assert!(
+            code_only.contains("1 code graph nodes"),
+            "code_only excludes config from count: {code_only}"
+        );
+        assert!(
+            code_only.contains("App [") && !code_only.contains("package.json ["),
+            "code_only lists only code nodes: {code_only}"
+        );
     }
 
     #[test]

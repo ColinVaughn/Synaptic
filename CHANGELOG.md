@@ -10,6 +10,39 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-06-21
+
+A round-3 agent-feedback pass on a11ycore: a real import-resolution bug that hid a
+symbol's direct unit tests, plus two usability follow-ups and a discoverability nit.
+
+### Fixed
+- **Relative imports that differ only by their `./` vs `../` prefix no longer
+  collapse into one phantom module stub.** `make_id` trims leading dots, so a
+  sibling `import './foo'` and a `import '../foo'` from a subdirectory hashed to
+  the same stub-node id. The cross-file resolver reads each import's specifier
+  back from that single shared stub, so it could rebind only one importer's edge
+  and stranded the others as unresolved "phantom" nodes (empty source, degree 2).
+  In practice a unit test in `__tests__/` importing `../foo` was never linked to
+  `foo.ts`, so `affected_tests` / `predict_impact` missed the direct test (and
+  could surface a spurious transitive one in its place). Module stubs now fold the
+  relative-climb depth into their id, so distinct specifiers stay distinct while
+  identical ones still share a node. This also removes the phantom-node graph
+  noise from neighbor/community results.
+
+### Changed
+- **`predict_edit` now summarizes like its siblings.** Added `limit` (default 20)
+  and `verbose`, plus a per-section by-depth rollup in the header
+  (`Will break (438) by depth: 1h: 274, 2h: 155, 3h: 9`). It previously emitted
+  every dependent uncapped (tens of KB on a hub). The CLI `predict --edit` already
+  writes its full report to a file and is unchanged.
+- **`working_changes_impact` gained an opt-in `code_only` flag** that counts and
+  lists only code nodes, excluding non-code files (`package.json`, lockfiles,
+  `.md` docs) to sharpen the blast radius. Default output is unchanged.
+- **`speculate` is now discoverable.** The server `initialize` instructions
+  explain that it is enabled by starting the server with `synaptic serve
+  --allow-exec` (it is otherwise invisible, since it executes commands and so is
+  not read-only).
+
 ## [0.3.5] - 2026-06-21
 
 A discoverability follow-up to 0.3.4: the `name@file` qualifier and the `god_nodes`

@@ -342,6 +342,36 @@ mod tests {
     }
 
     #[test]
+    fn dot_prefix_collision_resolves_both_importers() {
+        // A sibling `./foo` and a `../foo` from a subdir both target the same
+        // real file, but their specifiers collapse to one stub id under make_id
+        // (it trims leading dots). The shared stub can carry only one label, so
+        // the per-edge resolver could rewire only one importer and strand the
+        // other as a phantom. Both must resolve, and no stub may survive.
+        let sibling = extract_ts_source("src/features/loader.ts", b"import { x } from './foo';\n");
+        let test = extract_ts_source(
+            "src/features/__tests__/foo.test.ts",
+            b"import { x } from '../foo';\n",
+        );
+        let foo = extract_ts_source("src/features/foo.ts", b"export const x = 1;\n");
+        let (mut nodes, mut edges) = aggregate(vec![sibling, test, foo]);
+        let bound = resolve_relative_imports(&mut nodes, &mut edges);
+        assert_eq!(bound, 2, "both ./foo and ../foo should bind");
+        let foo_id = file_node_id("src/features/foo.ts");
+        let to_foo = edges
+            .iter()
+            .filter(|e| e.relation == "imports_from" && e.target == foo_id)
+            .count();
+        assert_eq!(to_foo, 2, "both importers point at the real foo.ts");
+        assert!(
+            !nodes
+                .iter()
+                .any(|n| n.source_file.is_empty() && n.label.ends_with("foo")),
+            "no phantom ./foo or ../foo specifier stub should survive"
+        );
+    }
+
+    #[test]
     fn bare_import_is_left_as_stub() {
         let a = extract_ts_source("src/a.ts", b"import React from 'react';\n");
         let (mut nodes, mut edges) = aggregate(vec![a]);

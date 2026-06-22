@@ -6,6 +6,30 @@ use crate::result::ImportRecord;
 use synaptic_core::{make_id, NodeId};
 use tree_sitter::Node as TsNode;
 
+/// Stub-node id for an import specifier.
+///
+/// A relative specifier's leading dot run (`./`, `../`, `../../`) encodes how far
+/// the import climbs, but [`make_id`] trims all leading dots — so `./foo` and
+/// `../foo` would collapse to one stub id, shared by importers sitting in
+/// different directories. The cross-file resolver reads the specifier back from
+/// that single shared stub label, so it can rewire only one importer and strands
+/// the rest as phantom nodes. Folding the climb depth into the id keeps distinct
+/// relative specifiers distinct, while two identical specifiers (which always
+/// resolve the same way for a given importer dir) still share one stub. Bare
+/// packages (`react`) are keyed as before, so a package stays a single node.
+fn import_stub_id(spec: &str) -> NodeId {
+    if spec.starts_with('.') {
+        let up = spec
+            .split('/')
+            .take_while(|c| *c == "." || *c == "..")
+            .filter(|c| *c == "..")
+            .count();
+        NodeId(make_id(&[&format!("rel{up}"), spec]))
+    } else {
+        NodeId(make_id(&[spec]))
+    }
+}
+
 impl<'tree> Extractor<'_, '_, 'tree> {
     /// EcmaScript class/interface heritage → `inherits` (extends) and
     /// `implements` edges. Handles TS (`extends_clause`/`implements_clause`,
@@ -76,7 +100,7 @@ impl<'tree> Extractor<'_, '_, 'tree> {
             return;
         };
         let stem = module_stem(&spec);
-        let tgt = NodeId(make_id(&[spec.as_str()]));
+        let tgt = import_stub_id(&spec);
         self.add_external_node(tgt.clone(), spec.clone());
         self.add_edge(file_nid.clone(), tgt, "imports_from", line, Some("import"));
         let edge_idx = self.edges.len() - 1;
@@ -154,7 +178,7 @@ impl<'tree> Extractor<'_, '_, 'tree> {
             return;
         }
         let line = Self::line(node);
-        let tgt = NodeId(make_id(&[spec]));
+        let tgt = import_stub_id(spec);
         self.add_external_node(tgt.clone(), spec.to_string());
         self.add_edge(file_nid.clone(), tgt, "imports_from", line, Some("import"));
     }
@@ -167,7 +191,7 @@ impl<'tree> Extractor<'_, '_, 'tree> {
             return;
         };
         let stem = module_stem(&spec);
-        let tgt = NodeId(make_id(&[spec.as_str()]));
+        let tgt = import_stub_id(&spec);
         self.add_external_node(tgt.clone(), spec.clone());
         self.add_edge(file_nid.clone(), tgt, "re_exports", line, Some("import"));
         let edge_idx = self.edges.len() - 1;
