@@ -1,7 +1,7 @@
 //! The finding/severity model produced by the auditor. Serde wire format is
 //! snake_case and versioned (like synaptic-predict's ChangeForecast).
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 pub const AUDIT_VERSION: u32 = 1;
 
@@ -90,6 +90,15 @@ impl AuditReport {
     /// Build a report from raw findings: sort by severity then rule id, tally
     /// counts, and write a one-line summary. Deterministic output.
     pub fn from_findings(mut findings: Vec<Finding>, unparsed: Vec<String>) -> Self {
+        // scan_sql emits one code->SQL edge per referenced table, each carrying
+        // the identical full SQL text at the same file:line, so the per-edge
+        // rules produce byte-identical findings for a multi-table or schema-
+        // qualified interpolated query. Drop exact repeats keyed on
+        // (rule_id, location, snippet), keeping the first and the relative order
+        // of the distinct findings before the sort below runs.
+        let mut seen: HashSet<(String, Option<String>, Option<String>)> = HashSet::new();
+        findings
+            .retain(|f| seen.insert((f.rule_id.clone(), f.location.clone(), f.snippet.clone())));
         findings.sort_by(|a, b| {
             a.severity
                 .rank()
@@ -180,6 +189,46 @@ mod tests {
         );
         assert_eq!(r.findings[0].rule_id, "SEC-RLS-001");
         assert_eq!(r.findings[1].rule_id, "PERF-IDX-001");
+    }
+
+    #[test]
+    fn duplicate_findings_are_collapsed() {
+        // A schema-qualified interpolated query yields one identical finding per
+        // referenced table; only one distinct finding should survive.
+        let mk = |id: &str, loc: &str, snip: &str| Finding {
+            rule_id: id.into(),
+            severity: Severity::Critical,
+            category: Category::Security,
+            title: "t".into(),
+            detail: "d".into(),
+            location: Some(loc.into()),
+            node_ids: vec![],
+            snippet: Some(snip.into()),
+            remediation: "fix".into(),
+            confidence: 0.6,
+            evidence: None,
+        };
+        let dup = mk("SEC-INJ-001", "a.rs:10", "SELECT 1");
+        let r = AuditReport::from_findings(
+            vec![
+                dup.clone(),
+                dup.clone(),
+                // Distinct by snippet.
+                mk("SEC-INJ-001", "a.rs:10", "SELECT 2"),
+                // Distinct by location.
+                mk("SEC-INJ-001", "a.rs:20", "SELECT 1"),
+                // Distinct by rule id.
+                mk("PERF-IDX-001", "a.rs:10", "SELECT 1"),
+            ],
+            vec![],
+        );
+        assert_eq!(r.findings.len(), 4); // 5 in, one exact duplicate dropped
+        let inj = r
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == "SEC-INJ-001" && f.location.as_deref() == Some("a.rs:10"))
+            .count();
+        assert_eq!(inj, 2); // the two SELECT 1/SELECT 2 distinct snippets, not 3
     }
 
     #[test]

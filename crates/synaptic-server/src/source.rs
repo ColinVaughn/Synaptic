@@ -12,14 +12,32 @@ pub fn parse_line_marker(s: &str) -> Option<usize> {
     digits.parse().ok()
 }
 
-/// Resolve `rel` (a repo-relative `source_file`) under `root`, returning the
-/// canonical path only if it stays inside `root`. `None` means: no readable
-/// file, or the path escaped the jail. Canonicalizing both sides collapses
-/// `..` so traversal is caught by the `starts_with` check.
-pub fn resolve_in_root(root: &Path, rel: &str) -> Option<PathBuf> {
-    let root = root.canonicalize().ok()?;
-    let canon = root.join(rel).canonicalize().ok()?;
-    canon.starts_with(&root).then_some(canon)
+/// Why a `source_file` could not be served from under the jail. Splitting these
+/// out lets the caller tell "the file isn't there" from "it's outside the
+/// trusted root", which matters in federated workspaces where a node's path can
+/// point at a sibling repo outside a single `--source-root`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveOutcome {
+    /// Resolved to a real file inside `root`.
+    Found(PathBuf),
+    /// `root` or `root/rel` does not exist on disk (nothing to read).
+    Missing,
+    /// The path resolved outside `root` (jail escape).
+    OutsideRoot,
+}
+
+/// Resolve `rel` (a repo-relative `source_file`) under `root`, distinguishing a
+/// missing file from a path that escapes the jail. Canonicalizing both sides
+/// collapses `..` so traversal is caught by the `starts_with` check.
+pub fn resolve_in_root_detailed(root: &Path, rel: &str) -> ResolveOutcome {
+    let Ok(root) = root.canonicalize() else {
+        return ResolveOutcome::Missing;
+    };
+    match root.join(rel).canonicalize() {
+        Ok(canon) if canon.starts_with(&root) => ResolveOutcome::Found(canon),
+        Ok(_) => ResolveOutcome::OutsideRoot,
+        Err(_) => ResolveOutcome::Missing,
+    }
 }
 
 #[cfg(test)]
@@ -41,10 +59,45 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/a.py"), "x = 1\n").unwrap();
 
-        assert!(resolve_in_root(root, "src/a.py").is_some());
+        assert!(matches!(
+            resolve_in_root_detailed(root, "src/a.py"),
+            ResolveOutcome::Found(_)
+        ));
         // Escape attempt: canonicalizes outside root -> rejected.
-        assert!(resolve_in_root(root, "../../etc/passwd").is_none());
-        // Missing file -> None (not a panic).
-        assert!(resolve_in_root(root, "src/missing.py").is_none());
+        assert_eq!(
+            resolve_in_root_detailed(root, "../../etc/passwd"),
+            ResolveOutcome::Missing
+        );
+        // Missing file -> Missing (not a panic).
+        assert_eq!(
+            resolve_in_root_detailed(root, "src/missing.py"),
+            ResolveOutcome::Missing
+        );
+    }
+
+    #[test]
+    fn detailed_outcome_separates_missing_from_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.py"), "x = 1\n").unwrap();
+
+        assert!(matches!(
+            resolve_in_root_detailed(root, "src/a.py"),
+            ResolveOutcome::Found(_)
+        ));
+        assert_eq!(
+            resolve_in_root_detailed(root, "src/missing.py"),
+            ResolveOutcome::Missing
+        );
+        // A path that exists but resolves outside the root is an escape, not a
+        // missing file: create a real sibling so canonicalize succeeds.
+        let sibling = dir.path().parent().unwrap().join("outside.py");
+        std::fs::write(&sibling, "y = 2\n").unwrap();
+        assert_eq!(
+            resolve_in_root_detailed(root, "../outside.py"),
+            ResolveOutcome::OutsideRoot
+        );
+        let _ = std::fs::remove_file(&sibling);
     }
 }

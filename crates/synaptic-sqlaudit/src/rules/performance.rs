@@ -161,21 +161,52 @@ pub fn evaluate_query_text(sql: &str, loc: Option<String>, ids: Vec<String>) -> 
     }
     let inj_markers = ["' +", "+ '", "\" +", "+ \"", "${", ".format", "f\"", "|| '"];
     if inj_markers.iter().any(|m| sql.contains(m)) {
+        // Identifiers (table/column names) cannot be bound as parameters, so the
+        // usual "use $1 placeholders" advice is wrong when the interpolation sits
+        // in identifier position. Detect that case and steer to allowlist+quote.
+        let (detail, remediation) = if interpolated_identifier(sql) {
+            (
+                "Interpolating a value into SQL text instead of binding parameters allows SQL injection. When the interpolated token is a table or column name it cannot be bound as a parameter, so placeholders do not apply.",
+                "For interpolated values use bound parameters ($1/?). For an interpolated identifier (table/column name), validate it against a fixed allowlist and quote it with the driver's identifier-quoting helper; never interpolate a raw identifier.",
+            )
+        } else {
+            (
+                "Interpolating values into SQL text instead of binding parameters allows SQL injection. Use parameterized queries / prepared statements.",
+                "Replace string building with bound parameters (e.g. execute(sql, [params]) / $1 placeholders / a query builder).",
+            )
+        };
         out.push(Finding {
             rule_id: "SEC-INJ-001".into(),
             severity: Severity::Critical,
             category: Category::Security,
             title: "SQL query appears to be built by string concatenation".into(),
-            detail: "Interpolating values into SQL text instead of binding parameters allows SQL injection. Use parameterized queries / prepared statements.".into(),
+            detail: detail.into(),
             location: loc,
             node_ids: ids,
             snippet: Some(sql.to_string()),
-            remediation: "Replace string building with bound parameters (e.g. execute(sql, [params]) / $1 placeholders / a query builder).".into(),
+            remediation: remediation.into(),
             confidence: 0.6,
             evidence: Some("concatenation/interpolation marker in the query string".into()),
         });
     }
     out
+}
+
+/// True when an interpolation marker sits in identifier position: inside a
+/// quoted identifier (`"..."`, backticks, `[...]`) or directly after a
+/// FROM/JOIN/INTO/UPDATE/TABLE keyword. Conservative; aims to catch the common
+/// `FROM "schema"."${table}"` shape without false negatives.
+fn interpolated_identifier(sql: &str) -> bool {
+    static AFTER_KW: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?i)(from|join|into|update|table)\s+["`\[]?\s*\$\{"#)
+            .expect("ident keyword regex")
+    });
+    AFTER_KW.is_match(sql)
+        // Interpolation opening immediately inside a quoted identifier, including
+        // the schema-qualified `"."${...}` form.
+        || sql.contains("\"${")
+        || sql.contains("`${")
+        || sql.contains("[${")
 }
 
 /// Number of JOIN keywords in a query (case-insensitive whole-word).
@@ -567,5 +598,39 @@ mod tests {
             .check(&cx)
             .iter()
             .any(|x| x.rule_id == "PERF-N1-001"));
+    }
+
+    fn inj_finding(sql: &str) -> Finding {
+        evaluate_query_text(sql, None, vec![])
+            .into_iter()
+            .find(|f| f.rule_id == "SEC-INJ-001")
+            .unwrap_or_else(|| panic!("no SEC-INJ-001 for {sql:?}"))
+    }
+
+    #[test]
+    fn injection_value_position_keeps_parameter_advice() {
+        let f = inj_finding("SELECT * FROM users WHERE id = ${userId}");
+        assert!(
+            f.remediation.contains("bound parameters"),
+            "{}",
+            f.remediation
+        );
+        assert!(
+            !f.remediation.contains("identifier-quoting"),
+            "{}",
+            f.remediation
+        );
+    }
+
+    #[test]
+    fn injection_identifier_position_steers_to_allowlist() {
+        // Schema-qualified interpolated identifier: cannot be bound as a param.
+        let f = inj_finding("SELECT COUNT(*) FROM \"main\".\"${table}\"");
+        assert!(
+            f.remediation.contains("identifier-quoting"),
+            "{}",
+            f.remediation
+        );
+        assert!(f.detail.contains("cannot be bound"), "{}", f.detail);
     }
 }

@@ -313,7 +313,7 @@ fn gh_json(r: &dyn CommandRunner, args: &[&str]) -> Option<Value> {
 /// Errors from PR fetching.
 #[derive(Debug, thiserror::Error)]
 pub enum PrError {
-    #[error("gh CLI not found or not authenticated. Run: gh auth login")]
+    #[error("gh CLI not found or not authenticated (run: gh auth login). PR data is skipped; graph audit continues offline.")]
     GhUnavailable,
 }
 

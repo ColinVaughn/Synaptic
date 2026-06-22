@@ -175,7 +175,7 @@ annotated honestly as `readOnlyHint: false, openWorldHint: true`. The default
 server never advertises or runs it, preserving the strictly read-only surface.
 
 Each tool returns a text content block (the load-bearing, purpose-formatted
-output). Eight tools additionally declare an `outputSchema` and return a typed
+output). Twelve tools additionally declare an `outputSchema` and return a typed
 `structuredContent` object alongside the text (a 2025-06-18 feature) -- see
 [Structured output](#structured-output).
 
@@ -257,8 +257,21 @@ Parameters:
 Resolves the node, reads its file under the `--source-root` jail, and returns a
 header (`<label> [<type>] <source_file>:L<from>-L<to>`) followed by the numbered
 lines. The graph records a start line only, so the window is `context_lines`
-lines from there. Returns `Source not available for <label> (<file>).` when there
-is no readable source root, the file is missing, or it escapes the jail.
+lines from there.
+
+In a **federated/global graph**, a node's `source_file` is repo-prefixed
+(`<tag>/...`) and the member repos live in sibling directories outside any single
+`--source-root`. When the server is started on the global graph (a
+`global-manifest.json` sits next to it), `get_source` registers each member's own
+source root from the manifest and resolves a federated node under that root, so
+sources read correctly across repos. A co-located workspace build (members are
+subdirectories of one root) already resolves under the single `--source-root`.
+
+When the source cannot be read, the message names the cause and the root it
+tried, instead of a bare "not available": no source root configured; the file was
+not found under `<root>` (with a hint that in a federated workspace it may live in
+a sibling repo outside this root); or the path resolved outside the configured
+`--source-root` and was refused.
 
 ### get_neighbors
 
@@ -273,7 +286,8 @@ Returns one line per neighbour with a direction marker and the relation in
 brackets. When a `relation_filter` matches none of the node's edges, the result
 is `(none with relation '<filter>'; this node has: <rel>(<count>), ...)` -- naming
 the relations the node does have, so an empty result is not mistaken for a missing
-node.
+node. A `structuredContent` mirror carries `{ seed, neighbors, by_relation }`,
+where `by_relation` tallies every edge on the node before any filter.
 
 ### get_community
 
@@ -319,7 +333,9 @@ line omitted, for a single-repo graph).
 
 Federated workspace members (repo tags) with node/edge counts. Edges are counted
 under their source node's repo. Empty (single-repo) graphs return `No federated
-repos (single-repo graph).` See [Workspaces-and-Federation](Workspaces-and-Federation).
+repos (single-repo graph).` plus a `structuredContent` mirror
+(`{ repos: [{ repo, nodes, edges }] }`, an empty array for a single-repo graph).
+See [Workspaces-and-Federation](Workspaces-and-Federation).
 
 Parameters: none.
 
@@ -391,7 +407,10 @@ Parameters:
 ### list_prs
 
 Open PRs with CI/review state targeting the base branch. Requires the `gh` CLI.
-See [PR-Dashboard](PR-Dashboard).
+When `gh` is missing or unauthenticated, the tool reports
+`gh CLI not found or not authenticated (run: gh auth login). PR data is skipped;
+graph audit continues offline.` -- the failure is scoped to the PR tools and the
+rest of the graph stays usable. See [PR-Dashboard](PR-Dashboard).
 
 Parameters:
 - `base` (string) -- base branch; defaults to the repo's detected default branch.
@@ -439,8 +458,13 @@ Parameters:
   blast radius.
 
 Returns `Working changes vs <base>: <n> files, <n> graph nodes, <n> communities
-touched` and the changed files, or `No changes vs <base> (or git unavailable).`
-With `code_only`, the count reads `<n> code graph nodes`.
+touched` and the changed files. With `code_only`, the count reads `<n> code graph
+nodes`. The two empty outcomes are reported distinctly: a real clean tree gives
+`No changes vs <base>.`, while a missing/failed git or a directory that is not a
+git repository (e.g. the top-level directory of a federated workspace) gives a
+`git unavailable or not a git repository ... Graph audit continues offline.`
+message, so the two are never conflated. `git` runs in the server's working
+directory, so run the server from inside the repo whose diff you want.
 
 ### predict_impact
 
@@ -462,7 +486,8 @@ Parameters:
 Returns the forecast summary, a heuristic change-risk score (low/medium/high
 with its drivers), the changed nodes, the public APIs at risk, the tests at risk,
 the blast radius (one dependent per line: hop count, relation, label, file), and
-the verify checklist.
+the verify checklist, plus a `structuredContent` mirror carrying the full
+`ChangeForecast` (not truncated by `limit`, which caps only the text).
 
 ### affected_tests
 
@@ -483,8 +508,9 @@ Parameters:
 - `depth` (integer) -- reverse-impact hop bound. Default 3, max 16.
 
 Returns one test per line (hop count, relation, label, file), or a note when no
-test in the graph reaches the change. Inline unit tests not under a test path
-(e.g. Rust `#[cfg(test)]`) are not detected.
+test in the graph reaches the change, plus a `structuredContent` mirror
+(`{ tests, total }`). Inline unit tests not under a test path (e.g. Rust
+`#[cfg(test)]`) are not detected.
 
 ### predict_edit
 
@@ -613,7 +639,7 @@ Returns the findings as text + `structuredContent`.
 
 ### Structured output
 
-Eight tools declare an `outputSchema` and return a `structuredContent` object
+Twelve tools declare an `outputSchema` and return a `structuredContent` object
 beside the text content, so a client can parse the result instead of scraping the
 formatted text:
 
@@ -625,9 +651,16 @@ formatted text:
 | `query_graph` | `{ nodes: [{ label, file_type, source_file, score, changed }], edges: [{ source, relation, target }] }` (nodes sorted by `score`; `changed` is true when `since` was given and the node's file changed) |
 | `structural_search` | `{ columns, results: [[{ id, label, kind, visibility, file, line, loc, signature }]] }` (or `groups` for aggregates) |
 | `describe_node` | `{ found, id, label, kind, summary, callees, signature }` |
+| `get_neighbors` | `{ seed, neighbors: [{ label, relation, direction }], by_relation: { <relation>: <count> } }` (`by_relation` tallies every edge before any filter) |
+| `list_repos` | `{ repos: [{ repo, nodes, edges }] }` (empty array for a single-repo graph) |
+| `predict_impact` | the full `ChangeForecast`: `{ summary, changed_files, changed_nodes, public_api_breaks, blast_radius, blast_radius_total, at_risk_tests, verify_checklist, risk }` (not truncated by `limit`, which caps only the text) |
+| `affected_tests` | `{ tests: [{ id, label, file, depth, via_relation }], total }` |
 | `audit_sql` / `advise_sql` | `{ version, summary, findings: [{ rule_id, severity, category, title, detail, location, remediation, confidence }] }` |
 
-The other tools return text only.
+The other tools return text only. A tool whose structured mirror cannot resolve
+its node (e.g. `get_neighbors` on an ambiguous label) omits `structuredContent`
+rather than returning a null object; the text content still carries the
+disambiguation message.
 
 ### Tool error behavior
 

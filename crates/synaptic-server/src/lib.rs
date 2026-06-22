@@ -31,19 +31,21 @@ mod source;
 pub use http::serve_http;
 pub use session::{SessionStore, DEFAULT_SESSION_IDLE};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use synaptic_core::{sanitize_label, GraphData, NodeId};
+use synaptic_core::{sanitize_label, GraphData, Node, NodeId};
 use synaptic_graph::{
     god_nodes, graph_stats, suggest_questions, surprising_connections, GodNode, GraphStats,
     KnowledgeGraph,
 };
-use synaptic_predict::{assess_edit, forecast_changes_with_index, EditKind, ForecastOptions};
+use synaptic_predict::{
+    assess_edit, forecast_changes_with_index, ChangeForecast, EditKind, ForecastOptions,
+};
 use synaptic_prs::{
     compute_pr_impact, detect_default_branch, fetch_pr, fetch_pr_files, fetch_prs, fetch_worktrees,
     format_pr_detail, format_prs_text, today_epoch_days, CommandRunner, ImpactIndex, PrInfo,
@@ -134,6 +136,12 @@ pub struct Server {
     /// Trusted root for resolving repo-relative `source_file` paths to real
     /// files (the code-retrieval tools). `None` disables source reading.
     source_root: Option<PathBuf>,
+    /// Per-repo source roots for a federated/global graph, keyed by the repo tag
+    /// (`Node::repo`). Federation repo-prefixes each node's `source_file` with
+    /// `tag/` and the member repos live in sibling dirs outside a single
+    /// `source_root`, so the code-retrieval tools resolve a federated node under
+    /// its own repo root from this map before falling back to `source_root`.
+    repo_roots: HashMap<String, PathBuf>,
     /// Whether the command-running `speculate` tool is exposed. OFF by default so
     /// the server stays strictly read-only; enabled only by an explicit operator
     /// opt-in (`serve --allow-exec`). When off, `speculate` is neither advertised
@@ -238,6 +246,18 @@ fn append_capped_sites(
     }
 }
 
+/// Result of locating a node's source on disk for the code-retrieval tools.
+enum SourceLookup {
+    /// A readable file inside the trusted root.
+    Found(PathBuf),
+    /// No source root configured at all (source reading disabled).
+    NotConfigured,
+    /// No file at the resolved path under `root`.
+    Missing { root: PathBuf },
+    /// The path resolved outside `root` (jail escape / wrong root).
+    Outside { root: PathBuf },
+}
+
 impl Server {
     /// Build a server from already-parsed graph data.
     pub fn from_graph_data(gd: GraphData, graph_path: Option<PathBuf>) -> Server {
@@ -260,6 +280,7 @@ impl Server {
             runner: Box::new(SystemCommands),
             log_path: query_log_path(),
             source_root: None,
+            repo_roots: HashMap::new(),
             allow_exec: false,
             freshen: None,
             last_fresh_check: Mutex::new(None),
@@ -297,10 +318,44 @@ impl Server {
         self
     }
 
-    /// Resolve a node's `source_file` to a real, in-jail path (or `None`).
-    fn resolve_source_path(&self, rel: &str) -> Option<PathBuf> {
-        let root = self.source_root.as_deref()?;
-        source::resolve_in_root(root, rel)
+    /// Register per-repo source roots for a federated/global graph (`tag ->
+    /// repo root`). Lets the code-retrieval tools read a federated node from its
+    /// own repo even though it lives outside the single `source_root`.
+    pub fn with_repo_roots(mut self, roots: HashMap<String, PathBuf>) -> Server {
+        self.repo_roots = roots;
+        self
+    }
+
+    /// Pick the root a node's source should be read from and the path relative to
+    /// it. A federated node (`repo` set, `source_file` prefixed with `tag/`) is
+    /// resolved under its own repo root when one is registered; otherwise the
+    /// single `source_root` and the raw `source_file` are used.
+    fn root_for_node(&self, n: &Node) -> Option<(PathBuf, String)> {
+        if let Some(tag) = n.repo.as_deref() {
+            if let Some(root) = self.repo_roots.get(tag) {
+                let rel = n
+                    .source_file
+                    .strip_prefix(&format!("{tag}/"))
+                    .unwrap_or(&n.source_file);
+                return Some((root.clone(), rel.to_string()));
+            }
+        }
+        self.source_root
+            .as_ref()
+            .map(|r| (r.clone(), n.source_file.clone()))
+    }
+
+    /// Resolve a node's source to a real, in-jail path, or an explanation of why
+    /// it could not be read (no root, missing file, or outside the trusted root).
+    fn locate_source(&self, n: &Node) -> SourceLookup {
+        let Some((root, rel)) = self.root_for_node(n) else {
+            return SourceLookup::NotConfigured;
+        };
+        match source::resolve_in_root_detailed(&root, &rel) {
+            source::ResolveOutcome::Found(p) => SourceLookup::Found(p),
+            source::ResolveOutcome::Missing => SourceLookup::Missing { root },
+            source::ResolveOutcome::OutsideRoot => SourceLookup::Outside { root },
+        }
     }
 
     /// Reload `graph.json` if it changed on disk since the last check.
@@ -797,12 +852,31 @@ impl Server {
         let Some(n) = self.kg.node(&id) else {
             return format!("No node matches '{}'.", sanitize_label(label));
         };
-        let Some(path) = self.resolve_source_path(&n.source_file) else {
-            return format!(
-                "Source not available for {} ({}).",
-                sanitize_label(&n.label),
-                sanitize_label(&n.source_file)
-            );
+        let path = match self.locate_source(n) {
+            SourceLookup::Found(p) => p,
+            SourceLookup::NotConfigured => {
+                return format!(
+                    "Source not available for {} ({}): no source root is configured (the server was started without --source-root).",
+                    sanitize_label(&n.label),
+                    sanitize_label(&n.source_file)
+                );
+            }
+            SourceLookup::Missing { root } => {
+                return format!(
+                    "Source file for {} not found under source-root {}.\n  wanted: {}\n  In a federated workspace, the file may live in a sibling repo outside this root; serve the global graph so each repo's source root is registered.",
+                    sanitize_label(&n.label),
+                    sanitize_label(&root.display().to_string()),
+                    sanitize_label(&n.source_file)
+                );
+            }
+            SourceLookup::Outside { root } => {
+                return format!(
+                    "Source for {} is outside the configured source-root and was refused.\n  wanted: {}\n  source-root: {}",
+                    sanitize_label(&n.label),
+                    sanitize_label(&n.source_file),
+                    sanitize_label(&root.display().to_string())
+                );
+            }
         };
         let Ok(text) = std::fs::read_to_string(&path) else {
             return format!("Could not read {}.", sanitize_label(&n.source_file));
@@ -893,6 +967,43 @@ impl Server {
             };
         }
         format!("Neighbors of {seed}:{body}")
+    }
+
+    /// Structured mirror of `get_neighbors`: the seed plus each in/out neighbor
+    /// and a per-relation tally. Honors the same case-insensitive relation filter
+    /// as the text path. `null` when the node does not resolve.
+    fn get_neighbors_json(&self, label: &str, relation_filter: Option<&str>) -> Value {
+        let Ok(id) = self.resolve_or_msg(label) else {
+            return Value::Null;
+        };
+        let Some(ex) = explain(&self.kg, &id) else {
+            return Value::Null;
+        };
+        let rel_filter = relation_filter.map(str::to_lowercase);
+        let mut by_relation: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut neighbors = Vec::new();
+        for nb in &ex.neighbors {
+            *by_relation.entry(nb.relation.as_str()).or_default() += 1;
+            if let Some(f) = &rel_filter {
+                if !nb.relation.to_lowercase().contains(f.as_str()) {
+                    continue;
+                }
+            }
+            neighbors.push(json!({
+                "label": nb.label,
+                "relation": nb.relation,
+                "direction": nb.direction,
+            }));
+        }
+        let by_relation: serde_json::Map<String, Value> = by_relation
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), Value::from(v)))
+            .collect();
+        json!({
+            "seed": ex.label,
+            "neighbors": neighbors,
+            "by_relation": by_relation,
+        })
     }
 
     /// `get_community` — a page of a community's members (`offset`/`limit`), so
@@ -1061,6 +1172,32 @@ impl Server {
             ));
         }
         out
+    }
+
+    /// Structured mirror of `list_repos`: `{ repos: [{ repo, nodes, edges }] }`,
+    /// an empty array for a single-repo graph.
+    fn list_repos_json(&self) -> Value {
+        let node_repo: HashMap<&str, &str> = self
+            .kg
+            .nodes()
+            .filter_map(|n| n.repo.as_deref().map(|r| (n.id.0.as_str(), r)))
+            .collect();
+        let mut counts: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+        for n in self.kg.nodes() {
+            if let Some(r) = n.repo.as_deref() {
+                counts.entry(r).or_default().0 += 1;
+            }
+        }
+        for e in self.kg.edges() {
+            if let Some(r) = node_repo.get(e.source.0.as_str()) {
+                counts.entry(r).or_default().1 += 1;
+            }
+        }
+        let repos: Vec<Value> = counts
+            .into_iter()
+            .map(|(repo, (nodes, edges))| json!({ "repo": repo, "nodes": nodes, "edges": edges }))
+            .collect();
+        json!({ "repos": repos })
     }
 
     /// `repo_stats` — node/edge counts for one federated member.
@@ -1287,6 +1424,18 @@ impl Server {
         code_only: bool,
     ) -> String {
         let base = self.resolve_base(base, None);
+        // Probe for a usable repo first so a missing/failed git (e.g. the
+        // top-level dir of a federated workspace is not itself a repo) reads as a
+        // distinct outcome from a genuinely clean tree, instead of both
+        // collapsing to "no changes" once the lossy runner maps failure to "".
+        let in_repo = self
+            .runner
+            .run("git", &["rev-parse", "--is-inside-work-tree"])
+            .map(|s| s.trim() == "true")
+            .unwrap_or(false);
+        if !in_repo {
+            return "git unavailable or not a git repository (in a federated workspace the top-level dir is not a repo; run inside a member repo). Graph audit continues offline.".to_string();
+        }
         let diff = self.runner.run("git", &["diff", "--name-only", &base]);
         let files: Vec<String> = diff
             .unwrap_or_default()
@@ -1295,7 +1444,7 @@ impl Server {
             .map(str::to_string)
             .collect();
         if files.is_empty() {
-            return format!("No changes vs {base} (or git unavailable).");
+            return format!("No changes vs {base}.");
         }
         let (comms, nodes) = self.graph_impact(&files, code_only);
         let scope = if code_only { " code" } else { "" };
@@ -1402,6 +1551,31 @@ impl Server {
             .collect()
     }
 
+    /// Build the change forecast shared by `predict_impact` and `affected_tests`:
+    /// resolve the changed-file set, then walk the reverse-impact blast radius.
+    /// `None` means there were no changed files (each caller phrases that itself).
+    fn build_forecast(
+        &self,
+        files: &[String],
+        base: Option<&str>,
+        depth: usize,
+    ) -> Option<ChangeForecast> {
+        let changed = self.changed_from_args(files, base);
+        if changed.is_empty() {
+            return None;
+        }
+        let opts = ForecastOptions {
+            depth: depth.clamp(1, 16),
+            ..Default::default()
+        };
+        Some(forecast_changes_with_index(
+            &self.kg,
+            &self.affected_index,
+            &changed,
+            &opts,
+        ))
+    }
+
     pub fn tool_predict_impact(
         &self,
         files: &[String],
@@ -1410,19 +1584,18 @@ impl Server {
         limit: usize,
         verbose: bool,
     ) -> String {
-        let changed = self.changed_from_args(files, base);
-        if changed.is_empty() {
+        let Some(f) = self.build_forecast(files, base, depth) else {
             return "No changed files to forecast (pass `files`, or run on a branch with a diff vs the base)."
                 .to_string();
-        }
-        let opts = ForecastOptions {
-            depth: depth.clamp(1, 16),
-            ..Default::default()
         };
-        let f = forecast_changes_with_index(&self.kg, &self.affected_index, &changed, &opts);
         // Per-section display cap. `verbose` shows everything; otherwise each list
         // is truncated to `limit` with a "+N more" note so the payload stays small.
         let cap = if verbose { usize::MAX } else { limit.max(1) };
+        Self::render_predict_text(&f, cap)
+    }
+
+    /// Render a `predict_impact` forecast to text, each list capped at `cap`.
+    fn render_predict_text(f: &ChangeForecast, cap: usize) -> String {
         let mut out = format!("Forecast: {}", sanitize_label(&f.summary));
         if let Some(r) = &f.risk {
             out.push_str(&format!("\nChange risk: {} ({}/100)", r.level, r.score));
@@ -1572,16 +1745,15 @@ impl Server {
         base: Option<&str>,
         depth: usize,
     ) -> String {
-        let changed = self.changed_from_args(files, base);
-        if changed.is_empty() {
+        let Some(f) = self.build_forecast(files, base, depth) else {
             return "No changed files (pass `files`, or run on a branch with a diff vs the base)."
                 .to_string();
-        }
-        let opts = ForecastOptions {
-            depth: depth.clamp(1, 16),
-            ..Default::default()
         };
-        let f = forecast_changes_with_index(&self.kg, &self.affected_index, &changed, &opts);
+        Self::render_affected_tests_text(&f)
+    }
+
+    /// Render the test subset of a forecast for `affected_tests`.
+    fn render_affected_tests_text(f: &ChangeForecast) -> String {
         if f.at_risk_tests.is_empty() {
             return "No tests in the graph exercise the changed code (within the impact depth)."
                 .to_string();
@@ -1729,11 +1901,11 @@ impl Server {
     pub fn tool_get_pr_impact(&self, number: u64, repo: Option<&str>) -> String {
         let resolved = self.resolve_base(None, repo);
         let Some(mut pr) = fetch_pr(&*self.runner, number, repo, &resolved) else {
-            return format!("PR #{number} not found (gh unavailable or no such PR).");
+            return format!("PR #{number} not found (gh unavailable, unauthenticated, or no such PR). Graph audit continues offline.");
         };
         pr.files_changed = fetch_pr_files(&*self.runner, number, repo);
         if pr.files_changed.is_empty() {
-            return format!("PR #{number}: no changed files found (may require gh auth).");
+            return format!("PR #{number}: no changed files found (may require gh auth). Graph audit continues offline.");
         }
         let (comms, nodes) = self.graph_impact(&pr.files_changed, false);
         pr.communities_touched = comms;
@@ -2438,6 +2610,55 @@ impl Server {
             }));
         }
 
+        // predict_impact / affected_tests: build the forecast ONCE (it runs git
+        // and a blast-radius walk) and render both channels, instead of computing
+        // it for the text path and again for a structured mirror.
+        if name == "predict_impact" || name == "affected_tests" {
+            let files: Vec<String> = args
+                .get("files")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let depth = u("depth", 3) as usize;
+            let forecast = self.build_forecast(&files, opt("base"), depth);
+            let (text, structured) = match (name, forecast) {
+                ("predict_impact", Some(f)) => {
+                    let cap = if b("verbose") {
+                        usize::MAX
+                    } else {
+                        (u("limit", 20) as usize).max(1)
+                    };
+                    let text = Self::render_predict_text(&f, cap);
+                    let structured = serde_json::to_value(&f).unwrap_or(Value::Null);
+                    (text, structured)
+                }
+                ("predict_impact", None) => (
+                    "No changed files to forecast (pass `files`, or run on a branch with a diff vs the base).".to_string(),
+                    json!({ "changed_files": [] }),
+                ),
+                (_, Some(f)) => {
+                    let text = Self::render_affected_tests_text(&f);
+                    let structured =
+                        json!({ "tests": f.at_risk_tests, "total": f.at_risk_tests.len() });
+                    (text, structured)
+                }
+                (_, None) => (
+                    "No changed files (pass `files`, or run on a branch with a diff vs the base)."
+                        .to_string(),
+                    json!({ "tests": [], "total": 0 }),
+                ),
+            };
+            return Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": structured,
+                "isError": false
+            }));
+        }
+
         let text = match name {
             "get_node" => self.tool_get_node(&s("label")),
             "get_source" => self.tool_get_source(&s("label"), u("context_lines", 40) as usize),
@@ -2489,36 +2710,7 @@ impl Server {
                 b("verbose"),
                 b("code_only"),
             ),
-            "predict_impact" => {
-                let files: Vec<String> = args
-                    .get("files")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                self.tool_predict_impact(
-                    &files,
-                    opt("base"),
-                    u("depth", 3) as usize,
-                    u("limit", 20) as usize,
-                    b("verbose"),
-                )
-            }
-            "affected_tests" => {
-                let files: Vec<String> = args
-                    .get("files")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                self.tool_affected_tests(&files, opt("base"), u("depth", 3) as usize)
-            }
+            // predict_impact / affected_tests handled above (compute-once dual render).
             "predict_edit" => self.tool_predict_edit(
                 &s("symbol"),
                 &s("kind"),
@@ -2578,11 +2770,19 @@ impl Server {
                 u("limit", 50) as usize,
             )),
             "describe_node" => Some(self.describe_node_json(&s("label"))),
+            "get_neighbors" => Some(self.get_neighbors_json(
+                &s("label"),
+                args.get("relation_filter").and_then(Value::as_str),
+            )),
+            "list_repos" => Some(self.list_repos_json()),
             _ => None,
         };
 
         let mut result = json!({ "content": [{ "type": "text", "text": text }], "isError": false });
-        if let Some(sc) = structured {
+        // Skip a null mirror: a tool whose `*_json` could not resolve its node
+        // (e.g. get_neighbors on an ambiguous label) returns Null rather than
+        // attaching an empty `structuredContent: null` to the result.
+        if let Some(sc) = structured.filter(|v| !v.is_null()) {
             result["structuredContent"] = sc;
         }
         Ok(result)
@@ -2881,7 +3081,10 @@ changed between two git revisions (added/removed dependencies, removed APIs, dri
 cycles, hotspots); plan_rename produces a plan-only, confidence-scored rename. For \
 SQL-bearing code, audit_sql reviews the schema and advise_sql critiques a candidate query. \
 For a multi-repo graph, call list_repos then pass the repo argument to scope. The PR tools \
-(list_prs / get_pr_impact / triage_prs) need the `gh` CLI.\n\
+(list_prs / get_pr_impact / triage_prs) need the `gh` CLI; if it is missing or unauthenticated \
+they say so and skip PR data, while the rest of the graph stays usable offline. \
+working_changes_impact runs git in the server's working directory and distinguishes a clean tree \
+from a directory that is not a git repository.\n\
 \n\
 Disambiguating a name: every tool that takes a name resolves it leniently (id, \
 label, bare name). When a name is shared by several files, pin it to one with a \
@@ -2925,13 +3128,19 @@ fn tools_list(allow_exec: bool) -> Value {
         },
         { "name": "get_node", "description": "Show one node's metadata: type, source file, community, degree, plus kind (class/function/method/etc.), visibility, and LOC when available. Use after query_graph to inspect a specific symbol.",
           "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name (e.g. 'login_user', 'AuthService'); resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." } }, "required": ["label"] } },
-        { "name": "get_source", "description": "Return the actual source code for a symbol (the lines at its location), so you do not have to open the file. Use after query_graph or get_node to read a function or class body directly.",
+        { "name": "get_source", "description": "Return the actual source code for a symbol (the lines at its location), so you do not have to open the file. Use after query_graph or get_node to read a function or class body directly. In a federated/global graph it reads each member repo from its own source root; if a file cannot be read the message names the configured source-root and whether the path was missing or outside it.",
           "inputSchema": { "type": "object", "properties": {
               "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." },
               "context_lines": { "type": "integer", "description": "How many lines to return from the symbol start (default 40, max 400)." }
           }, "required": ["label"] } },
         { "name": "get_neighbors", "description": "List a node's directly connected nodes and the relation on each edge. Answers 'what does X call/use' and 'what calls X'.",
-          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." }, "relation_filter": { "type": "string", "description": "Optional: keep only this edge relation (substring match). Common relations: calls, imports, inherits, implements, references, contains, depends_on. If nothing matches, the result names the relations the node does have, so an empty list is not mistaken for a missing node." } }, "required": ["label"] } },
+          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." }, "relation_filter": { "type": "string", "description": "Optional: keep only this edge relation (substring match). Common relations: calls, imports, inherits, implements, references, contains, depends_on. If nothing matches, the result names the relations the node does have, so an empty list is not mistaken for a missing node." } }, "required": ["label"] },
+          "outputSchema": { "type": "object", "properties": {
+              "seed": {"type":"string"},
+              "neighbors": { "type": "array", "items": { "type": "object", "properties": {
+                  "label": {"type":"string"}, "relation": {"type":"string"}, "direction": {"type":"string", "description": "'out' (seed -> neighbor) or 'in' (neighbor -> seed)."} } } },
+              "by_relation": { "type": "object", "description": "Count of all edges on the seed by relation, before any filter." }
+          }, "required": ["seed","neighbors"] } },
         { "name": "get_community", "description": "List the members of a community: a cluster of densely-connected nodes, roughly a module or subsystem. Use to see what belongs together. Paginates: a large community returns one page at a time.",
           "inputSchema": { "type": "object", "properties": {
               "community_id": { "type": "integer", "description": "Community id, as reported by graph_stats, god_nodes, or a node's 'Community' field." },
@@ -2956,7 +3165,11 @@ fn tools_list(allow_exec: bool) -> Value {
               "cross_repo": {"type":"integer"}, "cross_language": {"type":"integer"}
           }, "required": ["nodes","edges","communities"] } },
         { "name": "list_repos", "description": "For a federated (multi-repo) graph, list member repos (tags) with node/edge counts; empty for a single repo. Use before scoping a query to one repo.",
-          "inputSchema": { "type": "object", "properties": {} } },
+          "inputSchema": { "type": "object", "properties": {} },
+          "outputSchema": { "type": "object", "properties": {
+              "repos": { "type": "array", "items": { "type": "object", "properties": {
+                  "repo": {"type":"string"}, "nodes": {"type":"integer"}, "edges": {"type":"integer"} } } }
+          }, "required": ["repos"] } },
         { "name": "repo_stats", "description": "Node/edge counts for one federated member repo.",
           "inputSchema": { "type": "object", "properties": { "repo": { "type": "string", "description": "Repo tag, as listed by list_repos." } }, "required": ["repo"] } },
         { "name": "shortest_path", "description": "Shortest path between two nodes, showing the chain of relations. Answers 'how does A reach B' or 'is X connected to Y'.",
@@ -3063,13 +3276,29 @@ fn tools_list(allow_exec: bool) -> Value {
               "depth": { "type": "integer", "description": "Reverse-impact hop bound (default 3, max 16)." },
               "limit": { "type": "integer", "description": "Max entries shown per section before a '+N more' summary (default 20). Ignored when verbose=true." },
               "verbose": { "type": "boolean", "description": "Emit the full, uncapped lists instead of the summarized top-N (default false)." }
-          } } },
+          } },
+          "outputSchema": { "type": "object", "description": "The full ChangeForecast. The structured channel is not truncated by `limit` (that caps only the text); blast_radius is bounded by the forecast's internal hit cap, with blast_radius_total carrying the true count.", "properties": {
+              "summary": {"type":"string"},
+              "changed_files": { "type": "array", "items": {"type":"string"} },
+              "changed_nodes": { "type": "array", "items": {"type":"object"} },
+              "public_api_breaks": { "type": "array", "items": {"type":"object"} },
+              "blast_radius": { "type": "array", "items": {"type":"object"} },
+              "blast_radius_total": {"type":"integer"},
+              "at_risk_tests": { "type": "array", "items": {"type":"object"} },
+              "verify_checklist": { "type": "array", "items": {"type":"object"} }
+          }, "required": ["summary","changed_files","blast_radius_total"] } },
         { "name": "affected_tests", "description": "Predictive test selection: the tests that exercise the changed code, found by walking the reverse-impact set from the changed files and keeping the test nodes (detected by path convention). The focused 'which tests should I run for this change' view.",
           "inputSchema": { "type": "object", "properties": {
               "files": { "type": "array", "items": { "type": "string" }, "description": "Repo-relative changed files. Omit to use the working-tree diff vs `base`." },
               "base": { "type": "string", "description": "Base branch to diff against when `files` is omitted (default: the repo's default branch)." },
               "depth": { "type": "integer", "description": "Reverse-impact hop bound (default 3, max 16)." }
-          } } },
+          } },
+          "outputSchema": { "type": "object", "properties": {
+              "tests": { "type": "array", "items": { "type": "object", "properties": {
+                  "id": {"type":"string"}, "label": {"type":"string"}, "file": {"type":"string"},
+                  "depth": {"type":"integer"}, "via_relation": {"type":"string"} } } },
+              "total": {"type":"integer"}
+          }, "required": ["tests","total"] } },
         { "name": "predict_edit", "description": "What breaks if you make a specific kind of edit to a symbol, classified into 'will break' vs 'to review'. kind=delete (every dependent breaks), signature (callers/type-users break, bare imports go to review), or visibility (references from other files break when narrowing to private). Pure-graph; complements plan_rename (which is rename-only).",
           "inputSchema": { "type": "object", "properties": {
               "symbol": { "type": "string", "description": "The symbol to edit: its name, bare name, or a node id. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." },
@@ -4121,6 +4350,49 @@ mod tests {
     }
 
     #[test]
+    fn get_source_reads_federated_node_from_its_repo_root() {
+        // A federated node: `repo` set and `source_file` prefixed with the tag,
+        // its file living under a sibling repo root outside the single source root.
+        let dir = tempfile::tempdir().unwrap();
+        let billing_root = dir.path().join("billing");
+        std::fs::create_dir_all(billing_root.join("src")).unwrap();
+        std::fs::write(billing_root.join("src/pay.py"), "def charge():\n    pass\n").unwrap();
+        let other_root = dir.path().join("other");
+        std::fs::create_dir_all(&other_root).unwrap();
+
+        let mut n = node("billing::charge", "charge", Some(0));
+        n.repo = Some("billing".into());
+        n.source_file = "billing/src/pay.py".into();
+        n.source_location = Some("L1".into());
+        let gd = GraphData {
+            nodes: vec![n],
+            ..Default::default()
+        };
+
+        // With the repo root registered, the federated file resolves.
+        let mut roots = HashMap::new();
+        roots.insert("billing".to_string(), billing_root.clone());
+        let mut s = Server::from_graph_data(gd.clone(), None)
+            .with_source_root(other_root.clone())
+            .with_repo_roots(roots);
+        let out = call_tool(&mut s, "get_source", json!({"label": "charge"}));
+        assert!(
+            out.contains("def charge():"),
+            "reads federated source: {out}"
+        );
+
+        // Without the repo root, it falls back to the single source root, misses,
+        // and the message names the root it actually tried.
+        let mut s2 = Server::from_graph_data(gd, None).with_source_root(other_root.clone());
+        let out2 = call_tool(&mut s2, "get_source", json!({"label": "charge"}));
+        assert!(out2.contains("not found under source-root"), "{out2}");
+        assert!(
+            out2.contains(&other_root.display().to_string()),
+            "message names the configured root: {out2}"
+        );
+    }
+
+    #[test]
     fn get_community_paginates() {
         // 6 members in community 0.
         let nodes: Vec<_> = (0..6)
@@ -4432,7 +4704,16 @@ mod tests {
     #[test]
     fn structured_tools_declare_output_schema() {
         let tools = tools_list(false);
-        for name in ["graph_stats", "query_graph", "affected", "god_nodes"] {
+        for name in [
+            "graph_stats",
+            "query_graph",
+            "affected",
+            "god_nodes",
+            "predict_impact",
+            "affected_tests",
+            "get_neighbors",
+            "list_repos",
+        ] {
             let t = tools
                 .as_array()
                 .unwrap()
@@ -4444,6 +4725,76 @@ mod tests {
                 "{name} needs an outputSchema"
             );
         }
+    }
+
+    #[test]
+    fn get_neighbors_and_list_repos_emit_structured_content() {
+        let mut s = server();
+        let resp = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":"get_neighbors","arguments":{"label":"AuthService"}}
+            }))
+            .unwrap();
+        let sc = &resp["result"]["structuredContent"];
+        assert_eq!(sc["seed"], "AuthService");
+        assert!(
+            !sc["neighbors"].as_array().unwrap().is_empty(),
+            "neighbors present: {sc}"
+        );
+        assert!(sc["by_relation"].is_object(), "by_relation tally: {sc}");
+
+        // Single-repo graph: list_repos is still structured, with an empty array.
+        let resp2 = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":2,"method":"tools/call",
+                "params":{"name":"list_repos","arguments":{}}
+            }))
+            .unwrap();
+        assert!(resp2["result"]["structuredContent"]["repos"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn predict_tools_emit_structured_content() {
+        struct GitRunner;
+        impl CommandRunner for GitRunner {
+            fn run(&self, program: &str, args: &[&str]) -> Option<String> {
+                if program == "git" && args.first() == Some(&"diff") {
+                    return Some("auth.py\n".to_string());
+                }
+                None
+            }
+        }
+        let mut a = node("auth", "AuthService", Some(0));
+        a.source_file = "auth.py".into();
+        let gd = GraphData {
+            nodes: vec![a],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None).with_runner(Box::new(GitRunner));
+
+        let resp = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":"predict_impact","arguments":{}}
+            }))
+            .unwrap();
+        let sc = &resp["result"]["structuredContent"];
+        assert!(sc["summary"].is_string(), "forecast in structured: {sc}");
+        assert!(sc.get("blast_radius_total").is_some(), "{sc}");
+
+        let resp2 = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":2,"method":"tools/call",
+                "params":{"name":"affected_tests","arguments":{}}
+            }))
+            .unwrap();
+        let sc2 = &resp2["result"]["structuredContent"];
+        assert!(sc2["tests"].is_array(), "tests array: {sc2}");
+        assert!(sc2["total"].is_number(), "total count: {sc2}");
     }
 
     #[test]
@@ -4976,6 +5327,9 @@ mod tests {
         struct GitRunner;
         impl CommandRunner for GitRunner {
             fn run(&self, program: &str, args: &[&str]) -> Option<String> {
+                if program == "git" && args.first() == Some(&"rev-parse") {
+                    return Some("true\n".to_string()); // inside a work tree
+                }
                 if program == "git" && args.first() == Some(&"diff") {
                     return Some("auth.py\n".to_string()); // one changed file
                 }
@@ -5017,17 +5371,38 @@ mod tests {
             "verbose labels the touched community: {verbose}"
         );
 
-        // No diff -> graceful message, no panic.
-        struct EmptyRunner;
-        impl CommandRunner for EmptyRunner {
-            fn run(&self, _p: &str, _a: &[&str]) -> Option<String> {
-                Some(String::new())
+        // In a repo with no diff -> clean-tree message, no panic.
+        struct CleanRunner;
+        impl CommandRunner for CleanRunner {
+            fn run(&self, _p: &str, args: &[&str]) -> Option<String> {
+                if args.first() == Some(&"rev-parse") {
+                    return Some("true\n".to_string());
+                }
+                Some(String::new()) // empty diff
             }
         }
-        let s2 = server().with_runner(Box::new(EmptyRunner));
-        assert!(s2
-            .tool_working_changes_impact(Some("main"), 20, false, false)
-            .contains("No changes"));
+        let s2 = server().with_runner(Box::new(CleanRunner));
+        let clean = s2.tool_working_changes_impact(Some("main"), 20, false, false);
+        assert!(clean.contains("No changes"), "clean tree: {clean}");
+        assert!(
+            !clean.contains("git unavailable"),
+            "a clean tree is not git-unavailable: {clean}"
+        );
+
+        // Not a repo / git missing -> a distinct outcome, not "No changes".
+        struct NoRepoRunner;
+        impl CommandRunner for NoRepoRunner {
+            fn run(&self, _p: &str, _a: &[&str]) -> Option<String> {
+                None // git fails / not a repo
+            }
+        }
+        let s3 = server().with_runner(Box::new(NoRepoRunner));
+        let no_repo = s3.tool_working_changes_impact(Some("main"), 20, false, false);
+        assert!(
+            no_repo.contains("not a git repository"),
+            "git-unavailable is distinct from no-changes: {no_repo}"
+        );
+        assert!(!no_repo.contains("No changes vs"), "{no_repo}");
     }
 
     #[test]
@@ -5037,6 +5412,9 @@ mod tests {
         struct GitRunner;
         impl CommandRunner for GitRunner {
             fn run(&self, program: &str, args: &[&str]) -> Option<String> {
+                if program == "git" && args.first() == Some(&"rev-parse") {
+                    return Some("true\n".to_string());
+                }
                 if program == "git" && args.first() == Some(&"diff") {
                     return Some("app.ts\npackage.json\n".to_string());
                 }

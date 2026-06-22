@@ -10,6 +10,55 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-06-22
+
+A tooling-quality round from auditing a 9-repo federated workspace: clearer
+diagnostics across the SQL auditor, `get_source`, git, and the PR tools, more
+machine-readable MCP output, and federated source reading. Verified end-to-end on
+both a federated workspace and a single-repo monorepo.
+
+### Added
+- **Structured output on four more MCP tools.** `predict_impact`,
+  `affected_tests`, `get_neighbors`, and `list_repos` now declare an
+  `outputSchema` and return a typed `structuredContent` object beside the text, so
+  a client can parse results instead of scraping formatted text (12 structured
+  tools total). The two forecast tools build their `ChangeForecast` once and render
+  both channels from it. A structured mirror that cannot resolve its node (e.g.
+  `get_neighbors` on an ambiguous label) omits `structuredContent` rather than
+  emitting a null object.
+- **Federated `get_source`.** Serving the global graph
+  (`synaptic serve --graph ~/.synaptic/global-graph.json`) reads
+  `global-manifest.json` and registers each member repo's own source root, so a
+  federated node whose `source_file` points at a sibling repo outside a single
+  `--source-root` is read from its real repo. Co-located workspace builds (members
+  under one root) already resolved and are unchanged.
+
+### Changed
+- **`SEC-INJ-001` distinguishes identifier interpolation from value
+  interpolation.** When the interpolation sits in identifier position (a
+  table/column name, e.g. `FROM "main"."${table}"`), the remediation now steers to
+  a fixed allowlist plus the driver's identifier-quoting helper, instead of
+  recommending bound parameters — identifiers cannot be bound as parameters.
+- **`get_source` errors name the cause and the root.** Instead of a bare "Source
+  not available", the message says whether no source root was configured, the file
+  was not found under `<root>` (with a federation hint), or the path resolved
+  outside the configured `--source-root`.
+- **`working_changes_impact` separates "no changes" from "git unavailable".** A
+  clean tree reports `No changes vs <base>.`; a missing/failed git or a directory
+  that is not a git repository (e.g. the top-level of a federated workspace)
+  reports a distinct "git unavailable or not a git repository ... continues
+  offline" message, so the two outcomes are no longer conflated.
+- **PR tools soften the offline failure.** When `gh` is missing or
+  unauthenticated, `list_prs` / `get_pr_impact` / `triage_prs` note that PR data is
+  skipped while the rest of the graph audit continues offline.
+
+### Fixed
+- **Duplicate SQL findings.** A code-to-SQL link is emitted once per referenced
+  table, so a multi-table or schema-qualified interpolated query (e.g.
+  `SELECT COUNT(*) FROM "main"."${table}"`, which links both `main` and `${table}`)
+  produced one identical finding per table. The auditor now deduplicates findings
+  on `(rule_id, location, query)`, reporting a query once per rule.
+
 ## [0.3.7] - 2026-06-21
 
 Two multi-repo federation gaps for .NET/WebSocket products: .NET solution repos

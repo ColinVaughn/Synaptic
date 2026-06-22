@@ -48,8 +48,12 @@ Tables also carry `rls_enabled` (defaults `false`, set `true` by
 The cross-language pass scans application code (Python, JS/TS, Go, Rust, Java, C#)
 for SQL string literals passed to query APIs, parses them, and links the
 enclosing function to the referenced tables with a `queries` (read), `writes_to`
-(INSERT/UPDATE/DELETE), or `calls_proc` edge, carrying the query text. This is
-what makes "how is this SQL linked into the code" a graph traversal:
+(INSERT/UPDATE/DELETE), or `calls_proc` edge, carrying the query text. A query
+that names several tables (a JOIN, or a schema-qualified `"main"."${table}"`)
+produces one such edge per table; the auditor deduplicates findings on
+`(rule_id, location, query)` so a multi-table query is reported once per rule, not
+once per table. This is what makes "how is this SQL linked into the code" a graph
+traversal:
 
 ```sh
 # what code reads or writes the orders table?
@@ -95,7 +99,7 @@ triggered it.
 | `SEC-RLS-005` | High | a SQL Server table with sensitive columns and no `CREATE SECURITY POLICY` |
 | `SEC-GRANT-001` | Medium | an over-broad grant (`GRANT ALL` / to `PUBLIC`) |
 | `SEC-PII-001` | Medium | a column named like a password/secret (confirm it is hashed/encrypted) |
-| `SEC-INJ-001` | Critical | a query built by string concatenation/interpolation (injection risk) |
+| `SEC-INJ-001` | Critical | a query built by string concatenation/interpolation (injection risk). When the interpolation sits in identifier position (a table/column name, e.g. `FROM "main"."${table}"`), the remediation steers to a fixed allowlist + the driver's identifier-quoting helper, since identifiers cannot be bound as parameters |
 
 ### Performance
 

@@ -389,6 +389,16 @@ synaptic global path
   sorted by tag.
 - `global path`: print the path to `global-graph.json`.
 
+Serving the global graph (`synaptic serve --graph ~/.synaptic/global-graph.json`)
+reads `global-manifest.json` next to it and registers each member's own source
+root (the grandparent of its recorded `source_path`), so `get_source` reads a
+federated node from its real repo even though the members live in sibling
+directories outside any single `--source-root`. A co-located **workspace build**
+(members are subdirectories of one root, the common case) needs none of this: the
+single `--source-root` already resolves the `tag/...` paths. When source still
+cannot be read, `get_source` names the configured root and says whether the path
+was missing or outside it, rather than a bare "not available".
+
 ## `merge-graphs`
 
 Composes several existing `graph.json` files into one namespaced graph. Unlike
