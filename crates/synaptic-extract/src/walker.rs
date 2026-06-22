@@ -99,6 +99,7 @@ pub fn extract_with_config(path: &str, source: &[u8], cfg: &LanguageConfig) -> E
         seen: HashSet::new(),
         function_bodies: Vec::new(),
         interface_names: HashSet::new(),
+        owned_fn_nodes: HashSet::new(),
     };
 
     let file_nid = file_node_id(path);
@@ -144,6 +145,11 @@ struct Extractor<'cfg, 'src, 'tree> {
     /// classification (C#/Swift) can tell interfaces from base classes. Empty
     /// unless the language's heritage style uses it.
     interface_names: HashSet<String>,
+    /// tree-sitter ids of the function/method nodes that got their OWN graph node
+    /// (and whose body is walked on its own). The call pass uses this to tell a
+    /// named nested function (skip -- walked separately) from an anonymous callback
+    /// (recurse -- its calls belong to the enclosing function).
+    owned_fn_nodes: HashSet<usize>,
 }
 
 /// True for the C# `IFoo` interface-naming convention: a leading `I` followed by

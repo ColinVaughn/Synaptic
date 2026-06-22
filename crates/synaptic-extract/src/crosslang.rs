@@ -36,6 +36,7 @@ pub fn augment(path: &str, source: &[u8], result: &mut ExtractionResult) {
     scan_http(ext, path, text, result);
     scan_grpc(ext, path, text, result);
     scan_websocket(ext, path, text, result);
+    scan_ipc(ext, path, text, result);
     scan_sql(ext, path, text, result);
 }
 
@@ -1546,7 +1547,7 @@ fn ws_message(result: &mut ExtractionResult, path: &str, line: u32, command: &st
     }
     let node = NodeId(make_id(&["wsmsg", &key]));
     ensure_target(result, &node, &format!("ws #{command}"), "ws_message");
-    ws_link(result, path, line, node, role);
+    boundary_link(result, path, line, node, role, "ws");
 }
 
 /// Attach a WebSocket endpoint boundary node `wsendpoint:<path>` (named paths
@@ -1558,14 +1559,23 @@ fn ws_endpoint(result: &mut ExtractionResult, path: &str, line: u32, raw_path: &
     }
     let node = NodeId(make_id(&["wsendpoint", &np]));
     ensure_target(result, &node, &format!("ws {np}"), "ws_endpoint");
-    ws_link(result, path, line, node, role);
+    boundary_link(result, path, line, node, role, "ws");
 }
 
-/// Client: `enclosing fn -> node` (`calls_service`). Server: `node -> enclosing
-/// fn` (`handled_by`), mirroring the HTTP route handler direction.
-fn ws_link(result: &mut ExtractionResult, path: &str, line: u32, node: NodeId, role: WsRole) {
+/// Attach a message-boundary site to its channel node. Client: `enclosing fn ->
+/// node` (`calls_service`). Server: `node -> enclosing fn` (`handled_by`),
+/// mirroring the HTTP route handler direction. `context` tags the edge (`ws`,
+/// `ipc`). Shared by the WebSocket and Electron-IPC detectors.
+fn boundary_link(
+    result: &mut ExtractionResult,
+    path: &str,
+    line: u32,
+    node: NodeId,
+    role: WsRole,
+    context: &str,
+) {
     match role {
-        WsRole::Client => link(result, path, line, node, "calls_service", "ws"),
+        WsRole::Client => link(result, path, line, node, "calls_service", context),
         WsRole::Server => {
             let handler = enclosing_function(result, line).unwrap_or_else(|| file_node_id(path));
             result.edges.push(Edge {
@@ -1577,12 +1587,98 @@ fn ws_link(result: &mut ExtractionResult, path: &str, line: u32, node: NodeId, r
                 source_location: Some(format!("L{line}")),
                 confidence_score: Some(Confidence::Inferred.default_score()),
                 weight: 1.0,
-                context: Some("ws".to_string()),
+                context: Some(context.to_string()),
                 cross_repo: false,
                 extra: Map::new(),
             });
         }
     }
+}
+
+/// Electron IPC detector. Senders (`ipcRenderer.invoke/send('ch')`,
+/// `webContents.send('ch')`) `calls_service` a channel-keyed `ipc #<ch>` node;
+/// handlers (`ipcMain.handle/on('ch', fn)`, renderer `ipcRenderer.on('ch', fn)`)
+/// are reached from it via `handled_by`. So a main-process handler invoked only
+/// across the IPC boundary -- which has no static caller -- gains one through the
+/// channel node, and a renderer->main call connects in the graph. JS/TS only,
+/// gated on an electron IPC API token to avoid firing on ordinary `.on`/`.handle`.
+fn scan_ipc(ext: &str, path: &str, text: &str, result: &mut ExtractionResult) {
+    if !matches!(
+        ext,
+        "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts"
+    ) {
+        return;
+    }
+    if !(text.contains("ipcMain") || text.contains("ipcRenderer") || text.contains("webContents")) {
+        return;
+    }
+    let mut scan = |re: &Regex, role: WsRole| {
+        for caps in re.captures_iter(text) {
+            let channel = &caps[1];
+            let line = line_of(text, caps.get(0).expect("group 0").start());
+            ipc_message(result, path, line, channel, role);
+        }
+    };
+    // ipcMain.handle/on + ipcRenderer.on are handlers (server side); the renderer's
+    // invoke/send and a main webContents.send are the senders (client side).
+    scan(ipc_handle_re(), WsRole::Server);
+    scan(ipc_renderer_on_re(), WsRole::Server);
+    scan(ipc_invoke_re(), WsRole::Client);
+    scan(webcontents_send_re(), WsRole::Client);
+}
+
+/// Attach an Electron IPC channel boundary node `ipc:<channel>` keyed on the
+/// channel name (case-insensitive via `make_id`). Senders `calls_service` it;
+/// handlers are reached from it via `handled_by`.
+fn ipc_message(result: &mut ExtractionResult, path: &str, line: u32, channel: &str, role: WsRole) {
+    if channel.is_empty() {
+        return;
+    }
+    let node = NodeId(make_id(&["ipc", channel]));
+    ensure_target(result, &node, &format!("ipc #{channel}"), "ipc_channel");
+    boundary_link(result, path, line, node, role, "ipc");
+}
+
+/// `ipcMain.handle('ch'` / `.handleOnce` / `.on` / `.once` (main-process handler).
+fn ipc_handle_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"ipcMain\s*\.\s*(?:handle|handleOnce|on|once)\s*\(\s*["'`]([A-Za-z0-9_.:+/-]+)["'`]"#,
+        )
+        .expect("valid regex")
+    })
+}
+
+/// `ipcRenderer.invoke('ch'` / `.send` / `.sendSync` / `.postMessage` (sender).
+fn ipc_invoke_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"ipcRenderer\s*\.\s*(?:invoke|send|sendSync|postMessage)\s*\(\s*["'`]([A-Za-z0-9_.:+/-]+)["'`]"#,
+        )
+        .expect("valid regex")
+    })
+}
+
+/// `ipcRenderer.on('ch'` / `.once` (renderer listening for a main->renderer push).
+fn ipc_renderer_on_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"ipcRenderer\s*\.\s*(?:on|once|addListener)\s*\(\s*["'`]([A-Za-z0-9_.:+/-]+)["'`]"#,
+        )
+        .expect("valid regex")
+    })
+}
+
+/// `<x>.webContents.send('ch'` (main pushing to a renderer).
+fn webcontents_send_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"webContents\s*\.\s*send\s*\(\s*["'`]([A-Za-z0-9_.:+/-]+)["'`]"#)
+            .expect("valid regex")
+    })
 }
 
 /// Byte offset just past the `}` matching the `{` at `open`. Skips braces inside

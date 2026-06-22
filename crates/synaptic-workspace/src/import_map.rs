@@ -1,5 +1,5 @@
 //! Import-map parser (single-spa / SystemJS / native import maps). A micro-frontend
-//! root references apps by an import-map **alias** (`@PCMatic/Hub`) decoupled from the
+//! root references apps by an import-map **alias** (`@acme/Hub`) decoupled from the
 //! app's `package.json name`; the alias's target path contains the app's directory
 //! (`…/hub/dist/…`). Import-map aliases are **exact** (the import specifier equals the
 //! alias). The bounded walk and member resolution live in [`crate::alias`]; this module
@@ -41,14 +41,14 @@ mod tests {
     fn parses_systemjs_importmap_template_form() {
         let text = r#"<script type="systemjs-importmap"></script>
             <script>const importMaps = { imports: {
-              "@PCMatic/Hub": `${url}/hub/dist/assets/index.js`,
-              "@PCMatic/Vpn": `${url}/vpn/dist/assets/index.js`,
+              "@acme/Hub": `${url}/hub/dist/assets/index.js`,
+              "@acme/Vpn": `${url}/vpn/dist/assets/index.js`,
               "single-spa": `${url}/root-config/dist/single-spa.js`
             }}</script>"#;
         let m = aliases(text);
         assert!(m
             .iter()
-            .any(|(a, t)| a == "@PCMatic/Hub" && t[0].contains("hub/dist")));
+            .any(|(a, t)| a == "@acme/Hub" && t[0].contains("hub/dist")));
         assert!(m.iter().any(|(a, _)| a == "single-spa"));
     }
 

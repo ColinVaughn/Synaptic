@@ -52,6 +52,19 @@ pub fn build_from_parts(
     }
 
     kg.remove_nodes(&ghosts);
+
+    // edges: normalize source_file the same way nodes are, so a Windows path on
+    // an edge (e.g. a code->SQL `queries` edge whose source_file is the importer)
+    // doesn't leak backslashes into downstream output. Nodes are normalized at
+    // upsert above; edges were previously left untouched.
+    let root = opts.root.as_deref();
+    let edges: Vec<Edge> = edges
+        .into_iter()
+        .map(|mut e| {
+            e.source_file = norm_source_file(&e.source_file, root);
+            e
+        })
+        .collect();
     add_edges(&mut kg, edges, &norm_to_id, opts.directed);
     kg
 }
@@ -289,6 +302,23 @@ mod tests {
             forms,
             ["src/middleware/auth.py".to_string()].into_iter().collect()
         );
+    }
+
+    #[test]
+    fn edge_source_file_backslashes_are_normalized() {
+        // Nodes get norm_source_file at upsert; edges must too, so a Windows path
+        // on an edge (e.g. a code->SQL `queries` edge) does not leak backslashes
+        // into downstream output (audit_sql location, plan_rename sites).
+        let mut e = edge("a", "b", "queries");
+        e.source_file = "app/src\\db\\query.js".into();
+        let kg = build_from_parts(
+            vec![node("a", "a", "a.py"), node("b", "b", "b.py")],
+            vec![e],
+            vec![],
+            &BuildOptions::default(),
+        );
+        let got = kg.edges().next().unwrap();
+        assert_eq!(got.source_file, "app/src/db/query.js");
     }
 
     #[test]

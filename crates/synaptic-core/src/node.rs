@@ -127,6 +127,14 @@ impl Node {
                 Some("config_key" | "config_resource")
             )
     }
+
+    /// True if this node is an external stub: an import target / third-party
+    /// package with no definition in any scanned repo (empty `source_file`). These
+    /// exist only to anchor cross-repo / import edges; they are not symbols that
+    /// belong to a subsystem, so listings like community membership exclude them.
+    pub fn is_external_stub(&self) -> bool {
+        self.source_file.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -144,6 +152,17 @@ mod tests {
             repo: None,
             extra: Map::new(),
         }
+    }
+
+    #[test]
+    fn external_stub_is_a_node_with_no_source_file() {
+        let mut n = sample();
+        assert!(!n.is_external_stub(), "a located node is not a stub");
+        n.source_file = String::new();
+        assert!(
+            n.is_external_stub(),
+            "empty source_file marks an import stub"
+        );
     }
 
     #[test]

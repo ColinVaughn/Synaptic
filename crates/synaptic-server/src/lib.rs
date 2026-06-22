@@ -6,7 +6,7 @@
 //! pure [`Server::handle_request`] dispatcher, which makes the whole protocol
 //! unit-testable without an async runtime.
 //!
-//! 26 read-only tools by default (27 with `--allow-exec`, which adds the
+//! 27 read-only tools by default (28 with `--allow-exec`, which adds the
 //! command-running `speculate`), over a graph loaded at startup: graph navigation
 //! (`query_graph`, `get_node`, `get_source`, `get_neighbors`, `get_community`,
 //! `god_nodes`, `graph_stats`, `shortest_path`, `find_callers`, `find_callees`),
@@ -26,6 +26,7 @@
 
 mod http;
 mod prompts;
+mod search;
 pub mod session;
 mod source;
 pub use http::serve_http;
@@ -52,9 +53,9 @@ use synaptic_prs::{
     Status, SystemCommands,
 };
 use synaptic_query::{
-    affected_nodes, candidate_details, describe_node, explain, resolve_detailed, resolve_seed,
-    shortest_path, QueryIndex, Recency, RecencyMode, Resolution, ReverseImpactIndex, TraversalMode,
-    DEFAULT_AFFECTED_RELATIONS,
+    affected_including_members, candidate_details, describe_node, explain, is_type_like,
+    resolve_detailed, shortest_path, type_member_ids, AffectedHit, QueryIndex, Recency,
+    RecencyMode, Resolution, ReverseImpactIndex, TraversalMode, DEFAULT_AFFECTED_RELATIONS,
 };
 use synaptic_sandbox::{
     render_markdown as render_speculate_md, speculate, Change, SpeculateOptions,
@@ -142,6 +143,12 @@ pub struct Server {
     /// `source_root`, so the code-retrieval tools resolve a federated node under
     /// its own repo root from this map before falling back to `source_root`.
     repo_roots: HashMap<String, PathBuf>,
+    /// Per-repo content fingerprint (`tag -> short source_hash`) read from the
+    /// sibling `workspace-state.json` of a federated graph. Surfaced by
+    /// `list_repos` so an agent can see each member's extraction fingerprint and
+    /// detect per-repo drift; empty for a single-repo graph or when the state file
+    /// is absent.
+    repo_hashes: HashMap<String, String>,
     /// Whether the command-running `speculate` tool is exposed. OFF by default so
     /// the server stays strictly read-only; enabled only by an explicit operator
     /// opt-in (`serve --allow-exec`). When off, `speculate` is neither advertised
@@ -201,6 +208,33 @@ impl FreshenConfig {
     }
 }
 
+/// Read per-repo content fingerprints from the `workspace-state.json` sibling of
+/// a federated `graph.json` (`{ members: { <tag>: { source_hash } } }`). Returns
+/// `tag -> short (12-char) source_hash`. Empty for a single-repo graph, a missing
+/// or malformed state file, or no graph path. Best-effort: never fails a load.
+fn read_repo_hashes(graph_path: Option<&Path>) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let Some(dir) = graph_path.and_then(Path::parent) else {
+        return out;
+    };
+    let Ok(bytes) = std::fs::read(dir.join("workspace-state.json")) else {
+        return out;
+    };
+    let Ok(state) = serde_json::from_slice::<Value>(&bytes) else {
+        return out;
+    };
+    let Some(members) = state.get("members").and_then(Value::as_object) else {
+        return out;
+    };
+    for (tag, entry) in members {
+        if let Some(hash) = entry.get("source_hash").and_then(Value::as_str) {
+            let short: String = hash.chars().take(12).collect();
+            out.insert(tag.clone(), short);
+        }
+    }
+    out
+}
+
 fn reload_key_for(path: &Path) -> Option<(u64, u64)> {
     let meta = std::fs::metadata(path).ok()?;
     let mtime = meta
@@ -246,6 +280,11 @@ fn append_capped_sites(
     }
 }
 
+/// `(neighbor, relation, direction)` -> the distinct `(source_file,
+/// source_location)` call sites on the edges between a node and that neighbor.
+/// Populated by [`Server::edge_sites`] for the `show_sites` affordance.
+type SiteMap = HashMap<(NodeId, String, &'static str), Vec<(String, Option<String>)>>;
+
 /// Result of locating a node's source on disk for the code-retrieval tools.
 enum SourceLookup {
     /// A readable file inside the trusted root.
@@ -268,6 +307,7 @@ impl Server {
         let stats = graph_stats(&kg);
         let god_nodes_all = god_nodes(&kg, usize::MAX);
         let reload_key = graph_path.as_deref().and_then(reload_key_for);
+        let repo_hashes = read_repo_hashes(graph_path.as_deref());
         Server {
             kg,
             communities,
@@ -281,6 +321,7 @@ impl Server {
             log_path: query_log_path(),
             source_root: None,
             repo_roots: HashMap::new(),
+            repo_hashes,
             allow_exec: false,
             freshen: None,
             last_fresh_check: Mutex::new(None),
@@ -358,6 +399,99 @@ impl Server {
         }
     }
 
+    /// Pick the root a RAW path should be read from and the path relative to it.
+    /// Mirrors [`root_for_node`](Server::root_for_node) but for a path the caller
+    /// supplies directly (e.g. a `get_source` `file` argument or an edge's
+    /// `source_file`): a leading `tag/` that names a registered repo resolves
+    /// under that member's root, otherwise the single `source_root` is used.
+    fn root_for_path(&self, file: &str) -> Option<(PathBuf, String)> {
+        let norm = file.replace('\\', "/");
+        if let Some((tag, rest)) = norm.split_once('/') {
+            if let Some(root) = self.repo_roots.get(tag) {
+                return Some((root.clone(), rest.to_string()));
+            }
+        }
+        self.source_root.as_ref().map(|r| (r.clone(), norm))
+    }
+
+    /// Resolve a raw path to a real, in-jail file, or say why it could not be read.
+    fn locate_path(&self, file: &str) -> SourceLookup {
+        let Some((root, rel)) = self.root_for_path(file) else {
+            return SourceLookup::NotConfigured;
+        };
+        match source::resolve_in_root_detailed(&root, &rel) {
+            source::ResolveOutcome::Found(p) => SourceLookup::Found(p),
+            source::ResolveOutcome::Missing => SourceLookup::Missing { root },
+            source::ResolveOutcome::OutsideRoot => SourceLookup::Outside { root },
+        }
+    }
+
+    /// Read a single 1-based line from a jailed source file, trimmed and capped
+    /// for display. `None` if the file is unreadable/outside the jail or the line
+    /// is past the end -- callers fall back to showing just `file:line`.
+    fn read_source_line(&self, file: &str, line: usize) -> Option<String> {
+        let SourceLookup::Found(path) = self.locate_path(file) else {
+            return None;
+        };
+        let text = std::fs::read_to_string(path).ok()?;
+        let raw = text.lines().nth(line.saturating_sub(1))?;
+        let trimmed = raw.trim();
+        Some(if trimmed.chars().count() > 200 {
+            let mut s: String = trimmed.chars().take(200).collect();
+            s.push_str("...");
+            s
+        } else {
+            trimmed.to_string()
+        })
+    }
+
+    /// The call-site edges incident to `id`, keyed by `(neighbor, relation,
+    /// direction)` -> the distinct `(source_file, source_location)` sites. The
+    /// site lives in the CALLER's file: for an out-edge it is where `id` calls the
+    /// neighbor; for an in-edge it is where the neighbor calls `id`. Used by
+    /// `show_sites` to turn "A calls B" into "A calls B at file:line: <code>".
+    fn edge_sites(&self, id: &NodeId, into: &mut SiteMap) {
+        for e in self.kg.incident_edges(id) {
+            let (nb, dir): (NodeId, &'static str) = if &e.source == id && &e.target != id {
+                (e.target.clone(), "out")
+            } else if &e.target == id && &e.source != id {
+                (e.source.clone(), "in")
+            } else {
+                continue;
+            };
+            let v = into.entry((nb, e.relation.clone(), dir)).or_default();
+            let site = (e.source_file.clone(), e.source_location.clone());
+            if !v.contains(&site) {
+                v.push(site);
+            }
+        }
+    }
+
+    /// Render up to `cap` call sites as indented `at file:line: <code>` lines (the
+    /// code is read from the jail; absent a readable line, just `at file:line`).
+    fn render_sites(&self, sites: &[(String, Option<String>)], indent: &str, cap: usize) -> String {
+        let mut out = String::new();
+        for (file, loc) in sites.iter().take(cap) {
+            let line = loc.as_deref().and_then(source::parse_line_marker);
+            let rendered = match line {
+                Some(l) => match self.read_source_line(file, l) {
+                    Some(text) => {
+                        format!("at {}:{}: {}", sanitize_label(file), l, text)
+                    }
+                    None => format!("at {}:{}", sanitize_label(file), l),
+                },
+                None if !file.is_empty() => format!("at {}", sanitize_label(file)),
+                None => continue,
+            };
+            out.push_str(&format!("\n{indent}{rendered}"));
+        }
+        let extra = sites.len().saturating_sub(cap);
+        if extra > 0 {
+            out.push_str(&format!("\n{indent}... (+{extra} more site(s))"));
+        }
+        out
+    }
+
     /// Reload `graph.json` if it changed on disk since the last check.
     /// Best-effort: a missing/corrupt file keeps the current graph
     /// (serve-stale-on-error).
@@ -389,6 +523,7 @@ impl Server {
         self.affected_index = ReverseImpactIndex::build(&self.kg, DEFAULT_AFFECTED_RELATIONS);
         self.stats = graph_stats(&self.kg);
         self.god_nodes_all = god_nodes(&self.kg, usize::MAX);
+        self.repo_hashes = read_repo_hashes(self.graph_path.as_deref());
     }
 
     /// Cheap, read-lock-safe staleness gate for the catch-up path: debounced so a
@@ -501,6 +636,43 @@ impl Server {
 
     fn degree(&self, id: &NodeId) -> usize {
         self.kg.degree(id)
+    }
+
+    /// The type-container members of `id` when it is a class/struct/interface/...
+    /// node, else empty. Used to fold a type's members into reverse-impact so the
+    /// blast radius reflects the members' incoming calls (where a class's real
+    /// coupling lives), not just the bare type symbol.
+    fn type_members(&self, id: &NodeId) -> Vec<NodeId> {
+        match self.kg.node(id).and_then(|n| n.kind()) {
+            Some(k) if is_type_like(k) => type_member_ids(&self.kg, id),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Reverse-impact for `id`, folding a type's members in (shared with the CLI
+    /// `affected` command so both surfaces give a class the same non-empty blast
+    /// radius). Returns the hits and the member count (0 for a non-type node).
+    fn affected_for(&self, id: &NodeId, rels: &[&str], depth: usize) -> (Vec<AffectedHit>, usize) {
+        affected_including_members(&self.kg, id, rels, depth)
+    }
+
+    /// One-line note prepended to a type's reverse-impact / caller output,
+    /// explaining that the result is aggregated across the type and its members
+    /// (so an agent does not misread a class's impact as living on the bare
+    /// symbol). Empty when `member_count` is 0 (a non-type or member-less node).
+    fn class_fold_note(&self, id: &NodeId, seed: &str, member_count: usize) -> String {
+        if member_count == 0 {
+            return String::new();
+        }
+        let kind = self
+            .kg
+            .node(id)
+            .and_then(|n| n.kind())
+            .map(|k| k.as_str())
+            .unwrap_or("type");
+        format!(
+            "{seed} is a {kind} with {member_count} members; impact is aggregated across the {kind} and its members (a class's callers attach to its methods).\n"
+        )
     }
 
     // tools
@@ -789,6 +961,50 @@ impl Server {
         )
     }
 
+    /// Structured mirror of `get_node`: node metadata, or an explicit ambiguity /
+    /// not-found shape (matching describe_node / affected) so an agent parsing the
+    /// structured channel sees the same resolution outcome as the text instead of a
+    /// plain-text-only ambiguity message.
+    fn get_node_json(&self, label: &str) -> Value {
+        let id = match resolve_detailed(&self.kg, label) {
+            Resolution::Unique(id) => id,
+            Resolution::Ambiguous(ids) => {
+                return json!({
+                    "found": false,
+                    "ambiguous": true,
+                    "query": sanitize_label(label),
+                    "candidates": self.candidates_json(&ids)
+                });
+            }
+            Resolution::NotFound => {
+                return json!({ "found": false, "query": sanitize_label(label) });
+            }
+        };
+        let Some(n) = self.kg.node(&id) else {
+            return json!({ "found": false, "query": sanitize_label(label) });
+        };
+        let mut obj = serde_json::Map::new();
+        obj.insert("found".into(), json!(true));
+        obj.insert("id".into(), json!(sanitize_label(&n.id.0)));
+        obj.insert("label".into(), json!(sanitize_label(&n.label)));
+        obj.insert("source_file".into(), json!(sanitize_label(&n.source_file)));
+        obj.insert("file_type".into(), json!(file_type_str(&n.file_type)));
+        obj.insert("degree".into(), json!(self.degree(&id)));
+        if let Some(c) = n.community {
+            obj.insert("community".into(), json!(c));
+        }
+        if let Some(k) = n.kind() {
+            obj.insert("kind".into(), json!(k.as_str()));
+        }
+        if let Some(v) = n.visibility() {
+            obj.insert("visibility".into(), json!(v.as_str()));
+        }
+        if let Some(loc) = n.loc() {
+            obj.insert("loc".into(), json!(loc));
+        }
+        Value::Object(obj)
+    }
+
     /// `describe_node` — a compact "takes X, returns Y, calls Z" description of a
     /// symbol from its captured signature and outgoing call edges (graph-only, no
     /// source read). Built for feeding tool/function description generation.
@@ -812,13 +1028,49 @@ impl Server {
                 calls.join(", ")
             ));
         }
+        // For a type node, the "calls" are empty (a class doesn't call; its methods
+        // do). List its members so the description isn't just "class X".
+        let members = self.type_members(&id);
+        if !members.is_empty() {
+            let shown = members.len().min(40);
+            let names: Vec<String> = members[..shown]
+                .iter()
+                .map(|m| sanitize_label(&self.label_of(m)))
+                .collect();
+            let more = if members.len() > shown {
+                format!(", +{} more", members.len() - shown)
+            } else {
+                String::new()
+            };
+            out.push_str(&format!(
+                "\nMembers ({}): {}{}",
+                members.len(),
+                names.join(", "),
+                more
+            ));
+        }
         out
     }
 
-    /// Typed mirror of [`tool_describe_node`](Server::tool_describe_node).
+    /// Typed mirror of [`tool_describe_node`](Server::tool_describe_node). Resolves
+    /// through the unified resolver so an ambiguous name reports candidates (not a
+    /// silent pick), matching the text path.
     fn describe_node_json(&self, label: &str) -> Value {
-        let Some(d) = resolve_seed(&self.kg, label).and_then(|i| describe_node(&self.kg, &i))
-        else {
+        let id = match resolve_detailed(&self.kg, label) {
+            Resolution::Unique(id) => id,
+            Resolution::Ambiguous(ids) => {
+                return json!({
+                    "found": false,
+                    "ambiguous": true,
+                    "query": sanitize_label(label),
+                    "candidates": self.candidates_json(&ids)
+                });
+            }
+            Resolution::NotFound => {
+                return json!({ "found": false, "query": sanitize_label(label) });
+            }
+        };
+        let Some(d) = describe_node(&self.kg, &id) else {
             return json!({ "found": false, "query": sanitize_label(label) });
         };
         let mut obj = serde_json::Map::new();
@@ -836,6 +1088,17 @@ impl Server {
             "callees".into(),
             Value::Array(d.callees.iter().map(|c| json!(sanitize_label(c))).collect()),
         );
+        // A type node's members (its methods carry the calls, not the bare type).
+        let members = self.type_members(&id);
+        if !members.is_empty() {
+            let names: Vec<Value> = members
+                .iter()
+                .take(40)
+                .map(|m| json!(sanitize_label(&self.label_of(m))))
+                .collect();
+            obj.insert("members".into(), Value::Array(names));
+            obj.insert("member_count".into(), json!(members.len()));
+        }
         Value::Object(obj)
     }
 
@@ -844,7 +1107,22 @@ impl Server {
     /// at the node's recorded line (`source_location` = `"L<n>"`): it stops at the
     /// symbol's end line when the node carries a span (bounded by `context_lines`),
     /// otherwise returns `context_lines` lines from the start.
-    pub fn tool_get_source(&self, label: &str, context_lines: usize) -> String {
+    ///
+    /// When `file` is given instead of resolving a node, an arbitrary jailed
+    /// range of that file is returned: `lines` is `"start-end"` (or a single
+    /// `"start"`, read for `context_lines`). This reads a region that is not a
+    /// single symbol -- a config block, a span around a `search_text` hit -- and
+    /// is federation-routed by a leading `tag/` just like the node path.
+    pub fn tool_get_source(
+        &self,
+        label: &str,
+        file: Option<&str>,
+        lines: Option<&str>,
+        context_lines: usize,
+    ) -> String {
+        if let Some(file) = file {
+            return self.source_by_file(file, lines, context_lines);
+        }
         let id = match self.resolve_or_msg(label) {
             Ok(id) => id,
             Err(msg) => return msg,
@@ -911,8 +1189,257 @@ impl Server {
         out
     }
 
+    /// `get_source` for a raw `file` + optional `lines` range (the node-free
+    /// path). Same jail and federation routing as the node path.
+    fn source_by_file(&self, file: &str, lines: Option<&str>, context_lines: usize) -> String {
+        let window = context_lines.clamp(1, 400);
+        let path = match self.locate_path(file) {
+            SourceLookup::Found(p) => p,
+            SourceLookup::NotConfigured => {
+                return "Source not available: no source root is configured (the server was started without --source-root).".to_string();
+            }
+            SourceLookup::Missing { root } => {
+                return format!(
+                    "File not found under source-root {}.\n  wanted: {}",
+                    sanitize_label(&root.display().to_string()),
+                    sanitize_label(file)
+                );
+            }
+            SourceLookup::Outside { root } => {
+                return format!(
+                    "Path {} is outside the configured source-root and was refused.\n  source-root: {}",
+                    sanitize_label(file),
+                    sanitize_label(&root.display().to_string())
+                );
+            }
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return format!("Could not read {}.", sanitize_label(file));
+        };
+        let all: Vec<&str> = text.lines().collect();
+        // Parse `lines`: "start-end", a single "start" (read `window` lines), or
+        // the whole-file top when omitted.
+        let (start, end) = match lines {
+            Some(spec) => match parse_line_range(spec, window) {
+                Some(r) => r,
+                None => {
+                    return format!(
+                        "Invalid `lines` value '{}'. Use 'start-end' (e.g. '108-140') or a single line 'start'.",
+                        sanitize_label(spec)
+                    )
+                }
+            },
+            None => (1, window),
+        };
+        if start > all.len() {
+            return format!(
+                "{} has only {} line(s); requested line {start}.",
+                sanitize_label(file),
+                all.len()
+            );
+        }
+        let from = start.saturating_sub(1);
+        // Cap the span so a huge range cannot blow the response.
+        let to = end.min(from + 400).min(all.len()).max(from + 1);
+        let mut out = format!("{}:L{}-L{}\n", sanitize_label(file), from + 1, to);
+        for (i, line) in all[from..to].iter().enumerate() {
+            out.push_str(&format!("{:>5}  {}\n", from + 1 + i, line));
+        }
+        out
+    }
+
+    /// The roots `search_text` walks. With no `only`, that is every registered
+    /// federated repo root, or -- for a single-repo graph -- the lone
+    /// `--source-root`. A federated graph is searched per-member (never via the
+    /// parent `source_root`) so each hit carries the right tag and is not double
+    /// counted. `only` restricts to one member tag.
+    fn search_roots(&self, only: Option<&str>) -> Vec<search::Root> {
+        if let Some(tag) = only {
+            return self
+                .repo_roots
+                .get(tag)
+                .map(|p| {
+                    vec![search::Root {
+                        tag: Some(tag.to_string()),
+                        path: p.clone(),
+                    }]
+                })
+                .unwrap_or_default();
+        }
+        if self.repo_roots.is_empty() {
+            return self
+                .source_root
+                .iter()
+                .map(|p| search::Root {
+                    tag: None,
+                    path: p.clone(),
+                })
+                .collect();
+        }
+        self.repo_roots
+            .iter()
+            .map(|(tag, p)| search::Root {
+                tag: Some(tag.clone()),
+                path: p.clone(),
+            })
+            .collect()
+    }
+
+    /// `search_text` — content (text/regex) search over the source roots, with
+    /// every hit attributed to the graph node whose span encloses it. Computes
+    /// the text and the structured mirror from a SINGLE walk (the walk is the
+    /// cost), so the dispatcher renders both without searching twice.
+    fn search_text_dual(
+        &self,
+        pattern: &str,
+        literal: bool,
+        case_sensitive: bool,
+        repo: Option<&str>,
+        path_glob: Option<&str>,
+        max_results: usize,
+    ) -> (String, Value) {
+        let empty = |msg: String| {
+            (
+                msg,
+                json!({ "pattern": pattern, "total": 0, "truncated": false,
+                        "files_scanned": 0, "hits": [] }),
+            )
+        };
+        if pattern.is_empty() {
+            return empty("search_text needs a non-empty `pattern`.".to_string());
+        }
+        let roots = self.search_roots(repo);
+        if roots.is_empty() {
+            return empty(match repo {
+                Some(r) => format!(
+                    "No source root is registered for repo '{}'; serve the federated/global graph so its members' roots are known, or check the tag with list_repos.",
+                    sanitize_label(r)
+                ),
+                None => "Source search needs a source root; start the server with --source-root <repo> (or serve a federated graph so each member's root is registered).".to_string(),
+            });
+        }
+        let q = search::Query {
+            pattern,
+            literal,
+            case_sensitive,
+            path_glob,
+            max_results: max_results.clamp(1, 1000),
+            max_line_len: 300,
+        };
+        let outcome = match search::run(&roots, &q) {
+            Ok(o) => o,
+            Err(e) => return empty(format!("search_text: {}", sanitize_label(&e))),
+        };
+
+        // Bucket nodes by the files that actually matched, so attribution is one
+        // pass over the graph instead of a scan per hit.
+        let hit_files: std::collections::HashSet<&str> =
+            outcome.hits.iter().map(|h| h.graph_path.as_str()).collect();
+        let mut by_file: HashMap<&str, Vec<&Node>> = HashMap::new();
+        if !hit_files.is_empty() {
+            for n in self.kg.nodes() {
+                if hit_files.contains(n.source_file.as_str()) && n.span().is_some() {
+                    by_file.entry(n.source_file.as_str()).or_default().push(n);
+                }
+            }
+        }
+        // The innermost (smallest) span containing the line wins.
+        let enclosing = |file: &str, line: u64| -> Option<&Node> {
+            let l = line as u32;
+            by_file
+                .get(file)?
+                .iter()
+                .filter(|n| {
+                    n.span()
+                        .map(|s| s.start_line <= l && l <= s.end_line)
+                        .unwrap_or(false)
+                })
+                .min_by_key(|n| {
+                    let s = n.span().unwrap();
+                    s.end_line.saturating_sub(s.start_line)
+                })
+                .copied()
+        };
+
+        let total = outcome.hits.len();
+        let files: std::collections::BTreeSet<&str> =
+            outcome.hits.iter().map(|h| h.graph_path.as_str()).collect();
+        let mut text = if total == 0 {
+            format!(
+                "search_text \"{}\": no matches in {} file(s) searched.",
+                sanitize_label(pattern),
+                outcome.files_scanned
+            )
+        } else {
+            let note = if outcome.truncated {
+                format!(
+                    " (capped at {}; narrow the pattern or raise max_results)",
+                    q.max_results
+                )
+            } else {
+                String::new()
+            };
+            format!(
+                "search_text \"{}\" -- {} match(es) in {} file(s):{}",
+                sanitize_label(pattern),
+                total,
+                files.len(),
+                note
+            )
+        };
+
+        let mut hits_json = Vec::with_capacity(total);
+        for h in &outcome.hits {
+            let node = enclosing(&h.graph_path, h.line);
+            let attr = match node {
+                Some(n) => format!(
+                    "   [{} {}]",
+                    sanitize_label(&n.label),
+                    n.kind().map(|k| k.as_str()).unwrap_or("node")
+                ),
+                None => "   [no enclosing symbol]".to_string(),
+            };
+            text.push_str(&format!(
+                "\n  {}:{}:{}  {}{}",
+                sanitize_label(&h.graph_path),
+                h.line,
+                h.col,
+                h.line_text,
+                attr
+            ));
+            hits_json.push(json!({
+                "repo": h.repo,
+                "file": h.graph_path,
+                "line": h.line,
+                "col": h.col,
+                "match": h.matched,
+                "line_text": h.line_text,
+                "node": node.map(|n| json!({
+                    "id": n.id.0.as_str(),
+                    "label": n.label,
+                    "kind": n.kind().map(|k| k.as_str()),
+                    "community": n.community,
+                })),
+            }));
+        }
+
+        let structured = json!({
+            "pattern": pattern,
+            "total": total,
+            "truncated": outcome.truncated,
+            "files_scanned": outcome.files_scanned,
+            "hits": hits_json,
+        });
+        (text, structured)
+    }
+
     /// `get_neighbors` — in/out neighbours, optionally filtered by relation.
-    pub fn tool_get_neighbors(&self, label: &str, relation_filter: Option<&str>) -> String {
+    pub fn tool_get_neighbors(
+        &self,
+        label: &str,
+        relation_filter: Option<&str>,
+        show_sites: bool,
+    ) -> String {
         let id = match self.resolve_or_msg(label) {
             Ok(id) => id,
             Err(msg) => return msg,
@@ -922,6 +1449,13 @@ impl Server {
         };
         let seed = sanitize_label(&ex.label);
         let rel_filter = relation_filter.map(str::to_lowercase);
+        let sites: SiteMap = if show_sites {
+            let mut m = SiteMap::new();
+            self.edge_sites(&id, &mut m);
+            m
+        } else {
+            SiteMap::new()
+        };
         // Tally every relation on the node so a filter that excludes everything can
         // still report what the node DOES have. Only needed on the filtered path:
         // with no filter, an empty result means the node simply has no neighbors.
@@ -946,6 +1480,13 @@ impl Server {
                 sanitize_label(&nb.label),
                 sanitize_label(&nb.relation)
             ));
+            if show_sites {
+                if let Some(site_list) =
+                    sites.get(&(nb.id.clone(), nb.relation.clone(), nb.direction))
+                {
+                    body.push_str(&self.render_sites(site_list, "        ", 3));
+                }
+            }
         }
         if shown == 0 {
             // Distinguish "node exists but no edge matched the filter" from "no
@@ -1074,10 +1615,12 @@ impl Server {
         if rows.is_empty() {
             return "No nodes.".to_string();
         }
-        let mut out = String::from("God nodes:");
+        let mut out = String::from(
+            "God nodes: most-connected hubs by total degree. Degree counts ALL edges incl. a class's members, so it is structural centrality/size, not an incoming-dependence count -- use `affected` for blast radius.",
+        );
         for (i, g) in rows.iter().enumerate() {
             out.push_str(&format!(
-                "\n  {}. {} - {} edges, {} test(s)",
+                "\n  {}. {} - {} connections, {} test(s)",
                 start + i + 1,
                 sanitize_label(&g.label),
                 g.degree,
@@ -1166,10 +1709,18 @@ impl Server {
         }
         let mut out = format!("Repos ({}):", counts.len());
         for (repo, (n, ed)) in &counts {
+            let fresh = self
+                .repo_hashes
+                .get(*repo)
+                .map(|h| format!(", src {h}"))
+                .unwrap_or_default();
             out.push_str(&format!(
-                "\n  {} - {n} nodes, {ed} edges",
+                "\n  {} - {n} nodes, {ed} edges{fresh}",
                 sanitize_label(repo)
             ));
+        }
+        if !self.repo_hashes.is_empty() {
+            out.push_str("\n(src = per-repo source fingerprint from workspace-state.json; changes when that repo's sources change.)");
         }
         out
     }
@@ -1195,7 +1746,16 @@ impl Server {
         }
         let repos: Vec<Value> = counts
             .into_iter()
-            .map(|(repo, (nodes, edges))| json!({ "repo": repo, "nodes": nodes, "edges": edges }))
+            .map(|(repo, (nodes, edges))| {
+                let mut obj = serde_json::Map::new();
+                obj.insert("repo".into(), json!(repo));
+                obj.insert("nodes".into(), json!(nodes));
+                obj.insert("edges".into(), json!(edges));
+                if let Some(h) = self.repo_hashes.get(repo) {
+                    obj.insert("source_hash".into(), json!(h));
+                }
+                Value::Object(obj)
+            })
             .collect();
         json!({ "repos": repos })
     }
@@ -1260,13 +1820,25 @@ impl Server {
     }
 
     /// `find_callers` — who calls/uses this node (incoming call-like edges).
-    pub fn tool_find_callers(&self, label: &str, limit: usize, verbose: bool) -> String {
-        self.directional("Callers", label, "in", limit, verbose)
+    pub fn tool_find_callers(
+        &self,
+        label: &str,
+        limit: usize,
+        verbose: bool,
+        show_sites: bool,
+    ) -> String {
+        self.directional("Callers", label, "in", limit, verbose, show_sites)
     }
 
     /// `find_callees` — what this node calls/uses (outgoing call-like edges).
-    pub fn tool_find_callees(&self, label: &str, limit: usize, verbose: bool) -> String {
-        self.directional("Callees", label, "out", limit, verbose)
+    pub fn tool_find_callees(
+        &self,
+        label: &str,
+        limit: usize,
+        verbose: bool,
+        show_sites: bool,
+    ) -> String {
+        self.directional("Callees", label, "out", limit, verbose, show_sites)
     }
 
     fn directional(
@@ -1276,31 +1848,73 @@ impl Server {
         dir: &str,
         limit: usize,
         verbose: bool,
+        show_sites: bool,
     ) -> String {
         let id = match self.resolve_or_msg(label) {
             Ok(id) => id,
             Err(msg) => return msg,
         };
-        let Some(ex) = explain(&self.kg, &id) else {
+        if self.kg.node(&id).is_none() {
             return format!("No node matches '{}'.", sanitize_label(label));
-        };
-        // Collect the call-like neighbors in the requested direction, plus a
-        // per-relation tally for the summary header.
-        let mut hits: Vec<(&str, &str)> = Vec::new();
-        let mut by_rel: BTreeMap<&str, usize> = BTreeMap::new();
-        for nb in &ex.neighbors {
-            let rel = nb.relation.to_lowercase();
-            let call_like =
-                rel.contains("call") || rel.contains("use") || rel.contains("reference");
-            if nb.direction == dir && call_like {
-                hits.push((&nb.label, &nb.relation));
-                *by_rel.entry(nb.relation.as_str()).or_default() += 1;
+        }
+        let seed = sanitize_label(&self.label_of(&id));
+        // For a type node, fold its members in: a class's callers/callees attach
+        // to its methods, not the bare type symbol. The focus set (type + members)
+        // is excluded from results so we list EXTERNAL callers/callees, not the
+        // class's own internal structure.
+        let members = self.type_members(&id);
+        let note = self.class_fold_note(&id, &seed, members.len());
+        let mut focus: Vec<NodeId> = Vec::with_capacity(members.len() + 1);
+        focus.push(id.clone());
+        focus.extend(members.iter().cloned());
+        let focus_set: std::collections::HashSet<&NodeId> = focus.iter().collect();
+        // Collect call-like neighbors in the requested direction across the focus
+        // set, deduped by (neighbor, relation) so a node reached via several
+        // members appears once per relation. Owned strings since each focus node's
+        // `explain` is a separate borrow.
+        let mut seen: std::collections::HashSet<(NodeId, String)> =
+            std::collections::HashSet::new();
+        // The neighbor id is only needed to look up its call sites, so it is
+        // cloned only when show_sites is on -- the default path pays nothing extra.
+        let mut hits: Vec<(Option<NodeId>, String, String)> = Vec::new();
+        let mut by_rel: BTreeMap<String, usize> = BTreeMap::new();
+        for f in &focus {
+            let Some(ex) = explain(&self.kg, f) else {
+                continue;
+            };
+            for nb in &ex.neighbors {
+                let rel = nb.relation.to_lowercase();
+                let call_like =
+                    rel.contains("call") || rel.contains("use") || rel.contains("reference");
+                if nb.direction != dir || !call_like || focus_set.contains(&nb.id) {
+                    continue;
+                }
+                if !seen.insert((nb.id.clone(), nb.relation.clone())) {
+                    continue;
+                }
+                *by_rel.entry(nb.relation.clone()).or_default() += 1;
+                hits.push((
+                    show_sites.then(|| nb.id.clone()),
+                    nb.label.clone(),
+                    nb.relation.clone(),
+                ));
             }
         }
-        let seed = sanitize_label(&ex.label);
         if hits.is_empty() {
-            return format!("{title} of {seed}:\n  (none)");
+            return format!("{note}{title} of {seed}:\n  (none)");
         }
+        // For show_sites, gather the call sites on every focus node's edges once,
+        // keyed by (neighbor, relation, direction), so each row can show where the
+        // call actually happens.
+        let sites: SiteMap = if show_sites {
+            let mut m = SiteMap::new();
+            for f in &focus {
+                self.edge_sites(f, &mut m);
+            }
+            m
+        } else {
+            SiteMap::new()
+        };
         // Per-relation breakdown only when it adds information (>1 kind), mirroring
         // affected's per-depth breakdown.
         let breakdown = if by_rel.len() > 1 {
@@ -1316,13 +1930,18 @@ impl Server {
         // Top-N by default; verbose dumps all. Mirrors `affected`.
         let cap = if verbose { usize::MAX } else { limit.max(1) };
         let total = hits.len();
-        let mut out = format!("{total} {title} of {seed}{breakdown}:");
-        for (lbl, rel) in hits.iter().take(cap) {
+        let mut out = format!("{note}{total} {title} of {seed}{breakdown}:");
+        for (nid, lbl, rel) in hits.iter().take(cap) {
             out.push_str(&format!(
                 "\n  {} [{}]",
                 sanitize_label(lbl),
                 sanitize_label(rel)
             ));
+            if let Some(nid) = nid {
+                if let Some(site_list) = sites.get(&(nid.clone(), rel.clone(), dir)) {
+                    out.push_str(&self.render_sites(site_list, "      ", 3));
+                }
+            }
         }
         if total > cap {
             out.push_str(&format!(
@@ -1354,10 +1973,11 @@ impl Server {
             relations.iter().map(String::as_str).collect()
         };
         let depth = depth.clamp(1, 16);
-        let hits = affected_nodes(&self.kg, &id, &rels, depth);
+        let (hits, member_count) = self.affected_for(&id, &rels, depth);
         let seed = sanitize_label(&self.label_of(&id));
+        let note = self.class_fold_note(&id, &seed, member_count);
         if hits.is_empty() {
-            return format!("Nothing depends on {seed} within {depth} hops.");
+            return format!("{note}Nothing depends on {seed} within {depth} hops.");
         }
         // Per-depth breakdown so a hub's blast radius is summarized even when the
         // entry list is truncated.
@@ -1373,7 +1993,7 @@ impl Server {
         // Top-N by default (hits are ordered shallowest-first); verbose dumps all.
         let cap = if verbose { usize::MAX } else { limit.max(1) };
         let mut out = format!(
-            "{} nodes depend on {seed} (<= {depth} hops) [{breakdown}]:",
+            "{note}{} nodes depend on {seed} (<= {depth} hops) [{breakdown}]:",
             hits.len()
         );
         for h in hits.iter().take(cap) {
@@ -2025,15 +2645,42 @@ impl Server {
         limit: usize,
         verbose: bool,
     ) -> Value {
-        let Some(id) = resolve_seed(&self.kg, label) else {
-            return json!({ "seed": sanitize_label(label), "affected": [], "total": 0, "truncated": false });
+        // Resolve through the SAME unified resolver as the text path, so the
+        // structured channel never silently picks one of several candidates and
+        // returns a misleading empty/total:0 (which reads as "nothing depends on
+        // it"). Ambiguity / not-found are reported explicitly instead.
+        let id = match resolve_detailed(&self.kg, label) {
+            Resolution::Unique(id) => id,
+            Resolution::Ambiguous(ids) => {
+                return json!({
+                    "seed": sanitize_label(label),
+                    "resolved": false,
+                    "ambiguous": true,
+                    "candidates": self.candidates_json(&ids),
+                    "affected": [],
+                    "total": 0,
+                    "truncated": false
+                });
+            }
+            Resolution::NotFound => {
+                return json!({
+                    "seed": sanitize_label(label),
+                    "resolved": false,
+                    "found": false,
+                    "affected": [],
+                    "total": 0,
+                    "truncated": false
+                });
+            }
         };
         let rels: Vec<&str> = if relations.is_empty() {
             DEFAULT_AFFECTED_RELATIONS.to_vec()
         } else {
             relations.iter().map(String::as_str).collect()
         };
-        let hits = affected_nodes(&self.kg, &id, &rels, depth.clamp(1, 16));
+        // Fold a type's members in (mirrors the text path) so the structured blast
+        // radius for a class is not a misleading zero.
+        let (hits, member_count) = self.affected_for(&id, &rels, depth.clamp(1, 16));
         let total = hits.len();
         let cap = if verbose { usize::MAX } else { limit.max(1) };
         let mut by_depth: serde_json::Map<String, Value> = serde_json::Map::new();
@@ -2053,13 +2700,29 @@ impl Server {
                 })
             })
             .collect();
-        json!({
-            "seed": sanitize_label(&self.label_of(&id)),
-            "affected": arr,
-            "total": total,
-            "truncated": total > cap,
-            "by_depth": Value::Object(by_depth)
-        })
+        let mut obj = serde_json::Map::new();
+        obj.insert("seed".into(), json!(sanitize_label(&self.label_of(&id))));
+        obj.insert("resolved".into(), json!(true));
+        obj.insert("affected".into(), Value::Array(arr));
+        obj.insert("total".into(), json!(total));
+        obj.insert("truncated".into(), json!(total > cap));
+        obj.insert("by_depth".into(), Value::Object(by_depth));
+        if member_count > 0 {
+            obj.insert("aggregated_over_members".into(), json!(member_count));
+        }
+        Value::Object(obj)
+    }
+
+    /// Candidate list for an ambiguous structured resolution: `[{id, file,
+    /// degree}]`, capped like the text path. Lets an agent reading only the
+    /// structured channel disambiguate without a `get_node` round-trip.
+    fn candidates_json(&self, ids: &[NodeId]) -> Value {
+        let shown = ids.len().min(10);
+        let arr: Vec<Value> = candidate_details(&self.kg, &ids[..shown])
+            .iter()
+            .map(|c| json!({ "id": c.id.0, "file": c.file, "degree": c.degree }))
+            .collect();
+        Value::Array(arr)
     }
 
     /// Typed mirror of [`tool_structural_search`](Server::tool_structural_search):
@@ -2529,6 +3192,24 @@ impl Server {
             }));
         }
 
+        // search_text renders text + structuredContent from a SINGLE content
+        // walk (the walk is the cost), so both shapes share one search.
+        if name == "search_text" {
+            let (text, structured) = self.search_text_dual(
+                &s("pattern"),
+                b("literal"),
+                b("case_sensitive"),
+                opt("repo"),
+                opt("path_glob"),
+                u("max_results", 100) as usize,
+            );
+            return Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": structured,
+                "isError": false
+            }));
+        }
+
         // The only command-running tool. Gated: it is advertised in tools/list and
         // runnable ONLY when the operator started the server with --allow-exec.
         if name == "speculate" {
@@ -2661,10 +3342,15 @@ impl Server {
 
         let text = match name {
             "get_node" => self.tool_get_node(&s("label")),
-            "get_source" => self.tool_get_source(&s("label"), u("context_lines", 40) as usize),
+            "get_source" => self.tool_get_source(
+                &s("label"),
+                opt("file"),
+                opt("lines"),
+                u("context_lines", 40) as usize,
+            ),
             "get_neighbors" => {
                 let rf = args.get("relation_filter").and_then(Value::as_str);
-                self.tool_get_neighbors(&s("label"), rf)
+                self.tool_get_neighbors(&s("label"), rf, b("show_sites"))
             }
             "get_community" => self.tool_get_community(
                 u("community_id", 0) as u32,
@@ -2695,12 +3381,18 @@ impl Server {
                     b("verbose"),
                 )
             }
-            "find_callers" => {
-                self.tool_find_callers(&s("label"), u("limit", 50) as usize, b("verbose"))
-            }
-            "find_callees" => {
-                self.tool_find_callees(&s("label"), u("limit", 50) as usize, b("verbose"))
-            }
+            "find_callers" => self.tool_find_callers(
+                &s("label"),
+                u("limit", 50) as usize,
+                b("verbose"),
+                b("show_sites"),
+            ),
+            "find_callees" => self.tool_find_callees(
+                &s("label"),
+                u("limit", 50) as usize,
+                b("verbose"),
+                b("show_sites"),
+            ),
             "list_prs" => self.tool_list_prs(opt("base"), opt("repo")),
             "get_pr_impact" => self.tool_get_pr_impact(u("pr_number", 0), opt("repo")),
             "triage_prs" => self.tool_triage_prs(opt("base"), opt("repo")),
@@ -2770,6 +3462,7 @@ impl Server {
                 u("limit", 50) as usize,
             )),
             "describe_node" => Some(self.describe_node_json(&s("label"))),
+            "get_node" => Some(self.get_node_json(&s("label"))),
             "get_neighbors" => Some(self.get_neighbors_json(
                 &s("label"),
                 args.get("relation_filter").and_then(Value::as_str),
@@ -2894,6 +3587,14 @@ impl Server {
 fn communities_of(kg: &KnowledgeGraph) -> BTreeMap<u32, Vec<NodeId>> {
     let mut communities: BTreeMap<u32, Vec<NodeId>> = BTreeMap::new();
     for n in kg.nodes() {
+        // A community lists the real code symbols that belong to a subsystem. Skip
+        // nodes that carry a community label from clustering but are not subsystem
+        // members: external stubs (import targets / third-party packages with no
+        // source file) and non-code-symbol nodes (rationale TODO/NOTE comments,
+        // markdown headings, config keys). Listing those is noise.
+        if n.is_external_stub() || !n.is_code_symbol() {
+            continue;
+        }
         if let Some(c) = n.community {
             communities.entry(c).or_default().push(n.id.clone());
         }
@@ -2948,6 +3649,28 @@ fn file_type_str(ft: &synaptic_core::FileType) -> &'static str {
         Image => "image",
         Rationale => "rationale",
         Concept => "concept",
+    }
+}
+
+/// Parse a `get_source` `lines` value into a 1-based inclusive `(start, end)`.
+/// `"108-140"` -> `(108, 140)`; a single `"108"` -> `(108, 108 + window - 1)` so
+/// a bare line number reads a `context_lines` window. `None` for malformed input
+/// or an end before the start.
+fn parse_line_range(spec: &str, window: usize) -> Option<(usize, usize)> {
+    let spec = spec.trim();
+    if let Some((a, b)) = spec.split_once('-') {
+        let start = a.trim().parse::<usize>().ok()?;
+        let end = b.trim().parse::<usize>().ok()?;
+        if start == 0 || end < start {
+            return None;
+        }
+        Some((start, end))
+    } else {
+        let start = spec.parse::<usize>().ok()?;
+        if start == 0 {
+            return None;
+        }
+        Some((start, start + window.saturating_sub(1)))
     }
 }
 
@@ -3065,10 +3788,18 @@ make no code edits. Query the graph before grepping or reading files broadly; it
 faster and surfaces structure (callers, callees, impact).\n\
 \n\
 Recommended flow: call graph_stats or god_nodes to orient, query_graph for a question \
-(returns a relevant subgraph), then get_source to read a symbol's actual code, \
-get_neighbors / find_callers / find_callees / shortest_path to navigate, and get_node \
-for detail. For change impact, affected gives the blast radius of editing a symbol and \
-working_changes_impact does the same for your current git diff. Before editing a symbol \
+(returns a relevant subgraph), then get_source to read a symbol's actual code (or pass \
+get_source a `file` + `lines` range to read an arbitrary region, e.g. the lines around a \
+search_text hit), get_neighbors / find_callers / find_callees / shortest_path to navigate, \
+and get_node for detail. find_callers / find_callees / get_neighbors take show_sites=true \
+to print the exact source line of each call/reference site ('at file:line: <code>') -- so \
+the graph's 'A calls B' becomes 'A calls B at this line', no second read needed. For change \
+impact, affected gives the blast radius of editing a symbol and \
+working_changes_impact does the same for your current git diff. A class/type's callers \
+attach to its methods, not the bare type symbol, so affected / find_callers / find_callees \
+on a class automatically fold in its members and label the result as aggregated -- a \
+class never reads as a safe leaf just because nothing references the type name directly. \
+Before editing a symbol \
 other code depends on, forecast the change: predict_impact gives the blast radius plus \
 the public APIs and tests at risk, affected_tests lists the tests to run, and \
 predict_edit says what a delete / signature / visibility change breaks. To confirm a \
@@ -3076,6 +3807,10 @@ forecast by actually running the at-risk tests, restart the server with --allow-
 enable the speculate tool (off by default, since it executes commands and so is not \
 read-only). structural_search \
 runs a SYNQL query or a named pattern (matches on kind / loc / fan-in-out, not text); \
+for text-shaped things the graph does not model -- string literals, config values, log \
+messages, a TODO's wording, error strings -- use search_text, a regex/literal content \
+search over the source that attributes every hit to the enclosing symbol, so you can \
+pivot from a matched line straight to affected / find_callers on that node; \
 describe_node summarizes a symbol's shape; time_travel_diff reports how the architecture \
 changed between two git revisions (added/removed dependencies, removed APIs, drift, new \
 cycles, hotspots); plan_rename produces a plan-only, confidence-scored rename. For \
@@ -3093,8 +3828,19 @@ get_node, get_source, get_neighbors, describe_node, find_callers, find_callees, 
 shortest_path, affected, and predict_edit. If a name is still ambiguous, the error \
 lists each candidate's id, file, and degree so you can pick one without another call.\n\
 \n\
-Terms: a 'god node' is a high-degree hub (structurally central); a 'community' is a \
-cluster of densely-connected nodes (roughly a module); edge confidence is EXTRACTED \
+Coverage limits: the graph is built from static structure, so call edges added at \
+runtime are not all captured. Electron IPC (ipcMain/ipcRenderer) and WebSocket/socket.io \
+message channels ARE modelled (a sender and its handler meet on an ipc/ws channel node), \
+so those cross-process calls connect; but a handler invoked only via a custom event bus, \
+a runtime-built dispatch table, or reflection can still show 0 callers even though it is \
+reached at runtime -- treat a surprising 0-caller result on a dispatched handler as 'no \
+STATIC caller', not 'dead code'. Inline unit tests defined next to the code under test \
+may likewise not be linked.\n\
+\n\
+Terms: a 'god node' is a high-degree hub (structurally central -- degree counts all \
+connections incl. a class's members, so it measures size/centrality, not how many things \
+depend on the symbol; use affected for that); a 'community' is a cluster of \
+densely-connected nodes (roughly a module); edge confidence is EXTRACTED \
 (observed in code), INFERRED, or AMBIGUOUS.";
 
 /// The MCP `tools/list` payload. Descriptions and per-parameter docs make the
@@ -3127,14 +3873,25 @@ fn tools_list(allow_exec: bool) -> Value {
             }, "required": ["nodes", "edges"] }
         },
         { "name": "get_node", "description": "Show one node's metadata: type, source file, community, degree, plus kind (class/function/method/etc.), visibility, and LOC when available. Use after query_graph to inspect a specific symbol.",
-          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name (e.g. 'login_user', 'AuthService'); resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." } }, "required": ["label"] } },
-        { "name": "get_source", "description": "Return the actual source code for a symbol (the lines at its location), so you do not have to open the file. Use after query_graph or get_node to read a function or class body directly. In a federated/global graph it reads each member repo from its own source root; if a file cannot be read the message names the configured source-root and whether the path was missing or outside it.",
+          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name (e.g. 'login_user', 'AuthService'); resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." } }, "required": ["label"] },
+          "outputSchema": { "type": "object", "properties": {
+              "found": {"type":"boolean"},
+              "id": {"type":"string"}, "label": {"type":"string"}, "source_file": {"type":"string"},
+              "file_type": {"type":"string"}, "degree": {"type":"integer"}, "community": {"type":"integer"},
+              "kind": {"type":"string"}, "visibility": {"type":"string"}, "loc": {"type":"integer"},
+              "ambiguous": {"type":"boolean"}, "query": {"type":"string"},
+              "candidates": { "type": "array", "items": { "type": "object", "properties": {
+                  "id": {"type":"string"}, "file": {"type":"string"}, "degree": {"type":"integer"} } }, "description":"Disambiguation candidates when the name is ambiguous (found=false)." }
+          }, "required": ["found"] } },
+        { "name": "get_source", "description": "Return the actual source code for a symbol (the lines at its location), so you do not have to open the file. Use after query_graph or get_node to read a function or class body directly. Alternatively pass `file` (with an optional `lines` range) to read an ARBITRARY region that is not a single symbol -- a config block, or the lines around a search_text hit. In a federated/global graph it reads each member repo from its own source root (a leading 'tag/' on `file` selects the member); if a file cannot be read the message names the configured source-root and whether the path was missing or outside it.",
           "inputSchema": { "type": "object", "properties": {
-              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." },
-              "context_lines": { "type": "integer", "description": "How many lines to return from the symbol start (default 40, max 400)." }
-          }, "required": ["label"] } },
+              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts'). Omit when using `file`." },
+              "file": { "type": "string", "description": "Read this file directly instead of resolving a symbol. Repo-relative, or 'tag/path' in a federated graph (the tag from list_repos). Pair with `lines` for a range." },
+              "lines": { "type": "string", "description": "With `file`: the range to read, 'start-end' (e.g. '108-140') or a single 'start' (reads context_lines from there). Ignored without `file`." },
+              "context_lines": { "type": "integer", "description": "Lines to return from the symbol/line start (default 40, max 400)." }
+          }, "required": [] } },
         { "name": "get_neighbors", "description": "List a node's directly connected nodes and the relation on each edge. Answers 'what does X call/use' and 'what calls X'.",
-          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." }, "relation_filter": { "type": "string", "description": "Optional: keep only this edge relation (substring match). Common relations: calls, imports, inherits, implements, references, contains, depends_on. If nothing matches, the result names the relations the node does have, so an empty list is not mistaken for a missing node." } }, "required": ["label"] },
+          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." }, "relation_filter": { "type": "string", "description": "Optional: keep only this edge relation (substring match). Common relations: calls, imports, inherits, implements, references, contains, depends_on. If nothing matches, the result names the relations the node does have, so an empty list is not mistaken for a missing node." }, "show_sites": { "type": "boolean", "description": "Append the actual source line of each edge's call/reference site ('at file:line: <code>') under the neighbor, read from the jail. Default false. Enriches the text view; the structured mirror is unchanged." } }, "required": ["label"] },
           "outputSchema": { "type": "object", "properties": {
               "seed": {"type":"string"},
               "neighbors": { "type": "array", "items": { "type": "object", "properties": {
@@ -3147,14 +3904,14 @@ fn tools_list(allow_exec: bool) -> Value {
               "offset": { "type": "integer", "description": "Members to skip before the page (default 0). Raise it to page through a large community." },
               "limit": { "type": "integer", "description": "Max members to return in this page (default 100)." }
           }, "required": ["community_id"] } },
-        { "name": "god_nodes", "description": "The most-connected nodes ('god nodes' = high-degree hubs, the structurally central symbols). Use to orient in an unfamiliar codebase. Each hub is annotated with how many tests transitively exercise it, so an untested hub (0 tests) is flagged for what it is: high blast radius, no safety net.",
+        { "name": "god_nodes", "description": "The most-connected nodes ('god nodes' = high-degree hubs, the structurally central symbols). Use to orient in an unfamiliar codebase. `degree` is TOTAL connections (all edge kinds, including a class's member edges), so it measures structural centrality/size, NOT how many things depend on a symbol -- a high-degree class can still have few incoming dependents; use `affected` for blast radius. Each hub is annotated with how many tests transitively exercise it, so an untested hub (0 tests) is flagged for what it is: high blast radius, no safety net.",
           "inputSchema": { "type": "object", "properties": {
               "top_n": { "type": "integer", "description": "How many hubs to return (default 10)." },
               "offset": { "type": "integer", "description": "Hubs to skip before the page (default 0), for paging past the top ranks." }
           } },
           "outputSchema": { "type": "object", "properties": {
               "god_nodes": { "type": "array", "items": { "type": "object", "properties": {
-                  "label": {"type":"string"}, "degree": {"type":"integer"}, "id": {"type":"string"},
+                  "label": {"type":"string"}, "degree": {"type":"integer", "description": "Total connections (all edge kinds, incl. class members): structural centrality/size, not an incoming-dependence count."}, "id": {"type":"string"},
                   "test_count": {"type":"integer", "description": "How many tests transitively exercise this hub; 0 flags an untested high-blast-radius symbol."} } } }
           }, "required": ["god_nodes"] } },
         { "name": "graph_stats", "description": "Graph size and health: node/edge/community counts and the EXTRACTED/INFERRED/AMBIGUOUS edge-confidence breakdown. On a federated (multi-repo) graph it also reports how many edges span repositories (`cross_repo`) and how many of those are cross-language coupling (`cross_language`: HTTP/RPC/FFI/WebSocket boundaries). Good first call to confirm a graph is loaded and how large it is.",
@@ -3164,17 +3921,18 @@ fn tools_list(allow_exec: bool) -> Value {
               "extracted": {"type":"integer"}, "inferred": {"type":"integer"}, "ambiguous": {"type":"integer"},
               "cross_repo": {"type":"integer"}, "cross_language": {"type":"integer"}
           }, "required": ["nodes","edges","communities"] } },
-        { "name": "list_repos", "description": "For a federated (multi-repo) graph, list member repos (tags) with node/edge counts; empty for a single repo. Use before scoping a query to one repo.",
+        { "name": "list_repos", "description": "For a federated (multi-repo) graph, list member repos (tags) with node/edge counts; empty for a single repo. Use before scoping a query to one repo. Each repo also carries a `source_hash` (a content fingerprint of that member's sources from the last extraction) when available, so per-repo drift is visible: a member whose code changed since this graph was built keeps its old hash until re-extraction.",
           "inputSchema": { "type": "object", "properties": {} },
           "outputSchema": { "type": "object", "properties": {
               "repos": { "type": "array", "items": { "type": "object", "properties": {
-                  "repo": {"type":"string"}, "nodes": {"type":"integer"}, "edges": {"type":"integer"} } } }
+                  "repo": {"type":"string"}, "nodes": {"type":"integer"}, "edges": {"type":"integer"},
+                  "source_hash": {"type":"string", "description": "Per-repo source fingerprint from workspace-state.json; present only for a federated graph with that state file."} } } }
           }, "required": ["repos"] } },
         { "name": "repo_stats", "description": "Node/edge counts for one federated member repo.",
           "inputSchema": { "type": "object", "properties": { "repo": { "type": "string", "description": "Repo tag, as listed by list_repos." } }, "required": ["repo"] } },
         { "name": "shortest_path", "description": "Shortest path between two nodes, showing the chain of relations. Answers 'how does A reach B' or 'is X connected to Y'.",
           "inputSchema": { "type": "object", "properties": { "source": { "type": "string", "description": "Start node: label, id, or bare name. If shared by several files, qualify as 'name@file-substring' (e.g. 'announce@core/foo.ts')." }, "target": { "type": "string", "description": "End node: label, id, or bare name. If shared by several files, qualify as 'name@file-substring' (e.g. 'announce@core/foo.ts')." }, "max_hops": { "type": "integer", "description": "Optional cap on path length in hops (default 8)." } }, "required": ["source", "target"] } },
-        { "name": "affected", "description": "Reverse-impact: the nodes that transitively depend on a symbol, i.e. what could break if you change it. Walks calls/imports/inheritance edges plus cross-language coupling (subprocess `invokes`, FFI `binds_native`, HTTP/gRPC `calls_service`/`handled_by`) backward, so the blast radius spans language boundaries. Answers 'what is the blast radius of changing X'.",
+        { "name": "affected", "description": "Reverse-impact: the nodes that transitively depend on a symbol, i.e. what could break if you change it. Walks calls/imports/inheritance edges plus cross-language coupling (subprocess `invokes`, FFI `binds_native`, HTTP/gRPC `calls_service`/`handled_by`) backward, so the blast radius spans language boundaries. Answers 'what is the blast radius of changing X'. When the target is a class/type, its members are folded in (a class's callers attach to its methods, not the bare type symbol) and the result is labelled as aggregated, so a class is never a false 'safe to change'. Note: only STATIC edges are walked -- a dependent reached purely via runtime dispatch (IPC/WebSocket/event bus/reflection) won't appear.",
           "inputSchema": { "type": "object", "properties": {
               "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." },
               "depth": { "type": "integer", "description": "Max hops to walk backward (default 3, max 16)." },
@@ -3187,19 +3945,26 @@ fn tools_list(allow_exec: bool) -> Value {
               "affected": { "type": "array", "items": { "type": "object", "properties": {
                   "label": {"type":"string"}, "depth": {"type":"integer"}, "via_relation": {"type":"string"} } } },
               "total": {"type":"integer"}, "truncated": {"type":"boolean"},
-              "by_depth": { "type": "object", "additionalProperties": {"type":"integer"} }
+              "by_depth": { "type": "object", "additionalProperties": {"type":"integer"} },
+              "resolved": {"type":"boolean", "description":"false when the name did not resolve to a single node; see ambiguous/candidates."},
+              "ambiguous": {"type":"boolean"},
+              "candidates": { "type": "array", "items": { "type": "object", "properties": {
+                  "id": {"type":"string"}, "file": {"type":"string"}, "degree": {"type":"integer"} } }, "description":"Disambiguation candidates when ambiguous." },
+              "aggregated_over_members": {"type":"integer", "description":"When the seed is a class/type, the number of members folded into the reverse-impact (impact attaches to a class's methods, not the bare symbol)."}
           }, "required": ["seed","affected"] } },
-        { "name": "find_callers", "description": "List the nodes that call, use, or reference this symbol (incoming edges only). Answers 'who calls X'. The count and a per-relation breakdown are always in the header; the list is capped with a '+N more' summary on a hub.",
+        { "name": "find_callers", "description": "List the nodes that call, use, or reference this symbol (incoming edges only). Answers 'who calls X'. The count and a per-relation breakdown are always in the header; the list is capped with a '+N more' summary on a hub. For a class/type, the external callers of its methods are folded in (a class's callers attach to its methods) and labelled. Only STATIC callers are seen -- a handler invoked via IPC/WebSocket/reflection can show 0 callers yet still run.",
           "inputSchema": { "type": "object", "properties": {
               "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." },
               "limit": { "type": "integer", "description": "Max callers listed before a '+N more' summary (default 50). Ignored when verbose=true." },
-              "verbose": { "type": "boolean", "description": "Emit the full, uncapped caller list instead of the summarized top-N (default false)." }
+              "verbose": { "type": "boolean", "description": "Emit the full, uncapped caller list instead of the summarized top-N (default false)." },
+              "show_sites": { "type": "boolean", "description": "Under each caller, show the actual source line where the call happens ('at file:line: <code>'), read from the jail. Turns 'who calls X' into 'who calls X, and the exact line' without a second get_source. Default false." }
           }, "required": ["label"] } },
-        { "name": "find_callees", "description": "List the nodes this symbol calls, uses, or references (outgoing edges only). Answers 'what does X call'. The count and a per-relation breakdown are always in the header; the list is capped with a '+N more' summary on a hub.",
+        { "name": "find_callees", "description": "List the nodes this symbol calls, uses, or references (outgoing edges only). Answers 'what does X call'. The count and a per-relation breakdown are always in the header; the list is capped with a '+N more' summary on a hub. For a class/type, the callees of its members are folded in (a class doesn't call; its methods do) and labelled.",
           "inputSchema": { "type": "object", "properties": {
               "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." },
               "limit": { "type": "integer", "description": "Max callees listed before a '+N more' summary (default 50). Ignored when verbose=true." },
-              "verbose": { "type": "boolean", "description": "Emit the full, uncapped callee list instead of the summarized top-N (default false)." }
+              "verbose": { "type": "boolean", "description": "Emit the full, uncapped callee list instead of the summarized top-N (default false)." },
+              "show_sites": { "type": "boolean", "description": "Under each callee, show the actual source line where this symbol calls it ('at file:line: <code>'), read from the jail -- so 'what does X call' also shows HOW it calls it. Default false." }
           }, "required": ["label"] } },
         { "name": "list_prs", "description": "Open pull requests targeting the base branch with their CI/review state. Requires the `gh` CLI authenticated for the repo.",
           "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch to filter to (default: the repo's default branch)." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } } } },
@@ -3241,7 +4006,7 @@ fn tools_list(allow_exec: bool) -> Value {
               "groups": { "type": "array", "description": "Scalar cells per group, for aggregation queries (count/projection).",
                 "items": { "type": "array", "items": { "type": "string" } } }
           } } },
-        { "name": "describe_node", "description": "Compact 'takes X, returns Y, calls Z' description of a symbol, composed from its captured signature and outgoing call edges (graph-only, no source read). Useful for generating tool/function descriptions or quickly understanding a function's shape. Resolve `label` by bare name, full label, id, or file.",
+        { "name": "describe_node", "description": "Compact 'takes X, returns Y, calls Z' description of a symbol, composed from its captured signature and outgoing call edges (graph-only, no source read). Useful for generating tool/function descriptions or quickly understanding a function's shape. For a class/type it lists the members instead (a class has no calls of its own). Resolve `label` by bare name, full label, id, or file.",
           "inputSchema": { "type": "object", "properties": {
               "label": { "type": "string", "description": "Symbol to describe (bare name, label, node id, or source file). If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." }
           }, "required": ["label"] },
@@ -3331,7 +4096,25 @@ fn tools_list(allow_exec: bool) -> Value {
                   "rule_id": {"type":"string"}, "severity": {"type":"string"}, "category": {"type":"string"},
                   "title": {"type":"string"}, "detail": {"type":"string"}, "location": {"type":"string"},
                   "remediation": {"type":"string"}, "confidence": {"type":"number"} } } }
-          }, "required": ["version","summary","findings"] } }
+          }, "required": ["version","summary","findings"] } },
+        { "name": "search_text", "description": "Content (text/regex) search over the actual source files -- the complement to structural_search, which matches the GRAPH (kinds, loc, names) and CANNOT see file content. Use this for anything text-shaped that the graph does not model: string literals, config values, log messages, a TODO's wording, error strings, magic numbers. Every hit is attributed to the graph node whose body encloses it, so you can pivot straight from a matched line to affected/find_callers on that symbol. Searches every member of a federated graph (respecting each repo's ignore files and the source-root jail); scope to one repo with `repo`. Pattern is a regex by default (set literal=true for a fixed string); case-insensitive unless case_sensitive=true.",
+          "inputSchema": { "type": "object", "properties": {
+              "pattern": { "type": "string", "description": "Regex (default) or, with literal=true, a fixed string to find in file content." },
+              "literal": { "type": "boolean", "description": "Treat `pattern` as a literal string rather than a regex (default false)." },
+              "case_sensitive": { "type": "boolean", "description": "Match case-sensitively (default false: case-insensitive)." },
+              "repo": { "type": "string", "description": "Restrict to one federated member repo (tag from list_repos). Omit to search every member / the single repo." },
+              "path_glob": { "type": "string", "description": "Only search files matching this glob, e.g. '**/*.ts' or 'src/**'. Applied relative to each repo root." },
+              "max_results": { "type": "integer", "description": "Max hits to return before truncation is flagged (default 100, max 1000)." }
+          }, "required": ["pattern"] },
+          "outputSchema": { "type": "object", "properties": {
+              "pattern": {"type":"string"}, "total": {"type":"integer"}, "truncated": {"type":"boolean"},
+              "files_scanned": {"type":"integer"},
+              "hits": { "type": "array", "items": { "type": "object", "properties": {
+                  "repo": {"type":["string","null"]}, "file": {"type":"string"}, "line": {"type":"integer"},
+                  "col": {"type":"integer"}, "match": {"type":"string"}, "line_text": {"type":"string"},
+                  "node": { "type": ["object","null"], "description": "The enclosing graph symbol (null if the hit is outside any captured span). Pivot from here to affected/find_callers.", "properties": {
+                      "id": {"type":"string"}, "label": {"type":"string"}, "kind": {"type":"string"}, "community": {"type":"integer"} } } } } }
+          }, "required": ["pattern","total","hits"] } }
     ]);
     // The single command-running tool, exposed only when the operator opted in
     // with --allow-exec. It is NOT read-only (it executes the project's tests /
@@ -3412,6 +4195,7 @@ fn resource_templates() -> Value {
 mod tests {
     use super::*;
     use serde_json::Map;
+    use synaptic_core::NodeKind;
     use synaptic_core::{Confidence, Edge, FileType};
 
     fn sql_graph() -> GraphData {
@@ -3507,6 +4291,234 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string()
+    }
+
+    fn call_tool_full(s: &mut Server, name: &str, args: Value) -> Value {
+        let req = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}});
+        s.handle_request(&req).unwrap()
+    }
+
+    /// A class `MyClass` owning methods `doThing`/`helper`; an external function
+    /// `caller` calls doThing; doThing calls helper (internal coupling). The
+    /// class's only incoming edge is the `method` ownership, so the bare class
+    /// node has ~0 reverse-impact — impact lives on its members.
+    fn class_server() -> Server {
+        let mut cls = node("c", "MyClass", Some(0));
+        cls.set_kind(NodeKind::Class);
+        let mut m1 = node("m1", "doThing", Some(0));
+        m1.set_kind(NodeKind::Method);
+        let mut m2 = node("m2", "helper", Some(0));
+        m2.set_kind(NodeKind::Method);
+        let caller = node("caller", "caller", Some(0));
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![cls, m1, m2, caller],
+            links: vec![
+                edge("c", "m1", "method"),
+                edge("c", "m2", "method"),
+                edge("caller", "m1", "calls"),
+                edge("m1", "m2", "calls"),
+            ],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        Server::from_graph_data(gd, None)
+    }
+
+    #[test]
+    fn affected_on_a_class_folds_member_impact_and_labels_it() {
+        let s = class_server();
+        let out = s.tool_affected("MyClass", 5, &[], 50, false);
+        // The class is labelled and the member-callers are surfaced (not "Nothing
+        // depends on MyClass"): caller (calls doThing) and doThing (calls helper).
+        assert!(
+            out.contains("MyClass is a class with 2 members"),
+            "note: {out}"
+        );
+        assert!(out.contains("caller"), "external caller folded in: {out}");
+        assert!(
+            out.contains("doThing"),
+            "internal member-caller folded in: {out}"
+        );
+    }
+
+    #[test]
+    fn affected_structured_on_a_class_is_not_a_misleading_zero() {
+        let mut s = class_server();
+        let resp = call_tool_full(&mut s, "affected", json!({"label": "MyClass", "depth": 5}));
+        let sc = &resp["result"]["structuredContent"];
+        assert!(
+            sc["total"].as_u64().unwrap() >= 2,
+            "class total must reflect folded members, got {sc}"
+        );
+        assert_eq!(sc["aggregated_over_members"], json!(2), "{sc}");
+    }
+
+    #[test]
+    fn find_callers_on_a_class_folds_members_external_only() {
+        let s = class_server();
+        let out = s.tool_find_callers("MyClass", 50, false, false);
+        assert!(
+            out.contains("MyClass is a class with 2 members"),
+            "note: {out}"
+        );
+        // External caller of a method is surfaced; the class's own members are not
+        // listed as callers of themselves.
+        assert!(out.contains("caller"), "external caller folded in: {out}");
+        assert!(
+            !out.contains("\n  helper "),
+            "members not listed as callers: {out}"
+        );
+    }
+
+    #[test]
+    fn describe_node_on_a_class_lists_members() {
+        let s = class_server();
+        let out = s.tool_describe_node("MyClass");
+        assert!(out.contains("Members (2):"), "members listed: {out}");
+        assert!(out.contains("doThing") && out.contains("helper"), "{out}");
+    }
+
+    #[test]
+    fn get_community_excludes_external_stubs() {
+        // A community holding a real symbol plus an import stub (empty source_file,
+        // e.g. `@acme/router`). The stub is noise and must not be listed; the
+        // total reflects only real members.
+        let real = node("real", "RealThing", Some(0));
+        let mut stub = node("pkg", "@acme/router", Some(0));
+        stub.source_file = String::new();
+        // A rationale (captured TODO comment) node also carries a community label
+        // but is not a code symbol.
+        let mut todo = node("todo", "// TODO: handle the edge case", Some(0));
+        todo.file_type = FileType::Rationale;
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![real, stub, todo],
+            links: vec![],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        let out = call_tool(&mut s, "get_community", json!({"community_id": 0}));
+        assert!(out.contains("RealThing"), "real member shown: {out}");
+        assert!(!out.contains("@acme/router"), "stub excluded: {out}");
+        assert!(!out.contains("TODO"), "rationale comment excluded: {out}");
+        assert!(
+            out.contains("showing 1 of 1"),
+            "total excludes noise: {out}"
+        );
+    }
+
+    #[test]
+    fn list_repos_surfaces_per_repo_source_hash() {
+        // A federated graph file with a workspace-state.json sibling: list_repos
+        // must surface each member's source fingerprint so per-repo drift is
+        // visible.
+        let dir = tempfile::tempdir().unwrap();
+        let mut n = node("alpha::x", "X", Some(0));
+        n.repo = Some("alpha".into());
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![n],
+            links: vec![],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let gpath = dir.path().join("graph.json");
+        std::fs::write(&gpath, serde_json::to_vec(&gd).unwrap()).unwrap();
+        std::fs::write(
+            dir.path().join("workspace-state.json"),
+            r#"{"members":{"alpha":{"source_hash":"abcdef0123456789deadbeef","surface_hash":"s"}}}"#,
+        )
+        .unwrap();
+        let mut s = Server::load(gpath).unwrap();
+        let resp = call_tool_full(&mut s, "list_repos", json!({}));
+        let repos = resp["result"]["structuredContent"]["repos"]
+            .as_array()
+            .unwrap();
+        assert_eq!(repos[0]["repo"], "alpha");
+        assert_eq!(
+            repos[0]["source_hash"], "abcdef012345",
+            "12-char fingerprint: {repos:?}"
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("src abcdef012345"),
+            "text fingerprint: {text}"
+        );
+    }
+
+    #[test]
+    fn affected_structured_surfaces_ambiguity_instead_of_zero() {
+        // Two nodes share the bare name "Dup"; the text path refuses with a
+        // candidate list, so the structured path must NOT silently pick one and
+        // report total:0 (which reads as "nothing depends on it").
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![
+                node("a_dup", "Dup", Some(0)),
+                node("b_dup", "Dup", Some(0)),
+                node("x", "x", Some(0)),
+            ],
+            links: vec![edge("x", "a_dup", "calls")],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        let resp = call_tool_full(&mut s, "affected", json!({"label": "Dup"}));
+        let sc = &resp["result"]["structuredContent"];
+        assert_eq!(sc["resolved"], json!(false), "must flag unresolved: {sc}");
+        assert_eq!(sc["ambiguous"], json!(true), "{sc}");
+        assert!(
+            sc["candidates"]
+                .as_array()
+                .map(|a| a.len() >= 2)
+                .unwrap_or(false),
+            "candidates listed: {sc}"
+        );
+    }
+
+    #[test]
+    fn get_node_structured_mirrors_metadata_and_ambiguity() {
+        // Unique name: structured metadata with found:true.
+        let mut s = server();
+        let resp = call_tool_full(&mut s, "get_node", json!({"label": "AuthService"}));
+        let sc = &resp["result"]["structuredContent"];
+        assert_eq!(sc["found"], json!(true), "{sc}");
+        assert_eq!(sc["label"], "AuthService");
+        assert!(sc["degree"].as_u64().is_some(), "degree present: {sc}");
+
+        // Ambiguous name: structured channel surfaces it like affected/describe_node
+        // (was text-only before), instead of silently picking one.
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![node("a_dup", "Dup", Some(0)), node("b_dup", "Dup", Some(0))],
+            links: vec![],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let mut s2 = Server::from_graph_data(gd, None);
+        let resp = call_tool_full(&mut s2, "get_node", json!({"label": "Dup"}));
+        let sc = &resp["result"]["structuredContent"];
+        assert_eq!(sc["found"], json!(false), "{sc}");
+        assert_eq!(sc["ambiguous"], json!(true), "{sc}");
+        assert!(
+            sc["candidates"]
+                .as_array()
+                .map(|a| a.len() >= 2)
+                .unwrap_or(false),
+            "candidates listed: {sc}"
+        );
     }
 
     #[test]
@@ -3705,7 +4717,7 @@ mod tests {
 
     #[test]
     fn structural_search_returns_structured_signature() {
-        use synaptic_core::{NodeKind, Param, Signature};
+        use synaptic_core::{Param, Signature};
         let mut greet = node("greet", "greet()", None);
         greet.set_kind(NodeKind::Function);
         greet.set_signature(Signature {
@@ -3740,7 +4752,7 @@ mod tests {
 
     #[test]
     fn describe_node_tool_returns_summary_and_structured() {
-        use synaptic_core::{NodeKind, Param, Signature};
+        use synaptic_core::{Param, Signature};
         let mut greet = node("greet", "greet()", None);
         greet.set_kind(NodeKind::Function);
         greet.set_signature(Signature {
@@ -3784,7 +4796,7 @@ mod tests {
     fn describe_node_structured_signature_preserves_generics() {
         // The structured signature must NOT HTML-escape generics (`Record<...>`),
         // since it feeds tool/function-description generation.
-        use synaptic_core::{NodeKind, Param, Signature};
+        use synaptic_core::{Param, Signature};
         let mut f = node("load", "loadWidget()", None);
         f.set_kind(NodeKind::Function);
         f.set_signature(Signature {
@@ -4086,11 +5098,12 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 26);
+        assert_eq!(names.len(), 27);
         for expected in [
             "query_graph",
             "get_node",
             "get_source",
+            "search_text",
             "get_neighbors",
             "get_community",
             "god_nodes",
@@ -4392,6 +5405,379 @@ mod tests {
         );
     }
 
+    /// Build a single-repo server over `dir` with one node spanning `lines` in
+    /// `rel`. The node is the enclosing symbol every in-range hit attributes to.
+    fn text_search_server(
+        dir: &std::path::Path,
+        rel: &str,
+        contents: &str,
+        node_label: &str,
+        span: (u32, u32),
+    ) -> Server {
+        let full = dir.join(rel);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(&full, contents).unwrap();
+        let mut n = node("sym", node_label, Some(0));
+        n.set_kind(NodeKind::Method);
+        n.source_file = rel.replace('\\', "/");
+        n.source_location = Some(format!("L{}", span.0));
+        n.set_span(synaptic_core::Span {
+            start_line: span.0,
+            start_col: 1,
+            end_line: span.1,
+            end_col: 1,
+        });
+        let gd = GraphData {
+            nodes: vec![n],
+            ..Default::default()
+        };
+        Server::from_graph_data(gd, None).with_source_root(dir.to_path_buf())
+    }
+
+    #[test]
+    fn search_text_finds_content_and_attributes_enclosing_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = "function getStatus() {\n  const ALLOW_LIST = ['a'];\n  // TODO: tighten this\n  return ALLOW_LIST;\n}\n";
+        let mut s = text_search_server(dir.path(), "src/fw.js", src, "getStatus", (1, 5));
+
+        let out = call_tool(&mut s, "search_text", json!({"pattern": "ALLOW_LIST"}));
+        assert!(out.contains("src/fw.js"), "names the file: {out}");
+        assert!(
+            out.contains("getStatus"),
+            "attributes the enclosing node: {out}"
+        );
+        assert!(out.contains("ALLOW_LIST"), "shows the matched line: {out}");
+    }
+
+    #[test]
+    fn search_text_structured_mirror_carries_node_and_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = "function getStatus() {\n  const ALLOW_LIST = ['a'];\n}\n";
+        let mut s = text_search_server(dir.path(), "src/fw.js", src, "getStatus", (1, 3));
+
+        let resp = call_tool_full(&mut s, "search_text", json!({"pattern": "ALLOW_LIST"}));
+        let sc = &resp["result"]["structuredContent"];
+        assert_eq!(sc["total"], json!(1), "{sc}");
+        let hit = &sc["hits"][0];
+        assert_eq!(hit["file"], "src/fw.js");
+        assert_eq!(hit["line"], json!(2), "matched on line 2: {hit}");
+        assert_eq!(hit["node"]["label"], "getStatus");
+        assert_eq!(hit["node"]["kind"], "method");
+    }
+
+    #[test]
+    fn search_text_regex_vs_literal() {
+        let dir = tempfile::tempdir().unwrap();
+        // `a.b` literal should match only "a.b", not "axb"; as a regex `.` is any.
+        let src = "x = a.b\ny = axb\n";
+        let mut s = text_search_server(dir.path(), "src/m.py", src, "fn", (1, 2));
+
+        let lit = call_tool_full(
+            &mut s,
+            "search_text",
+            json!({"pattern": "a.b", "literal": true}),
+        );
+        assert_eq!(
+            lit["result"]["structuredContent"]["total"],
+            json!(1),
+            "literal a.b matches one line: {}",
+            lit["result"]["structuredContent"]
+        );
+
+        let rx = call_tool_full(&mut s, "search_text", json!({"pattern": "a.b"}));
+        assert_eq!(
+            rx["result"]["structuredContent"]["total"],
+            json!(2),
+            "regex a.b matches both lines"
+        );
+    }
+
+    #[test]
+    fn search_text_case_insensitive_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = text_search_server(dir.path(), "src/m.py", "TODO fix\n", "fn", (1, 1));
+        let out = call_tool_full(&mut s, "search_text", json!({"pattern": "todo"}));
+        assert_eq!(out["result"]["structuredContent"]["total"], json!(1));
+        let sens = call_tool_full(
+            &mut s,
+            "search_text",
+            json!({"pattern": "todo", "case_sensitive": true}),
+        );
+        assert_eq!(sens["result"]["structuredContent"]["total"], json!(0));
+    }
+
+    #[test]
+    fn search_text_repo_filter_scopes_to_one_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let billing = dir.path().join("billing");
+        let web = dir.path().join("web");
+        std::fs::create_dir_all(billing.join("src")).unwrap();
+        std::fs::create_dir_all(web.join("src")).unwrap();
+        std::fs::write(billing.join("src/pay.py"), "SECRET = 1\n").unwrap();
+        std::fs::write(web.join("src/app.js"), "const SECRET = 2\n").unwrap();
+
+        let mut bn = node("b", "pay", Some(0));
+        bn.repo = Some("billing".into());
+        bn.source_file = "billing/src/pay.py".into();
+        bn.set_span(synaptic_core::Span {
+            start_line: 1,
+            start_col: 1,
+            end_line: 1,
+            end_col: 1,
+        });
+        let mut wn = node("w", "app", Some(0));
+        wn.repo = Some("web".into());
+        wn.source_file = "web/src/app.js".into();
+        wn.set_span(synaptic_core::Span {
+            start_line: 1,
+            start_col: 1,
+            end_line: 1,
+            end_col: 1,
+        });
+        let gd = GraphData {
+            nodes: vec![bn, wn],
+            ..Default::default()
+        };
+        let mut roots = HashMap::new();
+        roots.insert("billing".to_string(), billing.clone());
+        roots.insert("web".to_string(), web.clone());
+        let mut s = Server::from_graph_data(gd, None)
+            .with_source_root(dir.path().to_path_buf())
+            .with_repo_roots(roots);
+
+        let all = call_tool_full(&mut s, "search_text", json!({"pattern": "SECRET"}));
+        assert_eq!(
+            all["result"]["structuredContent"]["total"],
+            json!(2),
+            "both members hit without a filter"
+        );
+
+        let scoped = call_tool_full(
+            &mut s,
+            "search_text",
+            json!({"pattern": "SECRET", "repo": "billing"}),
+        );
+        let sc = &scoped["result"]["structuredContent"];
+        assert_eq!(
+            sc["total"],
+            json!(1),
+            "repo filter scopes to one member: {sc}"
+        );
+        assert_eq!(sc["hits"][0]["file"], "billing/src/pay.py");
+        assert_eq!(sc["hits"][0]["repo"], "billing");
+    }
+
+    #[test]
+    fn search_text_path_glob_filters_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/a.js"), "MARK\n").unwrap();
+        std::fs::write(dir.path().join("src/b.py"), "MARK\n").unwrap();
+        let gd = GraphData {
+            nodes: vec![],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None).with_source_root(dir.path().to_path_buf());
+
+        let out = call_tool_full(
+            &mut s,
+            "search_text",
+            json!({"pattern": "MARK", "path_glob": "**/*.js"}),
+        );
+        let sc = &out["result"]["structuredContent"];
+        assert_eq!(sc["total"], json!(1), "glob keeps only the .js file: {sc}");
+        assert_eq!(sc["hits"][0]["file"], "src/a.js");
+    }
+
+    #[test]
+    fn search_text_caps_results_and_flags_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let many = "HIT\nHIT\nHIT\nHIT\nHIT\n";
+        let mut s = text_search_server(dir.path(), "src/m.py", many, "fn", (1, 5));
+        let out = call_tool_full(
+            &mut s,
+            "search_text",
+            json!({"pattern": "HIT", "max_results": 2}),
+        );
+        let sc = &out["result"]["structuredContent"];
+        assert_eq!(sc["total"], json!(2), "capped to max_results: {sc}");
+        assert_eq!(sc["truncated"], json!(true), "flags more were available");
+    }
+
+    #[test]
+    fn search_text_without_source_root_is_graceful() {
+        let mut s = server();
+        let out = call_tool(&mut s, "search_text", json!({"pattern": "anything"}));
+        assert!(
+            out.contains("source root"),
+            "explains the missing root: {out}"
+        );
+    }
+
+    // ---- Gap 1: reading logic (get_source file+range, show_sites call lines) ----
+
+    #[test]
+    fn get_source_reads_an_arbitrary_file_range() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/conf.js"),
+            "line1\nline2\nline3\nline4\n",
+        )
+        .unwrap();
+        let gd = GraphData {
+            nodes: vec![],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None).with_source_root(dir.path().to_path_buf());
+
+        let out = call_tool(
+            &mut s,
+            "get_source",
+            json!({"file": "src/conf.js", "lines": "2-3"}),
+        );
+        assert!(
+            out.contains("line2") && out.contains("line3"),
+            "range body: {out}"
+        );
+        assert!(
+            !out.contains("line1") && !out.contains("line4"),
+            "range is bounded: {out}"
+        );
+        assert!(
+            out.contains("src/conf.js:L2-L3"),
+            "header names range: {out}"
+        );
+    }
+
+    #[test]
+    fn get_source_file_range_refuses_paths_outside_the_jail() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "top secret\n").unwrap();
+        let gd = GraphData {
+            nodes: vec![],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None).with_source_root(root.clone());
+        let out = call_tool(
+            &mut s,
+            "get_source",
+            json!({"file": "../secret.txt", "lines": "1"}),
+        );
+        assert!(
+            !out.contains("top secret"),
+            "must not escape the jail: {out}"
+        );
+        assert!(
+            out.to_lowercase().contains("outside") || out.to_lowercase().contains("not found"),
+            "refuses with an explanation: {out}"
+        );
+    }
+
+    #[test]
+    fn get_source_file_range_reads_a_federated_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let billing = dir.path().join("billing");
+        std::fs::create_dir_all(billing.join("src")).unwrap();
+        std::fs::write(billing.join("src/pay.py"), "def charge():\n    pass\n").unwrap();
+        let gd = GraphData {
+            nodes: vec![],
+            ..Default::default()
+        };
+        let mut roots = HashMap::new();
+        roots.insert("billing".to_string(), billing.clone());
+        let mut s = Server::from_graph_data(gd, None)
+            .with_source_root(dir.path().to_path_buf())
+            .with_repo_roots(roots);
+        let out = call_tool(
+            &mut s,
+            "get_source",
+            json!({"file": "billing/src/pay.py", "lines": "1"}),
+        );
+        assert!(out.contains("def charge"), "reads via tag/ path: {out}");
+    }
+
+    /// Build a 2-node graph where `a` calls `b` at `src/a.js:2`, where line 2 is
+    /// the actual call. Returns a server with the source root set.
+    fn call_site_server() -> (tempfile::TempDir, Server) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/a.js"), "function a(){\n  b();\n}\n").unwrap();
+        let mut a = node("a", "a", Some(0));
+        a.source_file = "src/a.js".into();
+        a.set_span(synaptic_core::Span {
+            start_line: 1,
+            start_col: 1,
+            end_line: 3,
+            end_col: 1,
+        });
+        let mut bnode = node("b", "b", Some(0));
+        bnode.source_file = "src/b.js".into();
+        let mut e = edge("a", "b", "calls");
+        e.source_file = "src/a.js".into();
+        e.source_location = Some("L2".into());
+        let gd = GraphData {
+            directed: true,
+            nodes: vec![a, bnode],
+            links: vec![e],
+            ..Default::default()
+        };
+        let s = Server::from_graph_data(gd, None).with_source_root(dir.path().to_path_buf());
+        (dir, s)
+    }
+
+    #[test]
+    fn find_callees_show_sites_shows_the_call_line() {
+        let (_d, mut s) = call_site_server();
+        let out = call_tool(
+            &mut s,
+            "find_callees",
+            json!({"label": "a", "show_sites": true}),
+        );
+        assert!(out.contains("b [calls]"), "lists the callee: {out}");
+        assert!(out.contains("src/a.js:2"), "names the call site: {out}");
+        assert!(out.contains("b();"), "shows the actual call line: {out}");
+    }
+
+    #[test]
+    fn find_callers_show_sites_shows_the_call_line() {
+        let (_d, mut s) = call_site_server();
+        let out = call_tool(
+            &mut s,
+            "find_callers",
+            json!({"label": "b", "show_sites": true}),
+        );
+        assert!(out.contains("a [calls]"), "lists the caller: {out}");
+        assert!(out.contains("src/a.js:2"), "names the call site: {out}");
+        assert!(out.contains("b();"), "shows the actual call line: {out}");
+    }
+
+    #[test]
+    fn show_sites_is_off_by_default() {
+        let (_d, mut s) = call_site_server();
+        let out = call_tool(&mut s, "find_callees", json!({"label": "a"}));
+        assert!(out.contains("b [calls]"), "still lists the callee: {out}");
+        assert!(
+            !out.contains("src/a.js:2"),
+            "no call site without show_sites: {out}"
+        );
+    }
+
+    #[test]
+    fn get_neighbors_show_sites_shows_the_edge_line() {
+        let (_d, mut s) = call_site_server();
+        let out = call_tool(
+            &mut s,
+            "get_neighbors",
+            json!({"label": "a", "show_sites": true}),
+        );
+        assert!(out.contains("b [calls]"), "lists the neighbor: {out}");
+        assert!(out.contains("src/a.js:2"), "names the edge site: {out}");
+        assert!(out.contains("b();"), "shows the actual line: {out}");
+    }
+
     #[test]
     fn get_community_paginates() {
         // 6 members in community 0.
@@ -4425,13 +5811,18 @@ mod tests {
     #[test]
     fn god_nodes_offset_pages_and_numbers_absolutely() {
         let mut s = server(); // AuthService(2), Database(1), login_user(1); no tests
-        assert_eq!(
-            call_tool(&mut s, "god_nodes", json!({"top_n": 1})),
-            "God nodes:\n  1. AuthService - 2 edges, 0 test(s)"
+        let top = call_tool(&mut s, "god_nodes", json!({"top_n": 1}));
+        assert!(top.starts_with("God nodes:"), "{top}");
+        assert!(
+            top.contains("\n  1. AuthService - 2 connections, 0 test(s)"),
+            "{top}"
         );
         // offset 1 skips the top hub and numbers from its absolute rank.
         let paged = call_tool(&mut s, "god_nodes", json!({"top_n": 1, "offset": 1}));
-        assert_eq!(paged, "God nodes:\n  2. Database - 1 edges, 0 test(s)");
+        assert!(
+            paged.contains("\n  2. Database - 1 connections, 0 test(s)"),
+            "{paged}"
+        );
     }
 
     #[test]
@@ -4713,6 +6104,7 @@ mod tests {
             "affected_tests",
             "get_neighbors",
             "list_repos",
+            "search_text",
         ] {
             let t = tools
                 .as_array()
@@ -5558,13 +6950,20 @@ mod tests {
         // H3: cached god_nodes/stats must render the current graph exactly, and
         // a rebuilt graph.json must refresh both caches on the next request.
         let mut s = server();
-        assert_eq!(
-            call_tool(&mut s, "god_nodes", json!({"top_n": 1})),
-            "God nodes:\n  1. AuthService - 2 edges, 0 test(s)"
+        assert!(call_tool(&mut s, "god_nodes", json!({"top_n": 1}))
+            .contains("\n  1. AuthService - 2 connections, 0 test(s)"));
+        let three = call_tool(&mut s, "god_nodes", json!({"top_n": 3}));
+        assert!(
+            three.contains("\n  1. AuthService - 2 connections, 0 test(s)"),
+            "{three}"
         );
-        assert_eq!(
-            call_tool(&mut s, "god_nodes", json!({"top_n": 3})),
-            "God nodes:\n  1. AuthService - 2 edges, 0 test(s)\n  2. Database - 1 edges, 0 test(s)\n  3. login_user - 1 edges, 0 test(s)"
+        assert!(
+            three.contains("\n  2. Database - 1 connections, 0 test(s)"),
+            "{three}"
+        );
+        assert!(
+            three.contains("\n  3. login_user - 1 connections, 0 test(s)"),
+            "{three}"
         );
         assert!(call_tool(&mut s, "graph_stats", json!({})).contains("3 nodes, 2 edges"));
 
@@ -5605,7 +7004,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&g2).unwrap()).unwrap();
         let gods = call_tool(&mut s, "god_nodes", json!({"top_n": 1}));
         assert!(
-            gods.contains("Core - 3 edges") && !gods.contains("Alpha"),
+            gods.contains("Core - 3 connections") && !gods.contains("Alpha"),
             "god_nodes must reflect the reloaded graph: {gods}"
         );
         assert!(call_tool(&mut s, "graph_stats", json!({})).contains("4 nodes, 3 edges"));

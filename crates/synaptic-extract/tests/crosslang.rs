@@ -876,6 +876,103 @@ fn js_ws_command_send_is_a_client_message() {
     );
 }
 
+#[cfg(feature = "lang-javascript")]
+#[test]
+fn js_electron_ipc_links_invoke_to_handle_via_channel_node() {
+    // Electron IPC: a renderer/preload `ipcRenderer.invoke('app:getStatus')` and a
+    // main `ipcMain.handle('app:getStatus', ...)` attach to one channel-keyed
+    // `ipc #app:getStatus` boundary node -- the invoke site calls_service it, the
+    // handler is handled_by it -- so a handler reached only across the IPC boundary
+    // is no longer a 0-caller node.
+    let preload = b"const { ipcRenderer } = require('electron');\nfunction getStatus() {\n  return ipcRenderer.invoke('app:getStatus');\n}\n";
+    let r = extract_source("bridge.js", preload).unwrap();
+    let node = r
+        .nodes
+        .iter()
+        .find(|n| n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("ipc_channel"))
+        .expect("an ipc_channel node");
+    assert_eq!(node.label, "ipc #app:getStatus");
+    assert!(node.source_file.is_empty(), "channel is an external stub");
+    let f = r.nodes.iter().find(|n| n.label == "getStatus()").unwrap();
+    let edge = r
+        .edges
+        .iter()
+        .find(|e| e.relation == "calls_service" && e.target == node.id)
+        .expect("calls_service edge to the ipc channel");
+    assert_eq!(edge.source, f.id, "attributed to the invoking fn");
+    assert_eq!(edge.context.as_deref(), Some("ipc"));
+    assert_eq!(edge.confidence, Confidence::Inferred);
+
+    // Main side: the ipcMain.handle handler is reached from the channel via
+    // handled_by (same channel id as the invoke side, so they meet in the graph).
+    let main = b"import { ipcMain } from 'electron';\nfunction registerHandlers() {\n  ipcMain.handle('app:getStatus', async () => readStatus());\n}\n";
+    let rm = extract_source("main.js", main).unwrap();
+    let node2 = rm
+        .nodes
+        .iter()
+        .find(|n| n.label == "ipc #app:getStatus")
+        .expect("ipc node on the main side");
+    assert_eq!(
+        node2.id, node.id,
+        "invoke and handle meet on one channel id"
+    );
+    let reg = rm
+        .nodes
+        .iter()
+        .find(|n| n.label == "registerHandlers()")
+        .unwrap();
+    let hb = rm
+        .edges
+        .iter()
+        .find(|e| e.relation == "handled_by" && e.source == node2.id)
+        .expect("handled_by edge from the channel");
+    assert_eq!(hb.target, reg.id, "handler attributed to the enclosing fn");
+    assert_eq!(hb.context.as_deref(), Some("ipc"));
+
+    // A plain `.handle(...)` with no electron IPC API in the file must NOT create a
+    // channel node (avoids false positives on ordinary `.handle`/`.on` calls).
+    let plain = b"function f() {\n  emitter.handle('x', g);\n}\n";
+    let rp = extract_source("p.js", plain).unwrap();
+    assert!(
+        !rp.nodes
+            .iter()
+            .any(|n| n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("ipc_channel")),
+        "no electron ipc API -> no channel node"
+    );
+}
+
+#[cfg(feature = "lang-javascript")]
+#[test]
+fn js_electron_ipc_main_to_renderer_push() {
+    // Main pushes via `webContents.send('evt')` (client) and the renderer listens
+    // via `ipcRenderer.on('evt', fn)` (handler); both meet on `ipc #evt`.
+    let mainp = b"const { ipcRenderer } = require('electron');\nfunction listen() {\n  ipcRenderer.on('app:progress', (e, p) => render(p));\n}\n";
+    let r = extract_source("renderer.js", mainp).unwrap();
+    let node = r
+        .nodes
+        .iter()
+        .find(|n| n.label == "ipc #app:progress")
+        .expect("ipc node from ipcRenderer.on");
+    let hb = r
+        .edges
+        .iter()
+        .find(|e| e.relation == "handled_by" && e.source == node.id)
+        .expect("renderer .on handler is handled_by the channel");
+    assert_eq!(hb.context.as_deref(), Some("ipc"));
+
+    let send = b"function push(win, p) {\n  win.webContents.send('app:progress', p);\n}\n";
+    let rs = extract_source("push.js", send).unwrap();
+    let n2 = rs
+        .nodes
+        .iter()
+        .find(|n| n.label == "ipc #app:progress")
+        .expect("ipc node from webContents.send");
+    assert_eq!(n2.id, node.id);
+    assert!(rs.edges.iter().any(|e| e.relation == "calls_service"
+        && e.target == n2.id
+        && e.context.as_deref() == Some("ipc")));
+}
+
 #[cfg(feature = "lang-csharp")]
 #[test]
 fn csharp_ws_server_case_and_endpoint() {

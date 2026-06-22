@@ -11,7 +11,7 @@ pub mod describe;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::Serialize;
-use synaptic_core::NodeId;
+use synaptic_core::{NodeId, NodeKind};
 use synaptic_graph::KnowledgeGraph;
 
 pub use describe::{describe_node, NodeDescription};
@@ -1054,6 +1054,146 @@ pub fn affected_nodes_multi(
     hits
 }
 
+/// Relations that link a type (class/struct/interface/...) to a member it owns.
+/// A class's reverse-impact lives on its members (methods carry the incoming
+/// `calls`), not on the class symbol itself, so impact tools fold these in.
+pub const MEMBER_RELATIONS: &[&str] = &["method", "contains", "has_method"];
+
+/// The members owned by a type node: targets of its outgoing member edges
+/// ([`MEMBER_RELATIONS`]). Excludes `references`/`uses` targets (types the class
+/// merely mentions, not members). Deterministic (sorted, deduped). Empty for a
+/// node with no members (e.g. a leaf function or a non-type node).
+pub fn type_member_ids(kg: &KnowledgeGraph, id: &NodeId) -> Vec<NodeId> {
+    let member_set: HashSet<&str> = MEMBER_RELATIONS.iter().copied().collect();
+    let mut out: Vec<NodeId> = kg
+        .edges()
+        .filter(|e| &e.source == id && member_set.contains(e.relation.as_str()) && &e.target != id)
+        .map(|e| e.target.clone())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Reverse-impact seeded from many `roots` at once, reporting every node that
+/// (transitively, within `depth`) depends on any root, EXCEPT the nodes in
+/// `exclude`. Unlike [`affected_nodes_multi`] (which drops every seed from the
+/// output), a root that is itself a dependent of another root IS reported -- so
+/// folding a class plus its members surfaces the members that call sibling
+/// members (the class's internal coupling), while `exclude` drops just the class
+/// symbol. Each reached node records its shallowest hop and, among edges at that
+/// hop, the lexicographically smallest relation, so the result is order-stable.
+pub fn affected_rooted(
+    kg: &KnowledgeGraph,
+    roots: &[NodeId],
+    exclude: &[NodeId],
+    relations: &[&str],
+    depth: usize,
+) -> Vec<AffectedHit> {
+    let relation_set: HashSet<&str> = relations.iter().copied().collect();
+    let exclude_set: HashSet<&NodeId> = exclude.iter().collect();
+    let root_set: Vec<&NodeId> = roots.iter().filter(|r| kg.contains_node(r)).collect();
+    if root_set.is_empty() {
+        return Vec::new();
+    }
+    // Reverse adjacency over impact relations: target -> [(source, relation)].
+    let mut rev: HashMap<&NodeId, Vec<(&NodeId, &str)>> = HashMap::new();
+    for e in kg.edges() {
+        if e.source == e.target || !relation_set.contains(e.relation.as_str()) {
+            continue;
+        }
+        rev.entry(&e.target)
+            .or_default()
+            .push((&e.source, e.relation.as_str()));
+    }
+    let mut best: HashMap<NodeId, (usize, String)> = HashMap::new();
+    // `queued` only dedups the BFS frontier; it is NOT the output filter, so a
+    // root reached as another root's dependent can still land in `best`.
+    let mut queued: HashSet<NodeId> = root_set.iter().map(|r| (*r).clone()).collect();
+    let mut queue: VecDeque<(NodeId, usize)> = root_set.iter().map(|r| ((*r).clone(), 0)).collect();
+    while let Some((cur, d)) = queue.pop_front() {
+        if d >= depth {
+            continue;
+        }
+        let Some(adj) = rev.get(&cur) else {
+            continue;
+        };
+        for (src, rel) in adj {
+            if exclude_set.contains(*src) {
+                continue;
+            }
+            let nd = d + 1;
+            let entry = best
+                .entry((*src).clone())
+                .or_insert((usize::MAX, String::new()));
+            if nd < entry.0 || (nd == entry.0 && *rel < entry.1.as_str()) {
+                *entry = (nd, (*rel).to_string());
+            }
+            if queued.insert((*src).clone()) {
+                queue.push_back(((*src).clone(), nd));
+            }
+        }
+    }
+    let mut hits: Vec<AffectedHit> = best
+        .into_iter()
+        .map(|(node_id, (depth, via_relation))| AffectedHit {
+            node_id,
+            depth,
+            via_relation,
+        })
+        .collect();
+    hits.sort_by(|a, b| {
+        a.depth
+            .cmp(&b.depth)
+            .then_with(|| a.node_id.cmp(&b.node_id))
+    });
+    hits
+}
+
+/// True for type-container kinds whose reverse-impact lives on their members
+/// (methods carry the incoming `calls`/`references`), not the type symbol itself.
+pub fn is_type_like(kind: NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Class
+            | NodeKind::Interface
+            | NodeKind::Trait
+            | NodeKind::Struct
+            | NodeKind::Enum
+            | NodeKind::Protocol
+            | NodeKind::Object
+    )
+}
+
+/// Reverse-impact for `seed`, folding a type's members in. When `seed` is a
+/// type-like node ([`is_type_like`]) with members, seeds the walk from the type
+/// PLUS its members (the members' incoming calls are the class's real coupling)
+/// and returns the member count for labeling; otherwise a plain single-seed walk
+/// with member count 0. Shared by the MCP server and the CLI so both surfaces give
+/// a class the same non-empty blast radius.
+pub fn affected_including_members(
+    kg: &KnowledgeGraph,
+    seed: &NodeId,
+    relations: &[&str],
+    depth: usize,
+) -> (Vec<AffectedHit>, usize) {
+    let members = match kg.node(seed).and_then(|n| n.kind()) {
+        Some(k) if is_type_like(k) => type_member_ids(kg, seed),
+        _ => Vec::new(),
+    };
+    if members.is_empty() {
+        (affected_nodes(kg, seed, relations, depth), 0)
+    } else {
+        let mut roots = Vec::with_capacity(members.len() + 1);
+        roots.push(seed.clone());
+        roots.extend(members.iter().cloned());
+        (
+            affected_rooted(kg, &roots, std::slice::from_ref(seed), relations, depth),
+            members.len(),
+        )
+    }
+}
+
 /// Reverse-impact adjacency built once and reused across many `affected_multi`
 /// queries against the same graph. Building it is O(edges); each subsequent walk
 /// is then O(reached) instead of O(edges + reached), so a long-lived server that
@@ -1637,6 +1777,112 @@ mod tests {
         let aff = affected_nodes(&kg, &NodeId("a".into()), DEFAULT_AFFECTED_RELATIONS, 5);
         let ids: Vec<&str> = aff.iter().map(|h| h.node_id.0.as_str()).collect();
         assert_eq!(ids, vec!["c"], "containment edge does not propagate impact");
+    }
+
+    #[test]
+    fn type_member_ids_returns_members_not_referenced_types() {
+        // C owns methods m1, m2 (via `method`) and references type T (not a member).
+        let kg = build(
+            &[("C", "C"), ("m1", "m1"), ("m2", "m2"), ("T", "T")],
+            &[
+                ("C", "m1", "method"),
+                ("C", "m2", "contains"),
+                ("C", "T", "references"),
+            ],
+        );
+        let mut members: Vec<String> = type_member_ids(&kg, &NodeId("C".into()))
+            .iter()
+            .map(|n| n.0.clone())
+            .collect();
+        members.sort();
+        assert_eq!(members, vec!["m1".to_string(), "m2".to_string()]);
+    }
+
+    #[test]
+    fn affected_rooted_folds_members_and_excludes_the_class() {
+        // C method-> m1, m2. X calls m1; m1 calls m2 (internal); R references C.
+        // From roots {C, m1, m2} excluding C: X (calls m1), R (references C), and
+        // m1 (calls m2, internal coupling) are dependents; m2 is a callee-only leaf
+        // and C is excluded.
+        let kg = build(
+            &[
+                ("C", "C"),
+                ("m1", "m1"),
+                ("m2", "m2"),
+                ("X", "X"),
+                ("R", "R"),
+            ],
+            &[
+                ("C", "m1", "method"),
+                ("C", "m2", "method"),
+                ("X", "m1", "calls"),
+                ("m1", "m2", "calls"),
+                ("R", "C", "references"),
+            ],
+        );
+        let roots = vec![NodeId("C".into()), NodeId("m1".into()), NodeId("m2".into())];
+        let exclude = vec![NodeId("C".into())];
+        let hits = affected_rooted(&kg, &roots, &exclude, DEFAULT_AFFECTED_RELATIONS, 5);
+        let mut ids: Vec<&str> = hits.iter().map(|h| h.node_id.0.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["R", "X", "m1"]);
+    }
+
+    #[test]
+    fn affected_including_members_folds_a_class_not_a_function() {
+        // C (class) owns method m1; x calls m1. The bare class has no incoming
+        // impact, but folding its members surfaces x. A non-type seed does not fold.
+        let mk = |id: &str, kind: Option<NodeKind>| {
+            let mut n = Node {
+                id: NodeId(id.into()),
+                label: id.into(),
+                file_type: FileType::Code,
+                source_file: format!("{id}.rs"),
+                source_location: Some("L1".into()),
+                community: None,
+                repo: None,
+                extra: Map::new(),
+            };
+            if let Some(k) = kind {
+                n.set_kind(k);
+            }
+            n
+        };
+        let mk_edge = |s: &str, t: &str, rel: &str| Edge {
+            source: NodeId(s.into()),
+            target: NodeId(t.into()),
+            relation: rel.into(),
+            confidence: Confidence::Extracted,
+            source_file: "x.rs".into(),
+            source_location: Some("L1".into()),
+            confidence_score: None,
+            weight: 1.0,
+            context: None,
+            cross_repo: false,
+            extra: Map::new(),
+        };
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![
+                mk("C", Some(NodeKind::Class)),
+                mk("m1", Some(NodeKind::Method)),
+                mk("x", None),
+            ],
+            links: vec![mk_edge("C", "m1", "method"), mk_edge("x", "m1", "calls")],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let kg = KnowledgeGraph::from_graph_data(gd);
+        let (hits, mc) =
+            affected_including_members(&kg, &NodeId("C".into()), DEFAULT_AFFECTED_RELATIONS, 5);
+        assert_eq!(mc, 1, "one member folded in");
+        assert!(hits.iter().any(|h| h.node_id.0 == "x"), "{hits:?}");
+        // A non-type seed (the method itself) does not fold.
+        let (_, mc2) =
+            affected_including_members(&kg, &NodeId("m1".into()), DEFAULT_AFFECTED_RELATIONS, 5);
+        assert_eq!(mc2, 0);
     }
 
     #[test]

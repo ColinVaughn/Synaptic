@@ -153,7 +153,7 @@ exposure.
 
 ## MCP tools
 
-`tools/list` reports 26 tools by default (27 with `--allow-exec`, which adds
+`tools/list` reports 27 tools by default (28 with `--allow-exec`, which adds
 `speculate`). Every tool documents its parameters in its input schema, and every
 tool carries annotations so a host knows how safe it is to run:
 
@@ -161,7 +161,7 @@ tool carries annotations so a host knows how safe it is to run:
 "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": <bool> }
 ```
 
-All 26 default tools are `readOnlyHint: true`. `openWorldHint` is `true` only for
+All 27 default tools are `readOnlyHint: true`. `openWorldHint` is `true` only for
 the tools that reach outside the graph by shelling out (`list_prs`,
 `get_pr_impact`, `triage_prs`, `working_changes_impact`, `predict_impact`,
 `affected_tests`, and `time_travel_diff`); it is `false` for the rest, including
@@ -175,7 +175,7 @@ annotated honestly as `readOnlyHint: false, openWorldHint: true`. The default
 server never advertises or runs it, preserving the strictly read-only surface.
 
 Each tool returns a text content block (the load-bearing, purpose-formatted
-output). Twelve tools additionally declare an `outputSchema` and return a typed
+output). Fourteen tools additionally declare an `outputSchema` and return a typed
 `structuredContent` object alongside the text (a 2025-06-18 feature) -- see
 [Structured output](#structured-output).
 
@@ -250,14 +250,21 @@ Return the actual source lines for a symbol, so an assistant can read a function
 or class body without opening the file itself.
 
 Parameters:
-- `label` (string, required) -- resolves to a node.
-- `context_lines` (integer) -- how many lines to return from the symbol's start.
-  Default 40, clamped to 1..400.
+- `label` (string) -- resolves to a node. Omit when reading by `file`.
+- `file` (string) -- read this file directly instead of resolving a symbol:
+  repo-relative, or `tag/path` in a federated graph (the `tag` from `list_repos`).
+  Use it to read a region that is not a single symbol -- a config block, or the
+  lines around a [`search_text`](#search_text) hit.
+- `lines` (string) -- with `file`, the range to read: `"108-140"`, or a single
+  `"108"` (reads `context_lines` from there). Ignored without `file`.
+- `context_lines` (integer) -- how many lines to return from the symbol's/line's
+  start. Default 40, clamped to 1..400.
 
-Resolves the node, reads its file under the `--source-root` jail, and returns a
-header (`<label> [<type>] <source_file>:L<from>-L<to>`) followed by the numbered
-lines. The graph records a start line only, so the window is `context_lines`
-lines from there.
+Resolves the node (or the raw `file`), reads it under the `--source-root` jail,
+and returns a header (`<label> [<type>] <source_file>:L<from>-L<to>`, or
+`<file>:L<from>-L<to>` for a raw range) followed by the numbered lines. For a
+symbol the graph records a start line, so the window is `context_lines` from
+there (or stops at the symbol's end when a span is recorded).
 
 In a **federated/global graph**, a node's `source_file` is repo-prefixed
 (`<tag>/...`) and the member repos live in sibling directories outside any single
@@ -281,6 +288,9 @@ Parameters:
 - `label` (string, required).
 - `relation_filter` (string) -- case-insensitive substring; keep only neighbours
   whose relation contains it.
+- `show_sites` (boolean) -- under each neighbour, print the actual source line of
+  that edge's call/reference site (`at file:line: <code>`, read from the jail).
+  Default false; enriches the text view only (the structured mirror is unchanged).
 
 Returns one line per neighbour with a direction marker and the relation in
 brackets. When a `relation_filter` matches none of the node's edges, the result
@@ -312,9 +322,16 @@ Parameters:
 - `offset` (integer) -- hubs to skip before the page (absolute rank is preserved
   in the numbering). Default 0.
 
-Returns a ranked list of label, edge count, and how many tests transitively
+Returns a ranked list of label, connection count, and how many tests transitively
 exercise each hub (`N test(s)`), plus a `structuredContent` mirror. A hub with
 `0 test(s)` is an untested high-blast-radius symbol -- exactly what to flag.
+
+`degree` is **total connections** -- every edge kind, including the `method`/`contains`
+edges that link a class to its members. It therefore measures structural
+centrality/size, **not** how many things depend on a symbol: a class can top this
+list yet have very few incoming dependents (its members hold the coupling). For
+"what depends on X / what breaks if I change it", use [`affected`](#affected), not
+degree.
 
 ### graph_stats
 
@@ -334,8 +351,15 @@ line omitted, for a single-repo graph).
 Federated workspace members (repo tags) with node/edge counts. Edges are counted
 under their source node's repo. Empty (single-repo) graphs return `No federated
 repos (single-repo graph).` plus a `structuredContent` mirror
-(`{ repos: [{ repo, nodes, edges }] }`, an empty array for a single-repo graph).
-See [Workspaces-and-Federation](Workspaces-and-Federation).
+(`{ repos: [{ repo, nodes, edges, source_hash? }] }`, an empty array for a
+single-repo graph). See [Workspaces-and-Federation](Workspaces-and-Federation).
+
+When a `workspace-state.json` sits next to the graph, each repo also carries a
+`source_hash` -- a content fingerprint of that member's sources from the last
+extraction -- shown as `src <hash>` in the text and `source_hash` in the structured
+output. It makes **per-repo staleness** visible in a federation: a member whose code
+changed since the graph was built keeps its old fingerprint until that member is
+re-extracted.
 
 Parameters: none.
 
@@ -382,6 +406,23 @@ Returns `<n> nodes depend on <seed> (<= <depth> hops):` and, per hit, the hop
 count, the relation it was reached through, and the label, plus a
 `structuredContent` mirror. This is the MCP form of the CLI `affected` command.
 
+**Class/type nodes fold in their members.** A class's callers attach to its
+methods, not the bare type symbol -- a reverse walk from the class node alone would
+return ~0 and read as "safe to change". So when the target is a class / struct /
+interface / enum / trait, `affected` seeds the walk from the type **and its
+members** and prefixes the output with a note (`<X> is a class with <N> members;
+impact is aggregated across the class and its members`). The `structuredContent`
+mirror carries `aggregated_over_members: <N>`. The same fold applies to
+[`find_callers`](#find_callers) / [`find_callees`](#find_callees) (which report the
+external callers/callees of the members) and to [`describe_node`](#describe_node)
+(which lists the members). See also the [Limitations](#limitations) on dynamic
+dispatch.
+
+When the name does not resolve to a single node, `affected` reports it rather than
+silently picking one: the text lists the candidates, and the structured mirror sets
+`resolved: false` (with `ambiguous: true` and a `candidates` array, or `found:
+false`) instead of a misleading `total: 0`.
+
 ### find_callers
 
 The nodes that call, use, or reference this symbol (incoming call-like edges
@@ -392,17 +433,29 @@ Parameters:
 - `label` (string, required).
 - `limit` (integer, default 50) — max callers listed before a `+N more` summary. Ignored when `verbose` is true.
 - `verbose` (boolean, default false) — emit the full, uncapped caller list.
+- `show_sites` (boolean, default false) — under each caller, print the actual
+  source line where the call happens (`at file:line: <code>`, read from the jail).
+  Turns "who calls X" into "who calls X, and the exact line" with no second
+  `get_source`.
+
+For a class/type, the external callers of its **members** are folded in and the
+output is labelled (a class's callers attach to its methods). Only static callers
+are seen -- see [Limitations](#limitations).
 
 ### find_callees
 
 The nodes this symbol calls, uses, or references (outgoing call-like edges only).
 Answers "what does X call". Same capped, count-and-breakdown output as
-`find_callers`.
+`find_callers`. For a class/type, the callees of its **members** are folded in and
+labelled (a class doesn't call; its methods do).
 
 Parameters:
 - `label` (string, required).
 - `limit` (integer, default 50) — max callees listed before a `+N more` summary. Ignored when `verbose` is true.
 - `verbose` (boolean, default false) — emit the full, uncapped callee list.
+- `show_sites` (boolean, default false) — under each callee, print the actual
+  source line where this symbol calls it (`at file:line: <code>`), so "what does X
+  call" also shows HOW it calls it.
 
 ### list_prs
 
@@ -557,6 +610,38 @@ with optional types, return type, and the raw header), so an agent can route on
 a function's shape without reading source. Aggregate queries (`count(...)`,
 projections) return scalar `groups` instead.
 
+### search_text
+
+The complement to `structural_search`. Where `structural_search` matches the
+**graph** (kinds, loc, fan-in/out, symbol names) and cannot see file content,
+`search_text` is a real **content** search over the source files -- for
+everything text-shaped the graph does not model: string literals, config values,
+log messages, a TODO's wording, error strings, magic numbers. It reads through
+the same per-repo source roots and containment jail as `get_source` (so it needs
+a `--source-root`, or a federated graph whose members register their own roots),
+honoring each repo's `.gitignore`/`.synapticignore`.
+
+Parameters:
+- `pattern` (string, required) -- a regex by default; a fixed string when `literal=true`.
+- `literal` (boolean) -- treat `pattern` as a literal, not a regex. Default false.
+- `case_sensitive` (boolean) -- match case-sensitively. Default false.
+- `repo` (string) -- restrict to one federated member (a tag from `list_repos`).
+  Omit to search every member / the single repo.
+- `path_glob` (string) -- only files matching this glob, e.g. `**/*.ts` or `src/**`,
+  applied relative to each repo root.
+- `max_results` (integer) -- hits to return before truncation is flagged. Default 100, max 1000.
+
+The defining feature is **graph attribution**: every hit carries the node whose
+body encloses it (innermost span wins), so a matched line is a pivot -- from a
+fragile regex literal straight to `affected`/`find_callers` on the function that
+contains it. Each text row is `file:line:col  <line>   [enclosing-symbol kind]`;
+the `structuredContent` mirror is
+`{ pattern, total, truncated, files_scanned, hits: [{ repo, file, line, col, match, line_text, node? }] }`,
+where `node` is null only when the hit falls outside any captured span. On a
+federated graph this is strictly more useful than a raw shell `grep`: grep does
+not know where the member repos live, which ignore files apply, or which symbol a
+line belongs to.
+
 ### describe_node
 
 A compact "takes X, returns Y, calls Z" description of a symbol, composed from
@@ -639,20 +724,22 @@ Returns the findings as text + `structuredContent`.
 
 ### Structured output
 
-Twelve tools declare an `outputSchema` and return a `structuredContent` object
+Fourteen tools declare an `outputSchema` and return a `structuredContent` object
 beside the text content, so a client can parse the result instead of scraping the
 formatted text:
 
 | Tool | `structuredContent` shape |
 |---|---|
 | `graph_stats` | `{ nodes, edges, communities, extracted, inferred, ambiguous, cross_repo, cross_language }` |
-| `god_nodes` | `{ god_nodes: [{ label, degree, id, test_count }] }` |
-| `affected` | `{ seed, affected: [{ label, depth, via_relation }] }` |
+| `get_node` | `{ found, id, label, source_file, file_type, degree, community?, kind?, visibility?, loc? }` (on an ambiguous name: `found:false` with `ambiguous`+`candidates`, matching `affected`/`describe_node`) |
+| `god_nodes` | `{ god_nodes: [{ label, degree, id, test_count }] }` (`degree` = total connections incl. members; centrality/size, not incoming-dependence) |
+| `affected` | `{ seed, resolved, affected: [{ label, depth, via_relation }], total, truncated, by_depth, aggregated_over_members? }` (on an unresolved name: `resolved:false` with `ambiguous`+`candidates` or `found:false`) |
 | `query_graph` | `{ nodes: [{ label, file_type, source_file, score, changed }], edges: [{ source, relation, target }] }` (nodes sorted by `score`; `changed` is true when `since` was given and the node's file changed) |
 | `structural_search` | `{ columns, results: [[{ id, label, kind, visibility, file, line, loc, signature }]] }` (or `groups` for aggregates) |
-| `describe_node` | `{ found, id, label, kind, summary, callees, signature }` |
+| `search_text` | `{ pattern, total, truncated, files_scanned, hits: [{ repo, file, line, col, match, line_text, node? }] }` (`node` is the enclosing symbol `{ id, label, kind, community }`, or null when the hit is outside any captured span) |
+| `describe_node` | `{ found, id, label, kind, summary, callees, signature, members?, member_count? }` (`members` listed for a class/type; on an ambiguous name: `found:false` with `ambiguous`+`candidates`) |
 | `get_neighbors` | `{ seed, neighbors: [{ label, relation, direction }], by_relation: { <relation>: <count> } }` (`by_relation` tallies every edge before any filter) |
-| `list_repos` | `{ repos: [{ repo, nodes, edges }] }` (empty array for a single-repo graph) |
+| `list_repos` | `{ repos: [{ repo, nodes, edges, source_hash? }] }` (empty array for a single-repo graph; `source_hash` present when a `workspace-state.json` sibling exists) |
 | `predict_impact` | the full `ChangeForecast`: `{ summary, changed_files, changed_nodes, public_api_breaks, blast_radius, blast_radius_total, at_risk_tests, verify_checklist, risk }` (not truncated by `limit`, which caps only the text) |
 | `affected_tests` | `{ tests: [{ id, label, file, depth, via_relation }], total }` |
 | `audit_sql` / `advise_sql` | `{ version, summary, findings: [{ rule_id, severity, category, title, detail, location, remediation, confidence }] }` |
@@ -668,6 +755,42 @@ An unknown tool name is returned as a tool result with `isError: true` and a tex
 body `Unknown tool: <name>` (not a JSON-RPC protocol error). An unknown JSON-RPC
 method returns error code `-32601`. An unknown resource or prompt returns
 `-32602`.
+
+### Limitations
+
+- **Static analysis only (with modelled exceptions).** Edges are read from source
+  structure, so a call wired up at runtime is not always captured. Two common
+  cross-process mechanisms **are** modelled, so their handlers do show callers:
+  **Electron IPC** (`ipcMain.handle`/`on` ↔ `ipcRenderer.invoke`/`send`/`on`,
+  `webContents.send`) and **WebSocket / socket.io** message channels — a sender and
+  its handler meet on a channel node (`ipc #<ch>` / `ws #<cmd>`), so `affected`,
+  `find_callers`, and `shortest_path` cross the boundary. Still not traced: a
+  handler reached only via a custom event bus, a DI container, a runtime-built
+  dispatch table, or reflection can show **0 callers** even though it runs. Read a
+  surprising 0-caller result on a dispatched handler as "no *static* caller", not
+  "dead code".
+- **Class vs. method impact.** Because callers attach to a class's methods, not the
+  bare type symbol, `affected` / `find_callers` / `find_callees` / `describe_node`
+  fold a class's members in automatically and label the result (see
+  [`affected`](#affected)). `god_nodes` `degree` still counts those member edges, so
+  it ranks structural size/centrality, **not** incoming dependence -- use `affected`
+  for blast radius.
+- **Inline unit tests.** A test defined in the same file as the code under test may
+  not be linked as a separate test node, so `affected_tests` can undercount in
+  test-sparse or inline-test codebases.
+- **Text content is not in the graph (but `search_text` reaches it).** The graph
+  models structure, not the bytes of a line: string literals, config values, log
+  messages, a TODO's wording, and magic numbers are not nodes. Use
+  [`search_text`](#search_text) for those -- it searches the source directly and
+  attributes each hit back to its enclosing symbol, so you still land on a graph
+  node to pivot from. For *reading* logic, `get_source` returns a symbol's body or
+  an arbitrary `file`+`lines` range, and `show_sites` on `find_callers` /
+  `find_callees` / `get_neighbors` prints the exact call line for each edge -- so
+  "A calls B" becomes "A calls B at this line" without leaving the graph.
+- **Federated staleness.** The graph is a snapshot. In a multi-repo workspace,
+  members drift between extractions; `list_repos` surfaces a per-repo `source_hash`
+  (when a `workspace-state.json` sibling exists) so drift is at least visible, but
+  the graph still reflects the last extraction until you re-run it.
 
 ## MCP resources
 

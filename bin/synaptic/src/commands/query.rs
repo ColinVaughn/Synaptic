@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use synaptic_core::NodeId;
 use synaptic_graph::KnowledgeGraph;
 use synaptic_query::{
-    affected_nodes, explain, query_modal, shortest_path, QueryIndex, Recency, RecencyMode,
-    TraversalMode, DEFAULT_AFFECTED_RELATIONS,
+    affected_including_members, explain, query_modal, shortest_path, QueryIndex, Recency,
+    RecencyMode, TraversalMode, DEFAULT_AFFECTED_RELATIONS,
 };
 
 /// `query` recency-boost strength (mirrors the MCP server's RECENCY_BOOST).
@@ -222,9 +222,22 @@ pub(crate) fn run_affected(
         relations
     };
     let rel_refs: Vec<&str> = rel_owned.iter().map(String::as_str).collect();
-    let hits = affected_nodes(&kg, &seed, &rel_refs, depth);
+    // Fold a type's members in (a class's callers attach to its methods, not the
+    // bare type symbol) so a class is not a misleading empty result. Shared with
+    // the MCP `affected` tool.
+    let (hits, member_count) = affected_including_members(&kg, &seed, &rel_refs, depth);
 
     println!("Affected nodes for {}", label_or_id(&kg, &seed));
+    if member_count > 0 {
+        let kind = kg
+            .node(&seed)
+            .and_then(|n| n.kind())
+            .map(|k| k.as_str())
+            .unwrap_or("type");
+        println!(
+            "({kind} with {member_count} members; impact aggregated across the {kind} and its members)"
+        );
+    }
     println!("Relations: {}", rel_owned.join(", "));
     println!("Depth: {depth}");
     if hits.is_empty() {

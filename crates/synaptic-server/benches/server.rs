@@ -119,7 +119,7 @@ fn bench_new_tools(c: &mut Criterion) {
         });
 
         group.bench_with_input(BenchmarkId::new("get_source_40", n), &n, |b, _| {
-            b.iter(|| black_box(server.tool_get_source("n0", 40)));
+            b.iter(|| black_box(server.tool_get_source("n0", None, None, 40)));
         });
     }
     group.finish();
