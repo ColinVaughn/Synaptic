@@ -925,6 +925,7 @@ impl Server {
                 }
             }
             "resources/list" => Ok(json!({ "resources": resources_list() })),
+            "resources/templates/list" => Ok(json!({ "resourceTemplates": resource_templates() })),
             "tools/call" => self.dispatch_tool(&params),
             "resources/read" => self.dispatch_resource(&params),
             other => Err((-32601, format!("Method not found: {other}"))),
@@ -1070,6 +1071,22 @@ impl Server {
 
     fn dispatch_resource(&self, params: &Value) -> Result<Value, (i64, String)> {
         let uri = params.get("uri").and_then(Value::as_str).unwrap_or("");
+        // Templated resources (resources/templates/list): any node or community
+        // is addressable by URI. Checked before the static table; the static
+        // URIs (codegraph://god-nodes etc.) do not share these prefixes.
+        if let Some(label) = uri.strip_prefix("codegraph://node/") {
+            let text = self.tool_get_node(label);
+            return Ok(
+                json!({ "contents": [{ "uri": uri, "mimeType": "text/plain", "text": text }] }),
+            );
+        }
+        if let Some(id) = uri.strip_prefix("codegraph://community/") {
+            let cid: u32 = id.parse().unwrap_or(u32::MAX);
+            let text = self.tool_get_community(cid, 0, 1000);
+            return Ok(
+                json!({ "contents": [{ "uri": uri, "mimeType": "text/plain", "text": text }] }),
+            );
+        }
         let (mime, text) = match uri {
             "codegraph://report" => ("text/markdown", self.resource_report()),
             "codegraph://stats" => ("text/plain", self.tool_graph_stats()),
@@ -1338,6 +1355,17 @@ fn resources_list() -> Value {
         { "uri": "codegraph://surprises", "name": "Surprising connections", "mimeType": "text/plain" },
         { "uri": "codegraph://audit", "name": "Confidence audit", "mimeType": "text/plain" },
         { "uri": "codegraph://questions", "name": "Suggested questions", "mimeType": "text/plain" }
+    ])
+}
+
+/// The MCP `resources/templates/list` payload: any node or community is
+/// addressable as a resource by URI.
+fn resource_templates() -> Value {
+    json!([
+        { "uriTemplate": "codegraph://node/{label}", "name": "Node", "mimeType": "text/plain",
+          "description": "Metadata for one node by label, id, or bare name." },
+        { "uriTemplate": "codegraph://community/{id}", "name": "Community", "mimeType": "text/plain",
+          "description": "Members of one community by id." }
     ])
 }
 
@@ -1652,6 +1680,41 @@ mod tests {
         // offset 1 skips the top hub and numbers from its absolute rank.
         let paged = call_tool(&mut s, "god_nodes", json!({"top_n": 1, "offset": 1}));
         assert_eq!(paged, "God nodes:\n  2. Database - 1 edges");
+    }
+
+    #[test]
+    fn resource_templates_listed_and_readable() {
+        let mut s = server();
+        let tl = s
+            .handle_request(&json!({"jsonrpc":"2.0","id":1,"method":"resources/templates/list"}))
+            .unwrap();
+        let templates = tl["result"]["resourceTemplates"].as_array().unwrap();
+        assert!(templates
+            .iter()
+            .any(|t| t["uriTemplate"] == "codegraph://node/{label}"));
+
+        let read = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":2,"method":"resources/read",
+                "params":{"uri":"codegraph://node/AuthService"}
+            }))
+            .unwrap();
+        assert!(read["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("AuthService"));
+
+        // A static resource still resolves (templates do not shadow it).
+        let stats = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":3,"method":"resources/read",
+                "params":{"uri":"codegraph://god-nodes"}
+            }))
+            .unwrap();
+        assert!(stats["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("God nodes"));
     }
 
     #[test]
