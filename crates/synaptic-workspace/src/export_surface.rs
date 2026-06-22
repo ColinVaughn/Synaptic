@@ -368,7 +368,7 @@ pub fn resolve_cross_repo(
             continue; // already decided
         }
         // An alias (import map / tsconfig `paths` / module-federation remote, e.g.
-        // `@PCMatic/Hub` or `@app/Button` -> member `hub`) is the authoritative
+        // `@acme/Hub` or `@app/Button` -> member `hub`) is the authoritative
         // cross-repo link for these architectures; try it before coordinate / symbol
         // matching. Package-level: INFERRED, targets the member's anchor.
         let decided = aliases
@@ -853,13 +853,13 @@ mod tests {
 
     #[test]
     fn import_map_alias_resolves_cross_repo() {
-        // root-config imports "@PCMatic/Hub" (stub); alias map says that's `hub`.
+        // root-config imports "@acme/Hub" (stub); alias map says that's `hub`.
         let a = gd(
             vec![
                 node("app", "app", "rc.js"),
-                node("@PCMatic/Hub", "@PCMatic/Hub", ""),
+                node("@acme/Hub", "@acme/Hub", ""),
             ],
-            vec![import_edge("app", "@PCMatic/Hub", "imports_from")],
+            vec![import_edge("app", "@acme/Hub", "imports_from")],
         );
         let b = gd(vec![node("Widget", "Widget", "w.js")], vec![]);
         let composed = compose(vec![("root-config".into(), a), ("hub".into(), b.clone())]);
@@ -871,7 +871,7 @@ mod tests {
         let mut aliases = crate::alias::AliasMap::default();
         aliases.insert(
             crate::alias::AliasKind::Exact,
-            "@PCMatic/Hub".to_string(),
+            "@acme/Hub".to_string(),
             "hub".to_string(),
         );
         let (g, report) = resolve_cross_repo(composed, &surfaces, &aliases);

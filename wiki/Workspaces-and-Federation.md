@@ -335,7 +335,7 @@ alias pointing at its own member) is dropped.
   a candidate file (`.json`, `.js`, `.mjs`, `.cjs`, `.ts`, `.ejs`, `.html`,
   `.htm`). The alias is **exact** (the import specifier must equal the alias).
   The member is identified by a path segment of the target value (e.g.
-  `@PCMatic/Hub` to `${url}/hub/dist/...` resolves to member `hub`).
+  `@acme/Hub` to `${url}/hub/dist/...` resolves to member `hub`).
 - **tsconfig `paths`**: `compilerOptions.paths` in `tsconfig*.json`. A `"@app/*"`
   key (trailing `/*`) is a **prefix** alias; a bare key is **exact**. The member
   is identified by a path segment of the target paths (e.g. `../hub/src/*`). A

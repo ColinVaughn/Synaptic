@@ -24,6 +24,11 @@ tokio = { workspace = true, features = ["net", "time"] }
 futures-util = { workspace = true }
 getrandom = { workspace = true }
 tiktoken-rs = { workspace = true }
+# `search_text` content search: ignore-aware walk + ripgrep matcher/searcher.
+ignore = { workspace = true }
+regex = { workspace = true }
+grep-searcher = { workspace = true }
+grep-regex = { workspace = true }
 
 [dev-dependencies]
 tower = { workspace = true }

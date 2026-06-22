@@ -532,6 +532,9 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                     }
                 }
                 self.function_bodies.push((func_nid, body));
+                // Mark this function node as own-bodied so the call pass skips it
+                // (it is walked here) but still recurses into anonymous callbacks.
+                self.owned_fn_nodes.insert(node.id());
             }
             return;
         }
@@ -730,7 +733,14 @@ impl<'tree> Extractor<'_, '_, 'tree> {
             return;
         }
         if self.cfg.function_boundary_types.contains(&node.kind()) {
-            return;
+            // A NAMED nested function got its own node + body, walked separately --
+            // stop so its calls aren't double-attributed to this caller. An
+            // ANONYMOUS callback (arrow / function expression passed inline, e.g. an
+            // `ipcMain.handle(ch, () => helper())` body or `arr.map(x => f(x))`) has
+            // no node of its own, so recurse: its calls belong to this caller.
+            if self.owned_fn_nodes.contains(&node.id()) {
+                return;
+            }
         }
 
         if self.cfg.call_types.contains(&node.kind()) {

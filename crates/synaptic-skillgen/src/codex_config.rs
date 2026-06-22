@@ -195,7 +195,7 @@ fn uninstall_mcp_server(repo_root: &Path) -> std::io::Result<()> {
 
 // --- MCP server: global (app) registration in <codex_home>/config.toml ------
 
-/// Sanitized per-repo server name, e.g. `synaptic-pitframe`. The Codex desktop
+/// Sanitized per-repo server name, e.g. `synaptic-webapp`. The Codex desktop
 /// app only reads the global config (it ignores a project's `.codex/config.toml`
 /// for MCP), so each repo is registered as its own named server.
 fn global_server_name(repo_root: &Path) -> String {
@@ -575,13 +575,13 @@ mod tests {
     fn global_install_writes_named_server_with_absolute_graph() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("codexhome");
-        let repo = dir.path().join("pitframe");
+        let repo = dir.path().join("webapp");
         fs::create_dir_all(&repo).unwrap();
         let written = install_global_mcp(&home, &repo).unwrap();
         assert!(written.ends_with("config.toml"), "{written:?}");
         let toml = fs::read_to_string(home.join("config.toml")).unwrap();
         let parsed: DocumentMut = toml.parse().unwrap();
-        let s = &parsed["mcp_servers"]["synaptic-pitframe"];
+        let s = &parsed["mcp_servers"]["synaptic-webapp"];
         assert_eq!(s["command"].as_str(), Some("synaptic"), "{toml}");
         let args: Vec<String> = s["args"]
             .as_array()
@@ -594,7 +594,7 @@ mod tests {
         assert!(
             args.iter().any(|a| a
                 .replace('\\', "/")
-                .ends_with("pitframe/synaptic-out/graph.json")),
+                .ends_with("webapp/synaptic-out/graph.json")),
             "absolute graph path expected: {args:?}"
         );
     }

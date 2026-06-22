@@ -1,6 +1,6 @@
 //! Unified cross-repo alias resolution. Several JS/TS toolchains let one member
 //! reference another by an **alias** that is decoupled from the target's
-//! `package.json name`: import maps (`@PCMatic/Hub`), tsconfig `paths`
+//! `package.json name`: import maps (`@acme/Hub`), tsconfig `paths`
 //! (`@app/*` → `../hub/src/*`), and webpack/Vite module-federation `remotes`
 //! (`hub` imported as `hub/Button`). This module collects all of them into one
 //! [`AliasMap`] of `alias → member tag`, consumed by cross-repo resolution.

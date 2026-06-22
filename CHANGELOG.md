@@ -10,6 +10,119 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-06-22
+
+Two themes. First, two new "reach for the graph, not a shell" capabilities that
+close the gaps where an assistant would otherwise drop to `grep` or open files by
+hand: a content/text search that attributes every hit to a graph node, and
+source-reading that no longer needs a symbol to anchor on. Second, the
+federated-workspace audit follow-up: the 0.3.8 assessment was generated against
+the **0.3.7** binary, so several of its findings were already fixed in 0.3.8
+(`audit_sql` duplicate findings, the `working_changes_impact` clean-vs-not-a-repo
+message, and cross-tool ambiguity refusal — all re-confirmed correct here); this
+round fixes the genuinely open ones, each re-verified live on the same 9-repo
+workspace.
+
+### Added
+- **`get_source` reads an arbitrary file range, not just a symbol.** Pass `file`
+  (repo-relative, or `tag/path` in a federated graph) with an optional `lines`
+  range (`"108-140"`, or a single `"108"` for a `context_lines` window) to read a
+  region that is not a single node — a config block, or the lines around a
+  `search_text` hit — through the same source-root jail and federation routing as
+  the symbol path. Reading logic no longer requires a graph node to anchor on.
+- **`show_sites` on `find_callers` / `find_callees` / `get_neighbors`.** With
+  `show_sites=true`, each listed caller/callee/neighbor is annotated with the
+  actual source line of its call/reference site (`at file:line: <code>`, read from
+  the jail, long lines truncated). This turns the graph's "A calls B" into "A
+  calls B at this exact line" without a second `get_source` round-trip — the
+  precise bridge from a structural edge to the code that judges it (e.g. is the
+  call's argument-building regex fragile?). Text-view enrichment; the structured
+  mirrors are unchanged.
+- **`search_text` — content (text/regex) search over the source, attributed to the
+  graph.** `structural_search` matches the graph (kinds, loc, fan-in/out, symbol
+  names) and by design cannot see file content, so anything text-shaped — string
+  literals, config values, log messages, a TODO's wording, error strings, magic
+  numbers — was invisible to the MCP surface. The new `search_text` tool fills that
+  gap: a regex (or `literal`) search over the actual source files, case-insensitive
+  by default, that **routes through the same per-repo source roots and containment
+  jail as `get_source`**. On a federated/monorepo graph it searches every member
+  (honoring each repo's `.gitignore`/`.synapticignore`), or one member via `repo`;
+  filter files with `path_glob`, cap with `max_results`. Crucially, **every hit is
+  attributed to the graph node whose body encloses it**, so a matched line is a
+  pivot: from a fragile regex literal straight to `affected`/`find_callers` on the
+  function that contains it. Backed by ripgrep's matcher/searcher core
+  (`grep-searcher`/`grep-regex`) over the `ignore` walker. Text + structured
+  (`{pattern,total,truncated,files_scanned,hits:[{repo,file,line,col,match,line_text,node}]}`);
+  the read-only tool surface is now 27 tools, 14 of them structured. The server
+  instructions and tool descriptions tell agents to reach for `search_text` (not a
+  raw shell grep) for text-shaped questions, since only it knows the federation
+  topology and resolves each hit back to a symbol.
+- **Electron IPC modelled as cross-process edges.** A main-process handler invoked
+  only over IPC (`ipcMain.handle('ch', fn)`) previously had no static caller, so it
+  read as dead code. The cross-language pass now emits a channel-keyed `ipc #<ch>`
+  boundary node: senders (`ipcRenderer.invoke`/`send`, `webContents.send`)
+  `calls_service` it and handlers (`ipcMain.handle`/`on`, renderer `ipcRenderer.on`)
+  are reached from it via `handled_by`, so renderer↔main calls connect in the graph
+  and `affected` / `find_callers` / `shortest_path` cross the IPC boundary. Mirrors
+  the existing WebSocket/socket.io detector; JS/TS, gated on an Electron IPC API
+  token. This narrows the static-analysis coverage gap noted in 0.3.8 — custom
+  event buses and reflection are still not traced.
+
+### Fixed
+- **Calls inside anonymous callbacks are no longer lost.** The generic call pass
+  stopped at every nested function boundary, so a call made inside an inline arrow /
+  function expression (`ipcMain.handle('ch', () => helper())`, `arr.map(x => f(x))`,
+  `.then(() => g())`) was never attributed to anything — leaving the callee with 0
+  callers. It now recurses into anonymous callbacks (whose calls belong to the
+  enclosing named function) while still skipping named nested functions that get
+  their own node. Combined with the IPC channels above, this is what makes a
+  delegated IPC handler reachable: on the live workspace, a helper that an IPC
+  handler delegated to went from **0 callers** to its real caller, and `affected`
+  on it now reaches the renderer-side invoke sites across the IPC boundary
+  (renderer/preload → `ipc #<channel>` → handler-registrar → the helper).
+- **Class/type reverse-impact no longer collapses to ~0.** A class's callers attach
+  to its methods, not the bare type symbol, so `affected`, `find_callers`,
+  `find_callees`, and `describe_node` on a class previously returned almost nothing
+  — reading as "safe to change" when it is not. They now fold the type's members in
+  (seeding the reverse-impact walk from the class plus its methods) and label the
+  result as aggregated; `describe_node` lists a type's members. On the live
+  workspace, `affected` on the top god-class went from an empty/ambiguous result to
+  **65 dependents** with a `class with 124 members; impact aggregated…` note. The
+  fold is shared by the MCP server and the CLI `affected` command (new
+  `synaptic-query` `type_member_ids` / `affected_rooted` / `affected_including_members`).
+- **Structured `affected` no longer reports a misleading `total: 0` for an
+  ambiguous name.** The structured channel used a silent best-match resolver while
+  the text refused; both now use the unified resolver. An unresolved name returns
+  `resolved: false` with `ambiguous` + `candidates` (or `found: false`), matching
+  the text. `describe_node`'s structured mirror does the same and adds
+  `members` / `member_count` for a type. `get_node` gained a `structuredContent`
+  mirror too (node metadata, or the same `ambiguous`+`candidates` shape), so it is
+  no longer the one name-taking tool that surfaces ambiguity as text only
+  (13 tools now carry an `outputSchema`).
+- **Edge `source_file` paths are normalized to forward slashes.** Node paths were
+  normalized at build but edge paths kept Windows backslashes, so `audit_sql`
+  locations rendered `repo/src\main\file.js`. Fixed at graph build (the root cause —
+  a freshly extracted member now has zero backslashed edge paths) and again when an
+  `audit_sql` finding is emitted, so a pre-existing graph also renders clean paths.
+- **`get_community` no longer lists noise.** External import stubs (third-party
+  packages with no source file) and non-code-symbol nodes (captured TODO/NOTE
+  rationale comments, markdown headings, config keys) are filtered from community
+  membership, so a community lists the real code symbols of a subsystem.
+
+### Changed
+- **`god_nodes` degree is labelled as centrality, not dependence.** The text, the
+  output schema, and the server instructions now state that `degree` counts all
+  connections (including a class's member edges) — structural size/centrality, not
+  how many things depend on a symbol; use `affected` for blast radius. Per-row
+  wording changed from `N edges` to `N connections`.
+- **`list_repos` surfaces per-repo freshness.** When a `workspace-state.json` sits
+  beside the graph, each repo carries a `source_hash` (text `src <hash>`, structured
+  `source_hash`) so per-repo drift in a federation is visible.
+- **MCP instructions document the static-analysis coverage limit.** A handler
+  reached only via runtime dispatch (IPC / WebSocket / event bus / reflection) can
+  show 0 callers; the server instructions, the `affected` / `find_callers`
+  descriptions, and the wiki now call this out alongside the inline-unit-test note.
+
 ## [0.3.8] - 2026-06-22
 
 A tooling-quality round from auditing a 9-repo federated workspace: clearer

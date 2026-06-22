@@ -90,6 +90,19 @@ impl AuditReport {
     /// Build a report from raw findings: sort by severity then rule id, tally
     /// counts, and write a one-line summary. Deterministic output.
     pub fn from_findings(mut findings: Vec<Finding>, unparsed: Vec<String>) -> Self {
+        // Normalize location separators to '/' first. Locations built from an
+        // edge's source_file can carry Windows backslashes (older graphs predate
+        // edge-path normalization); a stray backslash would both render wrong and
+        // defeat the (rule_id, location, snippet) dedup below for a site reported
+        // via differently-normalized paths. The source_location suffix (e.g. `L12`)
+        // never contains a backslash, so normalizing the whole string is safe.
+        for f in &mut findings {
+            if let Some(loc) = &f.location {
+                if loc.contains('\\') {
+                    f.location = Some(loc.replace('\\', "/"));
+                }
+            }
+        }
         // scan_sql emits one code->SQL edge per referenced table, each carrying
         // the identical full SQL text at the same file:line, so the per-edge
         // rules produce byte-identical findings for a multi-table or schema-
@@ -189,6 +202,41 @@ mod tests {
         );
         assert_eq!(r.findings[0].rule_id, "SEC-RLS-001");
         assert_eq!(r.findings[1].rule_id, "PERF-IDX-001");
+    }
+
+    fn mk_loc(loc: &str) -> Finding {
+        Finding {
+            rule_id: "SEC-INJ-001".into(),
+            severity: Severity::Critical,
+            category: Category::Security,
+            title: "t".into(),
+            detail: "d".into(),
+            location: Some(loc.into()),
+            node_ids: vec![],
+            snippet: Some("SELECT 1".into()),
+            remediation: "fix".into(),
+            confidence: 0.6,
+            evidence: None,
+        }
+    }
+
+    #[test]
+    fn finding_location_paths_are_normalized_to_forward_slashes() {
+        // A code->SQL `queries` edge loaded from a pre-existing graph can carry a
+        // Windows source_file; the rendered finding location must use '/'.
+        let r = AuditReport::from_findings(vec![mk_loc("app/src\\db\\query.js:L122")], vec![]);
+        assert_eq!(
+            r.findings[0].location.as_deref(),
+            Some("app/src/db/query.js:L122")
+        );
+    }
+
+    #[test]
+    fn separator_only_duplicate_locations_collapse() {
+        // The same site reported once with backslashes and once with slashes must
+        // dedup to one after location normalization.
+        let r = AuditReport::from_findings(vec![mk_loc("a\\b.js:L1"), mk_loc("a/b.js:L1")], vec![]);
+        assert_eq!(r.findings.len(), 1);
     }
 
     #[test]
