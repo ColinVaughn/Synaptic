@@ -938,7 +938,8 @@ impl Server {
                     "capabilities": {
                         "tools": {},
                         "resources": { "subscribe": true },
-                        "prompts": {}
+                        "prompts": {},
+                        "completions": {}
                     },
                     "serverInfo": { "name": "codegraph", "version": env!("CARGO_PKG_VERSION") },
                     "instructions": SERVER_INSTRUCTIONS,
@@ -960,6 +961,7 @@ impl Server {
             // Subscriptions are acknowledged here; the HTTP transport does the
             // actual push over SSE when the graph reloads (see http::handle_sse).
             "resources/subscribe" | "resources/unsubscribe" => Ok(json!({})),
+            "completion/complete" => self.dispatch_completion(&params),
             "tools/call" => self.dispatch_tool(&params),
             "resources/read" => self.dispatch_resource(&params),
             other => Err((-32601, format!("Method not found: {other}"))),
@@ -1132,6 +1134,51 @@ impl Server {
             other => return Err((-32602, format!("Unknown resource: {other}"))),
         };
         Ok(json!({ "contents": [{ "uri": uri, "mimeType": mime, "text": text }] }))
+    }
+
+    /// `completion/complete` — argument autocomplete for the common tool/prompt
+    /// arguments: node labels (label/source/target), repo tags, and community
+    /// ids. Prefix match, sorted, capped at the protocol's 100 values.
+    fn dispatch_completion(&self, params: &Value) -> Result<Value, (i64, String)> {
+        let arg = params.get("argument");
+        let arg_name = arg
+            .and_then(|a| a.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let prefix = arg
+            .and_then(|a| a.get("value"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let plow = prefix.to_lowercase();
+        let mut values: Vec<String> = match arg_name {
+            "label" | "source" | "target" => self
+                .kg
+                .nodes()
+                .filter(|n| n.label.to_lowercase().starts_with(&plow))
+                .map(|n| sanitize_label(&n.label))
+                .collect(),
+            "repo" => self
+                .kg
+                .nodes()
+                .filter_map(|n| n.repo.clone())
+                .filter(|r| r.to_lowercase().starts_with(&plow))
+                .map(|r| sanitize_label(&r))
+                .collect(),
+            "community_id" => self
+                .communities
+                .keys()
+                .map(|c| c.to_string())
+                .filter(|c| c.starts_with(prefix))
+                .collect(),
+            _ => Vec::new(),
+        };
+        values.sort();
+        values.dedup();
+        let total = values.len();
+        values.truncate(100);
+        Ok(json!({
+            "completion": { "values": values, "total": total, "hasMore": total > 100 }
+        }))
     }
 
     /// Serve over stdio: newline-delimited JSON-RPC on stdin/stdout.
@@ -1722,6 +1769,27 @@ mod tests {
         // offset 1 skips the top hub and numbers from its absolute rank.
         let paged = call_tool(&mut s, "god_nodes", json!({"top_n": 1, "offset": 1}));
         assert_eq!(paged, "God nodes:\n  2. Database - 1 edges");
+    }
+
+    #[test]
+    fn completion_completes_node_labels() {
+        let mut s = server(); // AuthService, login_user, Database
+        let r = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":1,"method":"completion/complete",
+                "params":{ "ref": {"type":"ref/resource","uri":"codegraph://node/{label}"},
+                           "argument": {"name":"label","value":"Auth"} }
+            }))
+            .unwrap();
+        let values: Vec<&str> = r["result"]["completion"]["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(values.contains(&"AuthService"), "{values:?}");
+        assert!(!values.contains(&"Database"), "prefix filtered: {values:?}");
+        assert_eq!(r["result"]["completion"]["hasMore"], false);
     }
 
     #[test]
