@@ -10,6 +10,39 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.10] - 2026-06-22
+
+A patch release: a security-advisory dependency bump, a cross-platform CI fix, and
+agent-surface documentation completeness for the 0.3.9 tooling.
+
+### Security
+- **`quinn-proto` 0.11.14 -> 0.11.15** (RUSTSEC-2026-0185, remote memory exhaustion
+  from unbounded out-of-order stream reassembly, high). A lockfile-only bump:
+  `quinn-proto` is an orphan lock entry not reachable from any workspace crate's
+  build graph, so no shipped binary ever contained it; this clears the
+  `cargo-audit` / `cargo-deny` advisory gate.
+
+### Fixed
+- **Cross-platform jail test.** `jail_allows_inside_rejects_escape` asserted that a
+  path escaping the source-root resolves to `Missing`, which holds on Windows (the
+  escape target does not exist) but not on Linux, where `../../etc/passwd` exists and
+  the jail correctly returns `OutsideRoot`. The jail code was always sound -- it
+  never returns `Found` for an escape -- so the test now accepts either rejection
+  reason; the precise Missing-vs-OutsideRoot split stays pinned in a sibling test
+  with a controlled file. Unblocks the `test (ubuntu-latest)` CI job.
+
+### Documentation
+- **The generated skill now describes the 0.3.9 tooling.** The installed Synaptic
+  skill (`synaptic skill install`) gained `search_text` -- the text complement to
+  `structural_search`, with each hit attributed to the enclosing node -- in its MCP
+  tool list and its trigger description, and notes `get_source`'s new `file` +
+  `lines` arbitrary-range read. (`show_sites` stays deferred to the tool schema, like
+  other per-tool parameters.) Snapshots re-blessed.
+- **`describe_node`'s `outputSchema` is complete.** It now declares the `members` /
+  `member_count` fields it returns for a class/type and the `ambiguous` /
+  `candidates` / `query` disambiguation shape it returns for an unresolved name,
+  matching `get_node` / `affected`.
+
 ## [0.3.9] - 2026-06-22
 
 Two themes. First, two new "reach for the graph, not a shell" capabilities that

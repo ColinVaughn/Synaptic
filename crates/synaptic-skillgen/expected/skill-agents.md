@@ -1,6 +1,6 @@
 ---
 name: synaptic
-description: Queries this repo's Synaptic knowledge graph -- symbols and how they call, import, inherit, and (across language boundaries) reach each other -- to navigate code and analyze the impact of changes. It answers what calls or depends on a symbol, the blast radius of changing it, a forecast of what a planned edit breaks, which tests exercise it, and a real pass/fail from running the change in a throwaway worktree; it also runs structural/architectural pattern search, plan-only refactors, time-travel architecture diffs, and SQL audit. Use when exploring an unfamiliar codebase, finding callers or dependents, tracing how one part reaches another, reading a symbol's source, or -- before editing code others depend on -- judging blast radius, forecasting a change, choosing which tests to run, or verifying it. Prefer it over grepping or reading files broadly.
+description: Queries this repo's Synaptic knowledge graph -- symbols and how they call, import, inherit, and (across language boundaries) reach each other -- to navigate code and analyze the impact of changes. It answers what calls or depends on a symbol, the blast radius of changing it, a forecast of what a planned edit breaks, which tests exercise it, and a real pass/fail from running the change in a throwaway worktree; it also runs structural/architectural pattern search, content (text/regex) search over the source with each hit attributed to its enclosing symbol, plan-only refactors, time-travel architecture diffs, and SQL audit. Use when exploring an unfamiliar codebase, finding callers or dependents, tracing how one part reaches another, reading a symbol's source, searching the source for a string literal / config value / log message / TODO, or -- before editing code others depend on -- judging blast radius, forecasting a change, choosing which tests to run, or verifying it. Prefer it over grepping or reading files broadly.
 ---
 
 # Synaptic for your AI agent
@@ -55,7 +55,9 @@ broadly; it is faster and surfaces relationships and impact that text search can
 
 ## MCP (preferred for your AI agent)
 Use the **synaptic** MCP server's tools. Start with `query_graph`, then:
-- `get_source` -- read a symbol's actual code (no need to open the file).
+- `get_source` -- read a symbol's actual code (no need to open the file), or pass
+  `file` plus a `lines` range to read any region (a config block, or the lines
+  around a `search_text` hit) instead of a symbol.
 - `affected` -- the blast radius of changing a symbol; `working_changes_impact`
   does the same for your current git diff (no PR needed).
 - `predict_impact` -- forecast a change before you make it: pass the files you
@@ -74,6 +76,14 @@ Use the **synaptic** MCP server's tools. Start with `query_graph`, then:
   `get_community` -- navigate and inspect the graph.
 - `structural_search` -- SYNQL or a named pattern (kind/loc/fan-in-out, not text).
   Structured results include each match's captured signature (params + return).
+- `search_text` -- the text complement to `structural_search`: a regex (or
+  `literal`) content search over the actual source, case-insensitive by default,
+  with every hit attributed to the enclosing graph node. Reach for it, not a
+  shell grep, for the text-shaped things the graph does not model (string
+  literals, config values, log messages, a TODO's wording, error strings); a hit
+  is a pivot to `affected` / `find_callers` on the node that contains it.
+  Federation-aware (search every member or one via `repo`; `path_glob`,
+  `max_results`), jailed to the source roots like `get_source`.
 - `describe_node` -- a compact "takes X, returns Y, calls Z" summary of a symbol
   from its signature and outgoing calls; handy for writing a tool/function blurb.
 - `time_travel_diff` -- how the graph changed between two git revisions.

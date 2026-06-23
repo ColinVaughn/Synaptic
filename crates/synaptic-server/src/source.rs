@@ -63,11 +63,15 @@ mod tests {
             resolve_in_root_detailed(root, "src/a.py"),
             ResolveOutcome::Found(_)
         ));
-        // Escape attempt: canonicalizes outside root -> rejected.
-        assert_eq!(
+        // Escape attempt: rejected, never Found. The exact reason is platform-
+        // dependent -- a path that escapes the root resolves to OutsideRoot when
+        // the target exists (e.g. /etc/passwd on Unix) and Missing when it does
+        // not (e.g. on Windows); both refuse the read. The Missing-vs-OutsideRoot
+        // distinction is pinned separately in detailed_outcome_separates_missing_from_escape.
+        assert!(matches!(
             resolve_in_root_detailed(root, "../../etc/passwd"),
-            ResolveOutcome::Missing
-        );
+            ResolveOutcome::Missing | ResolveOutcome::OutsideRoot
+        ));
         // Missing file -> Missing (not a panic).
         assert_eq!(
             resolve_in_root_detailed(root, "src/missing.py"),

@@ -4017,7 +4017,13 @@ fn tools_list(allow_exec: bool) -> Value {
               "kind": { "type": "string" },
               "summary": { "type": "string", "description": "The one-line 'takes X, returns Y, calls Z' description." },
               "callees": { "type": "array", "items": { "type": "string" }, "description": "Distinct outgoing call-target labels." },
-              "signature": { "type": "object", "description": "Captured signature: params (name + optional type_ref), optional return_type, raw header." }
+              "signature": { "type": "object", "description": "Captured signature: params (name + optional type_ref), optional return_type, raw header." },
+              "members": { "type": "array", "items": { "type": "string" }, "description": "For a class/type only: its member symbol labels (a type has no calls of its own; capped at 40)." },
+              "member_count": { "type": "integer", "description": "For a class/type: total members folded in (may exceed the capped `members` list)." },
+              "query": { "type": "string", "description": "Echo of the input label when found=false." },
+              "ambiguous": { "type": "boolean", "description": "true when the name resolved to several nodes (found=false); see candidates." },
+              "candidates": { "type": "array", "items": { "type": "object", "properties": {
+                  "id": {"type":"string"}, "file": {"type":"string"}, "degree": {"type":"integer"} } }, "description": "Disambiguation candidates when the name is ambiguous (found=false), matching get_node/affected." }
           }, "required": ["found"] } },
         { "name": "time_travel_diff", "description": "How the code graph changed between two git revisions: added/removed module dependencies, removed APIs, architectural drift, new cycles, and hotspots. Builds each revision in a throwaway git worktree (slow on a cold repo).",
           "inputSchema": { "type": "object", "properties": {
