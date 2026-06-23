@@ -627,6 +627,33 @@ impl Server {
         )
     }
 
+    /// `working_changes_impact` — graph blast radius of the uncommitted
+    /// working-tree diff against `base` (default: the detected default branch).
+    /// Uses `git`, not `gh`, so it works offline and before any PR exists.
+    pub fn tool_working_changes_impact(&self, base: Option<&str>) -> String {
+        let base = self.resolve_base(base, None);
+        let diff = self.runner.run("git", &["diff", "--name-only", &base]);
+        let files: Vec<String> = diff
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+        if files.is_empty() {
+            return format!("No changes vs {base} (or git unavailable).");
+        }
+        let (comms, nodes) = self.graph_impact(&files);
+        let mut out = format!(
+            "Working changes vs {base}: {} files, {nodes} graph nodes, {} communities touched",
+            files.len(),
+            comms.len()
+        );
+        for f in &files {
+            out.push_str(&format!("\n  {}", sanitize_label(f)));
+        }
+        out
+    }
+
     /// `list_prs` — open PRs targeting the base, as text.
     pub fn tool_list_prs(&self, base: Option<&str>, repo: Option<&str>) -> String {
         let resolved = self.resolve_base(base, repo);
@@ -1038,6 +1065,7 @@ impl Server {
             "list_prs" => self.tool_list_prs(opt("base"), opt("repo")),
             "get_pr_impact" => self.tool_get_pr_impact(u("pr_number", 0), opt("repo")),
             "triage_prs" => self.tool_triage_prs(opt("base"), opt("repo")),
+            "working_changes_impact" => self.tool_working_changes_impact(opt("base")),
             // An unknown tool is a tool-result with isError, NOT a JSON-RPC
             // protocol error (return text content).
             other => {
@@ -1334,12 +1362,19 @@ fn tools_list() -> Value {
         { "name": "get_pr_impact", "description": "One PR's detail plus its graph blast radius: which graph nodes and communities its changed files touch. Requires the `gh` CLI.",
           "inputSchema": { "type": "object", "properties": { "pr_number": { "type": "integer", "description": "PR number." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } }, "required": ["pr_number"] } },
         { "name": "triage_prs", "description": "Open PRs ranked by actionability (status plus graph blast radius) so the model can prioritize review and merge order. Requires the `gh` CLI.",
-          "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch (default: the repo's default branch)." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } } } }
+          "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch (default: the repo's default branch)." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } } } },
+        { "name": "working_changes_impact", "description": "Graph blast radius of your uncommitted working-tree changes against a base branch: which graph nodes and communities your edits touch, before you commit. Uses git (no gh or PR needed).",
+          "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch to diff against (default: the repo's default branch)." } } } }
     ]);
     // Every tool is a pure read; the PR tools additionally reach the network
     // (gh), so they carry openWorldHint. Merged here to keep the entries above
     // focused on schema.
-    let open_world = ["list_prs", "get_pr_impact", "triage_prs"];
+    let open_world = [
+        "list_prs",
+        "get_pr_impact",
+        "triage_prs",
+        "working_changes_impact",
+    ];
     for t in tools.as_array_mut().unwrap() {
         let name = t["name"].as_str().unwrap_or("").to_string();
         t["annotations"] = json!({
@@ -1537,7 +1572,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 16);
+        assert_eq!(names.len(), 17);
         for expected in [
             "query_graph",
             "get_node",
@@ -1555,6 +1590,7 @@ mod tests {
             "list_prs",
             "get_pr_impact",
             "triage_prs",
+            "working_changes_impact",
         ] {
             assert!(names.contains(&expected), "missing tool {expected}");
         }
@@ -1876,8 +1912,11 @@ mod tests {
                 json!(true),
                 "tool {name} must be read-only"
             );
-            // PR tools reach the network (gh) -> openWorldHint true.
-            let open = matches!(name, "list_prs" | "get_pr_impact" | "triage_prs");
+            // PR + working-tree tools reach outside the graph (gh/git) -> open.
+            let open = matches!(
+                name,
+                "list_prs" | "get_pr_impact" | "triage_prs" | "working_changes_impact"
+            );
             assert_eq!(
                 ann["openWorldHint"],
                 json!(open),
@@ -2041,6 +2080,45 @@ mod tests {
                 None
             }
         }
+    }
+
+    #[test]
+    fn working_changes_impact_uses_git_diff() {
+        struct GitRunner;
+        impl CommandRunner for GitRunner {
+            fn run(&self, program: &str, args: &[&str]) -> Option<String> {
+                if program == "git" && args.first() == Some(&"diff") {
+                    return Some("auth.py\n".to_string()); // one changed file
+                }
+                None
+            }
+        }
+        // node "auth" lives in auth.py, community 0.
+        let mut a = node("auth", "AuthService", Some(0));
+        a.source_file = "auth.py".into();
+        let gd = GraphData {
+            nodes: vec![a],
+            ..Default::default()
+        };
+        let s = Server::from_graph_data(gd, None).with_runner(Box::new(GitRunner));
+        let out = s.tool_working_changes_impact(Some("main"));
+        assert!(out.contains("auth.py"), "names the changed file: {out}");
+        assert!(
+            out.contains("1 communities touched"),
+            "reports impact: {out}"
+        );
+
+        // No diff -> graceful message, no panic.
+        struct EmptyRunner;
+        impl CommandRunner for EmptyRunner {
+            fn run(&self, _p: &str, _a: &[&str]) -> Option<String> {
+                Some(String::new())
+            }
+        }
+        let s2 = server().with_runner(Box::new(EmptyRunner));
+        assert!(s2
+            .tool_working_changes_impact(Some("main"))
+            .contains("No changes"));
     }
 
     #[test]
