@@ -1202,20 +1202,19 @@ fn bpe() -> Option<&'static tiktoken_rs::CoreBPE> {
     BPE.get_or_init(|| tiktoken_rs::cl100k_base().ok()).as_ref()
 }
 
-/// Truncate rendered text to at most `token_budget` real tokens (cl100k_base),
-/// appending a note when cut. Every token decodes to at least one byte, so text
-/// shorter than the budget in bytes cannot exceed it in tokens - that common
-/// case skips tokenizing entirely. Falls back to a 4-chars/token heuristic if
-/// the tokenizer is unavailable.
+/// Truncate rendered text to about `token_budget` tokens. Cheap gate first: at
+/// roughly 4 bytes per token, text within `token_budget * 4` bytes is already at
+/// or under budget, so it returns unchanged without tokenizing. query_graph caps
+/// its node count at `budget / 40`, so its output stays well under this gate and
+/// the hot path never tokenizes. Only genuinely oversized text pays the real
+/// cl100k tokenizer, and only then for an exact cut (falling back to a byte cut
+/// if the tokenizer is unavailable).
 fn truncate_to_tokens(text: String, token_budget: usize) -> String {
-    if text.len() <= token_budget {
+    let cap = token_budget.saturating_mul(4);
+    if text.len() <= cap {
         return text;
     }
     let Some(bpe) = bpe() else {
-        let cap = token_budget.saturating_mul(4);
-        if text.len() <= cap {
-            return text;
-        }
         let mut end = cap;
         while end > 0 && !text.is_char_boundary(end) {
             end -= 1;
