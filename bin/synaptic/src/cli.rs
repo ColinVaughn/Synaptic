@@ -158,6 +158,22 @@ pub(crate) enum Cmd {
         #[arg(long)]
         verbose: bool,
     },
+    /// Reflection / dynamic-dispatch sites recorded in the graph. A symbol reached
+    /// only by dynamic dispatch has no static dependents, so "0 dependents" is not
+    /// proof it is safe to change; this lists the sites behind that risk.
+    Hazards {
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        /// Restrict to one federated member repo (tag).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Restrict to one site kind (reflection, dynamic_import, eval).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Max sites listed before a "+N more" summary.
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
     /// Git merge driver for graph.json — invoked by git as `%O %A %B`, not by
     /// users. Union-composes the two sides into `current` so graph.json never
     /// conflicts. (Registered by `hook install`.)

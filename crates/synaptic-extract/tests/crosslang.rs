@@ -973,6 +973,105 @@ fn js_electron_ipc_main_to_renderer_push() {
         && e.context.as_deref() == Some("ipc")));
 }
 
+// --- Event-bus coupling ---
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn event_emitter_links_publisher_and_subscriber_through_channel() {
+    // A Node EventEmitter: `bus.on('e', h)` subscribes (handled_by the channel),
+    // `bus.emit('e', x)` publishes (calls_service it). Gated on an `EventEmitter`
+    // token in the file so ordinary `.on(`/`.emit(` (jQuery, RxJS) do not fire.
+    let src = b"import { EventEmitter } from 'events';\nconst bus = new EventEmitter();\nfunction wire() { bus.on('user:login', handleLogin); }\nfunction fire() { bus.emit('user:login', u); }\n";
+    let r = extract_source("app/bus.ts", src).unwrap();
+    let chan = r
+        .nodes
+        .iter()
+        .find(|n| n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("event_channel"))
+        .expect("an event_channel node");
+    assert_eq!(chan.label, "event #user:login");
+    assert!(chan.source_file.is_empty(), "channel is an external stub");
+    assert!(
+        r.edges
+            .iter()
+            .any(|e| e.target == chan.id && e.relation == "calls_service"),
+        "publisher calls_service the channel"
+    );
+    assert!(
+        r.edges
+            .iter()
+            .any(|e| e.source == chan.id && e.relation == "handled_by"),
+        "subscriber handled_by the channel"
+    );
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn custom_event_links_but_standard_dom_event_is_ignored() {
+    // `dispatchEvent(new CustomEvent('e'))` publishes; `addEventListener('e')`
+    // subscribes -- but only for non-standard (app) event names. A standard DOM
+    // event (`click`) must not mint a channel.
+    let src = b"function a() { el.dispatchEvent(new CustomEvent('app:refresh')); }\nfunction b() { el.addEventListener('app:refresh', onRefresh); }\nfunction c() { el.addEventListener('click', onClick); }\n";
+    let r = extract_source("app/ui.ts", src).unwrap();
+    let chan = r
+        .nodes
+        .iter()
+        .find(|n| n.label == "event #app:refresh")
+        .expect("custom event channel");
+    assert!(r
+        .edges
+        .iter()
+        .any(|e| e.target == chan.id && e.relation == "calls_service"));
+    assert!(r
+        .edges
+        .iter()
+        .any(|e| e.source == chan.id && e.relation == "handled_by"));
+    assert!(
+        !r.nodes.iter().any(|n| n.label == "event #click"),
+        "standard DOM event must not mint a channel"
+    );
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn bare_emit_on_without_emitter_token_does_not_fire() {
+    // No EventEmitter signal -> ordinary `.on(`/`.emit(` must not mint a channel.
+    let src = b"function wire() { $el.on('click', go); socket.emit('ping', x); }\n";
+    let r = extract_source("app/ui.ts", src).unwrap();
+    assert!(
+        !r.nodes
+            .iter()
+            .any(|n| n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("event_channel")),
+        "no EventEmitter token -> no event channel"
+    );
+}
+
+#[cfg(feature = "lang-csharp")]
+#[test]
+fn csharp_event_invoke_and_subscribe_link_through_channel() {
+    // `StatusChanged?.Invoke(...)` raises (publisher); `x.StatusChanged += h`
+    // subscribes (handler), but `+=` only counts for a known event name, so a
+    // `total += amount` accumulator does not mint a spurious channel.
+    let src = b"class S {\n  event System.EventHandler StatusChanged;\n  void Raise() { StatusChanged?.Invoke(this, e); }\n  void Wire() { svc.StatusChanged += OnStatus; }\n  void Acc() { int total = 0; total += amount; }\n}\n";
+    let r = extract_source("svc/S.cs", src).unwrap();
+    let chan = r
+        .nodes
+        .iter()
+        .find(|n| n.label == "event #StatusChanged")
+        .expect("event channel");
+    assert!(r
+        .edges
+        .iter()
+        .any(|e| e.target == chan.id && e.relation == "calls_service"));
+    assert!(r
+        .edges
+        .iter()
+        .any(|e| e.source == chan.id && e.relation == "handled_by"));
+    assert!(
+        !r.nodes.iter().any(|n| n.label == "event #total"),
+        "arithmetic += must not mint a channel"
+    );
+}
+
 #[cfg(feature = "lang-csharp")]
 #[test]
 fn csharp_ws_server_case_and_endpoint() {

@@ -191,4 +191,41 @@ mod tests {
         let r = advise(&kg(), "SELECT id FROM nonexistent", None);
         assert!(r.findings.iter().any(|f| f.rule_id == "ADV-TABLE-404"));
     }
+
+    #[test]
+    fn advise_injection_remediation_matches_audit_smart_text() {
+        // advise_sql shares the query-text engine (`evaluate_query_text`) with
+        // audit_sql, so its SEC-INJ-001 remediation carries the same smart
+        // identifier-vs-value wording -- never a generic-only "bound parameters"
+        // line when the interpolation sits in identifier position. Guards the two
+        // tools against silently diverging.
+        let g = kg();
+
+        // Identifier-position interpolation cannot be a bound parameter.
+        let ident = advise(&g, "SELECT * FROM \"${table}\"", None);
+        let fi = ident
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "SEC-INJ-001")
+            .expect("identifier-position injection is flagged");
+        assert!(
+            fi.remediation.contains("identifier-quoting"),
+            "advise must steer an interpolated identifier to allowlist+quote: {}",
+            fi.remediation
+        );
+
+        // Value-position interpolation: the plain bound-parameter advice is right.
+        let val = advise(&g, "SELECT * FROM orders WHERE id = ${id}", None);
+        let fv = val
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "SEC-INJ-001")
+            .expect("value-position injection is flagged");
+        assert!(
+            fv.remediation.contains("bound parameters")
+                && !fv.remediation.contains("identifier-quoting"),
+            "advise keeps plain bound-parameter advice for a value: {}",
+            fv.remediation
+        );
+    }
 }

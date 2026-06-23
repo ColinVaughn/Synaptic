@@ -143,6 +143,109 @@ fn extract_then_query_roundtrip() {
     );
 }
 
+/// Dynamic-dispatch awareness end-to-end: an event bus connects a cross-file
+/// publisher/subscriber through one channel node; a literal-key reflection site is
+/// evidence-linked to its target; an opaque site makes a 0-dependent symbol's
+/// "affected" carry the honesty caveat; and the `hazards` CLI lists the sites.
+#[test]
+fn dynamic_dispatch_surfaces_in_graph_and_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "src/bus.ts",
+        "import { EventEmitter } from 'events';\nconst bus = new EventEmitter();\nexport function fire() { bus.emit('job:done', 1); }\nexport function wire() { bus.on('job:done', onDone); }\n",
+    );
+    write(
+        root,
+        "src/dispatch.ts",
+        "const handlers: any = {};\nexport function onDone() { return 1; }\nexport function helper() { return 2; }\nexport function route(name: string) { handlers['onDone'](); return handlers[name](); }\n",
+    );
+
+    Command::cargo_bin("synaptic")
+        .unwrap()
+        .arg("extract")
+        .arg(root)
+        .assert()
+        .success();
+
+    let graph_path = root.join("synaptic-out/graph.json");
+    let graph: serde_json::Value = serde_json::from_slice(&fs::read(&graph_path).unwrap()).unwrap();
+    let nodes = graph["nodes"].as_array().unwrap();
+
+    // The event bus mints one channel node that both fire (emit) and wire (on) meet on.
+    assert!(
+        nodes.iter().any(|n| n["label"] == "event #job:done"),
+        "expected an event #job:done channel node"
+    );
+    let chan = nodes
+        .iter()
+        .find(|n| n["label"] == "event #job:done")
+        .unwrap();
+    let chan_id = chan["id"].as_str().unwrap();
+    let links = graph["links"].as_array().unwrap();
+    assert!(
+        links
+            .iter()
+            .any(|e| e["target"] == chan_id && e["relation"] == "calls_service"),
+        "publisher calls_service the channel"
+    );
+    assert!(
+        links
+            .iter()
+            .any(|e| e["source"] == chan_id && e["relation"] == "handled_by"),
+        "subscriber handled_by the channel"
+    );
+
+    // The literal-key site handlers['onDone']() evidence-links to onDone().
+    let on_done = nodes
+        .iter()
+        .find(|n| n["label"] == "onDone()")
+        .expect("onDone node");
+    assert_eq!(
+        on_done["dynamically_referenced"],
+        serde_json::json!(true),
+        "onDone should be evidence-linked (dynamically_referenced)"
+    );
+    assert!(
+        links
+            .iter()
+            .any(|e| e["relation"] == "dynamic_ref" && e["target"] == on_done["id"]),
+        "a dynamic_ref edge should reach onDone"
+    );
+
+    // `hazards` lists the reflection sites in dispatch.ts (keyed + opaque).
+    let haz = Command::cargo_bin("synaptic")
+        .unwrap()
+        .current_dir(root)
+        .arg("hazards")
+        .assert()
+        .success();
+    let haz_out = String::from_utf8_lossy(&haz.get_output().stdout).into_owned();
+    assert!(
+        haz_out.contains("dispatch.ts"),
+        "hazards lists dispatch.ts sites: {haz_out}"
+    );
+    assert!(
+        haz_out.contains("(opaque)") && haz_out.contains("\"onDone\""),
+        "hazards shows both keyed and opaque sites: {haz_out}"
+    );
+
+    // `affected` on the orphan `helper` (0 static dependents, but its file has an
+    // opaque dynamic site) carries the honesty caveat.
+    let aff = Command::cargo_bin("synaptic")
+        .unwrap()
+        .current_dir(root)
+        .args(["affected", "helper"])
+        .assert()
+        .success();
+    let aff_out = String::from_utf8_lossy(&aff.get_output().stdout).into_owned();
+    assert!(
+        aff_out.contains("not provably unused"),
+        "affected on an orphan in a reflection file must carry the caveat: {aff_out}"
+    );
+}
+
 /// .NET project files and Markdown structure flow through a full `extract` into
 /// graph.json.
 #[test]

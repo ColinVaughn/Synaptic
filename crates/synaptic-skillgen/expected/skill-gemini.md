@@ -1,6 +1,6 @@
 ---
 name: synaptic
-description: Queries this repo's Synaptic knowledge graph -- symbols and how they call, import, inherit, and (across language boundaries) reach each other -- to navigate code and analyze the impact of changes. It answers what calls or depends on a symbol, the blast radius of changing it, a forecast of what a planned edit breaks, which tests exercise it, and a real pass/fail from running the change in a throwaway worktree; it also runs structural/architectural pattern search, content (text/regex) search over the source with each hit attributed to its enclosing symbol, plan-only refactors, time-travel architecture diffs, and SQL audit. Use when exploring an unfamiliar codebase, finding callers or dependents, tracing how one part reaches another, reading a symbol's source, searching the source for a string literal / config value / log message / TODO, or -- before editing code others depend on -- judging blast radius, forecasting a change, choosing which tests to run, or verifying it. Prefer it over grepping or reading files broadly.
+description: Queries this repo's Synaptic knowledge graph -- symbols and how they call, import, inherit, and (across language boundaries) reach each other -- to navigate code and analyze the impact of changes. It answers what calls or depends on a symbol, the blast radius of changing it, whether a "0 dependents" answer is trustworthy when code dispatches dynamically (reflection / event buses), a forecast of what a planned edit breaks, which tests exercise it, and a real pass/fail from running the change in a throwaway worktree; it also runs structural/architectural pattern search, content (text/regex) search over the source with each hit attributed to its enclosing symbol, plan-only refactors, time-travel architecture diffs, and SQL audit. Use when exploring an unfamiliar codebase, finding callers or dependents, tracing how one part reaches another, reading a symbol's source, searching the source for a string literal / config value / log message / TODO, or -- before editing code others depend on -- judging blast radius (including whether reflection or an event bus could reach a symbol that looks unused), forecasting a change, choosing which tests to run, or verifying it. Prefer it over grepping or reading files broadly.
 ---
 
 # Synaptic for Gemini
@@ -21,7 +21,14 @@ broadly; it is faster and surfaces relationships and impact that text search can
 - `synaptic query "<question>"`: the relevant subgraph for a question.
 - `synaptic explain <node>`: a node and its neighbours.
 - `synaptic path <a> <b>`: shortest path between two nodes.
-- `synaptic affected <node>`: what (transitively) depends on a node.
+- `synaptic affected <node>`: what (transitively) depends on a node. A "0
+  dependents" result carries a note when the symbol sits in a scope that uses
+  dynamic dispatch, so it is not misread as "safe to change".
+- `synaptic hazards`: the reflection / dynamic-dispatch sites the graph records
+  (by-name lookups, dispatch tables, eval, dynamic import, .NET/Python/JVM
+  reflection). A symbol reached only that way has no static dependents, so this is
+  how you judge whether a "0 dependents" answer is trustworthy (`--repo`, `--kind`,
+  `--limit`).
 - `synaptic search "<synql>"` / `--pattern <name>`: structural search (SYNQL) by
   kind/visibility/loc/fan-in-out, variable-length paths, and `count(...)`
   aggregation + named patterns (singleton, factory, observer, service-locator,
@@ -59,7 +66,18 @@ Use the **synaptic** MCP server's tools. Start with `query_graph`, then:
   `file` plus a `lines` range to read any region (a config block, or the lines
   around a `search_text` hit) instead of a symbol.
 - `affected` -- the blast radius of changing a symbol; `working_changes_impact`
-  does the same for your current git diff (no PR needed).
+  does the same for your current git diff (no PR needed). Runtime dispatch is
+  modeled where it can be (IPC/WebSocket/event-bus boundaries are inferred
+  `calls_service`/`handled_by` edges; a string-literal reflection name is linked as
+  a low-confidence `dynamic_ref`), and a 0-dependent result carries a
+  `dynamic_caveat` when the symbol is reached dynamically -- so "nothing depends on
+  it" never reads as a false "safe to change".
+- `dynamic_hazards` -- the reflection / dynamic-dispatch sites the graph records.
+  Use it to judge a "0 dependents" answer: a symbol reached only by reflection, an
+  event bus, or a dispatch table has no static dependents. Event buses and
+  string-literal reflection are already linked into the graph; what stays
+  unresolved (computed names) is cataloged here. Filter by
+  `repo`/`path_glob`/`kind`/`target`.
 - `predict_impact` -- forecast a change before you make it: pass the files you
   are about to edit (or omit them for your current diff) to get the blast radius,
   public APIs at risk, the tests that exercise it, and a verify checklist. Reach
@@ -114,7 +132,13 @@ Impact analysis crosses language boundaries: a change to a Rust function exporte
 to Python via PyO3, an HTTP or gRPC handler and the clients that call it, or a
 binary a script invokes all surface as dependents, because those couplings are
 graph edges too (subprocess `invokes`, FFI `binds_native`, service
-`calls_service`/`handled_by`).
+`calls_service`/`handled_by`). Event buses (EventEmitter / DOM CustomEvent / C#
+events) and Electron IPC connect a publisher to its subscriber through a channel
+node the same way, so a handler reached only across the bus is not a 0-caller
+island. What genuinely cannot be resolved statically -- reflection by a computed
+name, fully-dynamic dispatch -- is surfaced honestly instead: `dynamic_hazards`
+lists those sites and `affected` adds a `dynamic_caveat`, so a 0-dependent symbol
+in such a scope is never mistaken for safe.
 Before editing a symbol other code depends on, forecast the change with
 `predict_impact` (or `synaptic predict`) and run the checks it lists.
 

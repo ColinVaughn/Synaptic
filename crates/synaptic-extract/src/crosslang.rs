@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 use serde_json::{json, Map};
-use synaptic_core::{make_id, Confidence, Edge, FileType, Node, NodeId, NodeKind};
+use synaptic_core::{make_id, Confidence, DynamicSite, Edge, FileType, Node, NodeId, NodeKind};
 
 use crate::paths::file_node_id;
 use crate::result::ExtractionResult;
@@ -37,7 +37,10 @@ pub fn augment(path: &str, source: &[u8], result: &mut ExtractionResult) {
     scan_grpc(ext, path, text, result);
     scan_websocket(ext, path, text, result);
     scan_ipc(ext, path, text, result);
+    scan_event_bus(ext, path, text, result);
+    scan_dotnet_events(ext, path, text, result);
     scan_sql(ext, path, text, result);
+    crate::dynamic::scan(path, text, result);
 }
 
 // --- comment / docstring masking ---
@@ -1681,6 +1684,218 @@ fn webcontents_send_re() -> &'static Regex {
     })
 }
 
+/// JS/TS event-bus detector. `<x>.emit('e')` publishes (the enclosing fn
+/// `calls_service` an `event #e` channel node); `<x>.on/.once/.addListener('e')`
+/// subscribes (the channel reaches the handler via `handled_by`), so a handler
+/// invoked only across the bus is no longer a 0-caller node. The emit/on scan is
+/// gated on an `EventEmitter` token in the file so ordinary `.on(`/`.emit(`
+/// (jQuery, RxJS, sockets) do not fire. DOM custom events are detected separately
+/// and need no such gate.
+fn scan_event_bus(ext: &str, path: &str, text: &str, result: &mut ExtractionResult) {
+    if !matches!(
+        ext,
+        "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts"
+    ) {
+        return;
+    }
+    if text.contains("EventEmitter") {
+        for caps in emit_re().captures_iter(text) {
+            let line = line_of(text, caps.get(0).expect("group 0").start());
+            event_message(result, path, line, &caps[1], WsRole::Client);
+        }
+        for caps in on_re().captures_iter(text) {
+            let line = line_of(text, caps.get(0).expect("group 0").start());
+            event_message(result, path, line, &caps[1], WsRole::Server);
+        }
+    }
+    scan_custom_event(path, text, result);
+}
+
+/// Attach an event-bus channel boundary node `event:<name>` (case-insensitive via
+/// `make_id`). Publishers `calls_service` it; subscribers are reached via
+/// `handled_by`.
+fn event_message(result: &mut ExtractionResult, path: &str, line: u32, name: &str, role: WsRole) {
+    if name.is_empty() {
+        return;
+    }
+    let node = NodeId(make_id(&["event", &name.to_ascii_lowercase()]));
+    ensure_target(result, &node, &format!("event #{name}"), "event_channel");
+    boundary_link(result, path, line, node, role, "event");
+}
+
+/// `<emitter>.emit('e'` (publisher).
+fn emit_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"\.\s*emit\s*\(\s*["'`]([A-Za-z0-9_.:+/-]+)["'`]"#).expect("valid regex")
+    })
+}
+
+/// `<emitter>.on/.once/.addListener/.prependListener('e'` (subscriber).
+fn on_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"\.\s*(?:on|once|addListener|prependListener)\s*\(\s*["'`]([A-Za-z0-9_.:+/-]+)["'`]"#,
+        )
+        .expect("valid regex")
+    })
+}
+
+/// DOM custom events. `dispatchEvent(new CustomEvent('e'))` publishes; a matching
+/// `addEventListener('e')` subscribes. Standard DOM event names are skipped so we
+/// do not mint a channel per `click`/`load`.
+fn scan_custom_event(path: &str, text: &str, result: &mut ExtractionResult) {
+    for caps in custom_event_re().captures_iter(text) {
+        let line = line_of(text, caps.get(0).expect("group 0").start());
+        event_message(result, path, line, &caps[1], WsRole::Client);
+    }
+    for caps in add_listener_re().captures_iter(text) {
+        let name = &caps[1];
+        if is_standard_dom_event(name) {
+            continue;
+        }
+        let line = line_of(text, caps.get(0).expect("group 0").start());
+        event_message(result, path, line, name, WsRole::Server);
+    }
+}
+
+/// `new CustomEvent('e'` (publisher payload).
+fn custom_event_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"new\s+CustomEvent\s*\(\s*["'`]([A-Za-z0-9_.:+/-]+)["'`]"#)
+            .expect("valid regex")
+    })
+}
+
+/// `<target>.addEventListener('e'` (subscriber).
+fn add_listener_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"\.\s*addEventListener\s*\(\s*["'`]([A-Za-z0-9_.:+/-]+)["'`]"#)
+            .expect("valid regex")
+    })
+}
+
+/// Standard DOM/window/media event names that are not app-level buses.
+fn is_standard_dom_event(name: &str) -> bool {
+    const STD: &[&str] = &[
+        "click",
+        "dblclick",
+        "mousedown",
+        "mouseup",
+        "mousemove",
+        "mouseenter",
+        "mouseleave",
+        "mouseover",
+        "mouseout",
+        "contextmenu",
+        "keydown",
+        "keyup",
+        "keypress",
+        "input",
+        "change",
+        "submit",
+        "focus",
+        "blur",
+        "focusin",
+        "focusout",
+        "load",
+        "unload",
+        "beforeunload",
+        "resize",
+        "scroll",
+        "wheel",
+        "drag",
+        "dragstart",
+        "dragend",
+        "dragover",
+        "dragenter",
+        "dragleave",
+        "drop",
+        "touchstart",
+        "touchend",
+        "touchmove",
+        "touchcancel",
+        "pointerdown",
+        "pointerup",
+        "pointermove",
+        "pointerenter",
+        "pointerleave",
+        "animationend",
+        "transitionend",
+        "play",
+        "pause",
+        "ended",
+        "error",
+        "abort",
+        "loadeddata",
+        "canplay",
+        "message",
+        "open",
+        "close",
+        "online",
+        "offline",
+        "visibilitychange",
+        "hashchange",
+        "popstate",
+        "storage",
+        "domcontentloaded",
+        "readystatechange",
+    ];
+    STD.iter().any(|s| s.eq_ignore_ascii_case(name))
+}
+
+/// C# in-process events. `Foo?.Invoke(` raises (publisher); `x.Foo += handler`
+/// subscribes -- but `+=` only counts when `Foo` is a known event (declared with
+/// `event` or raised via `?.Invoke` in this file), so an arithmetic `total += x`
+/// does not mint a spurious channel. The idiomatic null-conditional `?.Invoke`
+/// avoids `Dispatcher/Action/Task.Invoke` false positives.
+fn scan_dotnet_events(ext: &str, path: &str, text: &str, result: &mut ExtractionResult) {
+    if ext != "cs" {
+        return;
+    }
+    let mut event_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for caps in cs_event_decl_re().captures_iter(text) {
+        event_names.insert(caps[1].to_string());
+    }
+    for caps in cs_invoke_re().captures_iter(text) {
+        let name = caps[1].to_string();
+        let line = line_of(text, caps.get(0).expect("group 0").start());
+        event_message(result, path, line, &name, WsRole::Client);
+        event_names.insert(name);
+    }
+    for caps in cs_subscribe_re().captures_iter(text) {
+        let name = &caps[1];
+        if !event_names.contains(name) {
+            continue;
+        }
+        let line = line_of(text, caps.get(0).expect("group 0").start());
+        event_message(result, path, line, name, WsRole::Server);
+    }
+}
+
+/// `event <Type> Name;` / `= ` / `{` -- captures the event identifier.
+fn cs_event_decl_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"\bevent\s+[^;={]*?\b([A-Za-z_]\w*)\s*(?:;|=>|=|\{)"#).expect("valid regex")
+    })
+}
+
+/// `Name?.Invoke(` (idiomatic event raise).
+fn cs_invoke_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"\b([A-Za-z_]\w*)\s*\?\.\s*Invoke\s*\("#).expect("valid regex"))
+}
+
+/// `Name += ` (event subscription; gated on `Name` being a known event).
+fn cs_subscribe_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"\b([A-Za-z_]\w*)\s*\+=\s*"#).expect("valid regex"))
+}
+
 /// Byte offset just past the `}` matching the `{` at `open`. Skips braces inside
 /// string and char literals and line comments so they do not throw off the count
 /// (raw strings and block comments are not handled -- best effort). `saturating_sub`
@@ -1843,7 +2058,7 @@ fn native_lib_name(raw: &str) -> String {
 }
 
 /// 1-based line number for a byte offset in `text`.
-fn line_of(text: &str, byte: usize) -> u32 {
+pub(crate) fn line_of(text: &str, byte: usize) -> u32 {
     text.as_bytes()[..byte.min(text.len())]
         .iter()
         .filter(|&&b| b == b'\n')
@@ -1898,8 +2113,44 @@ fn link(
     });
 }
 
+/// Record a dynamic-dispatch site on the node enclosing `line`, else on the file
+/// node (created if absent). Used by the reflection/dispatch detectors in the
+/// sibling `dynamic` module.
+pub(crate) fn attach_dynamic_site(
+    result: &mut ExtractionResult,
+    path: &str,
+    line: u32,
+    site: DynamicSite,
+) {
+    let host = enclosing_function(result, line).unwrap_or_else(|| ensure_file_node(result, path));
+    if let Some(node) = result.nodes.iter_mut().find(|n| n.id == host) {
+        node.push_dynamic_site(site);
+    }
+}
+
+/// Ensure a real (located) file node exists for `path`, returning its id. Distinct
+/// from `ensure_target`, which makes external (source-less) stubs.
+pub(crate) fn ensure_file_node(result: &mut ExtractionResult, path: &str) -> NodeId {
+    let id = file_node_id(path);
+    if !result.nodes.iter().any(|n| n.id == id) {
+        let mut extra = Map::new();
+        extra.insert("_origin".to_string(), json!("ast"));
+        result.nodes.push(Node {
+            id: id.clone(),
+            label: path.to_string(),
+            file_type: FileType::Code,
+            source_file: path.to_string(),
+            source_location: None,
+            community: None,
+            repo: None,
+            extra,
+        });
+    }
+    id
+}
+
 /// The innermost function/method node whose span contains `line`.
-fn enclosing_function(result: &ExtractionResult, line: u32) -> Option<NodeId> {
+pub(crate) fn enclosing_function(result: &ExtractionResult, line: u32) -> Option<NodeId> {
     let mut best: Option<(&NodeId, u32)> = None;
     for n in &result.nodes {
         if !matches!(

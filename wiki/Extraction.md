@@ -47,6 +47,13 @@ Code nodes carry structured metadata beyond their label and location:
   wherever the grammar exposes them (the config-driven languages plus Go and
   Rust); parameter and return *types* only when the source annotates them, with
   the `raw` header always kept as a fallback so a description is never empty.
+- **`dynamic_sites`** — reflection / dynamic-dispatch sites found in the node's
+  body (each a `kind`, `line`, optional string-literal `key`, and a source
+  `snippet`). These feed the honesty caveat and the
+  [`dynamic_hazards`](MCP-Server#dynamic_hazards) tool; see
+  [Cross-Language Edges](Cross-Language-Edges#dynamic-dispatch).
+- **`dynamically_referenced`** — set when an evidence-link resolved a reflection
+  site's literal key to this node, i.e. it may be reachable only at runtime.
 
 These are populated for the config-driven languages (Python, JavaScript/TypeScript,
 Java, C#, Kotlin, Swift, C, C++, PHP, Scala, Groovy) and for Go and Rust. Other

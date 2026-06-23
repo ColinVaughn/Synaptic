@@ -8,6 +8,8 @@ pub mod cache;
 pub mod config;
 #[cfg(feature = "cross-language")]
 pub mod crosslang;
+#[cfg(feature = "cross-language")]
+pub mod dynamic;
 pub mod paths;
 pub mod python;
 pub mod resolve;

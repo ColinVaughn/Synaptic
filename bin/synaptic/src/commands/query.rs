@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use synaptic_core::NodeId;
 use synaptic_graph::KnowledgeGraph;
 use synaptic_query::{
-    affected_including_members, explain, query_modal, shortest_path, QueryIndex, Recency,
-    RecencyMode, TraversalMode, DEFAULT_AFFECTED_RELATIONS,
+    affected_including_members, dependents_caveat, explain, query_modal, shortest_path,
+    DynamicHazardIndex, QueryIndex, Recency, RecencyMode, TraversalMode,
+    DEFAULT_AFFECTED_RELATIONS,
 };
 
 /// `query` recency-boost strength (mirrors the MCP server's RECENCY_BOOST).
@@ -242,6 +243,10 @@ pub(crate) fn run_affected(
     println!("Depth: {depth}");
     if hits.is_empty() {
         println!("No affected nodes found.");
+        let idx = DynamicHazardIndex::build(&kg);
+        if let Some(c) = kg.node(&seed).and_then(|n| dependents_caveat(&kg, &idx, n)) {
+            println!("note: {}", c.message);
+        }
         return Ok(());
     }
     // Per-depth breakdown so a hub's blast radius is summarized even when the list
@@ -283,6 +288,59 @@ pub(crate) fn run_affected(
             "... (+{} more; pass --verbose for the full list)",
             hits.len() - cap
         );
+    }
+    Ok(())
+}
+
+/// `hazards` — list reflection / dynamic-dispatch sites recorded in the graph,
+/// optionally filtered by repo and kind. Mirrors the MCP `dynamic_hazards` tool.
+pub(crate) fn run_hazards(
+    graph: Option<PathBuf>,
+    repo: Option<String>,
+    kind: Option<String>,
+    limit: usize,
+) -> Result<()> {
+    let kg = load_scoped_graph(&default_graph_path(graph), repo.as_deref())?;
+    let mut rows: Vec<(String, u32, &'static str, Option<String>, String)> = Vec::new();
+    for n in kg.nodes() {
+        if n.source_file.is_empty() {
+            continue;
+        }
+        for s in n.dynamic_sites() {
+            let ks = s.kind.as_str();
+            if let Some(k) = &kind {
+                if ks != k {
+                    continue;
+                }
+            }
+            rows.push((
+                n.source_file.clone(),
+                s.line,
+                ks,
+                s.key.clone(),
+                n.label.clone(),
+            ));
+        }
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.3.cmp(&b.3)));
+    if rows.is_empty() {
+        println!("No dynamic-dispatch sites found.");
+        return Ok(());
+    }
+    println!(
+        "Dynamic-dispatch sites: {} (a symbol with 0 static dependents here is not provably unused)",
+        rows.len()
+    );
+    let cap = limit.max(1);
+    for (f, line, ks, key, host) in rows.iter().take(cap) {
+        let keytxt = key
+            .as_deref()
+            .map(|k| format!("\"{k}\""))
+            .unwrap_or_else(|| "(opaque)".to_string());
+        println!("  {f}:{line}  {ks}  {keytxt}  in {host}");
+    }
+    if rows.len() > cap {
+        println!("  ... (+{} more; raise --limit)", rows.len() - cap);
     }
     Ok(())
 }

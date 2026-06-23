@@ -8,7 +8,49 @@ All notable changes to Synaptic are documented here. The format is based on
 > **CodeGraph**, and reference the old `codegraph` command and crate names. They
 > are preserved verbatim as historical record.
 
-## [Unreleased]
+## [0.3.12] - 2026-06-23
+
+### Added
+- **Dynamic-dispatch awareness, so "0 dependents" stops reading as "safe to
+  change."** Static analysis cannot see reflection, event buses, or fully-dynamic
+  dispatch, so a symbol reached only that way looked like a safe leaf. This release
+  detects what it can and is honest about the rest:
+  - **Event-bus edges (real coupling).** A Node `EventEmitter` (`.emit` / `.on` /
+    `.once` / `.addListener`, gated on an `EventEmitter` token to avoid firing on
+    ordinary `.on`), DOM `CustomEvent` (`dispatchEvent(new CustomEvent('e'))` +
+    `addEventListener('e')`, standard DOM events excluded), and C# events
+    (`Foo?.Invoke(` + `Foo += handler`, gated on a real `event` declaration) now
+    mint a channel-keyed `event #<name>` boundary node, so a publisher and a
+    cross-file/cross-repo subscriber meet in the graph and a handler reached only
+    across the bus is no longer a 0-caller island.
+  - **Reflection / dynamic-dispatch site catalog.** Computed-member calls,
+    `Reflect.*`, dispatch tables, `eval` / `new Function`, dynamic `import()`, .NET
+    `GetMethod` / `Activator.CreateInstance`, Python `getattr` / `importlib`, and
+    JVM `Class.forName` / `getMethod` are recorded as `dynamic_sites` on the
+    enclosing node (no graph-node churn).
+  - **Evidence-links.** When such a site's name is a string literal that resolves to
+    exactly one symbol, a low-confidence `dynamic_ref` edge is added so the target
+    shows up as a (caveated) dependent; ambiguous or computed names stay
+    catalog-only.
+  - **Honest caveat.** `affected`, `get_node`, `describe_node`, and the CLI
+    `affected` / `explain` attach a `dynamic_caveat` to a 0-static-dependent symbol
+    whose scope uses dynamic dispatch, and `god_nodes` flags a hub that is reachable
+    via reflection.
+  - **New `dynamic_hazards` MCP tool** and **`synaptic hazards` CLI command** list
+    the sites (filter by `repo` / `path_glob` / `kind` / `target`); `graph_stats`
+    now reports `dynamic_sites` / `dynamic_sites_opaque` / `dynamic_refs_linked`.
+    Read-only tool count is now 28 (29 with `--allow-exec`).
+
+### Fixed
+- **`search_text` now prunes cache-only output directories.** The output-dir
+  exclusion added in 0.3.11 matched `synaptic-out/` by name and a custom `--out`
+  dir by its `graph.json` + `.manifest.json` pair, but missed a directory holding
+  only the AST cache (`cache/ast/v<version>/<hash>.json`) with no graph manifest
+  beside it -- for example a predecessor tool's output dir or a cache-only layout.
+  Those hash-keyed cache files embed extracted source text, so a content search
+  surfaced them as junk hits that buried real source. The walk now also prunes any
+  directory containing a `cache/ast/` subtree, a name-independent signature of
+  generated cache.
 
 ## [0.3.11] - 2026-06-22
 

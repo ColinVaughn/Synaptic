@@ -7,6 +7,7 @@ pub mod cluster;
 mod community;
 pub mod cross_language;
 pub mod dedup;
+pub mod dynamic_link;
 pub mod error;
 pub mod graph;
 pub mod ids;
@@ -30,6 +31,7 @@ pub use cross_language::{
 pub use dedup::{
     ambiguous_concept_pairs, deduplicate_entities, deterministic_tiebreak, merge_pairs,
 };
+pub use dynamic_link::link_dynamic_refs;
 pub use error::GraphError;
 pub use graph::KnowledgeGraph;
 pub use ids::{norm_source_file, normalize_id};

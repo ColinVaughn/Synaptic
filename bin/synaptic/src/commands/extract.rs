@@ -11,10 +11,10 @@ use synaptic_extract::{
 };
 use synaptic_graph::{
     ambiguous_concept_pairs, analyze, apply_communities, build_from_parts, cluster,
-    deduplicate_entities, deterministic_tiebreak, merge_pairs, resolve_command_invocations,
-    resolve_parameterized_routes, resolve_pyo3_imports, resolve_pyo3_modules,
-    resolve_route_handlers, resolve_sql_queries, resolve_symbols, BuildOptions, ClusterOptions,
-    KnowledgeGraph,
+    deduplicate_entities, deterministic_tiebreak, link_dynamic_refs, merge_pairs,
+    resolve_command_invocations, resolve_parameterized_routes, resolve_pyo3_imports,
+    resolve_pyo3_modules, resolve_route_handlers, resolve_sql_queries, resolve_symbols,
+    BuildOptions, ClusterOptions, KnowledgeGraph,
 };
 use synaptic_llm::{
     build_client, default_concurrency, estimate_cost, resolve_backend, LlmClient, SemanticCache,
@@ -309,6 +309,19 @@ pub(crate) fn run_extract(
         let n = pe.len() - before_edges;
         kg = build_from_parts(pn, pe, vec![], &opts);
         println!("Connected {n} pyo3 edge(s) (module exports + imports)");
+    }
+
+    // Dynamic-dispatch evidence-link: resolve reflection sites whose key is a
+    // string literal to their unique defining symbol, adding a low-confidence
+    // `dynamic_ref` edge so the target shows up as a (caveated) dependent and is
+    // flagged `dynamically_referenced`. Runs after cross-language resolution so the
+    // full symbol set (incl. cross-file/cross-repo) is present.
+    let before_edges = kg.edges().count();
+    let (yn, ye) = link_dynamic_refs(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
+    if ye.len() > before_edges {
+        let n = ye.len() - before_edges;
+        kg = build_from_parts(yn, ye, vec![], &opts);
+        println!("Evidence-linked {n} dynamic-dispatch site(s)");
     }
 
     // Merge near-duplicate non-code entities (documents/concepts). A no-op on a

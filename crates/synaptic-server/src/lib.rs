@@ -6,7 +6,7 @@
 //! pure [`Server::handle_request`] dispatcher, which makes the whole protocol
 //! unit-testable without an async runtime.
 //!
-//! 27 read-only tools by default (28 with `--allow-exec`, which adds the
+//! 28 read-only tools by default (29 with `--allow-exec`, which adds the
 //! command-running `speculate`), over a graph loaded at startup: graph navigation
 //! (`query_graph`, `get_node`, `get_source`, `get_neighbors`, `get_community`,
 //! `god_nodes`, `graph_stats`, `shortest_path`, `find_callers`, `find_callees`),
@@ -53,9 +53,10 @@ use synaptic_prs::{
     Status, SystemCommands,
 };
 use synaptic_query::{
-    affected_including_members, candidate_details, describe_node, explain, is_type_like,
-    resolve_detailed, shortest_path, type_member_ids, AffectedHit, QueryIndex, Recency,
-    RecencyMode, Resolution, ReverseImpactIndex, TraversalMode, DEFAULT_AFFECTED_RELATIONS,
+    affected_including_members, candidate_details, dependents_caveat, describe_node, explain,
+    is_type_like, resolve_detailed, shortest_path, type_member_ids, AffectedHit, DynamicCaveat,
+    DynamicHazardIndex, QueryIndex, Recency, RecencyMode, Resolution, ReverseImpactIndex,
+    TraversalMode, DEFAULT_AFFECTED_RELATIONS,
 };
 use synaptic_sandbox::{
     render_markdown as render_speculate_md, speculate, Change, SpeculateOptions,
@@ -93,6 +94,9 @@ struct GodNodeRow {
     label: String,
     degree: usize,
     test_count: usize,
+    /// True when an evidence-link resolved a dynamic site to this hub: a high-degree
+    /// node reachable via reflection is extra dangerous to change.
+    dynamically_referenced: bool,
 }
 
 /// Echo the client's requested protocol when we support it, else our latest.
@@ -121,6 +125,10 @@ pub struct Server {
     /// load/reload so the predict tools (`predict_impact`, `affected_tests`,
     /// `speculate`) walk the blast radius without rebuilding it per request.
     affected_index: ReverseImpactIndex,
+    /// Dynamic-dispatch hazard catalog (opaque reflection sites + evidence-linked
+    /// node set), built once at load/reload to power the honesty caveat and the
+    /// `dynamic_hazards` tool.
+    hazard_index: DynamicHazardIndex,
     /// Headline stats, computed once at load/reload (H3).
     stats: GraphStats,
     /// Full degree-ranked god-node list, computed once at load/reload; tools
@@ -297,6 +305,63 @@ enum SourceLookup {
     Outside { root: PathBuf },
 }
 
+/// One `dynamic_hazards` row: `(repo, file, line, kind, key, host)`.
+type HazardRow = (String, String, u32, &'static str, Option<String>, String);
+
+/// Symbol name from a node label: up to `(`, lowercased (`runJob(a)` -> `runjob`).
+fn hazard_bare(label: &str) -> String {
+    label
+        .split('(')
+        .next()
+        .unwrap_or(label)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// Last path/namespace segment of a reflection key, lowercased (`com.x.Y` -> `y`).
+fn hazard_key_seg(k: &str) -> String {
+    k.rsplit(['.', ':', '/', '\\'])
+        .next()
+        .unwrap_or(k)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// Translate a `*` / `**` / `?` path glob into an anchored regex over `/`-paths.
+/// `**/` matches zero or more directories; `*` does not cross `/`. Used by
+/// `dynamic_hazards` to filter graph `source_file` strings.
+fn glob_to_regex(glob: &str) -> String {
+    let chars: Vec<char> = glob.replace('\\', "/").chars().collect();
+    let mut re = String::from("^");
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '*' => {
+                if chars.get(i + 1) == Some(&'*') {
+                    if chars.get(i + 2) == Some(&'/') {
+                        re.push_str("(?:.*/)?");
+                        i += 3;
+                        continue;
+                    }
+                    re.push_str(".*");
+                    i += 2;
+                    continue;
+                }
+                re.push_str("[^/]*");
+            }
+            '?' => re.push_str("[^/]"),
+            c @ ('.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '\\') => {
+                re.push('\\');
+                re.push(c);
+            }
+            c => re.push(c),
+        }
+        i += 1;
+    }
+    re.push('$');
+    re
+}
+
 impl Server {
     /// Build a server from already-parsed graph data.
     pub fn from_graph_data(gd: GraphData, graph_path: Option<PathBuf>) -> Server {
@@ -304,6 +369,7 @@ impl Server {
         let communities = communities_of(&kg);
         let query_index = QueryIndex::build(&kg);
         let affected_index = ReverseImpactIndex::build(&kg, DEFAULT_AFFECTED_RELATIONS);
+        let hazard_index = DynamicHazardIndex::build(&kg);
         let stats = graph_stats(&kg);
         let god_nodes_all = god_nodes(&kg, usize::MAX);
         let reload_key = graph_path.as_deref().and_then(reload_key_for);
@@ -313,6 +379,7 @@ impl Server {
             communities,
             query_index,
             affected_index,
+            hazard_index,
             stats,
             god_nodes_all,
             graph_path,
@@ -521,6 +588,7 @@ impl Server {
         self.communities = communities_of(&self.kg);
         self.query_index = QueryIndex::build(&self.kg);
         self.affected_index = ReverseImpactIndex::build(&self.kg, DEFAULT_AFFECTED_RELATIONS);
+        self.hazard_index = DynamicHazardIndex::build(&self.kg);
         self.stats = graph_stats(&self.kg);
         self.god_nodes_all = god_nodes(&self.kg, usize::MAX);
         self.repo_hashes = read_repo_hashes(self.graph_path.as_deref());
@@ -654,6 +722,14 @@ impl Server {
     /// radius). Returns the hits and the member count (0 for a non-type node).
     fn affected_for(&self, id: &NodeId, rels: &[&str], depth: usize) -> (Vec<AffectedHit>, usize) {
         affected_including_members(&self.kg, id, rels, depth)
+    }
+
+    /// The dynamic-dispatch honesty caveat for `id`, if its "0 dependents" answer
+    /// is untrustworthy (reflection in its file, or it was evidence-linked). `None`
+    /// when the node has real static dependents or no dynamic-hazard signal.
+    fn dynamic_caveat_for(&self, id: &NodeId) -> Option<DynamicCaveat> {
+        let node = self.kg.node(id)?;
+        dependents_caveat(&self.kg, &self.hazard_index, node)
     }
 
     /// One-line note prepended to a type's reverse-impact / caller output,
@@ -1002,6 +1078,25 @@ impl Server {
         if let Some(loc) = n.loc() {
             obj.insert("loc".into(), json!(loc));
         }
+        let sites = n.dynamic_sites();
+        if !sites.is_empty() {
+            let mut kinds: Vec<&str> = sites.iter().map(|s| s.kind.as_str()).collect();
+            kinds.sort();
+            kinds.dedup();
+            obj.insert(
+                "dynamic_sites".into(),
+                json!({ "count": sites.len(), "kinds": kinds }),
+            );
+        }
+        if n.dynamically_referenced() {
+            obj.insert("dynamically_referenced".into(), json!(true));
+        }
+        if let Some(c) = self.dynamic_caveat_for(&id) {
+            obj.insert(
+                "dynamic_caveat".into(),
+                serde_json::to_value(&c).unwrap_or(Value::Null),
+            );
+        }
         Value::Object(obj)
     }
 
@@ -1048,6 +1143,9 @@ impl Server {
                 names.join(", "),
                 more
             ));
+        }
+        if let Some(c) = self.dynamic_caveat_for(&id) {
+            out.push_str(&format!("\nnote: {}", c.message));
         }
         out
     }
@@ -1098,6 +1196,19 @@ impl Server {
                 .collect();
             obj.insert("members".into(), Value::Array(names));
             obj.insert("member_count".into(), json!(members.len()));
+        }
+        if self
+            .kg
+            .node(&id)
+            .is_some_and(|n| n.dynamically_referenced())
+        {
+            obj.insert("dynamically_referenced".into(), json!(true));
+        }
+        if let Some(c) = self.dynamic_caveat_for(&id) {
+            obj.insert(
+                "dynamic_caveat".into(),
+                serde_json::to_value(&c).unwrap_or(Value::Null),
+            );
         }
         Value::Object(obj)
     }
@@ -1474,6 +1585,142 @@ impl Server {
         (text, structured)
     }
 
+    /// `dynamic_hazards` — list reflection / dynamic-dispatch sites recorded on
+    /// graph nodes, with optional `repo` / `path_glob` / `kind` / `target` filters.
+    /// Reads sites off the graph (no source walk); renders text + structured from a
+    /// single pass. Surfaces why a "0 dependents" answer can be incomplete.
+    fn dynamic_hazards_dual(
+        &self,
+        repo: Option<&str>,
+        path_glob: Option<&str>,
+        kind: Option<&str>,
+        target: Option<&str>,
+        max_results: usize,
+    ) -> (String, Value) {
+        let cap = max_results.clamp(1, 1000);
+        let empty = |msg: String| (msg, json!({ "total": 0, "truncated": false, "sites": [] }));
+
+        let glob_re = match path_glob {
+            Some(g) => match regex::Regex::new(&glob_to_regex(g)) {
+                Ok(re) => Some(re),
+                Err(e) => {
+                    return empty(format!(
+                        "dynamic_hazards: invalid path_glob: {}",
+                        sanitize_label(&e.to_string())
+                    ))
+                }
+            },
+            None => None,
+        };
+
+        // target scoping: the symbol name (matches keyed sites) + the files that
+        // define it (an opaque site there could reach it).
+        let tnorm = target.map(hazard_bare);
+        let target_files: std::collections::HashSet<String> = match &tnorm {
+            Some(tn) => self
+                .kg
+                .nodes()
+                .filter(|n| !n.source_file.is_empty() && hazard_bare(&n.label) == *tn)
+                .map(|n| n.source_file.clone())
+                .collect(),
+            None => std::collections::HashSet::new(),
+        };
+
+        let mut total = 0usize;
+        let mut truncated = false;
+        let mut rows: Vec<HazardRow> = Vec::new();
+        for n in self.kg.nodes() {
+            if let Some(r) = repo {
+                if n.repo.as_deref() != Some(r) {
+                    continue;
+                }
+            }
+            if n.source_file.is_empty() {
+                continue;
+            }
+            if let Some(re) = &glob_re {
+                if !re.is_match(&n.source_file.replace('\\', "/")) {
+                    continue;
+                }
+            }
+            for s in n.dynamic_sites() {
+                let ks = s.kind.as_str();
+                if let Some(k) = kind {
+                    if ks != k {
+                        continue;
+                    }
+                }
+                if let Some(tn) = &tnorm {
+                    let key_match = s.key.as_deref().is_some_and(|k| hazard_key_seg(k) == *tn);
+                    let opaque_in_file = s.key.is_none() && target_files.contains(&n.source_file);
+                    if !key_match && !opaque_in_file {
+                        continue;
+                    }
+                }
+                total += 1;
+                if rows.len() < cap {
+                    rows.push((
+                        n.repo.clone().unwrap_or_default(),
+                        n.source_file.clone(),
+                        s.line,
+                        ks,
+                        s.key.clone(),
+                        n.label.clone(),
+                    ));
+                } else {
+                    truncated = true;
+                }
+            }
+        }
+        rows.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)).then(a.3.cmp(b.3)));
+
+        let mut text = if total == 0 {
+            "dynamic_hazards: no reflection / dynamic-dispatch sites match.".to_string()
+        } else {
+            let note = if truncated {
+                format!(" (capped at {cap}; narrow with repo/path_glob/kind or raise max_results)")
+            } else {
+                String::new()
+            };
+            format!(
+                "dynamic_hazards -- {total} site(s){note}:\n(a symbol with 0 static dependents here is not provably unused -- these dispatch dynamically)"
+            )
+        };
+        let mut sites_json: Vec<Value> = Vec::with_capacity(rows.len());
+        for (r, f, line, ks, key, host) in &rows {
+            let keytxt = key
+                .as_deref()
+                .map(|k| format!("\"{}\"", sanitize_label(k)))
+                .unwrap_or_else(|| "(opaque)".to_string());
+            let repotxt = if r.is_empty() {
+                String::new()
+            } else {
+                format!("[{}] ", sanitize_label(r))
+            };
+            text.push_str(&format!(
+                "\n  {}{}:{}  {}  {}  in {}",
+                repotxt,
+                sanitize_label(f),
+                line,
+                ks,
+                keytxt,
+                sanitize_label(host)
+            ));
+            sites_json.push(json!({
+                "repo": if r.is_empty() { Value::Null } else { json!(r) },
+                "file": f,
+                "line": line,
+                "kind": ks,
+                "key": key,
+                "host": host,
+            }));
+        }
+        (
+            text,
+            json!({ "total": total, "truncated": truncated, "sites": sites_json }),
+        )
+    }
+
     /// `get_neighbors` — in/out neighbours, optionally filtered by relation.
     pub fn tool_get_neighbors(
         &self,
@@ -1646,6 +1893,10 @@ impl Server {
                 label: g.label.clone(),
                 degree: g.degree,
                 test_count: self.test_count_for(&g.id),
+                dynamically_referenced: self
+                    .kg
+                    .node(&g.id)
+                    .is_some_and(|n| n.dynamically_referenced()),
             })
             .collect();
         (rows, start)
@@ -1660,12 +1911,18 @@ impl Server {
             "God nodes: most-connected hubs by total degree. Degree counts ALL edges incl. a class's members, so it is structural centrality/size, not an incoming-dependence count -- use `affected` for blast radius.",
         );
         for (i, g) in rows.iter().enumerate() {
+            let dyn_note = if g.dynamically_referenced {
+                " [reached via dynamic dispatch -- low static dependence is not safety]"
+            } else {
+                ""
+            };
             out.push_str(&format!(
-                "\n  {}. {} - {} connections, {} test(s)",
+                "\n  {}. {} - {} connections, {} test(s){}",
                 start + i + 1,
                 sanitize_label(&g.label),
                 g.degree,
-                g.test_count
+                g.test_count,
+                dyn_note
             ));
         }
         out
@@ -1676,12 +1933,15 @@ impl Server {
         let arr: Vec<Value> = rows
             .iter()
             .map(|g| {
-                json!({
-                    "label": sanitize_label(&g.label),
-                    "degree": g.degree,
-                    "id": sanitize_label(&g.id.0),
-                    "test_count": g.test_count
-                })
+                let mut o = serde_json::Map::new();
+                o.insert("label".into(), json!(sanitize_label(&g.label)));
+                o.insert("degree".into(), json!(g.degree));
+                o.insert("id".into(), json!(sanitize_label(&g.id.0)));
+                o.insert("test_count".into(), json!(g.test_count));
+                if g.dynamically_referenced {
+                    o.insert("dynamically_referenced".into(), json!(true));
+                }
+                Value::Object(o)
             })
             .collect();
         json!({ "god_nodes": arr })
@@ -1721,7 +1981,26 @@ impl Server {
                 s.cross_repo, s.cross_language
             ));
         }
+        let (total, opaque, linked) = self.dynamic_stats();
+        if total > 0 {
+            out.push_str(&format!(
+                "\nDynamic-dispatch sites: {total} ({opaque} opaque, {linked} evidence-linked) -- see dynamic_hazards; 0 dependents on a dynamically-dispatched symbol is not proof it is unused"
+            ));
+        }
         out
+    }
+
+    /// `(total dynamic-dispatch sites, opaque sites, evidence-linked dynamic_ref
+    /// edges)` across the graph, for the stats surfaces.
+    fn dynamic_stats(&self) -> (usize, usize, usize) {
+        let total: usize = self.kg.nodes().map(|n| n.dynamic_sites().len()).sum();
+        let opaque = self.hazard_index.opaque_total();
+        let linked = self
+            .kg
+            .edges()
+            .filter(|e| e.relation == "dynamic_ref")
+            .count();
+        (total, opaque, linked)
     }
 
     /// `list_repos` — federated members with node/edge counts.
@@ -2018,7 +2297,11 @@ impl Server {
         let seed = sanitize_label(&self.label_of(&id));
         let note = self.class_fold_note(&id, &seed, member_count);
         if hits.is_empty() {
-            return format!("{note}Nothing depends on {seed} within {depth} hops.");
+            let mut msg = format!("{note}Nothing depends on {seed} within {depth} hops.");
+            if let Some(c) = self.dynamic_caveat_for(&id) {
+                msg.push_str(&format!("\n  note: {}", c.message));
+            }
+            return msg;
         }
         // Per-depth breakdown so a hub's blast radius is summarized even when the
         // entry list is truncated.
@@ -2671,10 +2954,12 @@ impl Server {
 
     fn stats_json(&self) -> Value {
         let s = &self.stats;
+        let (total, opaque, linked) = self.dynamic_stats();
         json!({
             "nodes": s.nodes, "edges": s.edges, "communities": s.communities,
             "extracted": s.extracted, "inferred": s.inferred, "ambiguous": s.ambiguous,
-            "cross_repo": s.cross_repo, "cross_language": s.cross_language
+            "cross_repo": s.cross_repo, "cross_language": s.cross_language,
+            "dynamic_sites": total, "dynamic_sites_opaque": opaque, "dynamic_refs_linked": linked
         })
     }
 
@@ -2750,6 +3035,17 @@ impl Server {
         obj.insert("by_depth".into(), Value::Object(by_depth));
         if member_count > 0 {
             obj.insert("aggregated_over_members".into(), json!(member_count));
+        }
+        // When nothing statically depends on the seed, attach the honest
+        // dynamic-dispatch caveat (if any) so a structured-only reader does not
+        // treat total:0 as proof the symbol is unused.
+        if total == 0 {
+            if let Some(c) = self.dynamic_caveat_for(&id) {
+                obj.insert(
+                    "dynamic_caveat".into(),
+                    serde_json::to_value(&c).unwrap_or(Value::Null),
+                );
+            }
         }
         Value::Object(obj)
     }
@@ -3242,6 +3538,21 @@ impl Server {
                 args.get("case_sensitive").and_then(Value::as_bool),
                 opt("repo"),
                 opt("path_glob"),
+                u("max_results", 100) as usize,
+            );
+            return Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": structured,
+                "isError": false
+            }));
+        }
+
+        if name == "dynamic_hazards" {
+            let (text, structured) = self.dynamic_hazards_dual(
+                opt("repo"),
+                opt("path_glob"),
+                opt("kind"),
+                opt("target"),
                 u("max_results", 100) as usize,
             );
             return Ok(json!({
@@ -3840,6 +4151,11 @@ working_changes_impact does the same for your current git diff. A class/type's c
 attach to its methods, not the bare type symbol, so affected / find_callers / find_callees \
 on a class automatically fold in its members and label the result as aggregated -- a \
 class never reads as a safe leaf just because nothing references the type name directly. \
+A '0 dependents' result is not automatically 'safe to change': symbols reached via \
+reflection or fully-dynamic dispatch have no static dependents, so affected attaches a \
+dynamic_caveat in that case; dynamic_hazards lists the reflection / dynamic-dispatch sites \
+(event buses and string-literal reflection are already linked into the graph; computed \
+names are cataloged here as the residual risk). \
 Before editing a symbol \
 other code depends on, forecast the change: predict_impact gives the blast radius plus \
 the public APIs and tests at risk, affected_tests lists the tests to run, and \
@@ -3920,6 +4236,9 @@ fn tools_list(allow_exec: bool) -> Value {
               "id": {"type":"string"}, "label": {"type":"string"}, "source_file": {"type":"string"},
               "file_type": {"type":"string"}, "degree": {"type":"integer"}, "community": {"type":"integer"},
               "kind": {"type":"string"}, "visibility": {"type":"string"}, "loc": {"type":"integer"},
+              "dynamic_sites": { "type": "object", "description": "Reflection/dynamic-dispatch sites in this node's body (present only when non-empty).", "properties": { "count": {"type":"integer"}, "kinds": {"type":"array","items":{"type":"string"}} } },
+              "dynamically_referenced": {"type":"boolean", "description": "True when a reflection site names this symbol, so it may be reachable only at runtime."},
+              "dynamic_caveat": { "type": "object", "description": "Present when this symbol has 0 static dependents but a dynamic site could reach it -- 0 is not proof it is unused.", "properties": { "opaque_sites_in_scope": {"type":"integer"}, "kinds": {"type":"array","items":{"type":"string"}}, "dynamically_referenced": {"type":"boolean"}, "message": {"type":"string"} } },
               "ambiguous": {"type":"boolean"}, "query": {"type":"string"},
               "candidates": { "type": "array", "items": { "type": "object", "properties": {
                   "id": {"type":"string"}, "file": {"type":"string"}, "degree": {"type":"integer"} } }, "description":"Disambiguation candidates when the name is ambiguous (found=false)." }
@@ -3953,15 +4272,34 @@ fn tools_list(allow_exec: bool) -> Value {
           "outputSchema": { "type": "object", "properties": {
               "god_nodes": { "type": "array", "items": { "type": "object", "properties": {
                   "label": {"type":"string"}, "degree": {"type":"integer", "description": "Total connections (all edge kinds, incl. class members): structural centrality/size, not an incoming-dependence count."}, "id": {"type":"string"},
-                  "test_count": {"type":"integer", "description": "How many tests transitively exercise this hub; 0 flags an untested high-blast-radius symbol."} } } }
+                  "test_count": {"type":"integer", "description": "How many tests transitively exercise this hub; 0 flags an untested high-blast-radius symbol."},
+                  "dynamically_referenced": {"type":"boolean", "description": "Present and true when a reflection site names this hub: it is reachable via dynamic dispatch, so its static dependence count understates real coupling."} } } }
           }, "required": ["god_nodes"] } },
         { "name": "graph_stats", "description": "Graph size and health: node/edge/community counts and the EXTRACTED/INFERRED/AMBIGUOUS edge-confidence breakdown. On a federated (multi-repo) graph it also reports how many edges span repositories (`cross_repo`) and how many of those are cross-language coupling (`cross_language`: HTTP/RPC/FFI/WebSocket boundaries). Good first call to confirm a graph is loaded and how large it is.",
           "inputSchema": { "type": "object", "properties": {} },
           "outputSchema": { "type": "object", "properties": {
               "nodes": {"type":"integer"}, "edges": {"type":"integer"}, "communities": {"type":"integer"},
               "extracted": {"type":"integer"}, "inferred": {"type":"integer"}, "ambiguous": {"type":"integer"},
-              "cross_repo": {"type":"integer"}, "cross_language": {"type":"integer"}
+              "cross_repo": {"type":"integer"}, "cross_language": {"type":"integer"},
+              "dynamic_sites": {"type":"integer", "description": "Total reflection/dynamic-dispatch sites recorded across the graph."},
+              "dynamic_sites_opaque": {"type":"integer", "description": "Of those, sites whose dispatched name is computed (not a string literal) and so could not be evidence-linked."},
+              "dynamic_refs_linked": {"type":"integer", "description": "Evidence-linked dynamic_ref edges added from literal-key sites to their unique target."}
           }, "required": ["nodes","edges","communities"] } },
+        { "name": "dynamic_hazards", "description": "List reflection / dynamic-dispatch sites (by-name member lookups, dispatch tables, eval, dynamic import, .NET/Python/JVM reflection) recorded in the graph. Use this to judge a '0 dependents' answer: a symbol reached only by dynamic dispatch has no static dependents, so 'affected' can report 0 for something that is NOT safe to change. A literal-key site is evidence-linked to its target (shows as a low-confidence dependent); an opaque site (computed name) cannot be, and is cataloged here so the residual risk is visible. Federated: filter by `repo`/`path_glob`/`kind`, or pass `target` to see the sites that could reach a specific symbol.",
+          "inputSchema": { "type": "object", "properties": {
+              "repo": { "type": "string", "description": "Restrict to one federated member tag (as listed by list_repos)." },
+              "path_glob": { "type": "string", "description": "Only sites in files matching this glob, e.g. '**/*.ts' or 'src/**'." },
+              "kind": { "type": "string", "enum": ["reflection","dynamic_import","eval"], "description": "Restrict to one site kind." },
+              "target": { "type": "string", "description": "Show only sites that could reach this symbol: sites whose literal key names it, plus opaque sites in a file that defines it." },
+              "max_results": { "type": "integer", "description": "Max sites to return (default 100, capped at 1000)." }
+          } },
+          "outputSchema": { "type": "object", "properties": {
+              "total": {"type":"integer"}, "truncated": {"type":"boolean"},
+              "sites": { "type": "array", "items": { "type": "object", "properties": {
+                  "repo": {"type":["string","null"]}, "file": {"type":"string"}, "line": {"type":"integer"},
+                  "kind": {"type":"string"}, "key": {"type":["string","null"], "description": "The dispatched name when it is a string literal; null when computed/opaque."},
+                  "host": {"type":"string", "description": "The enclosing symbol that performs the dynamic dispatch."} } } }
+          }, "required": ["total","sites"] } },
         { "name": "list_repos", "description": "For a federated (multi-repo) graph, list member repos (tags) with node/edge counts; empty for a single repo. Use before scoping a query to one repo. Each repo also carries a `source_hash` (a content fingerprint of that member's sources from the last extraction) when available, so per-repo drift is visible: a member whose code changed since this graph was built keeps its old hash until re-extraction.",
           "inputSchema": { "type": "object", "properties": {} },
           "outputSchema": { "type": "object", "properties": {
@@ -3973,11 +4311,11 @@ fn tools_list(allow_exec: bool) -> Value {
           "inputSchema": { "type": "object", "properties": { "repo": { "type": "string", "description": "Repo tag, as listed by list_repos." } }, "required": ["repo"] } },
         { "name": "shortest_path", "description": "Shortest path between two nodes, showing the chain of relations. Answers 'how does A reach B' or 'is X connected to Y'.",
           "inputSchema": { "type": "object", "properties": { "source": { "type": "string", "description": "Start node: label, id, or bare name. If shared by several files, qualify as 'name@file-substring' (e.g. 'announce@core/foo.ts')." }, "target": { "type": "string", "description": "End node: label, id, or bare name. If shared by several files, qualify as 'name@file-substring' (e.g. 'announce@core/foo.ts')." }, "max_hops": { "type": "integer", "description": "Optional cap on path length in hops (default 8)." } }, "required": ["source", "target"] } },
-        { "name": "affected", "description": "Reverse-impact: the nodes that transitively depend on a symbol, i.e. what could break if you change it. Walks calls/imports/inheritance edges plus cross-language coupling (subprocess `invokes`, FFI `binds_native`, HTTP/gRPC `calls_service`/`handled_by`) backward, so the blast radius spans language boundaries. Answers 'what is the blast radius of changing X'. When the target is a class/type, its members are folded in (a class's callers attach to its methods, not the bare type symbol) and the result is labelled as aggregated, so a class is never a false 'safe to change'. Note: only STATIC edges are walked -- a dependent reached purely via runtime dispatch (IPC/WebSocket/event bus/reflection) won't appear.",
+        { "name": "affected", "description": "Reverse-impact: the nodes that transitively depend on a symbol, i.e. what could break if you change it. Walks calls/imports/inheritance edges plus cross-language coupling (subprocess `invokes`, FFI `binds_native`, HTTP/gRPC `calls_service`/`handled_by`) backward, so the blast radius spans language boundaries. Answers 'what is the blast radius of changing X'. When the target is a class/type, its members are folded in (a class's callers attach to its methods, not the bare type symbol) and the result is labelled as aggregated, so a class is never a false 'safe to change'. Runtime dispatch is modelled where it can be: IPC/WebSocket/event-bus boundaries appear as inferred `calls_service`/`handled_by` edges, and a reflection site with a string-literal name is evidence-linked as a low-confidence `dynamic_ref` dependent. What CANNOT be resolved (computed names, fully-dynamic dispatch) is surfaced instead: a 0-dependent result carries a `dynamic_caveat` when the symbol sits in a scope that uses dynamic dispatch, so 'nothing depends on it' never reads as 'safe' for a dynamically-reached symbol. Use `dynamic_hazards` to inspect the sites.",
           "inputSchema": { "type": "object", "properties": {
               "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." },
               "depth": { "type": "integer", "description": "Max hops to walk backward (default 3, max 16)." },
-              "relations": { "type": "array", "items": { "type": "string" }, "description": "Optional edge relations to follow; defaults to the structural-impact set: calls, references, imports, imports_from, re_exports, inherits, extends, implements, uses, mixes_in, embeds, depends_on, reads_from, plus the cross-language relations invokes, binds_native, calls_service, handled_by." },
+              "relations": { "type": "array", "items": { "type": "string" }, "description": "Optional edge relations to follow; defaults to the structural-impact set: calls, references, imports, imports_from, re_exports, inherits, extends, implements, uses, mixes_in, embeds, depends_on, reads_from, plus the cross-language relations invokes, binds_native, calls_service, handled_by, and the evidence-linked dynamic_ref (a reflection call resolved to a unique target)." },
               "limit": { "type": "integer", "description": "Max dependents listed before a '+N more' summary (default 50). A per-depth breakdown and the true total are always shown. Ignored when verbose=true." },
               "verbose": { "type": "boolean", "description": "Emit the full, uncapped dependent list instead of the summarized top-N (default false). Useful only after narrowing depth/relations on a hub." }
           }, "required": ["label"] },
@@ -3991,7 +4329,8 @@ fn tools_list(allow_exec: bool) -> Value {
               "ambiguous": {"type":"boolean"},
               "candidates": { "type": "array", "items": { "type": "object", "properties": {
                   "id": {"type":"string"}, "file": {"type":"string"}, "degree": {"type":"integer"} } }, "description":"Disambiguation candidates when ambiguous." },
-              "aggregated_over_members": {"type":"integer", "description":"When the seed is a class/type, the number of members folded into the reverse-impact (impact attaches to a class's methods, not the bare symbol)."}
+              "aggregated_over_members": {"type":"integer", "description":"When the seed is a class/type, the number of members folded into the reverse-impact (impact attaches to a class's methods, not the bare symbol)."},
+              "dynamic_caveat": { "type": "object", "description": "Present only when total=0 AND the symbol may be reached by dynamic dispatch -- so 0 dependents is not proof it is safe to change. Inspect the sites with dynamic_hazards.", "properties": { "opaque_sites_in_scope": {"type":"integer"}, "kinds": {"type":"array","items":{"type":"string"}}, "dynamically_referenced": {"type":"boolean"}, "message": {"type":"string"} } }
           }, "required": ["seed","affected"] } },
         { "name": "find_callers", "description": "List the nodes that call, use, or reference this symbol (incoming edges only). Answers 'who calls X'. The count and a per-relation breakdown are always in the header; the list is capped with a '+N more' summary on a hub. For a class/type, the external callers of its methods are folded in (a class's callers attach to its methods) and labelled. Only STATIC callers are seen -- a handler invoked via IPC/WebSocket/reflection can show 0 callers yet still run.",
           "inputSchema": { "type": "object", "properties": {
@@ -4061,6 +4400,8 @@ fn tools_list(allow_exec: bool) -> Value {
               "signature": { "type": "object", "description": "Captured signature: params (name + optional type_ref), optional return_type, raw header." },
               "members": { "type": "array", "items": { "type": "string" }, "description": "For a class/type only: its member symbol labels (a type has no calls of its own; capped at 40)." },
               "member_count": { "type": "integer", "description": "For a class/type: total members folded in (may exceed the capped `members` list)." },
+              "dynamically_referenced": { "type": "boolean", "description": "True when a reflection site names this symbol, so it may be reachable only at runtime." },
+              "dynamic_caveat": { "type": "object", "description": "Present when this symbol has 0 static dependents but a dynamic site could reach it.", "properties": { "opaque_sites_in_scope": {"type":"integer"}, "kinds": {"type":"array","items":{"type":"string"}}, "dynamically_referenced": {"type":"boolean"}, "message": {"type":"string"} } },
               "query": { "type": "string", "description": "Echo of the input label when found=false." },
               "ambiguous": { "type": "boolean", "description": "true when the name resolved to several nodes (found=false); see candidates." },
               "candidates": { "type": "array", "items": { "type": "object", "properties": {
@@ -4329,6 +4670,122 @@ mod tests {
             built_at_commit: None,
         };
         Server::from_graph_data(gd, None)
+    }
+
+    /// A graph with two dynamic-dispatch sites: an opaque reflection call in
+    /// `dispatcher.py` and an `eval` in `evil.py`.
+    fn hazard_server() -> Server {
+        let mut a = node("dispatcher", "dispatch", Some(0));
+        a.push_dynamic_site(synaptic_core::DynamicSite {
+            kind: synaptic_core::DynamicKind::Reflection,
+            line: 5,
+            key: None,
+            snippet: "h[k]()".into(),
+        });
+        let mut b = node("evil", "run_eval", Some(0));
+        b.push_dynamic_site(synaptic_core::DynamicSite {
+            kind: synaptic_core::DynamicKind::Eval,
+            line: 2,
+            key: None,
+            snippet: "eval(x)".into(),
+        });
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![a, b],
+            links: vec![],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        Server::from_graph_data(gd, None)
+    }
+
+    #[test]
+    fn dynamic_hazards_lists_sites_with_kind_and_location() {
+        let mut s = hazard_server();
+        let resp = call_tool_full(&mut s, "dynamic_hazards", json!({}));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("reflection"), "{text}");
+        let structured = &resp["result"]["structuredContent"];
+        assert!(structured["total"].as_u64().unwrap() >= 2, "{structured}");
+        assert!(
+            structured["sites"][0]["line"].as_u64().is_some(),
+            "{structured}"
+        );
+    }
+
+    #[test]
+    fn dynamic_hazards_filters_by_kind() {
+        let mut s = hazard_server();
+        let resp = call_tool_full(&mut s, "dynamic_hazards", json!({"kind": "eval"}));
+        let structured = &resp["result"]["structuredContent"];
+        let sites = structured["sites"].as_array().unwrap();
+        assert!(!sites.is_empty(), "{structured}");
+        assert!(sites.iter().all(|x| x["kind"] == "eval"), "{structured}");
+    }
+
+    #[test]
+    fn affected_appends_dynamic_caveat_for_zero_dep_node_with_reflection() {
+        let mut s = hazard_server();
+        // 'dispatch' has no static dependents but its file holds an opaque reflection
+        // site, so a bare "0 dependents" must carry the honesty caveat.
+        let text = call_tool(&mut s, "affected", json!({"label": "dispatch"}));
+        assert!(text.contains("not provably unused"), "text caveat: {text}");
+        let full = call_tool_full(&mut s, "affected", json!({"label": "dispatch"}));
+        let sc = &full["result"]["structuredContent"];
+        assert!(sc["dynamic_caveat"].is_object(), "structured caveat: {sc}");
+    }
+
+    /// A handler reached only by an evidence-linked `dynamic_ref` edge: flagged
+    /// `dynamically_referenced`, surfaced by get_node and god_nodes.
+    fn dynamic_ref_server() -> Server {
+        let mut tgt = node("handler", "on_event", Some(0));
+        tgt.set_dynamically_referenced(true);
+        let caller = node("c", "caller", Some(0));
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![tgt, caller],
+            links: vec![edge("c", "handler", "dynamic_ref")],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        Server::from_graph_data(gd, None)
+    }
+
+    #[test]
+    fn get_node_surfaces_dynamically_referenced_flag() {
+        let mut s = dynamic_ref_server();
+        let full = call_tool_full(&mut s, "get_node", json!({"label": "on_event"}));
+        let sc = &full["result"]["structuredContent"];
+        assert_eq!(sc["dynamically_referenced"], json!(true), "{sc}");
+    }
+
+    #[test]
+    fn graph_stats_reports_dynamic_dispatch_counts() {
+        let mut s = hazard_server();
+        let text = call_tool(&mut s, "graph_stats", json!({}));
+        assert!(text.contains("Dynamic-dispatch sites:"), "{text}");
+        let full = call_tool_full(&mut s, "graph_stats", json!({}));
+        let sc = &full["result"]["structuredContent"];
+        assert_eq!(sc["dynamic_sites"], json!(2), "{sc}");
+        assert_eq!(sc["dynamic_sites_opaque"], json!(2), "{sc}");
+    }
+
+    #[test]
+    fn god_nodes_annotates_dynamically_referenced_hub() {
+        let mut s = dynamic_ref_server();
+        let full = call_tool_full(&mut s, "god_nodes", json!({"top_n": 10}));
+        let gods = full["result"]["structuredContent"]["god_nodes"]
+            .as_array()
+            .unwrap();
+        assert!(
+            gods.iter()
+                .any(|g| g["label"] == "on_event" && g["dynamically_referenced"] == json!(true)),
+            "{gods:?}"
+        );
     }
 
     fn call_tool(s: &mut Server, name: &str, args: Value) -> String {
@@ -5145,12 +5602,13 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 27);
+        assert_eq!(names.len(), 28);
         for expected in [
             "query_graph",
             "get_node",
             "get_source",
             "search_text",
+            "dynamic_hazards",
             "get_neighbors",
             "get_community",
             "god_nodes",
@@ -5665,9 +6123,11 @@ mod tests {
     fn search_text_excludes_synaptic_output_dir() {
         // Synaptic's own generated output must never surface as content hits, even
         // when it is not gitignored: the canonical `synaptic-out/` (matched by
-        // name, with its exports/backups) and a custom --out dir (matched by its
-        // graph.json + .manifest.json marker pair). A stray source file merely
-        // *named* graph.json (no sibling manifest) stays searchable.
+        // name, with its exports/backups), a custom --out dir (matched by its
+        // graph.json + .manifest.json marker pair), and a cache-only / predecessor
+        // dir matched by its `cache/ast/` AST cache (no graph.json beside it). A
+        // stray source file merely *named* graph.json (no sibling manifest) stays
+        // searchable.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("src/app.js"), "const TOKEN = 1\n").unwrap();
@@ -5681,6 +6141,16 @@ mod tests {
         std::fs::write(
             dir.path().join("synaptic-out/graph.json.bak-007"),
             "TOKEN backup\n",
+        )
+        .unwrap();
+        // A predecessor / cache-only output dir: differently named, NO graph.json,
+        // just the hash-keyed AST cache full of extracted source text. Matched by
+        // the `cache/ast/` signature alone.
+        std::fs::create_dir_all(dir.path().join("codegraph-out/cache/ast/v0.1.0")).unwrap();
+        std::fs::write(
+            dir.path()
+                .join("codegraph-out/cache/ast/v0.1.0/deadbeef.json"),
+            "{\"label\":\"TOKEN from cached ast\"}\n",
         )
         .unwrap();
         // Custom --out dir, matched by the generated-file marker pair.

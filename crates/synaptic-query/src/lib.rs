@@ -7,6 +7,9 @@
 #![forbid(unsafe_code)]
 
 pub mod describe;
+pub mod dynamic;
+
+pub use dynamic::{dependents_caveat, DynamicCaveat, DynamicHazardIndex, SiteRef};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -87,6 +90,10 @@ pub const DEFAULT_AFFECTED_RELATIONS: &[&str] = &[
     "binds_native",
     "calls_service",
     "handled_by",
+    // Dynamic-dispatch evidence-link: a reflection site whose literal key resolved
+    // to a unique target points caller->target, so the target's reverse-impact
+    // includes the dynamic caller (low-confidence; surfaced with a caveat).
+    "dynamic_ref",
 ];
 
 /// One node reached by the reverse-impact walk: which node, how many hops from

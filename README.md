@@ -52,6 +52,13 @@ grepping or reading files.
   and GraphML / Cypher / DOT / Obsidian / wiki exports. See [Output Formats](https://github.com/ColinVaughn/Synaptic/wiki/Output-Formats).
 - **Graph queries**: relevant-subgraph search, shortest path, node explanation, and
   reverse-impact ("what depends on this"). See [Querying](https://github.com/ColinVaughn/Synaptic/wiki/Querying).
+- **Dynamic-dispatch awareness**: event buses (Node EventEmitter, DOM CustomEvent, C# events)
+  and Electron IPC link a publisher to its subscriber through a channel node, so a handler reached
+  only across the bus is not a phantom 0-caller. Reflection and dynamic dispatch that cannot be
+  resolved statically (by-name lookups, dispatch tables, `eval`, dynamic import, .NET/Python/JVM
+  reflection) are cataloged so a "0 dependents" answer is never mistaken for "safe to change":
+  `synaptic hazards` (and the `dynamic_hazards` MCP tool) list the sites, and `affected` attaches a
+  caveat when a symbol is reachable only dynamically.
 - **Time-travel diff**: `synaptic diff <rev1> [rev2]` (or `--since <date>`) reports how the
   graph changed between two git revisions, added/removed dependencies, removed APIs,
   architectural drift, new cycles, and hotspots, with a Markdown or self-contained HTML report.
@@ -80,11 +87,11 @@ grepping or reading files.
   queries to the tables they touch). `synaptic sql advise --query "<sql>"` critiques a candidate
   query before you write it, cross-referenced against the graph's tables/indexes/RLS. See
   [SQL Auditing](https://github.com/ColinVaughn/Synaptic/wiki/SQL-Auditing).
-- **MCP server** (protocol 2025-11-25) exposing 27 read-only tools over stdio or HTTP:
-  subgraph search, source reading, reverse-impact, PR/working-tree blast radius, change
-  forecasting, predictive test selection, edit-impact prediction, structural search, time-travel
-  diff, plan-only rename, and SQL audit/advise, plus prompts, completions, resource subscriptions,
-  and structured tool output. See
+- **MCP server** (protocol 2025-11-25) exposing 28 read-only tools over stdio or HTTP:
+  subgraph search, source reading, reverse-impact, dynamic-dispatch hazards, PR/working-tree blast
+  radius, change forecasting, predictive test selection, edit-impact prediction, structural search,
+  time-travel diff, plan-only rename, and SQL audit/advise, plus prompts, completions, resource
+  subscriptions, and structured tool output. See
   [MCP Server](https://github.com/ColinVaughn/Synaptic/wiki/MCP-Server).
 - **Incremental rebuilds**, file watching, and git hooks keep the graph current. See
   [Incremental Updates](https://github.com/ColinVaughn/Synaptic/wiki/Incremental-Updates).
@@ -299,7 +306,8 @@ A code-only corpus runs fully offline; the optional LLM semantic pass over docs 
 | `query <text>` | Return a relevance-ranked subgraph (each node scored). Flags: `--max-nodes`, `--repo`, `--dfs`, `--since <ref>` (boost code changed on the branch), `--seed-changed` |
 | `path <from> <to>` | Shortest path between two nodes |
 | `explain <node>` | Show a node and its neighbours |
-| `affected <node>` | Nodes that (transitively) depend on a node. Flags: `--depth`, `--relation` |
+| `affected <node>` | Nodes that (transitively) depend on a node; adds a caveat when a "0 dependents" symbol is reachable only via dynamic dispatch. Flags: `--depth`, `--relation` |
+| `hazards` | List reflection / dynamic-dispatch sites the graph records, so a "0 dependents" answer is not mistaken for "safe". Flags: `--repo`, `--kind`, `--limit` |
 | `search [synql]` | Structural search via SYNQL or a named `--pattern`. Flags: `--explain`, `--save`/`--saved`, `--json` |
 | `diff <rev1> [rev2]` | Time-travel graph diff between two git revisions. Flags: `--since`, `--report`, `--html`, `--scope` |
 | `refactor <action>` | Plan a safe `rename`/`move`/`extract` for an agent, then `verify` the graph (never edits source) |
@@ -330,10 +338,10 @@ synaptic serve                                                        # stdio MC
 synaptic serve --http 127.0.0.1:8765 --api-key "$SYNAPTIC_API_KEY"   # HTTP server
 ```
 
-The server exposes 27 read-only tools: graph navigation (`query_graph`, `get_node`,
+The server exposes 28 read-only tools: graph navigation (`query_graph`, `get_node`,
 `get_source`, `get_neighbors`, `get_community`, `god_nodes`, `graph_stats`, `shortest_path`),
-impact analysis (`affected`, `find_callers`, `find_callees`, `predict_impact`, `affected_tests`,
-`predict_edit`), federation (`list_repos`, `repo_stats`), change/PR review (`working_changes_impact`,
+impact analysis (`affected`, `find_callers`, `find_callees`, `dynamic_hazards`, `predict_impact`,
+`affected_tests`, `predict_edit`), federation (`list_repos`, `repo_stats`), change/PR review (`working_changes_impact`,
 `list_prs`, `get_pr_impact`, `triage_prs`), the advanced trio (`structural_search`,
 `time_travel_diff`, plan-only `plan_rename`), and SQL auditing (`audit_sql`, `advise_sql`).
 It also serves MCP prompts, argument completions, resource templates and

@@ -153,7 +153,7 @@ exposure.
 
 ## MCP tools
 
-`tools/list` reports 27 tools by default (28 with `--allow-exec`, which adds
+`tools/list` reports 28 tools by default (29 with `--allow-exec`, which adds
 `speculate`). Every tool documents its parameters in its input schema, and every
 tool carries annotations so a host knows how safe it is to run:
 
@@ -161,7 +161,7 @@ tool carries annotations so a host knows how safe it is to run:
 "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": <bool> }
 ```
 
-All 27 default tools are `readOnlyHint: true`. `openWorldHint` is `true` only for
+All 28 default tools are `readOnlyHint: true`. `openWorldHint` is `true` only for
 the tools that reach outside the graph by shelling out (`list_prs`,
 `get_pr_impact`, `triage_prs`, `working_changes_impact`, `predict_impact`,
 `affected_tests`, and `time_travel_diff`); it is `false` for the rest, including
@@ -344,7 +344,11 @@ Returns `Graph: <n> nodes, <n> edges, <n> communities` and
 mirror. On a federated (multi-repo) graph it adds a `Cross-repo: <n> edge(s) span
 repositories (<n> cross-language: HTTP/RPC/FFI/WebSocket boundaries)` line, and the
 structured output carries `cross_repo` / `cross_language` counts (both 0, and the
-line omitted, for a single-repo graph).
+line omitted, for a single-repo graph). When the graph has reflection /
+dynamic-dispatch sites it adds a `Dynamic-dispatch sites: <n> (<n> opaque, <n>
+evidence-linked)` line, mirrored in the structured output as `dynamic_sites` /
+`dynamic_sites_opaque` / `dynamic_refs_linked` (see
+[`dynamic_hazards`](#dynamic_hazards)).
 
 ### list_repos
 
@@ -652,6 +656,39 @@ where `node` is null only when the hit falls outside any captured span. On a
 federated graph this is strictly more useful than a raw shell `grep`: grep does
 not know where the member repos live, which ignore files apply, or which symbol a
 line belongs to.
+
+### dynamic_hazards
+
+Lists the **reflection / dynamic-dispatch sites** recorded in the graph. Static
+analysis cannot follow a by-name member lookup, a dispatch table, `eval`, a
+dynamic `import()`, or .NET / Python / JVM reflection, so a symbol reached only
+that way has no static dependents -- and a bare "0 dependents" then reads as "safe
+to change" when it is not. This tool is how you judge that risk.
+
+Where it can, Synaptic resolves dynamic dispatch instead of just cataloging it:
+event buses (`EventEmitter`, DOM `CustomEvent`, C# events) link a publisher and
+subscriber through an `event #<name>` node, and a reflection site whose name is a
+**string literal** is evidence-linked to its unique target with a low-confidence
+`dynamic_ref` edge (so it shows up as a caveated dependent in `affected` /
+`find_callers`). What remains -- computed names, fully-dynamic dispatch -- cannot
+be linked, so it is listed here as the residual risk, and `affected` / `get_node`
+/ `describe_node` attach a `dynamic_caveat` to a 0-dependent symbol in such a
+scope.
+
+Parameters:
+- `repo` (string) -- restrict to one federated member (a tag from `list_repos`).
+- `path_glob` (string) -- only sites in files matching this glob, e.g. `**/*.ts`.
+- `kind` (string) -- one of `reflection`, `dynamic_import`, `eval` (the kinds the
+  detectors emit; event buses are modeled as edges, not sites).
+- `target` (string) -- only sites that could reach this symbol: sites whose literal
+  key names it, plus opaque sites in a file that defines it.
+- `max_results` (integer) -- sites to return before truncation. Default 100, max 1000.
+
+Each text row is `[repo] file:line  <kind>  <"key"|(opaque)>  in <enclosing
+symbol>`; the `structuredContent` mirror is
+`{ total, truncated, sites: [{ repo, file, line, kind, key, host }] }`. `graph_stats`
+reports the totals (`dynamic_sites`, `dynamic_sites_opaque`, `dynamic_refs_linked`),
+and the CLI exposes the same listing as `synaptic hazards`.
 
 ### describe_node
 

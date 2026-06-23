@@ -38,10 +38,10 @@ use synaptic_detect::{classify_file, detect, DetectResult, FileType};
 use synaptic_extract::cached_extract_source;
 use synaptic_graph::{
     apply_communities, build_from_parts, cluster, deduplicate_entities, guard_shrink,
-    norm_source_file, remap_communities_to_previous, resolve_command_invocations,
-    resolve_parameterized_routes, resolve_pyo3_imports, resolve_pyo3_modules,
-    resolve_route_handlers, resolve_sql_queries, resolve_symbols, BuildOptions, ClusterOptions,
-    KnowledgeGraph,
+    link_dynamic_refs, norm_source_file, remap_communities_to_previous,
+    resolve_command_invocations, resolve_parameterized_routes, resolve_pyo3_imports,
+    resolve_pyo3_modules, resolve_route_handlers, resolve_sql_queries, resolve_symbols,
+    BuildOptions, ClusterOptions, KnowledgeGraph,
 };
 
 /// AST-extracted node — origin stamped by the extractors (`_origin == "ast"`).
@@ -413,6 +413,13 @@ pub fn rebuild_with_detect(
     let (pn, pe) = resolve_pyo3_imports(pn, pe);
     if pe.len() > before_edges {
         kg = build_from_parts(pn, pe, hyper, &build_opts);
+    }
+
+    // Dynamic-dispatch evidence-link (matches the one-shot `extract` path).
+    let before_edges = kg.edges().count();
+    let (yn, ye) = link_dynamic_refs(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
+    if ye.len() > before_edges {
+        kg = build_from_parts(yn, ye, kg.hyperedges.clone(), &build_opts);
     }
 
     // Dedup near-duplicate non-code entities (a no-op on a code-only graph).

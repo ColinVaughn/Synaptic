@@ -147,6 +147,47 @@ addition, the bare-builder reqwest client form (`.post("https://...")`) is only
 trusted in a file that actually uses `reqwest`, and absolute-URL-only matching
 keeps a local `.get("/x")` from being read as a service call.
 
+## Dynamic dispatch
+
+Runtime dispatch -- event buses, Electron IPC, and reflection -- is coupling the
+AST walk does not see, and a symbol reached only that way looks like a 0-dependent
+leaf. Synaptic resolves what it can and is honest about the rest.
+
+### Event buses and IPC (boundary nodes)
+
+Like WebSockets, these mint a channel boundary node that reuses `calls_service`
+(publisher) / `handled_by` (subscriber), so a handler reached only across the bus
+is not a phantom 0-caller and a cross-file/cross-repo publisher meets its
+subscriber on one node:
+
+- **Event buses** -> an `event #<name>` node. Node `EventEmitter`
+  (`.emit` / `.on` / `.once` / `.addListener`, gated on an `EventEmitter` token so
+  ordinary `.on` from jQuery/sockets does not fire), DOM `CustomEvent`
+  (`dispatchEvent(new CustomEvent('e'))` + `addEventListener('e')`, with standard
+  DOM events like `click`/`load` excluded), and C# events (`Foo?.Invoke(...)` +
+  `Foo += handler`, gated on a real `event` declaration so an arithmetic `total +=
+  x` does not mint a channel).
+- **Electron IPC** -> an `ipc #<channel>` node (`ipcMain.handle`/`ipcRenderer.on`
+  handlers; `ipcRenderer.invoke`/`webContents.send` senders).
+
+### Reflection / dynamic-dispatch sites (the honest residual)
+
+By-name member calls (`obj[expr]()`), `Reflect.*`, dispatch tables, `eval` /
+`new Function`, dynamic `import()`, .NET `GetMethod` / `Activator.CreateInstance`,
+Python `getattr` / `importlib`, and JVM `Class.forName` / `getMethod` are recorded
+as **`dynamic_sites`** metadata on the enclosing node (no new node kind). When such
+a site dispatches on a **string literal** that resolves to exactly one symbol
+(same-repo first), a low-confidence **`dynamic_ref`** edge links it to that target,
+so the target shows up as a caveated dependent. A computed / opaque name cannot be
+linked and stays catalog-only.
+
+Either way the residual risk is surfaced, never hidden: list the sites with
+[`synaptic hazards`](Commands#hazards) or the
+[`dynamic_hazards`](MCP-Server#dynamic_hazards) MCP tool, and a 0-dependent
+[`affected`](Querying#affected) result for a symbol in such a scope carries a
+`dynamic_caveat`. `graph_stats` reports the totals (`dynamic_sites`,
+`dynamic_sites_opaque`, `dynamic_refs_linked`).
+
 ## Resolution passes
 
 After the per-file scan, graph-level passes stitch the boundary nodes together
@@ -173,8 +214,9 @@ cross-repo dependency.
 
 ## How impact analysis uses these edges
 
-The four relations are part of the default reverse-impact set, so they are
-traversed automatically by:
+These relations (`calls_service`, `handled_by`, `invokes`, `binds_native`, and the
+evidence-linked `dynamic_ref`) are part of the default reverse-impact set, so they
+are traversed automatically by:
 
 - `synaptic affected` and the MCP `affected` tool -- the blast radius now spans
   language boundaries.

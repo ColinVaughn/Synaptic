@@ -43,6 +43,11 @@ get the binary.
   ([Output Formats](Output-Formats), [Visualizations](Visualizations)).
 - Graph queries: relevant-subgraph search, shortest path, and reverse impact
   ([Querying](Querying)).
+- Dynamic-dispatch awareness: event buses and Electron IPC link publishers to
+  subscribers through channel nodes, and reflection / dynamic-dispatch sites are
+  cataloged so a "0 dependents" answer is never mistaken for "safe to change"
+  (`synaptic hazards`, the `dynamic_hazards` MCP tool, and an `affected` caveat)
+  ([Querying](Querying), [Cross-Language Edges](Cross-Language-Edges)).
 - Structural search with SYNQL, a Cypher-inspired query language matching on
   kind/visibility/loc/fan-in-out plus named architectural patterns ([Commands](Commands)).
 - Time-travel diff between two git revisions: added/removed dependencies, removed
@@ -61,7 +66,7 @@ get the binary.
   commit from its parent state, and scores the prediction against git ground
   truth (co-edited tests, removed APIs) so forecast quality is regression-testable
   and CI-gateable ([Commands](Commands)).
-- An MCP server (27 read-only tools) and one-command assistant integration
+- An MCP server (28 read-only tools) and one-command assistant integration
   ([MCP Server](MCP-Server), [Assistant Integration](Assistant-Integration)).
 - Multi-repo federation with real cross-repo edge resolution
   ([Workspaces and Federation](Workspaces-and-Federation)).

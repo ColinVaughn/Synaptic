@@ -17,6 +17,7 @@ Most read commands operate on `synaptic-out/graph.json` by default; build it fir
 | [`update`](#update) | Incrementally rebuild after files change (or fully with `--full`). |
 | [`watch`](#watch) | Watch the working tree and rebuild on change (debounced). |
 | [`affected`](#affected) | Nodes that transitively depend on a node (reverse-impact). |
+| [`hazards`](#hazards) | List reflection / dynamic-dispatch sites, so a "0 dependents" answer is not mistaken for "safe". |
 | [`diff`](#diff) | Time-travel: diff the graph between two git revisions (dependencies, removed APIs, drift, cycles, hotspots). |
 | [`predict`](#predict) | Forecast a change before applying it: blast radius, public APIs at risk, new cycles, and a verify checklist. |
 | [`sql`](#sql) | Audit SQL for performance + security over the SQL-aware graph, or advise on a candidate query before writing it. |
@@ -349,7 +350,9 @@ synaptic affected <NODE> [--graph <PATH>] [--depth <N>] [--relation <REL>]...
 | `--depth` | `2` | Max hops to walk backward. |
 | `--relation` | structural impact relations | Restrict to these edge relations; repeatable. |
 
-When no `--relation` is given, the default structural impact relations are: `calls`, `references`, `imports`, `imports_from`, `re_exports`, `inherits`, `extends`, `implements`, `uses`, `mixes_in`, `embeds`, `depends_on`, `reads_from`, plus the cross-language relations `invokes`, `binds_native`, `calls_service`, and `handled_by` (so impact spans subprocess/FFI/HTTP/gRPC boundaries; see [Cross-Language-Edges](Cross-Language-Edges)). Containment relations (such as `contains`/`method`) are intentionally excluded. Output lists each affected node with the relation it was reached through and its source location.
+When no `--relation` is given, the default structural impact relations are: `calls`, `references`, `imports`, `imports_from`, `re_exports`, `inherits`, `extends`, `implements`, `uses`, `mixes_in`, `embeds`, `depends_on`, `reads_from`, plus the cross-language relations `invokes`, `binds_native`, `calls_service`, `handled_by`, and `dynamic_ref` (so impact spans subprocess/FFI/HTTP/gRPC/event-bus boundaries and string-literal reflection; see [Cross-Language-Edges](Cross-Language-Edges)). Containment relations (such as `contains`/`method`) are intentionally excluded. Output lists each affected node with the relation it was reached through and its source location.
+
+When the result is empty AND the symbol sits in a scope that uses dynamic dispatch (it was evidence-linked, or its file has unresolved reflection sites), `affected` appends a one-line caveat -- "0 static dependents, but ... not provably unused" -- so a dynamically-reached symbol is never read as a safe leaf. List the underlying sites with [`hazards`](#hazards).
 
 Example:
 
@@ -359,6 +362,25 @@ synaptic affected "User" --relation calls --relation references
 ```
 
 See [Querying](Querying) and [Analysis-and-Reports](Analysis-and-Reports).
+
+## hazards
+
+List the reflection / dynamic-dispatch sites recorded in the graph. Static analysis cannot follow a by-name member lookup, a dispatch table, `eval`, a dynamic `import()`, or .NET / Python / JVM reflection, so a symbol reached only that way has no static dependents -- this is how you judge whether a "0 dependents" answer is trustworthy. Event buses and string-literal reflection are already linked into the graph (and show up as dependents); what cannot be resolved (computed names) is cataloged here. Mirrors the MCP [`dynamic_hazards`](MCP-Server#dynamic_hazards) tool.
+
+Syntax:
+
+```sh
+synaptic hazards [--graph <PATH>] [--repo <TAG>] [--kind <KIND>] [--limit <N>]
+```
+
+| Name | Default | Description |
+| --- | --- | --- |
+| `--graph` | `synaptic-out/graph.json` | Source graph. |
+| `--repo` | all members | Restrict to one federated member tag. |
+| `--kind` | all | One of `reflection`, `dynamic_import`, `eval`. |
+| `--limit` | `100` | Max sites before a `+N more` summary. |
+
+Each row is `file:line  <kind>  <"key"|(opaque)>  in <enclosing symbol>`. A `"key"` is the string-literal name a site dispatches on (an evidence-link candidate); `(opaque)` is a computed name that cannot be resolved.
 
 ## diff
 
@@ -729,7 +751,7 @@ synaptic serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root
 | `--source-root` | dir above `synaptic-out/` | Trusted root for resolving a node's source file in the `get_source` tool (path-traversal jailed). |
 | `--allow-exec` | off | Expose the command-running `speculate` tool (the 28th tool). This makes the server no longer read-only, so enable it only for trusted clients. See [MCP Server](MCP-Server). |
 
-Defaults to stdio transport. The MCP server reports protocol `2025-11-25` and exposes 27 read-only tools (28 with `--allow-exec`, which adds the command-running `speculate` tool), prompts, completions, resource templates/subscriptions, and structured tool output. When serving HTTP on a wildcard address with no API key, it prints a warning.
+Defaults to stdio transport. The MCP server reports protocol `2025-11-25` and exposes 28 read-only tools (29 with `--allow-exec`, which adds the command-running `speculate` tool), prompts, completions, resource templates/subscriptions, and structured tool output. When serving HTTP on a wildcard address with no API key, it prints a warning.
 
 Example:
 

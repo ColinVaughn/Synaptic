@@ -108,10 +108,17 @@ pub fn run(roots: &[Root], q: &Query) -> Result<Outcome, String> {
         wb.standard_filters(true)
             .require_git(false)
             .add_custom_ignore_filename(".synapticignore");
-        // Never search Synaptic's own generated output: a `synaptic-out/` dir, or
-        // a custom `--out` dir identified by the generated-file pair an extraction
-        // writes (`graph.json` + `.manifest.json`). Requiring both files keeps a
-        // genuine source/fixture file merely named `graph.json` searchable.
+        // Never search Synaptic's own generated output, identified WITHOUT relying
+        // on the dir's name so a custom `--out` (or a predecessor tool's dir) is
+        // pruned too:
+        //   1. the canonical `synaptic-out/` (by name), or
+        //   2. the generated-file pair an extraction writes (`graph.json` +
+        //      `.manifest.json`) -- requiring both keeps a genuine source/fixture
+        //      file merely named `graph.json` searchable, or
+        //   3. the AST cache it writes at `cache/ast/` -- the hash-keyed serialized
+        //      ASTs hold extracted source text (e.g. an `addEventListener` literal),
+        //      and this dir can exist with NO graph.json beside it (a cache-only or
+        //      predecessor `codegraph-out/` layout) so rules 1-2 would miss it.
         // Pruning the dir also drops its exports (.dot/.svg/.graphml/...) and
         // graph.json.bak* backups, which would otherwise drown real source hits.
         wb.filter_entry(|dent| {
@@ -125,6 +132,9 @@ pub fn run(roots: &[Root], q: &Query) -> Result<Outcome, String> {
                 }
                 let d = dent.path();
                 if d.join("graph.json").is_file() && d.join(".manifest.json").is_file() {
+                    return false;
+                }
+                if d.join("cache").join("ast").is_dir() {
                     return false;
                 }
             }

@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod confidence;
+pub mod dynamic;
 pub mod edge;
 pub mod error;
 pub mod file_type;
@@ -23,6 +24,7 @@ pub mod test_path;
 pub mod validate;
 
 pub use confidence::Confidence;
+pub use dynamic::{DynamicKind, DynamicSite};
 pub use edge::Edge;
 pub use error::{CoreError, Result};
 pub use file_type::FileType;

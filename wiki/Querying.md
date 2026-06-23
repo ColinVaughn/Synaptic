@@ -246,12 +246,15 @@ The same cascade and messaging back the equivalent MCP tools.
   `calls`, `references`, `imports`, `imports_from`, `re_exports`, `inherits`,
   `extends`, `implements`, `uses`, `mixes_in`, `embeds`, `depends_on`,
   `reads_from`, and the cross-language relations `invokes`, `binds_native`,
-  `calls_service`, and `handled_by`.
+  `calls_service`, `handled_by`, and `dynamic_ref`.
 
-  The four cross-language relations mean reverse-impact crosses language
+  These cross-language relations mean reverse-impact crosses language
   boundaries: changing an HTTP/gRPC handler reaches the clients that call it, a
-  Rust function exported through PyO3 reaches the Python that imports it, and a
-  binary reaches the scripts that invoke it. See
+  Rust function exported through PyO3 reaches the Python that imports it, an
+  event-bus publisher reaches the subscribers on its channel, and a
+  binary reaches the scripts that invoke it. `dynamic_ref` carries an
+  evidence-linked reflection call (a site that dispatches on a string-literal name
+  matching exactly one symbol). See
   [Cross-Language-Edges](Cross-Language-Edges).
 
   Containment relations such as `contains` and `method` are intentionally not in
@@ -275,6 +278,17 @@ Depth: 2
 Each line is the affected node, the relation it was reached through, and its
 source location. If nothing depends on the seed within the depth bound it prints
 `No affected nodes found.`
+
+### "0 dependents" is not always "safe"
+
+A symbol reached only via reflection or fully-dynamic dispatch has no static
+dependents, so a bare `No affected nodes found.` could read as "safe to delete"
+when it is not. When the empty result's symbol sits in a scope that uses dynamic
+dispatch -- it was evidence-linked, or its own file holds unresolved reflection
+sites -- `affected` appends a caveat line ("0 static dependents, but N
+dynamic-dispatch site(s) ... not provably unused"). List the underlying sites with
+[`synaptic hazards`](Commands#hazards) (or the `dynamic_hazards` MCP tool), and see
+[Cross-Language-Edges](Cross-Language-Edges#dynamic-dispatch).
 
 `affected` accepts `--graph`. It does not take a `--repo` flag.
 

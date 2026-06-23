@@ -40,6 +40,8 @@ const KIND_KEY: &str = "kind";
 const VISIBILITY_KEY: &str = "visibility";
 const SPAN_KEY: &str = "span";
 const SIGNATURE_KEY: &str = "signature";
+const DYNAMIC_SITES_KEY: &str = "dynamic_sites";
+const DYNAMICALLY_REFERENCED_KEY: &str = "dynamically_referenced";
 
 impl Node {
     /// The node's kind (class/function/method/...), if the extractor set one.
@@ -109,6 +111,39 @@ impl Node {
         );
     }
 
+    /// Dynamic-dispatch sites recorded on this node (empty if none).
+    pub fn dynamic_sites(&self) -> Vec<crate::dynamic::DynamicSite> {
+        self.extra
+            .get(DYNAMIC_SITES_KEY)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Append a dynamic-dispatch site to this node.
+    pub fn push_dynamic_site(&mut self, site: crate::dynamic::DynamicSite) {
+        let mut sites = self.dynamic_sites();
+        sites.push(site);
+        self.extra.insert(
+            DYNAMIC_SITES_KEY.to_string(),
+            serde_json::to_value(sites).expect("DynamicSite serializes"),
+        );
+    }
+
+    /// True when an evidence-link resolved a dynamic site's key to this node, so its
+    /// reverse-impact may be reachable only dynamically.
+    pub fn dynamically_referenced(&self) -> bool {
+        self.extra
+            .get(DYNAMICALLY_REFERENCED_KEY)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// Mark/unmark this node as reached by a dynamic evidence-link.
+    pub fn set_dynamically_referenced(&mut self, v: bool) {
+        self.extra
+            .insert(DYNAMICALLY_REFERENCED_KEY.to_string(), serde_json::json!(v));
+    }
+
     /// True if this node lives in test code (heuristic, by its source path; see
     /// [`crate::is_test_path`]).
     pub fn is_test(&self) -> bool {
@@ -152,6 +187,29 @@ mod tests {
             repo: None,
             extra: Map::new(),
         }
+    }
+
+    #[test]
+    fn dynamic_sites_push_and_read_roundtrip() {
+        use crate::dynamic::{DynamicKind, DynamicSite};
+        let mut n = sample();
+        assert!(n.dynamic_sites().is_empty());
+        assert!(!n.dynamically_referenced());
+        n.push_dynamic_site(DynamicSite {
+            kind: DynamicKind::Reflection,
+            line: 3,
+            key: Some("ready".into()),
+            snippet: "o['ready']()".into(),
+        });
+        n.set_dynamically_referenced(true);
+        assert_eq!(n.dynamic_sites().len(), 1);
+        assert_eq!(n.dynamic_sites()[0].key.as_deref(), Some("ready"));
+        assert!(n.dynamically_referenced());
+        // survives a serde roundtrip via flattened extra
+        let json = serde_json::to_value(&n).unwrap();
+        let back: Node = serde_json::from_value(json).unwrap();
+        assert_eq!(back.dynamic_sites().len(), 1);
+        assert!(back.dynamically_referenced());
     }
 
     #[test]

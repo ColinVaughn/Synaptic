@@ -15,8 +15,9 @@ use std::path::{Path, PathBuf};
 use std::collections::BTreeMap;
 use synaptic_core::{GraphData, NodeId};
 use synaptic_graph::{
-    apply_communities, cluster, mark_cross_repo_edges, resolve_parameterized_routes,
-    resolve_route_handlers, resolve_sql_queries, ClusterOptions, KnowledgeGraph,
+    apply_communities, cluster, link_dynamic_refs, mark_cross_repo_edges,
+    resolve_parameterized_routes, resolve_route_handlers, resolve_sql_queries, ClusterOptions,
+    KnowledgeGraph,
 };
 use synaptic_incremental::{rebuild, ChangeSet, RebuildOptions};
 
@@ -108,6 +109,10 @@ fn finalize(
     let (hn, he) = resolve_route_handlers(resolved.nodes, resolved.links);
     let (hn, he) = resolve_sql_queries(hn, he);
     let (rn, re) = resolve_parameterized_routes(hn, he);
+    // Evidence-link reflection sites to their unique target across the whole
+    // federation before cross-repo edges are flagged, so a cross-repo dynamic_ref
+    // is marked like any other cross-repo coupling.
+    let (rn, re) = link_dynamic_refs(rn, re);
     resolved.nodes = rn;
     resolved.links = mark_cross_repo_edges(&resolved.nodes, re);
     // Cross-language coupling that spans repos (HTTP/RPC/FFI/WebSocket) is flagged
