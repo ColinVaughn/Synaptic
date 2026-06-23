@@ -619,14 +619,25 @@ everything text-shaped the graph does not model: string literals, config values,
 log messages, a TODO's wording, error strings, magic numbers. It reads through
 the same per-repo source roots and containment jail as `get_source` (so it needs
 a `--source-root`, or a federated graph whose members register their own roots),
-honoring each repo's `.gitignore`/`.synapticignore`.
+honoring each repo's `.gitignore`/`.synapticignore` and **skipping Synaptic's own
+generated output** (any `synaptic-out/` directory, plus any custom `--out` dir
+identified by its `graph.json` + `.manifest.json` marker pair), so the graph
+artifacts, exports, and `graph.json.bak*` backups never drown real source hits. A
+genuine source file merely named `graph.json` (no sibling manifest) is still
+searched.
 
 Parameters:
 - `pattern` (string, required) -- a regex by default; a fixed string when `literal=true`.
 - `literal` (boolean) -- treat `pattern` as a literal, not a regex. Default false.
-- `case_sensitive` (boolean) -- match case-sensitively. Default false.
+- `case_sensitive` (boolean) -- force case sensitivity. Omit for **smart case**:
+  case-insensitive unless `pattern` contains an uppercase letter, so `todo` stays
+  broad while `TODO`/`FIXME` are precise (this sharply cuts false positives like a
+  lowercase "todos" matching `TODO`). `true` is always sensitive, `false` always
+  insensitive.
 - `repo` (string) -- restrict to one federated member (a tag from `list_repos`).
-  Omit to search every member / the single repo.
+  Works even when the graph is served over a single parent source root (the member
+  is located under `<source-root>/<tag>`). Omit to search every member / the
+  single repo.
 - `path_glob` (string) -- only files matching this glob, e.g. `**/*.ts` or `src/**`,
   applied relative to each repo root.
 - `max_results` (integer) -- hits to return before truncation is flagged. Default 100, max 1000.

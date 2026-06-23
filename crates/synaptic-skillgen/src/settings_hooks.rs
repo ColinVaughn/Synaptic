@@ -25,7 +25,7 @@ const HOOK_MATCHERS: &[&str] = &["Bash", "Read|Glob", "Glob|Grep"];
 const BASH_HOOK_COMMAND: &str = r#"CMD=$(python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('tool_input',d).get('command',''))" 2>/dev/null || true); case "$CMD" in *grep*|*rg\ *|*ripgrep*|*find\ *|*fd\ *|*ack\ *|*ag\ *)   [ -f synaptic-out/graph.json ] &&   echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"MANDATORY: synaptic-out/graph.json exists. You MUST run `synaptic query \"<question>\"` before grepping raw files. Only grep after synaptic has oriented you, or to modify/debug specific lines."}}'   || true ;; esac"#;
 
 /// The Read|Glob hook: nudge before reading a source/doc file outside the graph dir.
-const READ_HOOK_COMMAND: &str = r#"HIT=$(python3 -c "import json,sys;d=json.load(sys.stdin);t=d.get('tool_input',d);s=(str(t.get('file_path') or '')+' '+str(t.get('pattern') or '')+' '+str(t.get('path') or '')).lower().replace(chr(92),'/');exts=('.py','.js','.ts','.tsx','.jsx','.go','.rs','.java','.rb','.c','.h','.cpp','.hpp','.cc','.cs','.kt','.swift','.php','.scala','.lua','.sh','.md','.rst','.txt','.mdx');sys.stdout.write('1' if 'synaptic-out/' not in s and any(e in s for e in exts) else '')" 2>/dev/null || true); if [ "$HIT" = 1 ] && [ -f synaptic-out/graph.json ]; then echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"MANDATORY: synaptic-out/graph.json exists. You MUST run synaptic before reading source files. Use: `synaptic query \"<question>\"` (scoped subgraph), `synaptic explain \"<concept>\"`, or `synaptic path \"<A>\" \"<B>\"`. Only read raw files after synaptic has oriented you, or to modify/debug specific lines. This rule applies to subagents too — include it in every subagent prompt involving code exploration."}}'; fi || true"#;
+const READ_HOOK_COMMAND: &str = r#"HIT=$(python3 -c "import json,sys;d=json.load(sys.stdin);t=d.get('tool_input',d);s=(str(t.get('file_path') or '')+' '+str(t.get('pattern') or '')+' '+str(t.get('path') or '')).lower().replace(chr(92),'/');exts=('.py','.js','.ts','.tsx','.jsx','.go','.rs','.java','.rb','.c','.h','.cpp','.hpp','.cc','.cs','.kt','.swift','.php','.scala','.lua','.sh','.md','.rst','.txt','.mdx');sys.stdout.write('1' if 'synaptic-out/' not in s and any(e in s for e in exts) else '')" 2>/dev/null || true); if [ "$HIT" = 1 ] && [ -f synaptic-out/graph.json ]; then echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"MANDATORY: synaptic-out/graph.json exists. You MUST run synaptic before reading source files. Use: `synaptic query \"<question>\"` (scoped subgraph), `synaptic explain \"<concept>\"`, or `synaptic path \"<A>\" \"<B>\"`. Only read raw files after synaptic has oriented you, or to modify/debug specific lines. This rule applies to subagents too -- include it in every subagent prompt involving code exploration."}}'; fi || true"#;
 
 fn hook_entry(matcher: &str, command: &str) -> Value {
     json!({
@@ -35,7 +35,7 @@ fn hook_entry(matcher: &str, command: &str) -> Value {
 }
 
 /// Our two PreToolUse entries.
-fn synaptic_hooks() -> Vec<Value> {
+pub(crate) fn synaptic_hooks() -> Vec<Value> {
     vec![
         hook_entry("Bash", BASH_HOOK_COMMAND),
         hook_entry("Read|Glob", READ_HOOK_COMMAND),

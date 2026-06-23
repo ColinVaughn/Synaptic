@@ -105,13 +105,15 @@ Use the **synaptic** MCP server's tools. Start with `query_graph`, then:
 - `structural_search` -- SYNQL or a named pattern (kind/loc/fan-in-out, not text).
   Structured results include each match's captured signature (params + return).
 - `search_text` -- the text complement to `structural_search`: a regex (or
-  `literal`) content search over the actual source, case-insensitive by default,
-  with every hit attributed to the enclosing graph node. Reach for it, not a
-  shell grep, for the text-shaped things the graph does not model (string
-  literals, config values, log messages, a TODO's wording, error strings); a hit
-  is a pivot to `affected` / `find_callers` on the node that contains it.
-  Federation-aware (search every member or one via `repo`; `path_glob`,
-  `max_results`), jailed to the source roots like `get_source`.
+  `literal`) content search over the actual source, smart-case by default
+  (insensitive unless the pattern has an uppercase letter; override with
+  `case_sensitive`), with every hit attributed to the enclosing graph node. Reach
+  for it, not a shell grep, for the text-shaped things the graph does not model
+  (string literals, config values, log messages, a TODO's wording, error
+  strings); a hit is a pivot to `affected` / `find_callers` on the node that
+  contains it. Federation-aware (search every member or one via `repo`;
+  `path_glob`, `max_results`), skips Synaptic's own output dirs, and jailed to the
+  source roots like `get_source`.
 - `describe_node` -- a compact "takes X, returns Y, calls Z" summary of a symbol
   from its signature and outgoing calls; handy for writing a tool/function blurb.
 - `time_travel_diff` -- how the graph changed between two git revisions.
@@ -518,20 +520,33 @@ mod tests {
 
     #[test]
     fn generated_artifacts_are_plain_ascii() {
-        // The skill + always-on ship into users' repos; keep them free of em-dashes,
-        // smart quotes, and arrows so the generated text does not read as machine
-        // written. (Doc comments elsewhere are exempt; this guards the OUTPUT.)
-        let tells = [
+        // Everything we write into a user's repo must stay plain ASCII: the skill
+        // and always-on text (no em-dashes/smart-quotes/arrows that read as machine
+        // written), AND the generated hook payloads -- a non-ASCII byte in
+        // .claude/settings.json or the Codex hook script is an encoding hazard
+        // (mojibake when read as Latin-1). Doc comments elsewhere are exempt; this
+        // guards the OUTPUT. (`forbidden` are the SMP-ish punctuation tells; the
+        // assertion below also rejects any non-ASCII char generally.)
+        let forbidden = [
             '\u{2014}', '\u{2013}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2192}',
         ];
         let mut bodies: Vec<String> = Platform::all().iter().map(|p| render_skill(*p)).collect();
         bodies.push(always_on_section());
+        // The PreToolUse hooks written into .claude/settings.json, serialized.
+        for h in crate::settings_hooks::synaptic_hooks() {
+            bodies.push(h.to_string());
+        }
+        // The Codex SessionStart hook script (includes its additionalContext message).
+        bodies.push(crate::codex_config::HOOK_SCRIPT.to_string());
         for body in &bodies {
-            for t in tells {
+            for t in forbidden {
                 assert!(
                     !body.contains(t),
                     "AI tell {t:?} in generated artifact: {body}"
                 );
+            }
+            if let Some(c) = body.chars().find(|c| !c.is_ascii()) {
+                panic!("non-ASCII char {c:?} in generated artifact: {body}");
             }
         }
     }
