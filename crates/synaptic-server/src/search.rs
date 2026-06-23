@@ -42,7 +42,12 @@ pub struct Root {
 pub struct Query<'a> {
     pub pattern: &'a str,
     pub literal: bool,
-    pub case_sensitive: bool,
+    /// `Some(true)`/`Some(false)` forces case sensitivity; `None` selects "smart
+    /// case": case-insensitive unless `pattern` contains an uppercase letter, so
+    /// `todo` stays broad while `TODO`/`FIXME` are precise (matching ripgrep -S).
+    /// Smart case sharply cuts false positives like a lowercase "todos" matching
+    /// `TODO` or a base64 blob matching `HACK`.
+    pub case_sensitive: Option<bool>,
     pub path_glob: Option<&'a str>,
     pub max_results: usize,
     /// Longest line/match echoed back; longer ones are truncated so a minified
@@ -76,14 +81,20 @@ pub fn run(roots: &[Root], q: &Query) -> Result<Outcome, String> {
     } else {
         q.pattern.to_string()
     };
+    // Smart case when unspecified: insensitive only if the pattern has no
+    // uppercase letter (so `todo` is broad, `TODO`/`FIXME` precise).
+    let case_insensitive = match q.case_sensitive {
+        Some(cs) => !cs,
+        None => !q.pattern.chars().any(|c| c.is_ascii_uppercase()),
+    };
     // The grep matcher drives the fast line scan; a plain regex (same pattern)
     // locates the match column on the few lines grep flags.
     let matcher = RegexMatcherBuilder::new()
-        .case_insensitive(!q.case_sensitive)
+        .case_insensitive(case_insensitive)
         .build(&pat)
         .map_err(|e| format!("invalid search pattern: {e}"))?;
     let col_re: Regex = RegexBuilder::new(&pat)
-        .case_insensitive(!q.case_sensitive)
+        .case_insensitive(case_insensitive)
         .build()
         .map_err(|e| format!("invalid search pattern: {e}"))?;
 
@@ -97,6 +108,28 @@ pub fn run(roots: &[Root], q: &Query) -> Result<Outcome, String> {
         wb.standard_filters(true)
             .require_git(false)
             .add_custom_ignore_filename(".synapticignore");
+        // Never search Synaptic's own generated output: a `synaptic-out/` dir, or
+        // a custom `--out` dir identified by the generated-file pair an extraction
+        // writes (`graph.json` + `.manifest.json`). Requiring both files keeps a
+        // genuine source/fixture file merely named `graph.json` searchable.
+        // Pruning the dir also drops its exports (.dot/.svg/.graphml/...) and
+        // graph.json.bak* backups, which would otherwise drown real source hits.
+        wb.filter_entry(|dent| {
+            if dent.depth() == 0 {
+                return true; // never prune the search root itself
+            }
+            if dent.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let name = dent.file_name().to_string_lossy();
+                if name.eq_ignore_ascii_case("synaptic-out") {
+                    return false;
+                }
+                let d = dent.path();
+                if d.join("graph.json").is_file() && d.join(".manifest.json").is_file() {
+                    return false;
+                }
+            }
+            true
+        });
         if let Some(glob) = q.path_glob {
             let mut ob = OverrideBuilder::new(&root.path);
             ob.add(glob)

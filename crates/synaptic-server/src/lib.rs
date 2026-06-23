@@ -1248,6 +1248,13 @@ impl Server {
         out
     }
 
+    /// True if any node is tagged with federation member `tag`. Lets `search_text`
+    /// honor a `repo` filter for a multi-repo graph served over a single parent
+    /// source root (no registered per-member roots).
+    fn graph_has_repo(&self, tag: &str) -> bool {
+        self.kg.nodes().any(|n| n.repo.as_deref() == Some(tag))
+    }
+
     /// The roots `search_text` walks. With no `only`, that is every registered
     /// federated repo root, or -- for a single-repo graph -- the lone
     /// `--source-root`. A federated graph is searched per-member (never via the
@@ -1255,16 +1262,32 @@ impl Server {
     /// counted. `only` restricts to one member tag.
     fn search_roots(&self, only: Option<&str>) -> Vec<search::Root> {
         if let Some(tag) = only {
-            return self
-                .repo_roots
-                .get(tag)
-                .map(|p| {
-                    vec![search::Root {
+            // The normal path: a per-member root registered from a global-manifest.
+            if let Some(p) = self.repo_roots.get(tag) {
+                return vec![search::Root {
+                    tag: Some(tag.to_string()),
+                    path: p.clone(),
+                }];
+            }
+            // Fallback for a multi-repo graph served over a single parent
+            // --source-root with no registered member roots: the graph knows the
+            // member (node.repo == tag) and its files live under <source_root>/<tag>
+            // (federated graph paths are `tag/rel`). If that subtree exists, search
+            // it as the member so the repo filter works and hits carry the tag.
+            if self.graph_has_repo(tag) {
+                if let Some(member) = self
+                    .source_root
+                    .as_ref()
+                    .map(|r| r.join(tag))
+                    .filter(|p| p.is_dir())
+                {
+                    return vec![search::Root {
                         tag: Some(tag.to_string()),
-                        path: p.clone(),
-                    }]
-                })
-                .unwrap_or_default();
+                        path: member,
+                    }];
+                }
+            }
+            return Vec::new();
         }
         if self.repo_roots.is_empty() {
             return self
@@ -1293,7 +1316,7 @@ impl Server {
         &self,
         pattern: &str,
         literal: bool,
-        case_sensitive: bool,
+        case_sensitive: Option<bool>,
         repo: Option<&str>,
         path_glob: Option<&str>,
         max_results: usize,
@@ -1388,6 +1411,24 @@ impl Server {
             )
         };
 
+        // The federation tags the graph knows about, so a hit can report its repo
+        // even when the search ran over a single parent root (tag-less walk): the
+        // enclosing node's `repo`, else the `tag/` prefix of the graph path.
+        let known_repos: std::collections::HashSet<&str> =
+            self.kg.nodes().filter_map(|n| n.repo.as_deref()).collect();
+        let repo_of = |h: &search::RawHit, node: Option<&Node>| -> Option<String> {
+            h.repo
+                .clone()
+                .or_else(|| node.and_then(|n| n.repo.clone()))
+                .or_else(|| {
+                    h.graph_path
+                        .split_once('/')
+                        .map(|(head, _)| head)
+                        .filter(|head| known_repos.contains(head))
+                        .map(str::to_string)
+                })
+        };
+
         let mut hits_json = Vec::with_capacity(total);
         for h in &outcome.hits {
             let node = enclosing(&h.graph_path, h.line);
@@ -1408,7 +1449,7 @@ impl Server {
                 attr
             ));
             hits_json.push(json!({
-                "repo": h.repo,
+                "repo": repo_of(h, node),
                 "file": h.graph_path,
                 "line": h.line,
                 "col": h.col,
@@ -3198,7 +3239,7 @@ impl Server {
             let (text, structured) = self.search_text_dual(
                 &s("pattern"),
                 b("literal"),
-                b("case_sensitive"),
+                args.get("case_sensitive").and_then(Value::as_bool),
                 opt("repo"),
                 opt("path_glob"),
                 u("max_results", 100) as usize,
@@ -4103,12 +4144,12 @@ fn tools_list(allow_exec: bool) -> Value {
                   "title": {"type":"string"}, "detail": {"type":"string"}, "location": {"type":"string"},
                   "remediation": {"type":"string"}, "confidence": {"type":"number"} } } }
           }, "required": ["version","summary","findings"] } },
-        { "name": "search_text", "description": "Content (text/regex) search over the actual source files -- the complement to structural_search, which matches the GRAPH (kinds, loc, names) and CANNOT see file content. Use this for anything text-shaped that the graph does not model: string literals, config values, log messages, a TODO's wording, error strings, magic numbers. Every hit is attributed to the graph node whose body encloses it, so you can pivot straight from a matched line to affected/find_callers on that symbol. Searches every member of a federated graph (respecting each repo's ignore files and the source-root jail); scope to one repo with `repo`. Pattern is a regex by default (set literal=true for a fixed string); case-insensitive unless case_sensitive=true.",
+        { "name": "search_text", "description": "Content (text/regex) search over the actual source files -- the complement to structural_search, which matches the GRAPH (kinds, loc, names) and CANNOT see file content. Use this for anything text-shaped that the graph does not model: string literals, config values, log messages, a TODO's wording, error strings, magic numbers. Every hit is attributed to the graph node whose body encloses it, so you can pivot straight from a matched line to affected/find_callers on that symbol. Searches every member of a federated graph (respecting each repo's ignore files and the source-root jail, and skipping Synaptic's own generated output dirs); scope to one repo with `repo`. Pattern is a regex by default (set literal=true for a fixed string). Matching is smart-case: case-insensitive unless the pattern contains an uppercase letter (so `todo` is broad, `TODO`/`FIXME` precise); override with case_sensitive.",
           "inputSchema": { "type": "object", "properties": {
               "pattern": { "type": "string", "description": "Regex (default) or, with literal=true, a fixed string to find in file content." },
               "literal": { "type": "boolean", "description": "Treat `pattern` as a literal string rather than a regex (default false)." },
-              "case_sensitive": { "type": "boolean", "description": "Match case-sensitively (default false: case-insensitive)." },
-              "repo": { "type": "string", "description": "Restrict to one federated member repo (tag from list_repos). Omit to search every member / the single repo." },
+              "case_sensitive": { "type": "boolean", "description": "Force case sensitivity. Omit for smart case: case-insensitive unless `pattern` has an uppercase letter (true = always sensitive, false = always insensitive)." },
+              "repo": { "type": "string", "description": "Restrict to one federated member repo (tag from list_repos). Works even when the graph is served over a single parent source root. Omit to search every member / the single repo." },
               "path_glob": { "type": "string", "description": "Only search files matching this glob, e.g. '**/*.ts' or 'src/**'. Applied relative to each repo root." },
               "max_results": { "type": "integer", "description": "Max hits to return before truncation is flagged (default 100, max 1000)." }
           }, "required": ["pattern"] },
@@ -5617,6 +5658,195 @@ mod tests {
         assert!(
             out.contains("source root"),
             "explains the missing root: {out}"
+        );
+    }
+
+    #[test]
+    fn search_text_excludes_synaptic_output_dir() {
+        // Synaptic's own generated output must never surface as content hits, even
+        // when it is not gitignored: the canonical `synaptic-out/` (matched by
+        // name, with its exports/backups) and a custom --out dir (matched by its
+        // graph.json + .manifest.json marker pair). A stray source file merely
+        // *named* graph.json (no sibling manifest) stays searchable.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/app.js"), "const TOKEN = 1\n").unwrap();
+        // Canonical output dir, matched by name.
+        std::fs::create_dir_all(dir.path().join("synaptic-out")).unwrap();
+        std::fs::write(
+            dir.path().join("synaptic-out/graph.json"),
+            "{\"TOKEN\":1}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("synaptic-out/graph.json.bak-007"),
+            "TOKEN backup\n",
+        )
+        .unwrap();
+        // Custom --out dir, matched by the generated-file marker pair.
+        std::fs::create_dir_all(dir.path().join("nested/build-out")).unwrap();
+        std::fs::write(
+            dir.path().join("nested/build-out/graph.json"),
+            "TOKEN out\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("nested/build-out/.manifest.json"), "{}\n").unwrap();
+        // A genuine source/fixture file that happens to be named graph.json (no
+        // manifest beside it): this is the user's content and must be searched.
+        std::fs::create_dir_all(dir.path().join("fixtures")).unwrap();
+        std::fs::write(dir.path().join("fixtures/graph.json"), "TOKEN sample\n").unwrap();
+
+        let gd = GraphData {
+            nodes: vec![],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None).with_source_root(dir.path().to_path_buf());
+
+        let out = call_tool_full(&mut s, "search_text", json!({"pattern": "TOKEN"}));
+        let sc = &out["result"]["structuredContent"];
+        let files: std::collections::BTreeSet<&str> = sc["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|h| h["file"].as_str())
+            .collect();
+        assert_eq!(
+            files,
+            ["fixtures/graph.json", "src/app.js"].into_iter().collect(),
+            "output dirs pruned, real source (incl. a stray graph.json) kept: {sc}"
+        );
+    }
+
+    #[test]
+    fn search_text_smart_case_uppercase_pattern_is_case_sensitive() {
+        // Smart case: an uppercase-bearing pattern defaults to case-sensitive (so
+        // `TODO` does not drag in a lowercase "todos"); case_sensitive=false
+        // restores insensitive matching, case_sensitive=true is unchanged.
+        let dir = tempfile::tempdir().unwrap();
+        let src = "// TODO real\nconst todos = []\n";
+        let mut s = text_search_server(dir.path(), "src/m.js", src, "fn", (1, 2));
+
+        let smart = call_tool_full(&mut s, "search_text", json!({"pattern": "TODO"}));
+        assert_eq!(
+            smart["result"]["structuredContent"]["total"],
+            json!(1),
+            "uppercase pattern is case-sensitive by default (TODO only): {}",
+            smart["result"]["structuredContent"]
+        );
+
+        let forced = call_tool_full(
+            &mut s,
+            "search_text",
+            json!({"pattern": "TODO", "case_sensitive": false}),
+        );
+        assert_eq!(
+            forced["result"]["structuredContent"]["total"],
+            json!(2),
+            "case_sensitive=false forces insensitive: TODO + todos"
+        );
+    }
+
+    #[test]
+    fn search_text_repo_filter_works_over_single_parent_root() {
+        // A multi-repo graph served with one parent --source-root and NO registered
+        // repo_roots (no global-manifest): the repo filter still scopes to a member
+        // whose files live under <root>/<tag>, and every hit carries its repo from
+        // the enclosing node.
+        let dir = tempfile::tempdir().unwrap();
+        let billing = dir.path().join("billing");
+        let web = dir.path().join("web");
+        std::fs::create_dir_all(billing.join("src")).unwrap();
+        std::fs::create_dir_all(web.join("src")).unwrap();
+        std::fs::write(billing.join("src/pay.py"), "SECRET = 1\n").unwrap();
+        std::fs::write(web.join("src/app.js"), "const SECRET = 2\n").unwrap();
+
+        let mut bn = node("b", "pay", Some(0));
+        bn.repo = Some("billing".into());
+        bn.source_file = "billing/src/pay.py".into();
+        bn.set_span(synaptic_core::Span {
+            start_line: 1,
+            start_col: 1,
+            end_line: 1,
+            end_col: 1,
+        });
+        let mut wn = node("w", "app", Some(0));
+        wn.repo = Some("web".into());
+        wn.source_file = "web/src/app.js".into();
+        wn.set_span(synaptic_core::Span {
+            start_line: 1,
+            start_col: 1,
+            end_line: 1,
+            end_col: 1,
+        });
+        let gd = GraphData {
+            nodes: vec![bn, wn],
+            ..Default::default()
+        };
+        // No with_repo_roots: only the single parent source root is registered.
+        let mut s = Server::from_graph_data(gd, None).with_source_root(dir.path().to_path_buf());
+
+        let all = call_tool_full(&mut s, "search_text", json!({"pattern": "SECRET"}));
+        let sc = &all["result"]["structuredContent"];
+        assert_eq!(sc["total"], json!(2), "both members hit: {sc}");
+        let repos: std::collections::BTreeSet<&str> = sc["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|h| h["repo"].as_str())
+            .collect();
+        assert!(
+            repos.contains("billing") && repos.contains("web"),
+            "each hit carries its repo from the enclosing node: {sc}"
+        );
+
+        let scoped = call_tool_full(
+            &mut s,
+            "search_text",
+            json!({"pattern": "SECRET", "repo": "billing"}),
+        );
+        let sc = &scoped["result"]["structuredContent"];
+        assert_eq!(
+            sc["total"],
+            json!(1),
+            "repo filter scopes without registered roots: {sc}"
+        );
+        assert_eq!(sc["hits"][0]["file"], "billing/src/pay.py");
+        assert_eq!(sc["hits"][0]["repo"], "billing");
+    }
+
+    #[test]
+    fn search_text_unenclosed_hit_carries_repo_from_path_prefix() {
+        // A hit outside any node span still reports its repo from the graph-path's
+        // member prefix, not null.
+        let dir = tempfile::tempdir().unwrap();
+        let billing = dir.path().join("billing");
+        std::fs::create_dir_all(billing.join("src")).unwrap();
+        std::fs::write(
+            billing.join("src/pay.py"),
+            "# MARKER here\n\ndef pay():\n    pass\n",
+        )
+        .unwrap();
+        let mut bn = node("b", "pay", Some(0));
+        bn.repo = Some("billing".into());
+        bn.source_file = "billing/src/pay.py".into();
+        bn.set_span(synaptic_core::Span {
+            start_line: 3,
+            start_col: 1,
+            end_line: 4,
+            end_col: 9,
+        });
+        let gd = GraphData {
+            nodes: vec![bn],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None).with_source_root(dir.path().to_path_buf());
+
+        let out = call_tool_full(&mut s, "search_text", json!({"pattern": "MARKER"}));
+        let hit = &out["result"]["structuredContent"]["hits"][0];
+        assert!(hit["node"].is_null(), "hit is outside any node span: {hit}");
+        assert_eq!(
+            hit["repo"], "billing",
+            "repo derived from the path prefix: {hit}"
         );
     }
 

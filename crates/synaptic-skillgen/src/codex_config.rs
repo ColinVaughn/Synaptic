@@ -42,7 +42,7 @@ const HOOK_EVENT: &str = "SessionStart";
 /// snippet) keeps it identical across Codex's Unix shell and the Windows
 /// `commandWindows` path, with no `case`/`[ -f ]` portability traps. Fails open:
 /// any IO hiccup exits 0 so a session never stalls on the hook.
-const HOOK_SCRIPT: &str = r#"#!/usr/bin/env python3
+pub(crate) const HOOK_SCRIPT: &str = r#"#!/usr/bin/env python3
 """Synaptic SessionStart hook for Codex.
 
 Inject model-visible context, once per session, telling the agent to consult the

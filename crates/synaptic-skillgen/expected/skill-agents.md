@@ -77,13 +77,15 @@ Use the **synaptic** MCP server's tools. Start with `query_graph`, then:
 - `structural_search` -- SYNQL or a named pattern (kind/loc/fan-in-out, not text).
   Structured results include each match's captured signature (params + return).
 - `search_text` -- the text complement to `structural_search`: a regex (or
-  `literal`) content search over the actual source, case-insensitive by default,
-  with every hit attributed to the enclosing graph node. Reach for it, not a
-  shell grep, for the text-shaped things the graph does not model (string
-  literals, config values, log messages, a TODO's wording, error strings); a hit
-  is a pivot to `affected` / `find_callers` on the node that contains it.
-  Federation-aware (search every member or one via `repo`; `path_glob`,
-  `max_results`), jailed to the source roots like `get_source`.
+  `literal`) content search over the actual source, smart-case by default
+  (insensitive unless the pattern has an uppercase letter; override with
+  `case_sensitive`), with every hit attributed to the enclosing graph node. Reach
+  for it, not a shell grep, for the text-shaped things the graph does not model
+  (string literals, config values, log messages, a TODO's wording, error
+  strings); a hit is a pivot to `affected` / `find_callers` on the node that
+  contains it. Federation-aware (search every member or one via `repo`;
+  `path_glob`, `max_results`), skips Synaptic's own output dirs, and jailed to the
+  source roots like `get_source`.
 - `describe_node` -- a compact "takes X, returns Y, calls Z" summary of a symbol
   from its signature and outgoing calls; handy for writing a tool/function blurb.
 - `time_travel_diff` -- how the graph changed between two git revisions.

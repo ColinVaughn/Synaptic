@@ -10,6 +10,41 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.11] - 2026-06-22
+
+A `search_text` quality release: three fixes from a federated-repo field test that
+make naive content searches as clean as ripgrep's, plus an installer cosmetic fix.
+
+### Fixed
+- **`search_text` no longer searches Synaptic's own output.** The content walk now
+  prunes any `synaptic-out/` directory and any custom `--out` dir identified by the
+  `graph.json` + `.manifest.json` pair an extraction writes, so generated graph
+  artifacts, exports (`.dot`/`.svg`/`.graphml`/...), and `graph.json.bak*` backups
+  can no longer drown real source hits (previously a search could return several
+  junk artifact matches per real one when the output dir was not gitignored). A
+  genuine source file merely named `graph.json` stays searchable.
+- **`search_text` repo filter works over a single parent source root.** A
+  multi-repo graph served with one `--source-root` and no per-member roots (no
+  global-manifest) accepted a `repo` tag from `list_repos` but returned zero files
+  and reported `repo: null` on every hit. The filter now falls back to the
+  member's subtree under `<source-root>/<tag>` when the graph knows that member,
+  and every hit derives its `repo` from the enclosing node (or the graph-path's
+  member prefix) instead of null.
+- **Installer hook text is plain ASCII.** The generated `.claude/settings.json`
+  Read|Glob hook carried a mojibake em-dash in one `additionalContext` string
+  (cosmetic; the hook still functioned). It is now `--`, and the
+  `generated_artifacts_are_plain_ascii` guard was extended to scan the generated
+  hook payloads (Claude `settings.json` hooks and the Codex `HOOK_SCRIPT`) so the
+  whole installed surface stays ASCII-only.
+
+### Changed
+- **`search_text` matching is now smart-case.** With `case_sensitive` omitted, a
+  pattern is matched case-insensitively only when it has no uppercase letter, so
+  `todo` stays broad while `TODO`/`FIXME`/`HACK` are precise -- cutting false
+  positives such as a lowercase "todos" matching `TODO` or a base64 blob matching
+  `HACK`. `case_sensitive=true`/`false` still forces a mode explicitly. Lowercase
+  queries are unchanged.
+
 ## [0.3.10] - 2026-06-22
 
 A patch release: a security-advisory dependency bump, a cross-platform CI fix, and
