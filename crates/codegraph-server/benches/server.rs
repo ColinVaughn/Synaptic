@@ -124,5 +124,32 @@ fn bench_new_tools(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_query_graph_structured, bench_new_tools);
+/// `completion/complete` over the full dispatch: an O(nodes) label prefix scan
+/// plus sort/dedup/cap. Low-frequency autocomplete, but it scans every node.
+fn bench_completion(c: &mut Criterion) {
+    let mut group = c.benchmark_group("server/completion");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
+
+    // "Serv" matches every synthetic label ("Service_..."), the worst case.
+    let req = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "completion/complete",
+        "params": { "argument": { "name": "label", "value": "Serv" } }
+    });
+    for &n in &SCALES {
+        let mut server = Server::from_graph_data(synthetic_graph(n), None);
+        group.bench_with_input(BenchmarkId::new("label_prefix", n), &n, |b, _| {
+            b.iter(|| black_box(server.handle_request(&req)));
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_query_graph_structured,
+    bench_new_tools,
+    bench_completion
+);
 criterion_main!(benches);
