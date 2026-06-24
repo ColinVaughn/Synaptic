@@ -8,6 +8,36 @@ All notable changes to Synaptic are documented here. The format is based on
 > **CodeGraph**, and reference the old `codegraph` command and crate names. They
 > are preserved verbatim as historical record.
 
+## [0.3.13] - 2026-06-24
+
+### Changed
+- **Lower token cost for AI agents that drive the MCP server.** An agent reads the
+  text a tool returns plus the server's instructions on every turn, so the default
+  output is now leaner without losing any information on request:
+  - **`query_graph` is terse by default.** A "where is X" question returns a ranked
+    list of the most relevant symbols (no edges) instead of the whole subgraph;
+    pass `full=true` for all budget-bounded nodes plus their edges. The default
+    `token_budget` drops 2000 -> 1200, the structured channel is bounded to the same
+    kept nodes (it was uncapped), and `full` mode caps edges to about twice the
+    node count.
+  - **`get_neighbors` no longer dumps every neighbour.** A hub is capped (default
+    `limit` 50) with a `+N more` summary and a `verbose` escape hatch, mirroring
+    `find_callers`/`affected`; the structured mirror gains `total`/`truncated`.
+  - **`audit_sql` prints one line per finding by default** (`[severity] rule_id @
+    location (conf) title`); `verbose` adds each finding's detail and fix.
+  - **Leaner defaults:** `structural_search` `limit` 50 -> 25, `dynamic_hazards`
+    `max_results` 100 -> 30.
+  - **Trimmed the per-session surface:** the server `instructions` are ~40% shorter
+    (every load-bearing fact kept), and repeated boilerplate in the tool/parameter
+    descriptions was collapsed.
+
+### Added
+- **`SYNAPTIC_CONCISE` environment variable and `serve --concise` flag.** One
+  switch lowers the default list/budget sizes across the tools for token-tight
+  sessions (`token_budget` 1200, list limits to 20, `dynamic_hazards` to 20,
+  `get_community` to 40, `top_n` to 6, `context_lines` to 25). An explicit per-call
+  argument always wins, so nothing is lost.
+
 ## [0.3.12] - 2026-06-23
 
 ### Added

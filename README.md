@@ -103,9 +103,11 @@ grepping or reading files.
 ## Token economy
 
 A core payoff of querying a compact graph is **reading a small answer instead of the whole
-codebase**. Measured on Synaptic's own source (199 Rust files, 56,408 lines, **510,966**
-`cl100k` tokens), one `query_graph` answer to a structural question is **~1,950 tokens**
-(bounded by its token budget), versus reading the source files that answer actually touches:
+codebase**. `query_graph` defaults to a terse, ranked list of the most relevant symbols (a
+few hundred tokens); pass `full=true` for the whole subgraph with its edges. The figures
+below measure a *full* subgraph response (at a 2,000-token budget) on Synaptic's own source
+(199 Rust files, 56,408 lines, **510,966** `cl100k` tokens) -- one such answer to a
+structural question is **~1,950 tokens**, versus reading the source files it actually touches:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/token-economy-dark.svg">
@@ -346,7 +348,9 @@ impact analysis (`affected`, `find_callers`, `find_callees`, `dynamic_hazards`, 
 `time_travel_diff`, plan-only `plan_rename`), and SQL auditing (`audit_sql`, `advise_sql`).
 It also serves MCP prompts, argument completions, resource templates and
 subscriptions, and a small REST surface (`/api/stats`, `/api/query`, ...) for non-MCP
-clients. `synaptic install` wires the graph into a host assistant (a `PreToolUse` hook for
+clients. Tool output is tuned to stay token-lean (terse defaults, capped lists); add
+`serve --concise` (or set `SYNAPTIC_CONCISE`) to lower the default sizes further.
+`synaptic install` wires the graph into a host assistant (a `PreToolUse` hook for
 Claude; a native MCP server for Codex, with `synaptic install codex --global` for the Codex
 desktop app). See [MCP Server](https://github.com/ColinVaughn/Synaptic/wiki/MCP-Server) and
 [Assistant Integration](https://github.com/ColinVaughn/Synaptic/wiki/Assistant-Integration).

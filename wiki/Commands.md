@@ -740,7 +740,7 @@ Run the MCP server exposing read-only graph tools (and PR tools) to an AI assist
 Syntax:
 
 ```sh
-synaptic serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root <DIR>] [--allow-exec]
+synaptic serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root <DIR>] [--allow-exec] [--concise]
 ```
 
 | Name | Default | Description |
@@ -750,6 +750,7 @@ synaptic serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root
 | `--api-key` | none | Require this API key for HTTP requests (or set `SYNAPTIC_API_KEY`). |
 | `--source-root` | dir above `synaptic-out/` | Trusted root for resolving a node's source file in the `get_source` tool (path-traversal jailed). |
 | `--allow-exec` | off | Expose the command-running `speculate` tool (the 28th tool). This makes the server no longer read-only, so enable it only for trusted clients. See [MCP Server](MCP-Server). |
+| `--concise` | off | Token-lean output: lower the default list/budget sizes so tool results return less to the model (or set `SYNAPTIC_CONCISE`). An explicit per-call argument always wins. |
 
 Defaults to stdio transport. The MCP server reports protocol `2025-11-25` and exposes 28 read-only tools (29 with `--allow-exec`, which adds the command-running `speculate` tool), prompts, completions, resource templates/subscriptions, and structured tool output. When serving HTTP on a wildcard address with no API key, it prints a warning.
 
