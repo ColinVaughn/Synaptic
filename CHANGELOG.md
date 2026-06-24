@@ -8,6 +8,35 @@ All notable changes to Synaptic are documented here. The format is based on
 > **CodeGraph**, and reference the old `codegraph` command and crate names. They
 > are preserved verbatim as historical record.
 
+## [0.3.14] - 2026-06-24
+
+### Added
+- **`find_references` tool + `synaptic references` CLI (alias `refs`):** the
+  find-all-references view of a symbol -- every incoming use, including the
+  imports, `implements`/`inherits`, and type uses that `find_callers` (calls only)
+  omits, plus cross-language coupling and reflection refs, with a per-relation
+  breakdown. Aimed at types/interfaces/enums, where a caller-only view comes up
+  short. References are to the symbol itself (a type's members are not folded in),
+  and a cross-repo use surfaces the same as a local one on a federated graph.
+- **File outline via `structural_search`'s new `file` param (and `synaptic search
+  --file <path>`):** list every symbol defined in a file, ordered by line, with no
+  SYNQL query. The path matches literally and works on a federated graph's
+  `tag/`-prefixed paths -- a bare path matches the file across every member, a
+  tag-qualified path scopes to one.
+
+### Changed
+- **Further reduced the token cost of the AI-tooling surface** by removing
+  cross-surface duplication left after 0.3.13, with no behavior change (the trims
+  are skill/description text and were verified not to regress tool selection). The
+  skill body's parallel CLI and MCP prose lists collapse into one `CLI <-> MCP`
+  capability table (~56% smaller); the dynamic-dispatch, `name@file`,
+  cross-language, and query-before-grep guidance now has one canonical home with
+  short pointers elsewhere; the skill frontmatter description and the always-on
+  block are tightened; `SERVER_INSTRUCTIONS` gains a "change impact -- pick by
+  input" map that disambiguates the five impact tools in a line; the repeated
+  `name@file` parameter text is deduped; and `predict_edit.kind` gains a
+  machine-checkable `enum`.
+
 ## [0.3.13] - 2026-06-24
 
 ### Changed
