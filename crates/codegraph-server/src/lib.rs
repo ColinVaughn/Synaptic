@@ -939,7 +939,8 @@ impl Server {
                         "tools": {},
                         "resources": { "subscribe": true },
                         "prompts": {},
-                        "completions": {}
+                        "completions": {},
+                        "logging": {}
                     },
                     "serverInfo": { "name": "codegraph", "version": env!("CARGO_PKG_VERSION") },
                     "instructions": SERVER_INSTRUCTIONS,
@@ -961,6 +962,9 @@ impl Server {
             // Subscriptions are acknowledged here; the HTTP transport does the
             // actual push over SSE when the graph reloads (see http::handle_sse).
             "resources/subscribe" | "resources/unsubscribe" => Ok(json!({})),
+            // Accept the client's minimum log level; we advertise `logging` so a
+            // host can set it, and never emit below it.
+            "logging/setLevel" => Ok(json!({})),
             "completion/complete" => self.dispatch_completion(&params),
             "tools/call" => self.dispatch_tool(&params),
             "resources/read" => self.dispatch_resource(&params),
@@ -1769,6 +1773,24 @@ mod tests {
         // offset 1 skips the top hub and numbers from its absolute rank.
         let paged = call_tool(&mut s, "god_nodes", json!({"top_n": 1, "offset": 1}));
         assert_eq!(paged, "God nodes:\n  2. Database - 1 edges");
+    }
+
+    #[test]
+    fn logging_set_level_acknowledged() {
+        let mut s = server();
+        let r = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":1,"method":"logging/setLevel","params":{"level":"info"}
+            }))
+            .unwrap();
+        assert!(r.get("error").is_none(), "setLevel should succeed: {r}");
+        assert_eq!(r["result"], json!({}));
+
+        // The capability is advertised so a host knows it can set a level.
+        let init = s
+            .handle_request(&json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}))
+            .unwrap();
+        assert!(init["result"]["capabilities"]["logging"].is_object());
     }
 
     #[test]
