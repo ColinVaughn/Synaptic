@@ -627,9 +627,10 @@ impl Server {
         )
     }
 
-    /// `working_changes_impact` — graph blast radius of the uncommitted
-    /// working-tree diff against `base` (default: the detected default branch).
-    /// Uses `git`, not `gh`, so it works offline and before any PR exists.
+    /// `working_changes_impact` — graph blast radius of the working-tree diff
+    /// against `base` (default: the detected default branch). `git diff <base>`
+    /// covers the branch's committed work plus uncommitted edits, the same set a
+    /// PR would. Uses `git`, not `gh`, so it works offline and before any PR.
     pub fn tool_working_changes_impact(&self, base: Option<&str>) -> String {
         let base = self.resolve_base(base, None);
         let diff = self.runner.run("git", &["diff", "--name-only", &base]);
@@ -1414,7 +1415,7 @@ fn tools_list() -> Value {
           "inputSchema": { "type": "object", "properties": { "pr_number": { "type": "integer", "description": "PR number." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } }, "required": ["pr_number"] } },
         { "name": "triage_prs", "description": "Open PRs ranked by actionability (status plus graph blast radius) so the model can prioritize review and merge order. Requires the `gh` CLI.",
           "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch (default: the repo's default branch)." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } } } },
-        { "name": "working_changes_impact", "description": "Graph blast radius of your uncommitted working-tree changes against a base branch: which graph nodes and communities your edits touch, before you commit. Uses git (no gh or PR needed).",
+        { "name": "working_changes_impact", "description": "Graph blast radius of your branch's changes against a base branch (committed plus uncommitted, the same set a PR would have): which graph nodes and communities they touch, before opening a PR. Uses git, no gh needed.",
           "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch to diff against (default: the repo's default branch)." } } } }
     ]);
     // Every tool is a pure read; the PR tools additionally reach the network
