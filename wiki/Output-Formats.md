@@ -233,6 +233,8 @@ On success each prints the number of statements pushed. Without the `push` featu
 
 ## See also
 
+- [Building on Synaptic](Building-on-Synaptic) for consuming `graph.json` as an
+  API from any language (and building your own MCP server on it).
 - [Visualizations] for the interactive and static visual outputs.
 - [Analysis-and-Reports] for GRAPH_REPORT.md.
 - [Commands] for the full CLI reference.

@@ -83,7 +83,8 @@ get the binary.
 [Output Formats](Output-Formats) - [Visualizations](Visualizations)
 
 **Integrations:** [MCP Server](MCP-Server) - [Assistant Integration](Assistant-Integration)
-- [Ingestion](Ingestion) - [Semantic Analysis](Semantic-Analysis)
+- [Building on Synaptic](Building-on-Synaptic) - [Ingestion](Ingestion) -
+[Semantic Analysis](Semantic-Analysis)
 
 **Scaling:** [Workspaces and Federation](Workspaces-and-Federation) -
 [Incremental Updates](Incremental-Updates) - [PR Dashboard](PR-Dashboard)
