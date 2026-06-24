@@ -4316,7 +4316,7 @@ fn tools_list(allow_exec: bool) -> Value {
                     "full": { "type": "boolean", "description": "Return the whole subgraph (all budget-bounded nodes plus their edges) instead of the terse top-N node list (default false). Set true when you need the relationships, not just which symbols match." },
                     "token_budget": { "type": "integer", "description": "Approximate token budget for the full subgraph (default 1200). Controls how many nodes are in scope (about budget/40, capped 10-400); raise it for broader context. The terse default shows only the top ~15 of those." },
                     "context_filter": { "type": "array", "items": { "type": "string" }, "description": "Optional source-file path substrings; keeps only nodes whose file matches one (e.g. ['src/auth','login']). Use to scope a question to a subsystem." },
-                    "since": { "type": "string", "description": "Optional. Boost nodes whose file changed on the current branch since this baseline: a git ref ('main', 'HEAD~10'), a date ('2 weeks ago'), or 'auto' (detect the default branch). Scope is merge-base(since, HEAD)..working-tree, so it includes uncommitted edits. Use when working on a feature branch to surface in-progress code. Silently ignored if not a git repo." },
+                    "since": { "type": "string", "description": "Optional. Boost nodes whose file changed since this baseline: a git ref ('main', 'HEAD~10'), a date ('2 weeks ago'), or 'auto' (detect the default branch). Includes uncommitted edits; silently ignored outside a git repo." },
                     "recency_mode": { "type": "string", "enum": ["boost", "seed"], "description": "Only with `since`. 'boost' (default) re-ranks query matches by recency. 'seed' also injects changed-file nodes as seeds, so the changed surface appears even when the question matches little (use to answer 'what did this branch change')." }
                 },
                 "required": ["question"]
@@ -4418,9 +4418,9 @@ fn tools_list(allow_exec: bool) -> Value {
           "inputSchema": { "type": "object", "properties": {
               "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. Shared names: qualify as 'name@file-substring'." },
               "depth": { "type": "integer", "description": "Max hops to walk backward (default 3, max 16)." },
-              "relations": { "type": "array", "items": { "type": "string" }, "description": "Optional edge relations to follow; defaults to the structural-impact set: calls, references, imports, imports_from, re_exports, inherits, extends, implements, uses, mixes_in, embeds, depends_on, reads_from, plus the cross-language relations invokes, binds_native, calls_service, handled_by, and the evidence-linked dynamic_ref (a reflection call resolved to a unique target)." },
-              "limit": { "type": "integer", "description": "Max dependents listed before a '+N more' summary (default 50). A per-depth breakdown and the true total are always shown. Ignored when verbose=true." },
-              "verbose": { "type": "boolean", "description": "Emit the full, uncapped dependent list instead of the summarized top-N (default false). Useful only after narrowing depth/relations on a hub." }
+              "relations": { "type": "array", "items": { "type": "string" }, "description": "Optional edge relations to follow; defaults to the structural-impact set (calls/imports/inheritance/uses/depends_on) plus the cross-language relations invokes, binds_native, calls_service, handled_by, and the evidence-linked dynamic_ref." },
+              "limit": { "type": "integer", "description": "Max dependents listed before a '+N more' summary (default 50; a per-depth breakdown and true total are always shown). Ignored when verbose=true." },
+              "verbose": { "type": "boolean", "description": "List all dependents instead of the top-N summary (default false); useful after narrowing depth/relations on a hub." }
           }, "required": ["label"] },
           "outputSchema": { "type": "object", "properties": {
               "seed": {"type":"string"},
@@ -4439,14 +4439,14 @@ fn tools_list(allow_exec: bool) -> Value {
           "inputSchema": { "type": "object", "properties": {
               "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. Shared names: qualify as 'name@file-substring'." },
               "limit": { "type": "integer", "description": "Max callers listed before a '+N more' summary (default 50). Ignored when verbose=true." },
-              "verbose": { "type": "boolean", "description": "Emit the full, uncapped caller list instead of the summarized top-N (default false)." },
+              "verbose": { "type": "boolean", "description": "List all callers instead of the top-N summary (default false)." },
               "show_sites": { "type": "boolean", "description": "Under each caller, show the actual source line where the call happens ('at file:line: <code>'), read from the jail. Turns 'who calls X' into 'who calls X, and the exact line' without a second get_source. Default false." }
           }, "required": ["label"] } },
         { "name": "find_callees", "description": "List the nodes this symbol calls, uses, or references (outgoing edges only). Answers 'what does X call'. The count and a per-relation breakdown are always in the header; the list is capped with a '+N more' summary on a hub. For a class/type, the callees of its members are folded in (a class doesn't call; its methods do) and labelled.",
           "inputSchema": { "type": "object", "properties": {
               "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. Shared names: qualify as 'name@file-substring'." },
               "limit": { "type": "integer", "description": "Max callees listed before a '+N more' summary (default 50). Ignored when verbose=true." },
-              "verbose": { "type": "boolean", "description": "Emit the full, uncapped callee list instead of the summarized top-N (default false)." },
+              "verbose": { "type": "boolean", "description": "List all callees instead of the top-N summary (default false)." },
               "show_sites": { "type": "boolean", "description": "Under each callee, show the actual source line where this symbol calls it ('at file:line: <code>'), read from the jail -- so 'what does X call' also shows HOW it calls it. Default false." }
           }, "required": ["label"] } },
         { "name": "list_prs", "description": "Open pull requests targeting the base branch with their CI/review state. Requires the `gh` CLI authenticated for the repo.",
@@ -4531,7 +4531,7 @@ fn tools_list(allow_exec: bool) -> Value {
               "base": { "type": "string", "description": "Base branch to diff against when `files` is omitted (default: the repo's default branch)." },
               "depth": { "type": "integer", "description": "Reverse-impact hop bound (default 3, max 16)." },
               "limit": { "type": "integer", "description": "Max entries shown per section before a '+N more' summary (default 20). Ignored when verbose=true." },
-              "verbose": { "type": "boolean", "description": "Emit the full, uncapped lists instead of the summarized top-N (default false)." }
+              "verbose": { "type": "boolean", "description": "List all instead of the top-N summary (default false)." }
           } },
           "outputSchema": { "type": "object", "description": "The full ChangeForecast. The structured channel is not truncated by `limit` (that caps only the text); blast_radius is bounded by the forecast's internal hit cap, with blast_radius_total carrying the true count.", "properties": {
               "summary": {"type":"string"},
@@ -4561,7 +4561,7 @@ fn tools_list(allow_exec: bool) -> Value {
               "kind": { "type": "string", "description": "The edit kind: delete, signature, or visibility." },
               "depth": { "type": "integer", "description": "Reverse-impact hop bound (default 3, max 16)." },
               "limit": { "type": "integer", "description": "Max entries shown per section (will break / review) before a '+N more' summary (default 20). Each section also prints a by-depth rollup. Ignored when verbose=true." },
-              "verbose": { "type": "boolean", "description": "Emit the full, uncapped lists instead of the summarized top-N (default false)." }
+              "verbose": { "type": "boolean", "description": "List all instead of the top-N summary (default false)." }
           }, "required": ["symbol", "kind"] } },
         { "name": "audit_sql", "description": "Audit the codebase's SQL for performance and security problems over the SQL-aware graph: row-level-security gaps, over-broad grants, likely SQL injection, missing indexes on filter/foreign-key columns, SELECT *, non-sargable predicates, and missing primary keys. Findings are ranked by severity, then by confidence within a tier (so high-confidence security findings lead and low-confidence name heuristics sink); each carries a severity, confidence, location, and a fix.",
           "inputSchema": { "type": "object", "properties": {
