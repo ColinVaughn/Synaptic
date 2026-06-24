@@ -162,6 +162,11 @@ pub struct Server {
     /// opt-in (`serve --allow-exec`). When off, `speculate` is neither advertised
     /// in tools/list nor runnable.
     allow_exec: bool,
+    /// Token-lean output mode. When on (env `SYNAPTIC_CONCISE` or `serve
+    /// --concise`), tools that take a size/limit knob fall back to lower defaults
+    /// so a default call returns less to the model; an explicit per-call argument
+    /// still wins. Off by default to preserve existing output sizes.
+    concise: bool,
     /// On-query catch-up config (repo root, output dir, debounce, caps). `None`
     /// disables auto-freshen (e.g. no source root, or no graph path).
     freshen: Option<FreshenConfig>,
@@ -241,6 +246,15 @@ fn read_repo_hashes(graph_path: Option<&Path>) -> HashMap<String, String> {
         }
     }
     out
+}
+
+/// Whether token-lean output mode is on from the environment. Truthy unless the
+/// value is an explicit off token, mirroring the `SYNAPTIC_SERVE_AUTOFRESH`
+/// parse; unset = off (default output sizes unchanged).
+fn concise_from_env() -> bool {
+    std::env::var("SYNAPTIC_CONCISE")
+        .map(|v| !matches!(v.trim(), "" | "0" | "false" | "no" | "off"))
+        .unwrap_or(false)
 }
 
 fn reload_key_for(path: &Path) -> Option<(u64, u64)> {
@@ -390,6 +404,7 @@ impl Server {
             repo_roots: HashMap::new(),
             repo_hashes,
             allow_exec: false,
+            concise: concise_from_env(),
             freshen: None,
             last_fresh_check: Mutex::new(None),
         }
@@ -423,6 +438,14 @@ impl Server {
     /// that is acceptable for this deployment.
     pub fn with_allow_exec(mut self, allow: bool) -> Server {
         self.allow_exec = allow;
+        self
+    }
+
+    /// Turn on token-lean output mode (lower default list/budget sizes). Only
+    /// ever enables it: the env (`SYNAPTIC_CONCISE`) may already have, and a
+    /// `serve --concise` flag should not be able to turn it back off.
+    pub fn with_concise(mut self, concise: bool) -> Server {
+        self.concise = self.concise || concise;
         self
     }
 
@@ -880,6 +903,7 @@ impl Server {
         mode: TraversalMode,
         token_budget: usize,
         recency: Option<&ResolvedRecency>,
+        edge_cap: usize,
     ) -> String {
         let in_set: std::collections::HashSet<&NodeId> =
             keep.iter().map(|&i| &r.nodes[i]).collect();
@@ -921,7 +945,13 @@ impl Server {
                 ));
             }
         }
+        // Edges are relevance-ordered; cap them so a dense neighbourhood cannot
+        // dominate the result (edge_cap == 0 omits them, the terse default).
+        let mut edges_emitted = 0usize;
         for e in &r.edges {
+            if edges_emitted >= edge_cap {
+                break;
+            }
             if in_set.contains(&e.source) && in_set.contains(&e.target) {
                 out.push_str(&format!(
                     "EDGE {} --{}--> {}\n",
@@ -929,6 +959,7 @@ impl Server {
                     sanitize_label(&e.relation),
                     sanitize_label(&self.label_of(&e.target))
                 ));
+                edges_emitted += 1;
             }
         }
         truncate_to_tokens(out, token_budget)
@@ -952,7 +983,7 @@ impl Server {
             None,
             RecencyMode::Boost,
         );
-        self.render_query_text(&r, &keep, mode, token_budget, recency.as_ref())
+        self.render_query_text(&r, &keep, mode, token_budget, recency.as_ref(), usize::MAX)
     }
 
     /// Resolve a user-supplied name/id to a single node, or a consistent error
@@ -1727,6 +1758,8 @@ impl Server {
         label: &str,
         relation_filter: Option<&str>,
         show_sites: bool,
+        limit: usize,
+        verbose: bool,
     ) -> String {
         let id = match self.resolve_or_msg(label) {
             Ok(id) => id,
@@ -1744,12 +1777,17 @@ impl Server {
         } else {
             SiteMap::new()
         };
+        // A hub can have hundreds of neighbors; cap the rendered list (default,
+        // verbose=false) with a '+N more' summary so the output stays bounded,
+        // mirroring find_callers/affected. verbose lists every neighbor.
+        let cap = if verbose { usize::MAX } else { limit.max(1) };
         // Tally every relation on the node so a filter that excludes everything can
         // still report what the node DOES have. Only needed on the filtered path:
         // with no filter, an empty result means the node simply has no neighbors.
         let mut by_rel: BTreeMap<&str, usize> = BTreeMap::new();
         let mut body = String::new();
-        let mut shown = 0usize;
+        let mut matched = 0usize;
+        let mut rendered = 0usize;
         for nb in &ex.neighbors {
             if rel_filter.is_some() {
                 *by_rel.entry(nb.relation.as_str()).or_default() += 1;
@@ -1760,7 +1798,12 @@ impl Server {
                     continue;
                 }
             }
-            shown += 1;
+            matched += 1;
+            // Count the rest for the '+N more' line, but stop rendering past the cap.
+            if rendered >= cap {
+                continue;
+            }
+            rendered += 1;
             let arrow = if nb.direction == "out" { "-->" } else { "<--" };
             body.push_str(&format!(
                 "\n  {} {} [{}]",
@@ -1776,7 +1819,7 @@ impl Server {
                 }
             }
         }
-        if shown == 0 {
+        if matched == 0 {
             // Distinguish "node exists but no edge matched the filter" from "no
             // such node". When a filter hid everything, name the relations the node
             // actually has so the empty list is not misread as a missing node.
@@ -1795,13 +1838,25 @@ impl Server {
                 _ => format!("Neighbors of {seed}:\n  (none)"),
             };
         }
-        format!("Neighbors of {seed}:{body}")
+        if matched > rendered {
+            body.push_str(&format!(
+                "\n  ... +{} more (pass verbose=true to list all, or relation_filter to narrow)",
+                matched - rendered
+            ));
+        }
+        format!("Neighbors of {seed} ({matched}):{body}")
     }
 
     /// Structured mirror of `get_neighbors`: the seed plus each in/out neighbor
     /// and a per-relation tally. Honors the same case-insensitive relation filter
     /// as the text path. `null` when the node does not resolve.
-    fn get_neighbors_json(&self, label: &str, relation_filter: Option<&str>) -> Value {
+    fn get_neighbors_json(
+        &self,
+        label: &str,
+        relation_filter: Option<&str>,
+        limit: usize,
+        verbose: bool,
+    ) -> Value {
         let Ok(id) = self.resolve_or_msg(label) else {
             return Value::Null;
         };
@@ -1809,14 +1864,22 @@ impl Server {
             return Value::Null;
         };
         let rel_filter = relation_filter.map(str::to_lowercase);
+        // Mirror the text path's cap so the structured channel cannot blow past
+        // the budget on a hub; `total` carries the true matched count.
+        let cap = if verbose { usize::MAX } else { limit.max(1) };
         let mut by_relation: BTreeMap<&str, usize> = BTreeMap::new();
         let mut neighbors = Vec::new();
+        let mut matched = 0usize;
         for nb in &ex.neighbors {
             *by_relation.entry(nb.relation.as_str()).or_default() += 1;
             if let Some(f) = &rel_filter {
                 if !nb.relation.to_lowercase().contains(f.as_str()) {
                     continue;
                 }
+            }
+            matched += 1;
+            if neighbors.len() >= cap {
+                continue;
             }
             neighbors.push(json!({
                 "label": nb.label,
@@ -1832,6 +1895,8 @@ impl Server {
             "seed": ex.label,
             "neighbors": neighbors,
             "by_relation": by_relation,
+            "total": matched,
+            "truncated": matched > neighbors.len(),
         })
     }
 
@@ -3109,6 +3174,7 @@ impl Server {
         r: &synaptic_query::QueryResult,
         keep: &[usize],
         recency: Option<&ResolvedRecency>,
+        edge_cap: usize,
     ) -> Value {
         let in_set: std::collections::HashSet<&NodeId> =
             keep.iter().map(|&i| &r.nodes[i]).collect();
@@ -3129,10 +3195,13 @@ impl Server {
                 })
             })
             .collect();
+        // Mirror the text path's edge cap so the structured channel stays bounded
+        // (edge_cap == 0 => no edges, the terse default).
         let edges: Vec<Value> = r
             .edges
             .iter()
             .filter(|e| in_set.contains(&e.source) && in_set.contains(&e.target))
+            .take(edge_cap)
             .map(|e| {
                 json!({
                     "source": sanitize_label(&self.label_of(&e.source)),
@@ -3456,25 +3525,46 @@ impl Server {
 
     /// Compact text rendering of an audit report for the MCP text channel.
     /// Shows at most `cap` findings (the report is severity-sorted) before a
-    /// "+N more" note, so a large audit does not overflow the channel.
-    fn render_audit_text(&self, r: &synaptic_sqlaudit::AuditReport, cap: usize) -> String {
+    /// "+N more" note. Terse by default: one line per finding (severity, rule,
+    /// location, confidence, title); `verbose` adds the detail + fix per finding.
+    fn render_audit_text(
+        &self,
+        r: &synaptic_sqlaudit::AuditReport,
+        cap: usize,
+        verbose: bool,
+    ) -> String {
         let mut out = sanitize_label(&r.summary);
         for f in r.findings.iter().take(cap) {
-            out.push_str(&format!(
-                "\n[{}] {} ({}) conf {:.2}\n  {}\n  fix: {}",
-                f.severity.as_str(),
-                sanitize_label(&f.title),
-                sanitize_label(&f.rule_id),
-                f.confidence,
-                sanitize_label(&f.detail),
-                sanitize_label(&f.remediation),
-            ));
+            let loc = f.location.as_deref().unwrap_or("-");
+            if verbose {
+                out.push_str(&format!(
+                    "\n[{}] {} ({}) @ {} conf {:.2}\n  {}\n  fix: {}",
+                    f.severity.as_str(),
+                    sanitize_label(&f.title),
+                    sanitize_label(&f.rule_id),
+                    sanitize_label(loc),
+                    f.confidence,
+                    sanitize_label(&f.detail),
+                    sanitize_label(&f.remediation),
+                ));
+            } else {
+                out.push_str(&format!(
+                    "\n[{}] {} @ {} (conf {:.2}) {}",
+                    f.severity.as_str(),
+                    sanitize_label(&f.rule_id),
+                    sanitize_label(loc),
+                    f.confidence,
+                    sanitize_label(&f.title),
+                ));
+            }
         }
         if r.findings.len() > cap {
             out.push_str(&format!(
                 "\n... (+{} more finding(s); pass verbose=true or raise limit for the full list)",
                 r.findings.len() - cap
             ));
+        } else if !verbose && !r.findings.is_empty() {
+            out.push_str("\n(pass verbose=true for each finding's detail and fix)");
         }
         out
     }
@@ -3491,6 +3581,9 @@ impl Server {
         let u = |k: &str, d: u64| args.get(k).and_then(Value::as_u64).unwrap_or(d);
         let opt = |k: &str| args.get(k).and_then(Value::as_str);
         let b = |k: &str| args.get(k).and_then(Value::as_bool).unwrap_or(false);
+        // Concise mode lowers a knob's DEFAULT only; an explicit argument always
+        // wins because `u(k, d)` reads the argument before falling back to `d`.
+        let cdef = |normal: u64, concise: u64| if self.concise { concise } else { normal };
 
         // query_graph renders both text and structuredContent from a SINGLE
         // retrieval. The index query is O(graph); rendering both shapes from one
@@ -3510,18 +3603,37 @@ impl Server {
                 })
                 .unwrap_or_default();
             let question = s("question");
-            let budget = u("token_budget", 2000) as usize;
+            let budget = u("token_budget", cdef(1200, 800)) as usize;
             let since = opt("since");
+            let full = b("full");
             let recency_mode = match opt("recency_mode") {
                 Some("seed") => RecencyMode::Seed,
                 _ => RecencyMode::Boost,
             };
             let (r, keep, recency) =
                 self.query_filtered(&question, mode, budget, &ctx, since, recency_mode);
-            let text = self.render_query_text(&r, &keep, mode, budget, recency.as_ref());
+            // Terse by default: a prefix of the score-sorted nodes and NO edges, so
+            // a "where is X" question returns the key symbols cheaply. full=true
+            // returns the whole budget-bounded subgraph with its edges (capped to
+            // ~2x the node count so a dense neighbourhood cannot dominate).
+            let (view, edge_cap): (&[usize], usize) = if full {
+                (&keep, keep.len().saturating_mul(2).max(1))
+            } else {
+                let top_k = cdef(15, 10) as usize;
+                (&keep[..keep.len().min(top_k)], 0)
+            };
+            let mut text =
+                self.render_query_text(&r, view, mode, budget, recency.as_ref(), edge_cap);
+            if !full && keep.len() > view.len() {
+                text.push_str(&format!(
+                    "\n(terse: top {} of {} matched nodes, edges omitted; pass full=true for the whole subgraph)",
+                    view.len(),
+                    keep.len()
+                ));
+            }
             // Log the "<n> nodes found" count from the header.
             self.log_query(&question, nodes_found(&text));
-            let structured = self.render_query_json(&r, &keep, recency.as_ref());
+            let structured = self.render_query_json(&r, view, recency.as_ref(), edge_cap);
             return Ok(json!({
                 "content": [{ "type": "text", "text": text }],
                 "structuredContent": structured,
@@ -3538,7 +3650,7 @@ impl Server {
                 args.get("case_sensitive").and_then(Value::as_bool),
                 opt("repo"),
                 opt("path_glob"),
-                u("max_results", 100) as usize,
+                u("max_results", cdef(100, 40)) as usize,
             );
             return Ok(json!({
                 "content": [{ "type": "text", "text": text }],
@@ -3553,7 +3665,7 @@ impl Server {
                 opt("path_glob"),
                 opt("kind"),
                 opt("target"),
-                u("max_results", 100) as usize,
+                u("max_results", cdef(30, 20)) as usize,
             );
             return Ok(json!({
                 "content": [{ "type": "text", "text": text }],
@@ -3600,7 +3712,7 @@ impl Server {
         // for the structured mirror. Mirrors the audit_sql compute-once idiom.
         if name == "god_nodes" {
             let (rows, start) =
-                self.god_nodes_page(u("top_n", 10) as usize, u("offset", 0) as usize);
+                self.god_nodes_page(u("top_n", cdef(10, 6)) as usize, u("offset", 0) as usize);
             let text = Self::render_god_nodes_text(&rows, start);
             let structured = Self::render_god_nodes_json(&rows);
             return Ok(json!({
@@ -3624,9 +3736,9 @@ impl Server {
             let cap = if verbose {
                 usize::MAX
             } else {
-                (u("limit", 20) as usize).max(1)
+                (u("limit", cdef(20, 12)) as usize).max(1)
             };
-            let text = self.render_audit_text(&report, cap);
+            let text = self.render_audit_text(&report, cap, verbose);
             // The structured channel mirrors the text cap so the response payload
             // stays bounded; the summary still reflects the true total.
             let structured = if report.findings.len() > cap {
@@ -3663,7 +3775,7 @@ impl Server {
                     let cap = if b("verbose") {
                         usize::MAX
                     } else {
-                        (u("limit", 20) as usize).max(1)
+                        (u("limit", cdef(20, 12)) as usize).max(1)
                     };
                     let text = Self::render_predict_text(&f, cap);
                     let structured = serde_json::to_value(&f).unwrap_or(Value::Null);
@@ -3698,16 +3810,22 @@ impl Server {
                 &s("label"),
                 opt("file"),
                 opt("lines"),
-                u("context_lines", 40) as usize,
+                u("context_lines", cdef(40, 25)) as usize,
             ),
             "get_neighbors" => {
                 let rf = args.get("relation_filter").and_then(Value::as_str);
-                self.tool_get_neighbors(&s("label"), rf, b("show_sites"))
+                self.tool_get_neighbors(
+                    &s("label"),
+                    rf,
+                    b("show_sites"),
+                    u("limit", cdef(50, 20)) as usize,
+                    b("verbose"),
+                )
             }
             "get_community" => self.tool_get_community(
                 u("community_id", 0) as u32,
                 u("offset", 0) as usize,
-                u("limit", 100) as usize,
+                u("limit", cdef(100, 40)) as usize,
             ),
             "graph_stats" => self.tool_graph_stats(),
             "list_repos" => self.tool_list_repos(),
@@ -3729,19 +3847,19 @@ impl Server {
                     &s("label"),
                     u("depth", 3) as usize,
                     &rels,
-                    u("limit", 50) as usize,
+                    u("limit", cdef(50, 20)) as usize,
                     b("verbose"),
                 )
             }
             "find_callers" => self.tool_find_callers(
                 &s("label"),
-                u("limit", 50) as usize,
+                u("limit", cdef(50, 20)) as usize,
                 b("verbose"),
                 b("show_sites"),
             ),
             "find_callees" => self.tool_find_callees(
                 &s("label"),
-                u("limit", 50) as usize,
+                u("limit", cdef(50, 20)) as usize,
                 b("verbose"),
                 b("show_sites"),
             ),
@@ -3750,7 +3868,7 @@ impl Server {
             "triage_prs" => self.tool_triage_prs(opt("base"), opt("repo")),
             "working_changes_impact" => self.tool_working_changes_impact(
                 opt("base"),
-                u("limit", 20) as usize,
+                u("limit", cdef(20, 12)) as usize,
                 b("verbose"),
                 b("code_only"),
             ),
@@ -3759,12 +3877,14 @@ impl Server {
                 &s("symbol"),
                 &s("kind"),
                 u("depth", 3) as usize,
-                u("limit", 20) as usize,
+                u("limit", cdef(20, 12)) as usize,
                 b("verbose"),
             ),
-            "structural_search" => {
-                self.tool_structural_search(opt("query"), opt("pattern"), u("limit", 50) as usize)
-            }
+            "structural_search" => self.tool_structural_search(
+                opt("query"),
+                opt("pattern"),
+                u("limit", cdef(25, 15)) as usize,
+            ),
             "describe_node" => self.tool_describe_node(&s("label")),
             "time_travel_diff" => {
                 self.tool_time_travel_diff(&s("rev1"), opt("rev2"), u("top", 20) as usize)
@@ -3774,7 +3894,7 @@ impl Server {
                 &s("to"),
                 opt("id"),
                 opt("file"),
-                u("limit", 50) as usize,
+                u("limit", cdef(50, 20)) as usize,
                 b("verbose"),
             ),
             // An unknown tool is a tool-result with isError, NOT a JSON-RPC
@@ -3804,20 +3924,22 @@ impl Server {
                     &s("label"),
                     u("depth", 3) as usize,
                     &rels,
-                    u("limit", 50) as usize,
+                    u("limit", cdef(50, 20)) as usize,
                     b("verbose"),
                 ))
             }
             "structural_search" => Some(self.structural_search_json(
                 opt("query"),
                 opt("pattern"),
-                u("limit", 50) as usize,
+                u("limit", cdef(25, 15)) as usize,
             )),
             "describe_node" => Some(self.describe_node_json(&s("label"))),
             "get_node" => Some(self.get_node_json(&s("label"))),
             "get_neighbors" => Some(self.get_neighbors_json(
                 &s("label"),
                 args.get("relation_filter").and_then(Value::as_str),
+                u("limit", cdef(50, 20)) as usize,
+                b("verbose"),
             )),
             "list_repos" => Some(self.list_repos_json()),
             _ => None,
@@ -4133,72 +4255,50 @@ fn truncate_to_tokens(text: String, token_budget: usize) -> String {
 /// the whole toolset (these tools all query THIS repo's Synaptic), gives the
 /// recommended flow, and defines the jargon, so an agent picks the right tool.
 const SERVER_INSTRUCTIONS: &str = "\
-This server exposes a Synaptic knowledge graph of THIS repository's code: symbols \
-(functions, classes, files) as nodes and relationships (calls, imports, inheritance) \
-as edges, clustered into communities. All tools here operate on that loaded graph and \
-make no code edits. Query the graph before grepping or reading files broadly; it is \
-faster and surfaces structure (callers, callees, impact).\n\
+This server exposes a Synaptic knowledge graph of THIS repo's code: symbols (functions, \
+classes, files) as nodes and relationships (calls, imports, inheritance) as edges, \
+clustered into communities. All tools are read-only. Query the graph before grepping or \
+reading files broadly.\n\
 \n\
-Recommended flow: call graph_stats or god_nodes to orient, query_graph for a question \
-(returns a relevant subgraph), then get_source to read a symbol's actual code (or pass \
-get_source a `file` + `lines` range to read an arbitrary region, e.g. the lines around a \
-search_text hit), get_neighbors / find_callers / find_callees / shortest_path to navigate, \
-and get_node for detail. find_callers / find_callees / get_neighbors take show_sites=true \
-to print the exact source line of each call/reference site ('at file:line: <code>') -- so \
-the graph's 'A calls B' becomes 'A calls B at this line', no second read needed. For change \
-impact, affected gives the blast radius of editing a symbol and \
-working_changes_impact does the same for your current git diff. A class/type's callers \
-attach to its methods, not the bare type symbol, so affected / find_callers / find_callees \
-on a class automatically fold in its members and label the result as aggregated -- a \
-class never reads as a safe leaf just because nothing references the type name directly. \
-A '0 dependents' result is not automatically 'safe to change': symbols reached via \
-reflection or fully-dynamic dispatch have no static dependents, so affected attaches a \
-dynamic_caveat in that case; dynamic_hazards lists the reflection / dynamic-dispatch sites \
-(event buses and string-literal reflection are already linked into the graph; computed \
-names are cataloged here as the residual risk). \
-Before editing a symbol \
-other code depends on, forecast the change: predict_impact gives the blast radius plus \
-the public APIs and tests at risk, affected_tests lists the tests to run, and \
-predict_edit says what a delete / signature / visibility change breaks. To confirm a \
-forecast by actually running the at-risk tests, restart the server with --allow-exec to \
-enable the speculate tool (off by default, since it executes commands and so is not \
-read-only). structural_search \
-runs a SYNQL query or a named pattern (matches on kind / loc / fan-in-out, not text); \
-for text-shaped things the graph does not model -- string literals, config values, log \
-messages, a TODO's wording, error strings -- use search_text, a regex/literal content \
-search over the source that attributes every hit to the enclosing symbol, so you can \
-pivot from a matched line straight to affected / find_callers on that node; \
-describe_node summarizes a symbol's shape; time_travel_diff reports how the architecture \
-changed between two git revisions (added/removed dependencies, removed APIs, drift, new \
-cycles, hotspots); plan_rename produces a plan-only, confidence-scored rename. For \
-SQL-bearing code, audit_sql reviews the schema and advise_sql critiques a candidate query. \
-For a multi-repo graph, call list_repos then pass the repo argument to scope. The PR tools \
-(list_prs / get_pr_impact / triage_prs) need the `gh` CLI; if it is missing or unauthenticated \
-they say so and skip PR data, while the rest of the graph stays usable offline. \
-working_changes_impact runs git in the server's working directory and distinguishes a clean tree \
-from a directory that is not a git repository.\n\
+Flow: graph_stats or god_nodes to orient; query_graph for a question (terse ranked nodes \
+by default, full=true for the subgraph + edges); get_source to read a symbol's code (or a \
+`file` + `lines` range, e.g. around a search_text hit); get_neighbors / find_callers / \
+find_callees / shortest_path to navigate (show_sites=true prints the exact call-site line); \
+get_node / describe_node for detail.\n\
 \n\
-Disambiguating a name: every tool that takes a name resolves it leniently (id, \
-label, bare name). When a name is shared by several files, pin it to one with a \
-'name@file-substring' qualifier (e.g. 'announce@core/foo.ts') -- this works on \
-get_node, get_source, get_neighbors, describe_node, find_callers, find_callees, \
-shortest_path, affected, and predict_edit. If a name is still ambiguous, the error \
-lists each candidate's id, file, and degree so you can pick one without another call.\n\
+Change impact: affected gives the blast radius of editing a symbol; working_changes_impact \
+does the same for your git diff. On a class/type these fold in its members, so a class is \
+never a false 'safe leaf'. A '0 dependents' result is NOT proof of 'safe to change': a \
+symbol reached via reflection or dynamic dispatch has no static dependents, so affected \
+attaches a dynamic_caveat and dynamic_hazards lists the sites (event buses and \
+string-literal reflection are linked into the graph; computed names are cataloged as the \
+residual risk). Forecast before editing: predict_impact (blast radius + public-API and \
+test risk), affected_tests (the tests to run), predict_edit (what a delete / signature / \
+visibility change breaks). To actually run the at-risk tests, start the server with \
+--allow-exec to enable the speculate tool (off by default; it executes commands).\n\
 \n\
-Coverage limits: the graph is built from static structure, so call edges added at \
-runtime are not all captured. Electron IPC (ipcMain/ipcRenderer) and WebSocket/socket.io \
-message channels ARE modelled (a sender and its handler meet on an ipc/ws channel node), \
-so those cross-process calls connect; but a handler invoked only via a custom event bus, \
-a runtime-built dispatch table, or reflection can still show 0 callers even though it is \
-reached at runtime -- treat a surprising 0-caller result on a dispatched handler as 'no \
-STATIC caller', not 'dead code'. Inline unit tests defined next to the code under test \
-may likewise not be linked.\n\
+Other tools: structural_search runs a SYNQL query or named pattern (matches kind / loc / \
+fan-in-out, not text); search_text is a regex/literal content search that attributes each \
+hit to its enclosing symbol (pivot to affected / find_callers); time_travel_diff diffs the \
+architecture between two git revisions; plan_rename gives a plan-only, confidence-scored \
+rename; audit_sql / advise_sql review SQL. Multi-repo: list_repos, then pass repo to scope. \
+The PR tools (list_prs / get_pr_impact / triage_prs) need the `gh` CLI and skip gracefully \
+without it.\n\
 \n\
-Terms: a 'god node' is a high-degree hub (structurally central -- degree counts all \
-connections incl. a class's members, so it measures size/centrality, not how many things \
-depend on the symbol; use affected for that); a 'community' is a cluster of \
-densely-connected nodes (roughly a module); edge confidence is EXTRACTED \
-(observed in code), INFERRED, or AMBIGUOUS.";
+Names resolve leniently (id, label, bare name); when a name is shared by several files pin \
+it with a 'name@file-substring' qualifier (e.g. announce@core/foo.ts). An ambiguous name \
+returns its candidates (id, file, degree).\n\
+\n\
+Coverage: the graph is static, so some runtime call edges are missing. Electron IPC and \
+WebSocket/socket.io channels ARE modelled; but a handler reached only via a custom event \
+bus, a runtime dispatch table, or reflection can show 0 callers though it runs -- read a \
+surprising 0-caller as 'no STATIC caller', not 'dead code'. Inline tests next to the code \
+may not be linked.\n\
+\n\
+Terms: a 'god node' is a high-degree hub (degree counts all connections incl. a class's \
+members -- size/centrality, NOT a dependence count; use affected for that); a 'community' \
+is a densely-connected cluster (roughly a module); edge confidence is EXTRACTED, INFERRED, \
+or AMBIGUOUS.";
 
 /// The MCP `tools/list` payload. Descriptions and per-parameter docs make the
 /// implicit domain knowledge explicit so an agent uses each tool correctly
@@ -4207,13 +4307,14 @@ fn tools_list(allow_exec: bool) -> Value {
     let mut tools = json!([
         {
             "name": "query_graph",
-            "description": "Primary entry point: return a relevant subgraph (nodes + edges) for a natural-language question about this codebase, instead of grepping or reading files. Good for 'where is X handled', 'how does auth work', 'what is related to Y'. Pass `since` (e.g. 'main' or 'auto') to rank code changed on the current branch higher; use recency_mode='seed' to surface the branch's changed surface itself.",
+            "description": "Primary entry point: find the symbols relevant to a natural-language question about this codebase, instead of grepping or reading files. Good for 'where is X handled', 'how does auth work', 'what is related to Y'. Returns a terse, ranked list of the top matching nodes by default; pass full=true for the whole subgraph with its edges. Pass `since` (e.g. 'main' or 'auto') to rank code changed on the current branch higher; use recency_mode='seed' to surface the branch's changed surface itself.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "question": { "type": "string", "description": "Natural-language question, e.g. 'how does login work' or 'what handles payments'." },
                     "mode": { "type": "string", "enum": ["bfs", "dfs"], "description": "Traversal from the seed nodes: 'bfs' (default) expands a broad neighbourhood; 'dfs' follows deep call chains. Use dfs to trace one flow end to end." },
-                    "token_budget": { "type": "integer", "description": "Approximate token budget for the result (default 2000). Controls how many nodes return (about budget/40, capped 10-400). Raise it for broader context." },
+                    "full": { "type": "boolean", "description": "Return the whole subgraph (all budget-bounded nodes plus their edges) instead of the terse top-N node list (default false). Set true when you need the relationships, not just which symbols match." },
+                    "token_budget": { "type": "integer", "description": "Approximate token budget for the full subgraph (default 1200). Controls how many nodes are in scope (about budget/40, capped 10-400); raise it for broader context. The terse default shows only the top ~15 of those." },
                     "context_filter": { "type": "array", "items": { "type": "string" }, "description": "Optional source-file path substrings; keeps only nodes whose file matches one (e.g. ['src/auth','login']). Use to scope a question to a subsystem." },
                     "since": { "type": "string", "description": "Optional. Boost nodes whose file changed on the current branch since this baseline: a git ref ('main', 'HEAD~10'), a date ('2 weeks ago'), or 'auto' (detect the default branch). Scope is merge-base(since, HEAD)..working-tree, so it includes uncommitted edits. Use when working on a feature branch to surface in-progress code. Silently ignored if not a git repo." },
                     "recency_mode": { "type": "string", "enum": ["boost", "seed"], "description": "Only with `since`. 'boost' (default) re-ranks query matches by recency. 'seed' also injects changed-file nodes as seeds, so the changed surface appears even when the question matches little (use to answer 'what did this branch change')." }
@@ -4230,7 +4331,7 @@ fn tools_list(allow_exec: bool) -> Value {
             }, "required": ["nodes", "edges"] }
         },
         { "name": "get_node", "description": "Show one node's metadata: type, source file, community, degree, plus kind (class/function/method/etc.), visibility, and LOC when available. Use after query_graph to inspect a specific symbol.",
-          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name (e.g. 'login_user', 'AuthService'); resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." } }, "required": ["label"] },
+          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name (e.g. 'login_user', 'AuthService'); resolved leniently. Shared names: qualify as 'name@file-substring'." } }, "required": ["label"] },
           "outputSchema": { "type": "object", "properties": {
               "found": {"type":"boolean"},
               "id": {"type":"string"}, "label": {"type":"string"}, "source_file": {"type":"string"},
@@ -4245,18 +4346,20 @@ fn tools_list(allow_exec: bool) -> Value {
           }, "required": ["found"] } },
         { "name": "get_source", "description": "Return the actual source code for a symbol (the lines at its location), so you do not have to open the file. Use after query_graph or get_node to read a function or class body directly. Alternatively pass `file` (with an optional `lines` range) to read an ARBITRARY region that is not a single symbol -- a config block, or the lines around a search_text hit. In a federated/global graph it reads each member repo from its own source root (a leading 'tag/' on `file` selects the member); if a file cannot be read the message names the configured source-root and whether the path was missing or outside it.",
           "inputSchema": { "type": "object", "properties": {
-              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts'). Omit when using `file`." },
+              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. Shared names: qualify as 'name@file-substring'. Omit when using `file`." },
               "file": { "type": "string", "description": "Read this file directly instead of resolving a symbol. Repo-relative, or 'tag/path' in a federated graph (the tag from list_repos). Pair with `lines` for a range." },
               "lines": { "type": "string", "description": "With `file`: the range to read, 'start-end' (e.g. '108-140') or a single 'start' (reads context_lines from there). Ignored without `file`." },
               "context_lines": { "type": "integer", "description": "Lines to return from the symbol/line start (default 40, max 400)." }
           }, "required": [] } },
         { "name": "get_neighbors", "description": "List a node's directly connected nodes and the relation on each edge. Answers 'what does X call/use' and 'what calls X'.",
-          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." }, "relation_filter": { "type": "string", "description": "Optional: keep only this edge relation (substring match). Common relations: calls, imports, inherits, implements, references, contains, depends_on. If nothing matches, the result names the relations the node does have, so an empty list is not mistaken for a missing node." }, "show_sites": { "type": "boolean", "description": "Append the actual source line of each edge's call/reference site ('at file:line: <code>') under the neighbor, read from the jail. Default false. Enriches the text view; the structured mirror is unchanged." } }, "required": ["label"] },
+          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. Shared names: qualify as 'name@file-substring'." }, "relation_filter": { "type": "string", "description": "Optional: keep only this edge relation (substring match). Common relations: calls, imports, inherits, implements, references, contains, depends_on. If nothing matches, the result names the relations the node does have, so an empty list is not mistaken for a missing node." }, "show_sites": { "type": "boolean", "description": "Append the actual source line of each edge's call/reference site ('at file:line: <code>') under the neighbor, read from the jail. Default false. Enriches the text view." }, "limit": { "type": "integer", "description": "Max neighbors listed before a '+N more' summary (default 50). Ignored when verbose=true." }, "verbose": { "type": "boolean", "description": "List every neighbor instead of the capped top-N (default false). Use after a relation_filter on a hub." } }, "required": ["label"] },
           "outputSchema": { "type": "object", "properties": {
               "seed": {"type":"string"},
               "neighbors": { "type": "array", "items": { "type": "object", "properties": {
                   "label": {"type":"string"}, "relation": {"type":"string"}, "direction": {"type":"string", "description": "'out' (seed -> neighbor) or 'in' (neighbor -> seed)."} } } },
-              "by_relation": { "type": "object", "description": "Count of all edges on the seed by relation, before any filter." }
+              "by_relation": { "type": "object", "description": "Count of all edges on the seed by relation, before any filter." },
+              "total": {"type":"integer", "description": "Total neighbors matching the filter; may exceed the capped `neighbors` list."},
+              "truncated": {"type":"boolean"}
           }, "required": ["seed","neighbors"] } },
         { "name": "get_community", "description": "List the members of a community: a cluster of densely-connected nodes, roughly a module or subsystem. Use to see what belongs together. Paginates: a large community returns one page at a time.",
           "inputSchema": { "type": "object", "properties": {
@@ -4264,7 +4367,7 @@ fn tools_list(allow_exec: bool) -> Value {
               "offset": { "type": "integer", "description": "Members to skip before the page (default 0). Raise it to page through a large community." },
               "limit": { "type": "integer", "description": "Max members to return in this page (default 100)." }
           }, "required": ["community_id"] } },
-        { "name": "god_nodes", "description": "The most-connected nodes ('god nodes' = high-degree hubs, the structurally central symbols). Use to orient in an unfamiliar codebase. `degree` is TOTAL connections (all edge kinds, including a class's member edges), so it measures structural centrality/size, NOT how many things depend on a symbol -- a high-degree class can still have few incoming dependents; use `affected` for blast radius. Each hub is annotated with how many tests transitively exercise it, so an untested hub (0 tests) is flagged for what it is: high blast radius, no safety net.",
+        { "name": "god_nodes", "description": "The most-connected nodes (high-degree hubs). Use to orient in an unfamiliar codebase. `degree` is TOTAL connections (all edge kinds, incl. a class's members) -- structural centrality/size, NOT a count of what depends on the symbol (use `affected` for blast radius). Each hub also shows how many tests transitively exercise it, so 0 flags an untested high-blast-radius hub.",
           "inputSchema": { "type": "object", "properties": {
               "top_n": { "type": "integer", "description": "How many hubs to return (default 10)." },
               "offset": { "type": "integer", "description": "Hubs to skip before the page (default 0), for paging past the top ranks." }
@@ -4285,13 +4388,13 @@ fn tools_list(allow_exec: bool) -> Value {
               "dynamic_sites_opaque": {"type":"integer", "description": "Of those, sites whose dispatched name is computed (not a string literal) and so could not be evidence-linked."},
               "dynamic_refs_linked": {"type":"integer", "description": "Evidence-linked dynamic_ref edges added from literal-key sites to their unique target."}
           }, "required": ["nodes","edges","communities"] } },
-        { "name": "dynamic_hazards", "description": "List reflection / dynamic-dispatch sites (by-name member lookups, dispatch tables, eval, dynamic import, .NET/Python/JVM reflection) recorded in the graph. Use this to judge a '0 dependents' answer: a symbol reached only by dynamic dispatch has no static dependents, so 'affected' can report 0 for something that is NOT safe to change. A literal-key site is evidence-linked to its target (shows as a low-confidence dependent); an opaque site (computed name) cannot be, and is cataloged here so the residual risk is visible. Federated: filter by `repo`/`path_glob`/`kind`, or pass `target` to see the sites that could reach a specific symbol.",
+        { "name": "dynamic_hazards", "description": "List the reflection / dynamic-dispatch sites (by-name lookups, dispatch tables, eval, dynamic import, .NET/Python/JVM reflection) in the graph. Use it to judge a '0 dependents' answer: a symbol reached only by dynamic dispatch has no static dependents. A literal-key site is evidence-linked to its target; an opaque (computed-name) site cannot be and is cataloged here as residual risk. Filter by `repo`/`path_glob`/`kind`, or pass `target` for the sites that could reach one symbol.",
           "inputSchema": { "type": "object", "properties": {
               "repo": { "type": "string", "description": "Restrict to one federated member tag (as listed by list_repos)." },
               "path_glob": { "type": "string", "description": "Only sites in files matching this glob, e.g. '**/*.ts' or 'src/**'." },
               "kind": { "type": "string", "enum": ["reflection","dynamic_import","eval"], "description": "Restrict to one site kind." },
               "target": { "type": "string", "description": "Show only sites that could reach this symbol: sites whose literal key names it, plus opaque sites in a file that defines it." },
-              "max_results": { "type": "integer", "description": "Max sites to return (default 100, capped at 1000)." }
+              "max_results": { "type": "integer", "description": "Max sites to return (default 30, capped at 1000). It is a scan-and-narrow tool: filter by repo/path_glob/kind/target rather than raising this." }
           } },
           "outputSchema": { "type": "object", "properties": {
               "total": {"type":"integer"}, "truncated": {"type":"boolean"},
@@ -4310,10 +4413,10 @@ fn tools_list(allow_exec: bool) -> Value {
         { "name": "repo_stats", "description": "Node/edge counts for one federated member repo.",
           "inputSchema": { "type": "object", "properties": { "repo": { "type": "string", "description": "Repo tag, as listed by list_repos." } }, "required": ["repo"] } },
         { "name": "shortest_path", "description": "Shortest path between two nodes, showing the chain of relations. Answers 'how does A reach B' or 'is X connected to Y'.",
-          "inputSchema": { "type": "object", "properties": { "source": { "type": "string", "description": "Start node: label, id, or bare name. If shared by several files, qualify as 'name@file-substring' (e.g. 'announce@core/foo.ts')." }, "target": { "type": "string", "description": "End node: label, id, or bare name. If shared by several files, qualify as 'name@file-substring' (e.g. 'announce@core/foo.ts')." }, "max_hops": { "type": "integer", "description": "Optional cap on path length in hops (default 8)." } }, "required": ["source", "target"] } },
-        { "name": "affected", "description": "Reverse-impact: the nodes that transitively depend on a symbol, i.e. what could break if you change it. Walks calls/imports/inheritance edges plus cross-language coupling (subprocess `invokes`, FFI `binds_native`, HTTP/gRPC `calls_service`/`handled_by`) backward, so the blast radius spans language boundaries. Answers 'what is the blast radius of changing X'. When the target is a class/type, its members are folded in (a class's callers attach to its methods, not the bare type symbol) and the result is labelled as aggregated, so a class is never a false 'safe to change'. Runtime dispatch is modelled where it can be: IPC/WebSocket/event-bus boundaries appear as inferred `calls_service`/`handled_by` edges, and a reflection site with a string-literal name is evidence-linked as a low-confidence `dynamic_ref` dependent. What CANNOT be resolved (computed names, fully-dynamic dispatch) is surfaced instead: a 0-dependent result carries a `dynamic_caveat` when the symbol sits in a scope that uses dynamic dispatch, so 'nothing depends on it' never reads as 'safe' for a dynamically-reached symbol. Use `dynamic_hazards` to inspect the sites.",
+          "inputSchema": { "type": "object", "properties": { "source": { "type": "string", "description": "Start node: label, id, or bare name. Shared names: qualify as 'name@file-substring'." }, "target": { "type": "string", "description": "End node: label, id, or bare name. Shared names: qualify as 'name@file-substring'." }, "max_hops": { "type": "integer", "description": "Optional cap on path length in hops (default 8)." } }, "required": ["source", "target"] } },
+        { "name": "affected", "description": "Reverse-impact: the nodes that transitively depend on a symbol -- what could break if you change it. Walks calls/imports/inheritance backward plus cross-language coupling (subprocess `invokes`, FFI `binds_native`, HTTP/gRPC `calls_service`/`handled_by`), so the blast radius spans languages. A class/type folds in its members (result labelled aggregated), so a class is never a false 'safe to change'. A 0-dependent result carries a `dynamic_caveat` when the symbol sits in a dynamic-dispatch scope (reflection/IPC/event-bus), so it never reads as 'safe' for a runtime-reached symbol; inspect the sites with `dynamic_hazards`.",
           "inputSchema": { "type": "object", "properties": {
-              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." },
+              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. Shared names: qualify as 'name@file-substring'." },
               "depth": { "type": "integer", "description": "Max hops to walk backward (default 3, max 16)." },
               "relations": { "type": "array", "items": { "type": "string" }, "description": "Optional edge relations to follow; defaults to the structural-impact set: calls, references, imports, imports_from, re_exports, inherits, extends, implements, uses, mixes_in, embeds, depends_on, reads_from, plus the cross-language relations invokes, binds_native, calls_service, handled_by, and the evidence-linked dynamic_ref (a reflection call resolved to a unique target)." },
               "limit": { "type": "integer", "description": "Max dependents listed before a '+N more' summary (default 50). A per-depth breakdown and the true total are always shown. Ignored when verbose=true." },
@@ -4334,14 +4437,14 @@ fn tools_list(allow_exec: bool) -> Value {
           }, "required": ["seed","affected"] } },
         { "name": "find_callers", "description": "List the nodes that call, use, or reference this symbol (incoming edges only). Answers 'who calls X'. The count and a per-relation breakdown are always in the header; the list is capped with a '+N more' summary on a hub. For a class/type, the external callers of its methods are folded in (a class's callers attach to its methods) and labelled. Only STATIC callers are seen -- a handler invoked via IPC/WebSocket/reflection can show 0 callers yet still run.",
           "inputSchema": { "type": "object", "properties": {
-              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." },
+              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. Shared names: qualify as 'name@file-substring'." },
               "limit": { "type": "integer", "description": "Max callers listed before a '+N more' summary (default 50). Ignored when verbose=true." },
               "verbose": { "type": "boolean", "description": "Emit the full, uncapped caller list instead of the summarized top-N (default false)." },
               "show_sites": { "type": "boolean", "description": "Under each caller, show the actual source line where the call happens ('at file:line: <code>'), read from the jail. Turns 'who calls X' into 'who calls X, and the exact line' without a second get_source. Default false." }
           }, "required": ["label"] } },
         { "name": "find_callees", "description": "List the nodes this symbol calls, uses, or references (outgoing edges only). Answers 'what does X call'. The count and a per-relation breakdown are always in the header; the list is capped with a '+N more' summary on a hub. For a class/type, the callees of its members are folded in (a class doesn't call; its methods do) and labelled.",
           "inputSchema": { "type": "object", "properties": {
-              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." },
+              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. Shared names: qualify as 'name@file-substring'." },
               "limit": { "type": "integer", "description": "Max callees listed before a '+N more' summary (default 50). Ignored when verbose=true." },
               "verbose": { "type": "boolean", "description": "Emit the full, uncapped callee list instead of the summarized top-N (default false)." },
               "show_sites": { "type": "boolean", "description": "Under each callee, show the actual source line where this symbol calls it ('at file:line: <code>'), read from the jail -- so 'what does X call' also shows HOW it calls it. Default false." }
@@ -4363,7 +4466,7 @@ fn tools_list(allow_exec: bool) -> Value {
           "inputSchema": { "type": "object", "properties": {
               "query": { "type": "string", "description": "A SYNQL query. Omit when using `pattern`." },
               "pattern": { "type": "string", "description": "A built-in pattern name instead of a query." },
-              "limit": { "type": "integer", "description": "Max rows to return (default 50)." }
+              "limit": { "type": "integer", "description": "Max rows to return (default 25)." }
           } },
           "outputSchema": { "type": "object", "properties": {
               "columns": { "type": "array", "items": { "type": "string" }, "description": "RETURN headers." },
@@ -4388,7 +4491,7 @@ fn tools_list(allow_exec: bool) -> Value {
           } } },
         { "name": "describe_node", "description": "Compact 'takes X, returns Y, calls Z' description of a symbol, composed from its captured signature and outgoing call edges (graph-only, no source read). Useful for generating tool/function descriptions or quickly understanding a function's shape. For a class/type it lists the members instead (a class has no calls of its own). Resolve `label` by bare name, full label, id, or file.",
           "inputSchema": { "type": "object", "properties": {
-              "label": { "type": "string", "description": "Symbol to describe (bare name, label, node id, or source file). If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." }
+              "label": { "type": "string", "description": "Symbol to describe (bare name, label, node id, or source file). Shared names: qualify as 'name@file-substring'." }
           }, "required": ["label"] },
           "outputSchema": { "type": "object", "properties": {
               "found": { "type": "boolean" },
@@ -4454,7 +4557,7 @@ fn tools_list(allow_exec: bool) -> Value {
           }, "required": ["tests","total"] } },
         { "name": "predict_edit", "description": "What breaks if you make a specific kind of edit to a symbol, classified into 'will break' vs 'to review'. kind=delete (every dependent breaks), signature (callers/type-users break, bare imports go to review), or visibility (references from other files break when narrowing to private). Pure-graph; complements plan_rename (which is rename-only).",
           "inputSchema": { "type": "object", "properties": {
-              "symbol": { "type": "string", "description": "The symbol to edit: its name, bare name, or a node id. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts')." },
+              "symbol": { "type": "string", "description": "The symbol to edit: its name, bare name, or a node id. Shared names: qualify as 'name@file-substring'." },
               "kind": { "type": "string", "description": "The edit kind: delete, signature, or visibility." },
               "depth": { "type": "integer", "description": "Reverse-impact hop bound (default 3, max 16)." },
               "limit": { "type": "integer", "description": "Max entries shown per section (will break / review) before a '+N more' summary (default 20). Each section also prints a by-depth rollup. Ignored when verbose=true." },
@@ -4464,7 +4567,7 @@ fn tools_list(allow_exec: bool) -> Value {
           "inputSchema": { "type": "object", "properties": {
               "severity": { "type": "string", "enum": ["critical","high","medium","low","info"], "description": "Only return findings at least this severe (default: all)." },
               "limit": { "type": "integer", "description": "Max findings returned before a '+N more' summary (default 20). Ignored when verbose=true." },
-              "verbose": { "type": "boolean", "description": "Return all findings instead of the summarized top-N (default false)." }
+              "verbose": { "type": "boolean", "description": "Return all findings AND each finding's full detail + fix, instead of the terse one-line-per-finding summary (default false)." }
           } },
           "outputSchema": { "type": "object", "properties": {
               "version": {"type":"integer"}, "summary": {"type":"string"},
@@ -4485,7 +4588,7 @@ fn tools_list(allow_exec: bool) -> Value {
                   "title": {"type":"string"}, "detail": {"type":"string"}, "location": {"type":"string"},
                   "remediation": {"type":"string"}, "confidence": {"type":"number"} } } }
           }, "required": ["version","summary","findings"] } },
-        { "name": "search_text", "description": "Content (text/regex) search over the actual source files -- the complement to structural_search, which matches the GRAPH (kinds, loc, names) and CANNOT see file content. Use this for anything text-shaped that the graph does not model: string literals, config values, log messages, a TODO's wording, error strings, magic numbers. Every hit is attributed to the graph node whose body encloses it, so you can pivot straight from a matched line to affected/find_callers on that symbol. Searches every member of a federated graph (respecting each repo's ignore files and the source-root jail, and skipping Synaptic's own generated output dirs); scope to one repo with `repo`. Pattern is a regex by default (set literal=true for a fixed string). Matching is smart-case: case-insensitive unless the pattern contains an uppercase letter (so `todo` is broad, `TODO`/`FIXME` precise); override with case_sensitive.",
+        { "name": "search_text", "description": "Content (text/regex) search over source files -- the complement to structural_search, which matches the GRAPH and cannot see file content. Use for text-shaped things the graph does not model: string literals, config values, log messages, a TODO's wording, error strings. Every hit is attributed to the enclosing graph node, so you can pivot from a matched line to affected/find_callers on that symbol. Searches every member of a federated graph (respecting ignore files and the source-root jail, skipping Synaptic's own output dirs); scope with `repo`. Regex by default (literal=true for a fixed string); smart-case (case-insensitive unless the pattern has an uppercase letter, so `todo` is broad and `TODO`/`FIXME` precise).",
           "inputSchema": { "type": "object", "properties": {
               "pattern": { "type": "string", "description": "Regex (default) or, with literal=true, a fixed string to find in file content." },
               "literal": { "type": "boolean", "description": "Treat `pattern` as a literal string rather than a regex (default false)." },
@@ -4800,6 +4903,127 @@ mod tests {
     fn call_tool_full(s: &mut Server, name: &str, args: Value) -> Value {
         let req = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}});
         s.handle_request(&req).unwrap()
+    }
+
+    /// A hub node with 25 outgoing 'calls' neighbors, for the cap / verbose /
+    /// concise-default tests.
+    fn hub_server() -> Server {
+        let mut nodes = vec![node("hub", "Hub", Some(0))];
+        let mut links = Vec::new();
+        for i in 0..25 {
+            nodes.push(node(&format!("n{i}"), &format!("dep{i}"), Some(0)));
+            links.push(edge("hub", &format!("n{i}"), "calls"));
+        }
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes,
+            links,
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        Server::from_graph_data(gd, None)
+    }
+
+    #[test]
+    fn get_neighbors_caps_with_limit_and_verbose_lists_all() {
+        let mut s = hub_server();
+        let capped = call_tool(&mut s, "get_neighbors", json!({"label":"hub","limit":5}));
+        assert!(
+            capped.contains("Neighbors of Hub (25)"),
+            "header carries the total: {capped}"
+        );
+        assert!(capped.contains("+20 more"), "cap note present: {capped}");
+        assert_eq!(
+            capped.lines().filter(|l| l.contains("-->")).count(),
+            5,
+            "limit caps the rendered neighbors: {capped}"
+        );
+        let full = call_tool(
+            &mut s,
+            "get_neighbors",
+            json!({"label":"hub","verbose":true}),
+        );
+        assert!(
+            !full.contains("more"),
+            "verbose lists all, no cap note: {full}"
+        );
+        assert_eq!(full.lines().filter(|l| l.contains("-->")).count(), 25);
+    }
+
+    #[test]
+    fn get_neighbors_structured_mirror_caps_and_reports_total() {
+        let mut s = hub_server();
+        let full = call_tool_full(&mut s, "get_neighbors", json!({"label":"hub","limit":5}));
+        let sc = &full["result"]["structuredContent"];
+        assert_eq!(sc["neighbors"].as_array().unwrap().len(), 5, "{sc}");
+        assert_eq!(sc["total"], json!(25));
+        assert_eq!(sc["truncated"], json!(true));
+    }
+
+    #[test]
+    fn concise_mode_lowers_get_neighbors_default() {
+        // The default neighbor cap is 50 (does not trim 25); concise lowers it to 20.
+        let mut normal = hub_server();
+        let n = call_tool(&mut normal, "get_neighbors", json!({"label":"hub"}));
+        assert!(
+            !n.contains("more"),
+            "non-concise default does not cap 25: {n}"
+        );
+        let mut lean = hub_server().with_concise(true);
+        let c = call_tool(&mut lean, "get_neighbors", json!({"label":"hub"}));
+        assert!(c.contains("+5 more"), "concise default caps at 20: {c}");
+    }
+
+    #[test]
+    fn query_graph_terse_by_default_then_full_includes_edges() {
+        let mut s = server();
+        let terse = query_graph_structured(&mut s, json!({"question":"auth login database"}));
+        assert!(
+            terse["structuredContent"]["edges"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "terse default omits edges: {}",
+            terse["structuredContent"]
+        );
+        assert!(
+            !terse["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("EDGE "),
+            "terse text has no EDGE lines: {}",
+            terse["content"][0]["text"]
+        );
+        let full = query_graph_structured(
+            &mut s,
+            json!({"question":"auth login database","full":true}),
+        );
+        assert!(
+            !full["structuredContent"]["edges"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "full=true includes the subgraph edges: {}",
+            full["structuredContent"]
+        );
+    }
+
+    #[test]
+    fn audit_sql_terse_one_line_default_verbose_adds_fix() {
+        let mut s = Server::from_graph_data(sql_graph(), None);
+        let terse = call_tool(&mut s, "audit_sql", json!({}));
+        assert!(
+            !terse.contains("fix:"),
+            "terse default omits the fix line: {terse}"
+        );
+        assert!(
+            terse.contains("pass verbose=true"),
+            "terse default hints at verbose: {terse}"
+        );
+        let full = call_tool(&mut s, "audit_sql", json!({"verbose":true}));
+        assert!(full.contains("fix:"), "verbose adds the fix line: {full}");
     }
 
     /// A class `MyClass` owning methods `doThing`/`helper`; an external function

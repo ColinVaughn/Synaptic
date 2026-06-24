@@ -12,12 +12,16 @@ pub(crate) fn run_serve(
     api_key: Option<String>,
     source_root: Option<PathBuf>,
     allow_exec: bool,
+    concise: bool,
 ) -> Result<()> {
     let path = default_graph_path(graph);
     let mut server = Server::load(path.clone())
         .with_context(|| format!("loading {} (run `synaptic extract` first?)", path.display()))?;
     let root = source_root.unwrap_or_else(|| default_source_root(&path));
-    server = server.with_source_root(root).with_allow_exec(allow_exec);
+    server = server
+        .with_source_root(root)
+        .with_allow_exec(allow_exec)
+        .with_concise(concise);
     // When serving a federated/global graph, register each member repo's source
     // root so `get_source` can read nodes whose `source_file` points at a sibling
     // repo outside the single source root.

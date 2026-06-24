@@ -211,6 +211,11 @@ pub(crate) enum Cmd {
         /// the server no longer read-only, so enable it only for trusted clients.
         #[arg(long)]
         allow_exec: bool,
+        /// Token-lean output: lower the default list/budget sizes so tool results
+        /// return less to the model (an explicit per-call argument still wins).
+        /// Equivalent to setting SYNAPTIC_CONCISE=1.
+        #[arg(long)]
+        concise: bool,
     },
     /// Ingest an external source into the graph (cargo workspace, MCP config) or
     /// fetch a URL into synaptic-out/ingested/ for the next extract.

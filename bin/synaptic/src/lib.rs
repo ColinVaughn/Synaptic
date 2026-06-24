@@ -149,7 +149,8 @@ fn run() -> Result<()> {
             api_key,
             source_root,
             allow_exec,
-        } => run_serve(graph, http, api_key, source_root, allow_exec),
+            concise,
+        } => run_serve(graph, http, api_key, source_root, allow_exec, concise),
         Cmd::Prs {
             number,
             repo,
