@@ -158,7 +158,7 @@ exposure.
 
 ## MCP tools
 
-`tools/list` reports 28 tools by default (29 with `--allow-exec`, which adds
+`tools/list` reports 29 tools by default (30 with `--allow-exec`, which adds
 `speculate`). Every tool documents its parameters in its input schema, and every
 tool carries annotations so a host knows how safe it is to run:
 
@@ -166,7 +166,7 @@ tool carries annotations so a host knows how safe it is to run:
 "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": <bool> }
 ```
 
-All 28 default tools are `readOnlyHint: true`. `openWorldHint` is `true` only for
+All 29 default tools are `readOnlyHint: true`. `openWorldHint` is `true` only for
 the tools that reach outside the graph by shelling out (`list_prs`,
 `get_pr_impact`, `triage_prs`, `working_changes_impact`, `predict_impact`,
 `affected_tests`, and `time_travel_diff`); it is `false` for the rest, including
@@ -240,8 +240,8 @@ same cascade: exact node id, then case-insensitive label, bare name, source file
 and finally a unique label substring. When a name is shared by several files you
 can pin it to one with a `name@file-substring` qualifier (e.g.
 `announce@core/foo.ts`) -- this works uniformly across `get_node`,
-`get_neighbors`, `get_source`, `find_callers`, `find_callees`, `shortest_path`,
-`affected`, and `predict_edit`. (`plan_rename` instead takes a dedicated `file`
+`get_neighbors`, `get_source`, `find_callers`, `find_callees`, `find_references`,
+`shortest_path`, `affected`, and `predict_edit`. (`plan_rename` instead takes a dedicated `file`
 parameter for the same purpose.) If the name is still ambiguous, the tool returns
 the candidate list with each candidate's id, file, and degree inline, so you can
 pick one without a follow-up `get_node` call.
@@ -480,6 +480,30 @@ Parameters:
   source line where this symbol calls it (`at file:line: <code>`), so "what does X
   call" also shows HOW it calls it.
 
+### find_references
+
+Find-all-references: **every** place a symbol is used, not just where it is called.
+`find_callers` reports incoming call/use/reference edges, so for a type or interface
+it misses the `imports`, `implements`/`inherits`, and type-use edges that are the
+whole point of "where is this type used". `find_references` returns every incoming
+edge except structural ownership (`contains`/`defines`/`has_*`), so the result unions
+calls, imports, inheritance/implements, type uses, cross-language coupling
+(`calls_service`/`handled_by`/`invokes`/`binds_native`), and evidence-linked
+`dynamic_ref`. The header carries the total and a per-relation breakdown.
+
+It is the superset companion to `find_callers` (calls only) aimed at
+types/interfaces/enums/constants. References are to the symbol **itself** — unlike
+`find_callers`, a class's members are **not** folded in (it answers "where is `Foo`
+referenced", not "where are `Foo`'s methods called"). On a federated graph a
+cross-repo use surfaces the same as a local one.
+
+Parameters:
+- `label` (string, required).
+- `limit` (integer, default 50) — max references listed before a `+N more` summary. Ignored when `verbose` is true.
+- `verbose` (boolean, default false) — emit the full, uncapped reference list.
+- `show_sites` (boolean, default false) — under each reference, print the actual
+  source line where the use happens (`at file:line: <code>`).
+
 ### list_prs
 
 Open PRs with CI/review state targeting the base branch. Requires the `gh` CLI.
@@ -614,15 +638,20 @@ the symbol or kind is not recognized.
 ### structural_search
 
 Structural search over the graph with SYNQL (a small Cypher-inspired query
-language), or a named architectural pattern. Not text search: it matches on
-kind/visibility/loc/fan-in/out/etc. `.name` is the bare symbol (no parentheses);
-use `=~` for a regex/substring match.
+language), a named architectural pattern, or a file outline. Not text search: it
+matches on kind/visibility/loc/fan-in/out/etc. `.name` is the bare symbol (no
+parentheses); use `=~` for a regex/substring match.
 
 Parameters:
 - `query` (string) -- a SYNQL query, e.g. `MATCH (c:class) WHERE c.loc > 500 RETURN c`.
-  Omit when using `pattern`.
+  Omit when using `pattern` or `file`.
 - `pattern` (string) -- a built-in pattern name instead of a query: `singleton`,
   `factory`, `observer`, `service-locator`, `god-class`.
+- `file` (string) -- list every symbol defined in this file (a path substring),
+  ordered by line: a **file outline**, no query needed. Used only when `query` and
+  `pattern` are omitted (precedence is `pattern` > `query` > `file`). The path
+  matches literally; on a federated graph a bare path matches the file across every
+  member, while a `tag/`-qualified path scopes to one.
 - `limit` (integer) -- max rows to return. Default 25.
 
 Returns the matched rows (one node per line: label, kind/visibility, source

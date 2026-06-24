@@ -50,8 +50,11 @@ grepping or reading files.
   Razor/Blazor. See [Languages](https://github.com/ColinVaughn/Synaptic/wiki/Languages).
 - **One command to a full graph** plus 2D, 3D, and SVG visualizations, a Markdown report,
   and GraphML / Cypher / DOT / Obsidian / wiki exports. See [Output Formats](https://github.com/ColinVaughn/Synaptic/wiki/Output-Formats).
-- **Graph queries**: relevant-subgraph search, shortest path, node explanation, and
-  reverse-impact ("what depends on this"). See [Querying](https://github.com/ColinVaughn/Synaptic/wiki/Querying).
+- **Graph queries**: relevant-subgraph search, shortest path, node explanation,
+  reverse-impact ("what depends on this"), find-all-references (`synaptic references` /
+  the `find_references` tool: everywhere a symbol is used, including the imports and
+  inheritance a caller-only view misses), and per-file symbol outlines. See
+  [Querying](https://github.com/ColinVaughn/Synaptic/wiki/Querying).
 - **Dynamic-dispatch awareness**: event buses (Node EventEmitter, DOM CustomEvent, C# events)
   and Electron IPC link a publisher to its subscriber through a channel node, so a handler reached
   only across the bus is not a phantom 0-caller. Reflection and dynamic dispatch that cannot be
@@ -66,7 +69,8 @@ grepping or reading files.
   language over the graph, matching on structure (kind, visibility, LOC, fan-in/out,
   variable-length paths) with `count(...)` aggregation, `--explain`, saved queries, and a
   library of named patterns (singleton, factory, observer, service-locator, god-class). Not
-  text search.
+  text search. `synaptic search --file <path>` lists every symbol defined in a file, ordered
+  by line, with no query needed.
 - **Safe refactor**: `synaptic refactor rename` / `move` / `extract` emit a confidence-scored
   execution plan (`plan.json` + `plan.md`) for an AI agent to apply, then `refactor verify`
   rebuilds and checks the graph held (the definition moved/renamed, no references lost, no new
@@ -87,11 +91,11 @@ grepping or reading files.
   queries to the tables they touch). `synaptic sql advise --query "<sql>"` critiques a candidate
   query before you write it, cross-referenced against the graph's tables/indexes/RLS. See
   [SQL Auditing](https://github.com/ColinVaughn/Synaptic/wiki/SQL-Auditing).
-- **MCP server** (protocol 2025-11-25) exposing 28 read-only tools over stdio or HTTP:
-  subgraph search, source reading, reverse-impact, dynamic-dispatch hazards, PR/working-tree blast
-  radius, change forecasting, predictive test selection, edit-impact prediction, structural search,
-  time-travel diff, plan-only rename, and SQL audit/advise, plus prompts, completions, resource
-  subscriptions, and structured tool output. See
+- **MCP server** (protocol 2025-11-25) exposing 29 read-only tools over stdio or HTTP:
+  subgraph search, source reading, reverse-impact, find-all-references, dynamic-dispatch hazards,
+  PR/working-tree blast radius, change forecasting, predictive test selection, edit-impact prediction,
+  structural search, time-travel diff, plan-only rename, and SQL audit/advise, plus prompts, completions,
+  resource subscriptions, and structured tool output. See
   [MCP Server](https://github.com/ColinVaughn/Synaptic/wiki/MCP-Server).
 - **Incremental rebuilds**, file watching, and git hooks keep the graph current. See
   [Incremental Updates](https://github.com/ColinVaughn/Synaptic/wiki/Incremental-Updates).
@@ -340,10 +344,10 @@ synaptic serve                                                        # stdio MC
 synaptic serve --http 127.0.0.1:8765 --api-key "$SYNAPTIC_API_KEY"   # HTTP server
 ```
 
-The server exposes 28 read-only tools: graph navigation (`query_graph`, `get_node`,
+The server exposes 29 read-only tools: graph navigation (`query_graph`, `get_node`,
 `get_source`, `get_neighbors`, `get_community`, `god_nodes`, `graph_stats`, `shortest_path`),
-impact analysis (`affected`, `find_callers`, `find_callees`, `dynamic_hazards`, `predict_impact`,
-`affected_tests`, `predict_edit`), federation (`list_repos`, `repo_stats`), change/PR review (`working_changes_impact`,
+impact analysis (`affected`, `find_callers`, `find_callees`, `find_references`, `dynamic_hazards`,
+`predict_impact`, `affected_tests`, `predict_edit`), federation (`list_repos`, `repo_stats`), change/PR review (`working_changes_impact`,
 `list_prs`, `get_pr_impact`, `triage_prs`), the advanced trio (`structural_search`,
 `time_travel_diff`, plan-only `plan_rename`), and SQL auditing (`audit_sql`, `advise_sql`).
 It also serves MCP prompts, argument completions, resource templates and

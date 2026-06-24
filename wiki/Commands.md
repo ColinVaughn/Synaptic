@@ -11,12 +11,13 @@ Most read commands operate on `synaptic-out/graph.json` by default; build it fir
 | [`extract`](#extract) | Build the graph for a directory and write `synaptic-out/`. |
 | [`export`](#export) | Re-emit an output format from an existing `graph.json` (no re-extraction), or push live to a database. |
 | [`query`](#query) | Find a relevant subgraph for a free-text query. |
-| [`search`](#search) | Structural search (SYNQL) and named architectural patterns. Not text search. |
+| [`search`](#search) | Structural search (SYNQL), named architectural patterns, or a per-file symbol outline (`--file`). Not text search. |
 | [`path`](#path) | Shortest path between two nodes. |
 | [`explain`](#explain) | Show a node and its neighbours. |
 | [`update`](#update) | Incrementally rebuild after files change (or fully with `--full`). |
 | [`watch`](#watch) | Watch the working tree and rebuild on change (debounced). |
 | [`affected`](#affected) | Nodes that transitively depend on a node (reverse-impact). |
+| [`references`](#references) | Find all references / uses of a symbol (calls plus imports, inheritance, type uses). |
 | [`hazards`](#hazards) | List reflection / dynamic-dispatch sites, so a "0 dependents" answer is not mistaken for "safe". |
 | [`diff`](#diff) | Time-travel: diff the graph between two git revisions (dependencies, removed APIs, drift, cycles, hotspots). |
 | [`predict`](#predict) | Forecast a change before applying it: blast radius, public APIs at risk, new cycles, and a verify checklist. |
@@ -200,15 +201,16 @@ community) and relationships.
 Syntax:
 
 ```sh
-synaptic search [QUERY] [--pattern <NAME>] [--list-patterns]
+synaptic search [QUERY] [--pattern <NAME>] [--file <PATH>] [--list-patterns]
                  [--explain] [--save <NAME>] [--saved <NAME>] [--list-saved]
                  [--graph <PATH>] [--repo <TAG>] [--json] [--limit <N>]
 ```
 
 | Name | Default | Description |
 | --- | --- | --- |
-| `QUERY` | none | A SYNQL query (omit when using `--pattern`/`--saved`/`--list-patterns`). |
+| `QUERY` | none | A SYNQL query (omit when using `--pattern`/`--file`/`--saved`/`--list-patterns`). |
 | `--pattern` | none | Run a built-in pattern instead of a query. |
+| `--file` | none | List every symbol defined in this file (a path substring), ordered by line -- a file outline, no query needed. Used when neither a query nor `--pattern` is given. |
 | `--list-patterns` | off | List the built-in patterns and exit. |
 | `--explain` | off | Print the query plan (scan, joins, filter, project/aggregate) without running it. |
 | `--save` | none | Save the given query under a name (`synaptic-out/synql/<name>.synql`). |
@@ -254,6 +256,7 @@ synaptic search "MATCH (c:class) RETURN c.community, count(c)" # group + count
 synaptic search "MATCH (c:class) WHERE c.loc > 500 RETURN c" --explain
 synaptic search "MATCH (c:class) RETURN c" --save big_classes
 synaptic search --saved big_classes
+synaptic search --file src/auth/service.ts          # file outline, ordered by line
 ```
 
 ### Named patterns
@@ -362,6 +365,45 @@ synaptic affected "User" --relation calls --relation references
 ```
 
 See [Querying](Querying) and [Analysis-and-Reports](Analysis-and-Reports).
+
+## references
+
+Find all references / uses of a symbol -- the find-all-references view. Where
+[`affected`](#affected) walks the *transitive* reverse-impact closure and a
+caller-only view reports just calls, `references` lists the symbol's **direct**
+incoming uses of every kind: calls plus imports, `implements`/`inherits`, type
+uses, cross-language coupling, and reflection refs (every incoming edge except
+structural ownership like `contains`). It is the tool for "where is this type /
+interface / enum used", which a calls-only view misses. References are to the
+symbol itself; a type's members are not folded in. Aliased as `refs`.
+
+Syntax:
+
+```sh
+synaptic references <NODE> [--graph <PATH>] [--repo <TAG>] [--limit <N>] [--verbose]
+```
+
+| Name | Default | Description |
+| --- | --- | --- |
+| `NODE` | required | Node id, label, bare name, or `name@file-substring` to disambiguate. |
+| `--graph` | `synaptic-out/graph.json` | Source graph. |
+| `--repo` | none | Scope to one federated member (its `repo` tag). |
+| `--limit` | `50` | Max references listed before a `+N more` summary. Ignored with `--verbose`. |
+| `--verbose` | off | List every reference instead of the summarized top-N. |
+
+The header carries the total and a per-relation breakdown (e.g. `calls: 7,
+imports: 3, implements: 2`). On a federated graph a cross-repo use surfaces the
+same as a local one. Mirrors the `find_references` MCP tool.
+
+Example:
+
+```sh
+synaptic references "User"                      # everywhere the User type is used
+synaptic references "announce@core/foo.ts"      # qualify a name shared by several files
+synaptic refs PaymentService --repo billing     # scope to one federated member
+```
+
+See [Querying](Querying) and [MCP-Server](MCP-Server).
 
 ## hazards
 
@@ -752,7 +794,7 @@ synaptic serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root
 | `--allow-exec` | off | Expose the command-running `speculate` tool (the 28th tool). This makes the server no longer read-only, so enable it only for trusted clients. See [MCP Server](MCP-Server). |
 | `--concise` | off | Token-lean output: lower the default list/budget sizes so tool results return less to the model (or set `SYNAPTIC_CONCISE`). An explicit per-call argument always wins. |
 
-Defaults to stdio transport. The MCP server reports protocol `2025-11-25` and exposes 28 read-only tools (29 with `--allow-exec`, which adds the command-running `speculate` tool), prompts, completions, resource templates/subscriptions, and structured tool output. When serving HTTP on a wildcard address with no API key, it prints a warning.
+Defaults to stdio transport. The MCP server reports protocol `2025-11-25` and exposes 29 read-only tools (30 with `--allow-exec`, which adds the command-running `speculate` tool), prompts, completions, resource templates/subscriptions, and structured tool output. When serving HTTP on a wildcard address with no API key, it prints a warning.
 
 Example:
 

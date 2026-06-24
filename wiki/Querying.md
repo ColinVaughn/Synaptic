@@ -1,10 +1,11 @@
 # Querying
 
-Synaptic reads a built `graph.json` and answers four kinds of questions about it:
+Synaptic reads a built `graph.json` and answers five kinds of questions about it:
 `query` (relevant subgraph), `path` (shortest route between two nodes), `explain`
-(one node and its neighbours), and `affected` (reverse-impact: what depends on a
-node). All four are read-only and operate on the graph produced by `synaptic
-extract` (see [Commands] and [Output-Formats]).
+(one node and its neighbours), `affected` (reverse-impact: what *transitively*
+depends on a node), and `references` (find-all-references: every *direct* use of a
+symbol). All are read-only and operate on the graph produced by `synaptic extract`
+(see [Commands] and [Output-Formats]).
 
 By default each command loads `synaptic-out/graph.json`. Pass `--graph <path>`
 to point at a different file.
@@ -291,6 +292,31 @@ dynamic-dispatch site(s) ... not provably unused"). List the underlying sites wi
 [Cross-Language-Edges](Cross-Language-Edges#dynamic-dispatch).
 
 `affected` accepts `--graph`. It does not take a `--repo` flag.
+
+## references
+
+```sh
+synaptic references User
+```
+
+`references` is the find-all-references view: the symbol's **direct** incoming uses
+of every kind -- calls plus imports, `implements`/`inherits`, type uses,
+cross-language coupling, and reflection refs (every incoming edge except structural
+ownership like `contains`). Two distinctions matter:
+
+- vs `affected`: `affected` walks the *transitive* reverse-impact closure (depth
+  hops); `references` reports only *direct* uses, but of every relation kind.
+- vs a calls-only view: a caller list reports calls/uses/references and so misses a
+  type's `imports` and `implements`/`inherits`. For "where is this type/interface
+  used", reach for `references`. References are to the symbol itself -- a type's
+  members are not folded in.
+
+The header carries the total and a per-relation breakdown. It accepts `--graph`,
+`--limit`/`--verbose`, and -- unlike `affected` -- a `--repo` flag to scope to one
+federated member; on a federated graph a cross-repo use surfaces the same as a
+local one. Mirrors the `find_references` MCP tool. The related file outline
+`synaptic search --file <path>` lists every symbol defined in a file, ordered by
+line (see [Commands](Commands#search)).
 
 ## See also
 

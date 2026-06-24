@@ -66,7 +66,7 @@ get the binary.
   commit from its parent state, and scores the prediction against git ground
   truth (co-edited tests, removed APIs) so forecast quality is regression-testable
   and CI-gateable ([Commands](Commands)).
-- An MCP server (28 read-only tools) and one-command assistant integration
+- An MCP server (29 read-only tools) and one-command assistant integration
   ([MCP Server](MCP-Server), [Assistant Integration](Assistant-Integration)).
 - Multi-repo federation with real cross-repo edge resolution
   ([Workspaces and Federation](Workspaces-and-Federation)).

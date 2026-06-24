@@ -429,7 +429,13 @@ it (cross-repo edges, whose other end is in another repo, are dropped).
 synaptic query "billing ledger" --repo billing
 synaptic path NodeA NodeB --repo billing
 synaptic explain Ledger --repo billing
+synaptic references Ledger --repo billing
 synaptic export svg --repo billing
 ```
 
-See [Querying] for query/path/explain and [Output-Formats] for export.
+`synaptic search --file <path>` and the `find_references` / `structural_search`
+MCP tools work over the whole federated graph without `--repo`: a bare file path
+matches that file across every member (a `tag/`-qualified path scopes to one), and
+a `find_references` result includes cross-repo uses of the symbol.
+
+See [Querying] for query/path/explain/references and [Output-Formats] for export.
