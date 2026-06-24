@@ -58,6 +58,7 @@ OpenAI, DeepSeek, Azure OpenAI, Bedrock, Ollama. Set `SYNAPTIC_BACKEND` to force
 | Variable | Purpose |
 |---|---|
 | `SYNAPTIC_API_KEY` | Bearer token for the HTTP MCP server (fallback for `--api-key`) |
+| `SYNAPTIC_CONCISE` | Token-lean output: lower the default list/budget sizes so tool results return less to the model (same as `serve --concise`). An explicit per-call argument always wins. Truthy unless `0`/`false`/`no`/`off` |
 | `SYNAPTIC_QUERY_LOG` | Path to write the server query log |
 | `SYNAPTIC_QUERY_LOG_DISABLE` | Disable the query log (`1`/`true`/`yes`) |
 | `SYNAPTIC_CHANGED` | Newline-delimited changed-file list read by `update` (used by the git hook) |

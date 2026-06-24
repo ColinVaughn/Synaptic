@@ -52,7 +52,7 @@ edge confidence mean).
 ## Running the server
 
 ```
-synaptic serve [--graph <path>] [--http <addr>] [--api-key <key>] [--source-root <dir>] [--allow-exec]
+synaptic serve [--graph <path>] [--http <addr>] [--api-key <key>] [--source-root <dir>] [--allow-exec] [--concise]
 ```
 
 - `--graph <path>` selects the `graph.json` to load. Default is the standard
@@ -70,6 +70,11 @@ synaptic serve [--graph <path>] [--http <addr>] [--api-key <key>] [--source-root
   This makes the server **no longer read-only** — `speculate` executes the
   project's test/build commands in a throwaway worktree — so enable it only for
   trusted clients. Without it the tool is neither advertised nor runnable.
+- `--concise`: token-lean output. Lowers the default list/budget sizes so tool
+  results return less to the model (`query_graph` `token_budget` 1200, list limits
+  to 20, `dynamic_hazards` to 20, `get_community` to 40, `top_n` to 6,
+  `context_lines` to 25). An explicit per-call argument always wins. Equivalent to
+  setting the `SYNAPTIC_CONCISE` environment variable (see [Configuration]).
 
 ### stdio transport
 
@@ -195,11 +200,16 @@ Parameters:
 - `mode` (string, `"bfs"` or `"dfs"`) -- traversal mode. Default `bfs`. Both
   expand best-first by relevance; the mode only breaks score ties (bfs favors
   shallower nodes, dfs deeper ones).
-- `token_budget` (integer) -- approximate output token budget. Default 2000. It
-  maps to a node cap (about `budget/40`, clamped to 10..400). The rendered text
+- `full` (boolean) -- return the whole subgraph (all budget-bounded nodes plus
+  their edges) instead of the terse top-N node list. Default false. Set it true
+  when you need the relationships, not just which symbols match.
+- `token_budget` (integer) -- approximate output token budget for the full
+  subgraph. Default 1200. It maps to a node cap (about `budget/40`, clamped to
+  10..400); the terse default shows only the top ~15 of those. The rendered text
   is bounded to about `token_budget` tokens: output within `token_budget*4` bytes
   is returned as-is (a fast path), and only larger output is truncated, using the
-  `cl100k_base` tokenizer for an exact cut.
+  `cl100k_base` tokenizer for an exact cut. In `full` mode the edges are capped to
+  about twice the node count.
 - `context_filter` (array of strings) -- keep only nodes whose source file path
   contains one of these substrings.
 - `since` (string) -- optional recency boost. Nodes whose file changed on the
@@ -213,10 +223,13 @@ Parameters:
   nodes as seeds, so the changed surface appears even when the question matches
   little -- use it to answer "what did this branch change".
 
-Returns a header (`Traversal: <mode> | Start: [<seeds>] | <n> nodes found`, plus a
-`Recency:` line when `since` is used) followed by `NODE` lines (`[score]`, an
-optional `(changed)` marker, label, file type, source file) and `EDGE` lines
-(`source --relation--> target`), plus a `structuredContent` mirror (see below).
+By default the response is terse: a header (`Traversal: <mode> | Start: [<seeds>]
+| <n> nodes found`, plus a `Recency:` line when `since` is used) followed by the
+top ranked `NODE` lines (`[score]`, an optional `(changed)` marker, label, file
+type, source file) and **no edges**, ending with a `(terse: top N of M matched
+nodes ...)` note when more matched. Pass `full=true` for the whole subgraph: all
+budget-bounded nodes plus `EDGE` lines (`source --relation--> target`). Either way
+a `structuredContent` mirror (see below) accompanies the text.
 When the `SYNAPTIC_QUERY_LOG` environment variable points to a path, each query
 is appended to it as JSONL (disable with `SYNAPTIC_QUERY_LOG_DISABLE=1`).
 
@@ -290,14 +303,20 @@ Parameters:
   whose relation contains it.
 - `show_sites` (boolean) -- under each neighbour, print the actual source line of
   that edge's call/reference site (`at file:line: <code>`, read from the jail).
-  Default false; enriches the text view only (the structured mirror is unchanged).
+  Default false; enriches the text view only.
+- `limit` (integer, default 50) -- max neighbours listed before a `+N more`
+  summary. Ignored when `verbose` is true.
+- `verbose` (boolean, default false) -- list every neighbour instead of the
+  capped top-N (use after a `relation_filter` on a hub).
 
 Returns one line per neighbour with a direction marker and the relation in
-brackets. When a `relation_filter` matches none of the node's edges, the result
-is `(none with relation '<filter>'; this node has: <rel>(<count>), ...)` -- naming
-the relations the node does have, so an empty result is not mistaken for a missing
-node. A `structuredContent` mirror carries `{ seed, neighbors, by_relation }`,
-where `by_relation` tallies every edge on the node before any filter.
+brackets, capped at `limit` with a `+N more` note on a hub. When a
+`relation_filter` matches none of the node's edges, the result is `(none with
+relation '<filter>'; this node has: <rel>(<count>), ...)` -- naming the relations
+the node does have, so an empty result is not mistaken for a missing node. A
+`structuredContent` mirror carries `{ seed, neighbors, by_relation, total,
+truncated }`, where `by_relation` tallies every edge on the node before any filter
+and `total` is the full matched count (which may exceed the capped `neighbors`).
 
 ### get_community
 
@@ -604,7 +623,7 @@ Parameters:
   Omit when using `pattern`.
 - `pattern` (string) -- a built-in pattern name instead of a query: `singleton`,
   `factory`, `observer`, `service-locator`, `god-class`.
-- `limit` (integer) -- max rows to return. Default 50.
+- `limit` (integer) -- max rows to return. Default 25.
 
 Returns the matched rows (one node per line: label, kind/visibility, source
 location), or the parse error if the query is malformed. It also returns a
@@ -682,7 +701,9 @@ Parameters:
   detectors emit; event buses are modeled as edges, not sites).
 - `target` (string) -- only sites that could reach this symbol: sites whose literal
   key names it, plus opaque sites in a file that defines it.
-- `max_results` (integer) -- sites to return before truncation. Default 100, max 1000.
+- `max_results` (integer) -- sites to return before truncation. Default 30, max 1000.
+  It is a scan-and-narrow tool: filter by `repo`/`path_glob`/`kind`/`target`
+  rather than raising this.
 
 Each text row is `[repo] file:line  <kind>  <"key"|(opaque)>  in <enclosing
 symbol>`; the `structuredContent` mirror is
@@ -753,9 +774,15 @@ non-sargable predicates, N+1 patterns, and missing primary keys.
 Parameters:
 - `severity` (string) -- only return findings at least this severe
   (`critical`|`high`|`medium`|`low`|`info`).
+- `limit` (integer, default 20) -- max findings before a `+N more` summary.
+  Ignored when `verbose` is true.
+- `verbose` (boolean, default false) -- list all findings AND each finding's full
+  detail + fix, instead of the terse one-line-per-finding summary.
 
-Returns a one-line summary plus, in `structuredContent`, the full `AuditReport`.
-See [SQL Auditing](SQL-Auditing).
+Returns a one-line report summary, then one line per finding by default
+(`[severity] rule_id @ location (conf) title`); `verbose` adds each finding's
+detail and fix. A `structuredContent` mirror carries the full `AuditReport`. See
+[SQL Auditing](SQL-Auditing).
 
 ### advise_sql
 
@@ -782,11 +809,11 @@ formatted text:
 | `get_node` | `{ found, id, label, source_file, file_type, degree, community?, kind?, visibility?, loc? }` (on an ambiguous name: `found:false` with `ambiguous`+`candidates`, matching `affected`/`describe_node`) |
 | `god_nodes` | `{ god_nodes: [{ label, degree, id, test_count }] }` (`degree` = total connections incl. members; centrality/size, not incoming-dependence) |
 | `affected` | `{ seed, resolved, affected: [{ label, depth, via_relation }], total, truncated, by_depth, aggregated_over_members? }` (on an unresolved name: `resolved:false` with `ambiguous`+`candidates` or `found:false`) |
-| `query_graph` | `{ nodes: [{ label, file_type, source_file, score, changed }], edges: [{ source, relation, target }] }` (nodes sorted by `score`; `changed` is true when `since` was given and the node's file changed) |
+| `query_graph` | `{ nodes: [{ label, file_type, source_file, score, changed }], edges: [{ source, relation, target }] }` (nodes sorted by `score`; `changed` is true when `since` was given and the node's file changed; `edges` is empty unless `full=true`) |
 | `structural_search` | `{ columns, results: [[{ id, label, kind, visibility, file, line, loc, signature }]] }` (or `groups` for aggregates) |
 | `search_text` | `{ pattern, total, truncated, files_scanned, hits: [{ repo, file, line, col, match, line_text, node? }] }` (`node` is the enclosing symbol `{ id, label, kind, community }`, or null when the hit is outside any captured span) |
 | `describe_node` | `{ found, id, label, kind, summary, callees, signature, members?, member_count? }` (`members` listed for a class/type; on an ambiguous name: `found:false` with `ambiguous`+`candidates`) |
-| `get_neighbors` | `{ seed, neighbors: [{ label, relation, direction }], by_relation: { <relation>: <count> } }` (`by_relation` tallies every edge before any filter) |
+| `get_neighbors` | `{ seed, neighbors: [{ label, relation, direction }], by_relation: { <relation>: <count> }, total, truncated }` (`by_relation` tallies every edge before any filter; `total` is the full matched count, capped to `limit`) |
 | `list_repos` | `{ repos: [{ repo, nodes, edges, source_hash? }] }` (empty array for a single-repo graph; `source_hash` present when a `workspace-state.json` sibling exists) |
 | `predict_impact` | the full `ChangeForecast`: `{ summary, changed_files, changed_nodes, public_api_breaks, blast_radius, blast_radius_total, at_risk_tests, verify_checklist, risk }` (not truncated by `limit`, which caps only the text) |
 | `affected_tests` | `{ tests: [{ id, label, file, depth, via_relation }], total }` |
