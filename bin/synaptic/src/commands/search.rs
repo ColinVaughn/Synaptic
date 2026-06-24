@@ -5,13 +5,16 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 use synaptic_graph::KnowledgeGraph;
-use synaptic_synql::{explain, patterns, run, QueryResult};
+use synaptic_synql::{explain, file_outline, patterns, run, QueryResult};
 
 use crate::commands::common::{default_graph_path, load_scoped_graph};
 
 pub(crate) struct SearchArgs {
     pub query: Option<String>,
     pub pattern: Option<String>,
+    /// List every symbol defined in this file (an outline, ordered by line);
+    /// used only when neither a query nor a pattern is given.
+    pub file: Option<String>,
     pub list_patterns: bool,
     pub explain: bool,
     pub save: Option<String>,
@@ -82,8 +85,10 @@ pub(crate) fn run_search(a: SearchArgs) -> Result<()> {
         patterns::run_pattern(&kg, &p).map_err(|e| anyhow!("{e}"))?
     } else if let Some(q) = &query_text {
         run(&kg, q).map_err(|e| anyhow!("{e}"))?
+    } else if let Some(f) = &a.file {
+        file_outline(&kg, f).map_err(|e| anyhow!("{e}"))?
     } else {
-        bail!("provide a SYNQL query, --saved <name>, or --pattern <name> (see --list-patterns)");
+        bail!("provide a SYNQL query, --saved <name>, --pattern <name>, or --file <path> (see --list-patterns)");
     };
     // A CLI-level safety cap on top of any LIMIT in the query.
     result.rows.truncate(a.limit);

@@ -158,6 +158,26 @@ pub(crate) enum Cmd {
         #[arg(long)]
         verbose: bool,
     },
+    /// Find all references / usages of a symbol: calls plus imports, inheritance,
+    /// implements, and type uses (the find-all-references view). For a
+    /// type/interface/enum this catches the structural usages a caller-only view
+    /// misses. References are to the symbol itself (members are not folded in).
+    #[command(visible_alias = "refs")]
+    References {
+        /// Node id, label, or bare name. If shared by several files, qualify it as "name@file-substring".
+        node: String,
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        /// Scope to one federated member (its `repo` tag).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Max references listed before a "+N more" summary. Ignored with --verbose.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// List every reference instead of the summarized top-N.
+        #[arg(long)]
+        verbose: bool,
+    },
     /// Reflection / dynamic-dispatch sites recorded in the graph. A symbol reached
     /// only by dynamic dispatch has no static dependents, so "0 dependents" is not
     /// proof it is safe to change; this lists the sites behind that risk.
@@ -348,11 +368,15 @@ pub(crate) enum Cmd {
     /// Example: synaptic search "MATCH (c:class) WHERE c.loc > 500 RETURN c"
     /// Example: synaptic search "MATCH (f:function) WHERE f.name =~ \"announce\" RETURN f"
     Search {
-        /// A SYNQL query. Omit when using --pattern or --list-patterns.
+        /// A SYNQL query. Omit when using --pattern, --file, or --list-patterns.
         query: Option<String>,
         /// Run a built-in pattern instead (singleton|factory|observer|service-locator|god-class).
         #[arg(long)]
         pattern: Option<String>,
+        /// List every symbol defined in this file (an outline, ordered by line).
+        /// Used when no query or --pattern is given.
+        #[arg(long)]
+        file: Option<String>,
         /// List the built-in patterns and exit.
         #[arg(long)]
         list_patterns: bool,

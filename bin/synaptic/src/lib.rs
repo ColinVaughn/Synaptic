@@ -21,7 +21,9 @@ use commands::install::{run_install, run_uninstall};
 use commands::merge::run_merge_graphs;
 use commands::predict::run_predict;
 use commands::prs::run_prs;
-use commands::query::{run_affected, run_explain, run_hazards, run_path, run_query};
+use commands::query::{
+    run_affected, run_explain, run_hazards, run_path, run_query, run_references,
+};
 use commands::refactor::run_refactor;
 use commands::search::run_search;
 use commands::self_update::run_self_update;
@@ -106,6 +108,13 @@ fn run() -> Result<()> {
             limit,
             verbose,
         } => run_affected(&node, graph, depth, relations, limit, verbose),
+        Cmd::References {
+            node,
+            graph,
+            repo,
+            limit,
+            verbose,
+        } => run_references(&node, graph, repo.as_deref(), limit, verbose),
         Cmd::Hazards {
             graph,
             repo,
@@ -194,6 +203,7 @@ fn run() -> Result<()> {
         Cmd::Search {
             query,
             pattern,
+            file,
             list_patterns,
             explain,
             save,
@@ -206,6 +216,7 @@ fn run() -> Result<()> {
         } => run_search(commands::search::SearchArgs {
             query,
             pattern,
+            file,
             list_patterns,
             explain,
             save,

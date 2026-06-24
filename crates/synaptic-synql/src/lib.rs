@@ -45,6 +45,27 @@ pub fn run(kg: &KnowledgeGraph, query: &str) -> Result<QueryResult, SynqlError> 
     Ok(eval::run_query(kg, &q))
 }
 
+/// List every symbol defined in `file` (a path substring), ordered by line -- a
+/// file outline. A convenience wrapper over `MATCH (n) WHERE n.file =~ "<file>"
+/// RETURN n` with the file string regex-escaped so a path matches literally, and
+/// the rows sorted by the symbol's start line. Shared by the `structural_search`
+/// MCP tool's `file` param and the `synaptic search --file` CLI flag.
+pub fn file_outline(kg: &KnowledgeGraph, file: &str) -> Result<QueryResult, SynqlError> {
+    let q = format!(
+        "MATCH (n) WHERE n.file =~ \"{}\" RETURN n",
+        regex::escape(file)
+    );
+    let mut r = run(kg, &q)?;
+    r.rows.sort_by_key(|row| {
+        row.first()
+            .and_then(|id| kg.node(id))
+            .and_then(|n| n.span())
+            .map(|s| s.start_line)
+            .unwrap_or(u32::MAX)
+    });
+    Ok(r)
+}
+
 /// Parse and validate a query, returning a human-readable plan (no evaluation).
 pub fn explain(query: &str) -> Result<String, SynqlError> {
     let q = parser::parse(query).map_err(SynqlError::Parse)?;

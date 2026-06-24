@@ -54,9 +54,9 @@ use synaptic_prs::{
 };
 use synaptic_query::{
     affected_including_members, candidate_details, dependents_caveat, describe_node, explain,
-    is_type_like, resolve_detailed, shortest_path, type_member_ids, AffectedHit, DynamicCaveat,
-    DynamicHazardIndex, QueryIndex, Recency, RecencyMode, Resolution, ReverseImpactIndex,
-    TraversalMode, DEFAULT_AFFECTED_RELATIONS,
+    is_type_like, references_to, resolve_detailed, shortest_path, type_member_ids, AffectedHit,
+    DynamicCaveat, DynamicHazardIndex, QueryIndex, Recency, RecencyMode, Resolution,
+    ReverseImpactIndex, TraversalMode, DEFAULT_AFFECTED_RELATIONS,
 };
 use synaptic_sandbox::{
     render_markdown as render_speculate_md, speculate, Change, SpeculateOptions,
@@ -2337,6 +2337,76 @@ impl Server {
         out
     }
 
+    /// `find_references` — every place a symbol is used (the "find all
+    /// references" primitive): all incoming non-ownership edges, including the
+    /// import / inheritance / type-use edges `find_callers` omits. Direct
+    /// references to the symbol itself; a type's members are NOT folded in.
+    pub fn tool_find_references(
+        &self,
+        label: &str,
+        limit: usize,
+        verbose: bool,
+        show_sites: bool,
+    ) -> String {
+        let id = match self.resolve_or_msg(label) {
+            Ok(id) => id,
+            Err(msg) => return msg,
+        };
+        if self.kg.node(&id).is_none() {
+            return format!("No node matches '{}'.", sanitize_label(label));
+        }
+        let seed = sanitize_label(&self.label_of(&id));
+        let refs = references_to(&self.kg, &id);
+        if refs.is_empty() {
+            return format!("No references to {seed}.");
+        }
+        let mut by_rel: BTreeMap<String, usize> = BTreeMap::new();
+        for r in &refs {
+            *by_rel.entry(r.relation.clone()).or_default() += 1;
+        }
+        // Gather the reference sites once for show_sites, keyed like `directional`.
+        let sites: SiteMap = if show_sites {
+            let mut m = SiteMap::new();
+            self.edge_sites(&id, &mut m);
+            m
+        } else {
+            SiteMap::new()
+        };
+        // Per-relation breakdown only when it adds information (>1 kind).
+        let breakdown = if by_rel.len() > 1 {
+            let parts = by_rel
+                .iter()
+                .map(|(r, c)| format!("{}: {c}", sanitize_label(r)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" [{parts}]")
+        } else {
+            String::new()
+        };
+        let cap = if verbose { usize::MAX } else { limit.max(1) };
+        let total = refs.len();
+        let mut out = format!("{total} references to {seed}{breakdown}:");
+        for r in refs.iter().take(cap) {
+            out.push_str(&format!(
+                "\n  {} [{}]",
+                sanitize_label(&r.label),
+                sanitize_label(&r.relation)
+            ));
+            if show_sites {
+                if let Some(site_list) = sites.get(&(r.id.clone(), r.relation.clone(), "in")) {
+                    out.push_str(&self.render_sites(site_list, "      ", 3));
+                }
+            }
+        }
+        if total > cap {
+            out.push_str(&format!(
+                "\n  ... (+{} more; pass verbose=true for the full list)",
+                total - cap
+            ));
+        }
+        out
+    }
+
     /// `affected` — the nodes that transitively depend on `label`, found by
     /// walking impact edges backward up to `depth` hops. Empty `relations`
     /// uses the default structural-impact set.
@@ -3136,18 +3206,12 @@ impl Server {
         &self,
         query: Option<&str>,
         pattern: Option<&str>,
+        file: Option<&str>,
         limit: usize,
     ) -> Value {
-        let result = if let Some(p) = pattern {
-            synaptic_synql::patterns::run_pattern(&self.kg, p)
-        } else if let Some(q) = query {
-            synaptic_synql::run(&self.kg, q)
-        } else {
-            return json!({ "error": "Provide a SYNQL query or a pattern name.", "results": [] });
-        };
-        let r = match result {
+        let r = match self.structural_search_result(query, pattern, file) {
             Ok(r) => r,
-            Err(e) => return json!({ "error": format!("search error: {e}"), "results": [] }),
+            Err(e) => return json!({ "error": e, "results": [] }),
         };
         if let Some(agg) = &r.aggregates {
             let groups: Vec<Value> = agg
@@ -3367,22 +3431,40 @@ impl Server {
     }
 
     /// Structural search via SYNQL (or a named pattern) over the loaded graph.
+    /// Resolve the structural_search inputs into a query result. Precedence:
+    /// `pattern`, then `query`, then `file` (the file-outline shorthand, which
+    /// synthesizes `WHERE n.file =~ "<file>"` and orders the rows by line so the
+    /// result reads like a file outline). The file string is regex-escaped so a
+    /// path matches literally.
+    fn structural_search_result(
+        &self,
+        query: Option<&str>,
+        pattern: Option<&str>,
+        file: Option<&str>,
+    ) -> Result<synaptic_synql::QueryResult, String> {
+        let raw = if let Some(p) = pattern {
+            synaptic_synql::patterns::run_pattern(&self.kg, p)
+        } else if let Some(q) = query {
+            synaptic_synql::run(&self.kg, q)
+        } else if let Some(f) = file {
+            // File-outline shorthand (escaped + line-ordered), shared with the CLI.
+            synaptic_synql::file_outline(&self.kg, f)
+        } else {
+            return Err("Provide a SYNQL query, a pattern name, or a file.".to_string());
+        };
+        raw.map_err(|e| format!("search error: {e}"))
+    }
+
     pub fn tool_structural_search(
         &self,
         query: Option<&str>,
         pattern: Option<&str>,
+        file: Option<&str>,
         limit: usize,
     ) -> String {
-        let result = if let Some(p) = pattern {
-            synaptic_synql::patterns::run_pattern(&self.kg, p)
-        } else if let Some(q) = query {
-            synaptic_synql::run(&self.kg, q)
-        } else {
-            return "Provide a SYNQL query or a pattern name.".to_string();
-        };
-        let r = match result {
+        let r = match self.structural_search_result(query, pattern, file) {
             Ok(r) => r,
-            Err(e) => return format!("search error: {e}"),
+            Err(e) => return e,
         };
         if let Some(agg) = &r.aggregates {
             let mut out = format!("{} group(s) [{}]", agg.len(), r.columns.join(", "));
@@ -3863,6 +3945,12 @@ impl Server {
                 b("verbose"),
                 b("show_sites"),
             ),
+            "find_references" => self.tool_find_references(
+                &s("label"),
+                u("limit", cdef(50, 20)) as usize,
+                b("verbose"),
+                b("show_sites"),
+            ),
             "list_prs" => self.tool_list_prs(opt("base"), opt("repo")),
             "get_pr_impact" => self.tool_get_pr_impact(u("pr_number", 0), opt("repo")),
             "triage_prs" => self.tool_triage_prs(opt("base"), opt("repo")),
@@ -3883,6 +3971,7 @@ impl Server {
             "structural_search" => self.tool_structural_search(
                 opt("query"),
                 opt("pattern"),
+                opt("file"),
                 u("limit", cdef(25, 15)) as usize,
             ),
             "describe_node" => self.tool_describe_node(&s("label")),
@@ -3931,6 +4020,7 @@ impl Server {
             "structural_search" => Some(self.structural_search_json(
                 opt("query"),
                 opt("pattern"),
+                opt("file"),
                 u("limit", cdef(25, 15)) as usize,
             )),
             "describe_node" => Some(self.describe_node_json(&s("label"))),
@@ -4263,42 +4353,37 @@ reading files broadly.\n\
 Flow: graph_stats or god_nodes to orient; query_graph for a question (terse ranked nodes \
 by default, full=true for the subgraph + edges); get_source to read a symbol's code (or a \
 `file` + `lines` range, e.g. around a search_text hit); get_neighbors / find_callers / \
-find_callees / shortest_path to navigate (show_sites=true prints the exact call-site line); \
+find_callees / find_references / shortest_path to navigate (find_callers = calls, \
+find_references = all uses incl. imports/inheritance; show_sites=true prints the call-site line); \
 get_node / describe_node for detail.\n\
 \n\
-Change impact: affected gives the blast radius of editing a symbol; working_changes_impact \
-does the same for your git diff. On a class/type these fold in its members, so a class is \
-never a false 'safe leaf'. A '0 dependents' result is NOT proof of 'safe to change': a \
-symbol reached via reflection or dynamic dispatch has no static dependents, so affected \
-attaches a dynamic_caveat and dynamic_hazards lists the sites (event buses and \
-string-literal reflection are linked into the graph; computed names are cataloged as the \
-residual risk). Forecast before editing: predict_impact (blast radius + public-API and \
-test risk), affected_tests (the tests to run), predict_edit (what a delete / signature / \
-visibility change breaks). To actually run the at-risk tests, start the server with \
---allow-exec to enable the speculate tool (off by default; it executes commands).\n\
+Change impact -- pick by input: affected = one SYMBOL now; working_changes_impact = your \
+git diff now; predict_impact = forecast a set of changed FILES (blast radius + public-API \
+breaks + at-risk tests + checklist); affected_tests = same input, tests only; predict_edit \
+= ONE symbol under a named edit (delete/signature/visibility). On a class/type these fold \
+in its members, so a class is never a false 'safe leaf'. A '0 dependents' result is NOT \
+proof of 'safe to change': a symbol reached via reflection or dynamic dispatch has no \
+static dependents, so affected attaches a dynamic_caveat and dynamic_hazards lists the \
+sites (event buses and string-literal reflection are linked into the graph; computed names \
+are the residual risk). speculate runs the at-risk tests for real but is gated: start the \
+server with --allow-exec to expose it (it executes commands).\n\
 \n\
-Other tools: structural_search runs a SYNQL query or named pattern (matches kind / loc / \
-fan-in-out, not text); search_text is a regex/literal content search that attributes each \
-hit to its enclosing symbol (pivot to affected / find_callers); time_travel_diff diffs the \
-architecture between two git revisions; plan_rename gives a plan-only, confidence-scored \
-rename; audit_sql / advise_sql review SQL. Multi-repo: list_repos, then pass repo to scope. \
-The PR tools (list_prs / get_pr_impact / triage_prs) need the `gh` CLI and skip gracefully \
-without it.\n\
+Also: structural_search (SYNQL query or named pattern; matches kind/loc/fan-in-out, not \
+text); search_text (regex/literal content search, each hit attributed to its enclosing \
+symbol); time_travel_diff; plan_rename (plan-only rename); audit_sql / advise_sql (review \
+SQL). Multi-repo: call list_repos, then pass repo to scope a tool. The PR tools (list_prs / \
+get_pr_impact / triage_prs) need the `gh` CLI and skip gracefully without it.\n\
 \n\
 Names resolve leniently (id, label, bare name); when a name is shared by several files pin \
 it with a 'name@file-substring' qualifier (e.g. announce@core/foo.ts). An ambiguous name \
 returns its candidates (id, file, degree).\n\
 \n\
-Coverage: the graph is static, so some runtime call edges are missing. Electron IPC and \
-WebSocket/socket.io channels ARE modelled; but a handler reached only via a custom event \
-bus, a runtime dispatch table, or reflection can show 0 callers though it runs -- read a \
-surprising 0-caller as 'no STATIC caller', not 'dead code'. Inline tests next to the code \
-may not be linked.\n\
+Coverage: the graph is static. Electron IPC and WebSocket/socket.io channels ARE modelled; \
+inline tests beside the code may not be linked. Treat a surprising 0-caller as 'no STATIC \
+caller' (see dynamic_hazards), not dead code.\n\
 \n\
-Terms: a 'god node' is a high-degree hub (degree counts all connections incl. a class's \
-members -- size/centrality, NOT a dependence count; use affected for that); a 'community' \
-is a densely-connected cluster (roughly a module); edge confidence is EXTRACTED, INFERRED, \
-or AMBIGUOUS.";
+Terms: a 'community' is a densely-connected cluster (roughly a module); edge confidence on \
+a relationship is EXTRACTED, INFERRED, or AMBIGUOUS.";
 
 /// The MCP `tools/list` payload. Descriptions and per-parameter docs make the
 /// implicit domain knowledge explicit so an agent uses each tool correctly
@@ -4307,7 +4392,7 @@ fn tools_list(allow_exec: bool) -> Value {
     let mut tools = json!([
         {
             "name": "query_graph",
-            "description": "Primary entry point: find the symbols relevant to a natural-language question about this codebase, instead of grepping or reading files. Good for 'where is X handled', 'how does auth work', 'what is related to Y'. Returns a terse, ranked list of the top matching nodes by default; pass full=true for the whole subgraph with its edges. Pass `since` (e.g. 'main' or 'auto') to rank code changed on the current branch higher; use recency_mode='seed' to surface the branch's changed surface itself.",
+            "description": "Primary entry point: find the symbols relevant to a natural-language question about this codebase, instead of grepping or reading files. Good for 'where is X handled', 'how does auth work', 'what is related to Y'. Returns a terse, ranked list of the top matching nodes by default; pass full=true for the whole subgraph with its edges. Optional `since`/`recency_mode` bias ranking toward branch-changed code.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -4331,7 +4416,7 @@ fn tools_list(allow_exec: bool) -> Value {
             }, "required": ["nodes", "edges"] }
         },
         { "name": "get_node", "description": "Show one node's metadata: type, source file, community, degree, plus kind (class/function/method/etc.), visibility, and LOC when available. Use after query_graph to inspect a specific symbol.",
-          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name (e.g. 'login_user', 'AuthService'); resolved leniently. Shared names: qualify as 'name@file-substring'." } }, "required": ["label"] },
+          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name (e.g. 'login_user', 'AuthService'); qualify a shared name as 'name@file'." } }, "required": ["label"] },
           "outputSchema": { "type": "object", "properties": {
               "found": {"type":"boolean"},
               "id": {"type":"string"}, "label": {"type":"string"}, "source_file": {"type":"string"},
@@ -4344,15 +4429,15 @@ fn tools_list(allow_exec: bool) -> Value {
               "candidates": { "type": "array", "items": { "type": "object", "properties": {
                   "id": {"type":"string"}, "file": {"type":"string"}, "degree": {"type":"integer"} } }, "description":"Disambiguation candidates when the name is ambiguous (found=false)." }
           }, "required": ["found"] } },
-        { "name": "get_source", "description": "Return the actual source code for a symbol (the lines at its location), so you do not have to open the file. Use after query_graph or get_node to read a function or class body directly. Alternatively pass `file` (with an optional `lines` range) to read an ARBITRARY region that is not a single symbol -- a config block, or the lines around a search_text hit. In a federated/global graph it reads each member repo from its own source root (a leading 'tag/' on `file` selects the member); if a file cannot be read the message names the configured source-root and whether the path was missing or outside it.",
+        { "name": "get_source", "description": "Return the actual source code for a symbol (the lines at its location), so you do not have to open the file. Use after query_graph or get_node to read a function or class body directly. Alternatively pass `file` (with an optional `lines` range) to read an ARBITRARY region that is not a single symbol -- a config block, or the lines around a search_text hit. In a federated graph a leading 'tag/' on `file` selects the member repo.",
           "inputSchema": { "type": "object", "properties": {
-              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. Shared names: qualify as 'name@file-substring'. Omit when using `file`." },
+              "label": { "type": "string", "description": "Node label, id, or bare name; qualify a shared name as 'name@file'. Omit when using `file`." },
               "file": { "type": "string", "description": "Read this file directly instead of resolving a symbol. Repo-relative, or 'tag/path' in a federated graph (the tag from list_repos). Pair with `lines` for a range." },
               "lines": { "type": "string", "description": "With `file`: the range to read, 'start-end' (e.g. '108-140') or a single 'start' (reads context_lines from there). Ignored without `file`." },
               "context_lines": { "type": "integer", "description": "Lines to return from the symbol/line start (default 40, max 400)." }
           }, "required": [] } },
         { "name": "get_neighbors", "description": "List a node's directly connected nodes and the relation on each edge. Answers 'what does X call/use' and 'what calls X'.",
-          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. Shared names: qualify as 'name@file-substring'." }, "relation_filter": { "type": "string", "description": "Optional: keep only this edge relation (substring match). Common relations: calls, imports, inherits, implements, references, contains, depends_on. If nothing matches, the result names the relations the node does have, so an empty list is not mistaken for a missing node." }, "show_sites": { "type": "boolean", "description": "Append the actual source line of each edge's call/reference site ('at file:line: <code>') under the neighbor, read from the jail. Default false. Enriches the text view." }, "limit": { "type": "integer", "description": "Max neighbors listed before a '+N more' summary (default 50). Ignored when verbose=true." }, "verbose": { "type": "boolean", "description": "List every neighbor instead of the capped top-N (default false). Use after a relation_filter on a hub." } }, "required": ["label"] },
+          "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name; qualify a shared name as 'name@file'." }, "relation_filter": { "type": "string", "description": "Keep only this edge relation (substring); e.g. calls, imports, inherits, implements, references, contains, depends_on. A non-match returns the node's actual relations." }, "show_sites": { "type": "boolean", "description": "Also show each edge's call/reference source line ('at file:line: <code>'). Default false." }, "limit": { "type": "integer", "description": "Max neighbors listed before a '+N more' summary (default 50). Ignored when verbose=true." }, "verbose": { "type": "boolean", "description": "List every neighbor instead of the capped top-N (default false). Use after a relation_filter on a hub." } }, "required": ["label"] },
           "outputSchema": { "type": "object", "properties": {
               "seed": {"type":"string"},
               "neighbors": { "type": "array", "items": { "type": "object", "properties": {
@@ -4367,7 +4452,7 @@ fn tools_list(allow_exec: bool) -> Value {
               "offset": { "type": "integer", "description": "Members to skip before the page (default 0). Raise it to page through a large community." },
               "limit": { "type": "integer", "description": "Max members to return in this page (default 100)." }
           }, "required": ["community_id"] } },
-        { "name": "god_nodes", "description": "The most-connected nodes (high-degree hubs). Use to orient in an unfamiliar codebase. `degree` is TOTAL connections (all edge kinds, incl. a class's members) -- structural centrality/size, NOT a count of what depends on the symbol (use `affected` for blast radius). Each hub also shows how many tests transitively exercise it, so 0 flags an untested high-blast-radius hub.",
+        { "name": "god_nodes", "description": "The most-connected nodes (high-degree hubs); use to orient in an unfamiliar codebase. degree = structural centrality, not a dependence count (use `affected` for blast radius). Also shows each hub's transitive test count; 0 flags an untested hub.",
           "inputSchema": { "type": "object", "properties": {
               "top_n": { "type": "integer", "description": "How many hubs to return (default 10)." },
               "offset": { "type": "integer", "description": "Hubs to skip before the page (default 0), for paging past the top ranks." }
@@ -4413,10 +4498,10 @@ fn tools_list(allow_exec: bool) -> Value {
         { "name": "repo_stats", "description": "Node/edge counts for one federated member repo.",
           "inputSchema": { "type": "object", "properties": { "repo": { "type": "string", "description": "Repo tag, as listed by list_repos." } }, "required": ["repo"] } },
         { "name": "shortest_path", "description": "Shortest path between two nodes, showing the chain of relations. Answers 'how does A reach B' or 'is X connected to Y'.",
-          "inputSchema": { "type": "object", "properties": { "source": { "type": "string", "description": "Start node: label, id, or bare name. Shared names: qualify as 'name@file-substring'." }, "target": { "type": "string", "description": "End node: label, id, or bare name. Shared names: qualify as 'name@file-substring'." }, "max_hops": { "type": "integer", "description": "Optional cap on path length in hops (default 8)." } }, "required": ["source", "target"] } },
-        { "name": "affected", "description": "Reverse-impact: the nodes that transitively depend on a symbol -- what could break if you change it. Walks calls/imports/inheritance backward plus cross-language coupling (subprocess `invokes`, FFI `binds_native`, HTTP/gRPC `calls_service`/`handled_by`), so the blast radius spans languages. A class/type folds in its members (result labelled aggregated), so a class is never a false 'safe to change'. A 0-dependent result carries a `dynamic_caveat` when the symbol sits in a dynamic-dispatch scope (reflection/IPC/event-bus), so it never reads as 'safe' for a runtime-reached symbol; inspect the sites with `dynamic_hazards`.",
+          "inputSchema": { "type": "object", "properties": { "source": { "type": "string", "description": "Start node: label, id, or bare name. Qualify a shared name as 'name@file'." }, "target": { "type": "string", "description": "End node: label, id, or bare name. Qualify a shared name as 'name@file'." }, "max_hops": { "type": "integer", "description": "Optional cap on path length in hops (default 8)." } }, "required": ["source", "target"] } },
+        { "name": "affected", "description": "Reverse-impact of one SYMBOL: the nodes that transitively depend on it -- what could break if you change it. Walks the dependency edges backward including cross-language coupling, so the blast radius spans languages. A class/type folds in its members (labelled aggregated), so a class is never a false 'safe leaf'. A 0-dependent result may carry a `dynamic_caveat` (reflection/IPC/event-bus); see the server instructions / `dynamic_hazards`.",
           "inputSchema": { "type": "object", "properties": {
-              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. Shared names: qualify as 'name@file-substring'." },
+              "label": { "type": "string", "description": "Node label, id, or bare name; qualify a shared name as 'name@file'." },
               "depth": { "type": "integer", "description": "Max hops to walk backward (default 3, max 16)." },
               "relations": { "type": "array", "items": { "type": "string" }, "description": "Optional edge relations to follow; defaults to the structural-impact set (calls/imports/inheritance/uses/depends_on) plus the cross-language relations invokes, binds_native, calls_service, handled_by, and the evidence-linked dynamic_ref." },
               "limit": { "type": "integer", "description": "Max dependents listed before a '+N more' summary (default 50; a per-depth breakdown and true total are always shown). Ignored when verbose=true." },
@@ -4435,25 +4520,32 @@ fn tools_list(allow_exec: bool) -> Value {
               "aggregated_over_members": {"type":"integer", "description":"When the seed is a class/type, the number of members folded into the reverse-impact (impact attaches to a class's methods, not the bare symbol)."},
               "dynamic_caveat": { "type": "object", "description": "Present only when total=0 AND the symbol may be reached by dynamic dispatch -- so 0 dependents is not proof it is safe to change. Inspect the sites with dynamic_hazards.", "properties": { "opaque_sites_in_scope": {"type":"integer"}, "kinds": {"type":"array","items":{"type":"string"}}, "dynamically_referenced": {"type":"boolean"}, "message": {"type":"string"} } }
           }, "required": ["seed","affected"] } },
-        { "name": "find_callers", "description": "List the nodes that call, use, or reference this symbol (incoming edges only). Answers 'who calls X'. The count and a per-relation breakdown are always in the header; the list is capped with a '+N more' summary on a hub. For a class/type, the external callers of its methods are folded in (a class's callers attach to its methods) and labelled. Only STATIC callers are seen -- a handler invoked via IPC/WebSocket/reflection can show 0 callers yet still run.",
+        { "name": "find_callers", "description": "Incoming callers of one SYMBOL ('who calls X'; incoming edges only). Capped with a '+N more' summary; per-relation counts in the header. For a class/type, its methods' callers fold in (labelled). For a type's import/inheritance/type usages (not just calls), use find_references. STATIC callers only: a dynamically-dispatched handler can show 0 yet still run (see server instructions).",
           "inputSchema": { "type": "object", "properties": {
-              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. Shared names: qualify as 'name@file-substring'." },
+              "label": { "type": "string", "description": "Node label, id, or bare name; qualify a shared name as 'name@file'." },
               "limit": { "type": "integer", "description": "Max callers listed before a '+N more' summary (default 50). Ignored when verbose=true." },
               "verbose": { "type": "boolean", "description": "List all callers instead of the top-N summary (default false)." },
               "show_sites": { "type": "boolean", "description": "Under each caller, show the actual source line where the call happens ('at file:line: <code>'), read from the jail. Turns 'who calls X' into 'who calls X, and the exact line' without a second get_source. Default false." }
           }, "required": ["label"] } },
-        { "name": "find_callees", "description": "List the nodes this symbol calls, uses, or references (outgoing edges only). Answers 'what does X call'. The count and a per-relation breakdown are always in the header; the list is capped with a '+N more' summary on a hub. For a class/type, the callees of its members are folded in (a class doesn't call; its methods do) and labelled.",
+        { "name": "find_callees", "description": "Outgoing calls of one SYMBOL ('what does X call'; outgoing edges only). Capped with a '+N more' summary; per-relation counts in the header. For a class/type, its methods' callees fold in (labelled).",
           "inputSchema": { "type": "object", "properties": {
-              "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently. Shared names: qualify as 'name@file-substring'." },
+              "label": { "type": "string", "description": "Node label, id, or bare name; qualify a shared name as 'name@file'." },
               "limit": { "type": "integer", "description": "Max callees listed before a '+N more' summary (default 50). Ignored when verbose=true." },
               "verbose": { "type": "boolean", "description": "List all callees instead of the top-N summary (default false)." },
               "show_sites": { "type": "boolean", "description": "Under each callee, show the actual source line where this symbol calls it ('at file:line: <code>'), read from the jail -- so 'what does X call' also shows HOW it calls it. Default false." }
           }, "required": ["label"] } },
+        { "name": "find_references", "description": "Find-all-references: EVERY place a symbol is used -- calls plus imports, inheritance/implements, type uses, cross-language coupling, and reflection refs -- with a per-relation breakdown. Use for a type/interface/enum/constant, where find_callers (calls only) misses the structural usages. Incoming edges to the symbol itself (no class-member folding). Capped with a '+N more' summary.",
+          "inputSchema": { "type": "object", "properties": {
+              "label": { "type": "string", "description": "Node label, id, or bare name; qualify a shared name as 'name@file'." },
+              "limit": { "type": "integer", "description": "Max references listed before a '+N more' summary (default 50). Ignored when verbose=true." },
+              "verbose": { "type": "boolean", "description": "List all references instead of the top-N summary (default false)." },
+              "show_sites": { "type": "boolean", "description": "Under each reference, show the actual source line where the use happens ('at file:line: <code>'). Default false." }
+          }, "required": ["label"] } },
         { "name": "list_prs", "description": "Open pull requests targeting the base branch with their CI/review state. Requires the `gh` CLI authenticated for the repo.",
           "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch to filter to (default: the repo's default branch)." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } } } },
-        { "name": "get_pr_impact", "description": "One PR's detail plus its graph blast radius: which graph nodes and communities its changed files touch. Requires the `gh` CLI.",
+        { "name": "get_pr_impact", "description": "One PR's detail plus its graph blast radius: which graph nodes and communities its changed files touch.",
           "inputSchema": { "type": "object", "properties": { "pr_number": { "type": "integer", "description": "PR number." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } }, "required": ["pr_number"] } },
-        { "name": "triage_prs", "description": "Open PRs ranked by actionability (status plus graph blast radius) so the model can prioritize review and merge order. Requires the `gh` CLI.",
+        { "name": "triage_prs", "description": "Open PRs ranked by actionability (status plus graph blast radius) so the model can prioritize review and merge order.",
           "inputSchema": { "type": "object", "properties": { "base": { "type": "string", "description": "Base branch (default: the repo's default branch)." }, "repo": { "type": "string", "description": "Target repo 'owner/name' (default: the current repo)." } } } },
         { "name": "working_changes_impact", "description": "Graph blast radius of your branch's changes against a base branch (committed plus uncommitted, the same set a PR would have): which graph nodes and communities they touch, before opening a PR. Uses git, no gh needed. Default output lists the changed files plus counts; pass verbose=true to also list the top touched nodes (ranked by connectivity) and the touched communities with labels.",
           "inputSchema": { "type": "object", "properties": {
@@ -4462,10 +4554,11 @@ fn tools_list(allow_exec: bool) -> Value {
               "limit": { "type": "integer", "description": "Max touched nodes listed when verbose (default 20)." },
               "code_only": { "type": "boolean", "description": "Count and list only code nodes, excluding non-code files (package.json, lockfiles, .md docs) to sharpen the blast radius (default false)." }
           } } },
-        { "name": "structural_search", "description": "Structural search over the graph with SYNQL, or a named architectural pattern. Not text search: matches on kind/visibility/loc/fan-in/out/etc. `.name` is the bare symbol (no parentheses); use `=~` for a regex/substring match. Example query: 'MATCH (c:class) WHERE c.loc > 500 RETURN c'. Example name match: 'MATCH (f:function) WHERE f.name =~ \"announce\" RETURN f'. Patterns: singleton, factory, observer, service-locator, god-class.",
+        { "name": "structural_search", "description": "Structural (not text) search over the graph via SYNQL, or a named pattern, or a file outline. Matches kind/visibility/loc/fan-in-out. `.name` is the bare symbol (no parentheses); use `=~` for a regex/substring match. Example: 'MATCH (c:class) WHERE c.loc > 500 RETURN c'. Patterns: singleton, factory, observer, service-locator, god-class. Pass `file` to list every symbol defined in a file (an outline, ordered by line) -- no query needed.",
           "inputSchema": { "type": "object", "properties": {
-              "query": { "type": "string", "description": "A SYNQL query. Omit when using `pattern`." },
+              "query": { "type": "string", "description": "A SYNQL query. Omit when using `pattern` or `file`." },
               "pattern": { "type": "string", "description": "A built-in pattern name instead of a query." },
+              "file": { "type": "string", "description": "List every symbol defined in this file (path substring), ordered by line -- a file outline. Used only when `query` and `pattern` are omitted." },
               "limit": { "type": "integer", "description": "Max rows to return (default 25)." }
           } },
           "outputSchema": { "type": "object", "properties": {
@@ -4491,7 +4584,7 @@ fn tools_list(allow_exec: bool) -> Value {
           } } },
         { "name": "describe_node", "description": "Compact 'takes X, returns Y, calls Z' description of a symbol, composed from its captured signature and outgoing call edges (graph-only, no source read). Useful for generating tool/function descriptions or quickly understanding a function's shape. For a class/type it lists the members instead (a class has no calls of its own). Resolve `label` by bare name, full label, id, or file.",
           "inputSchema": { "type": "object", "properties": {
-              "label": { "type": "string", "description": "Symbol to describe (bare name, label, node id, or source file). Shared names: qualify as 'name@file-substring'." }
+              "label": { "type": "string", "description": "Symbol to describe (bare name, label, node id, or source file). Qualify a shared name as 'name@file'." }
           }, "required": ["label"] },
           "outputSchema": { "type": "object", "properties": {
               "found": { "type": "boolean" },
@@ -4525,7 +4618,7 @@ fn tools_list(allow_exec: bool) -> Value {
               "limit": { "type": "integer", "description": "Max sites listed per section (Edits, Review) before a '+N more' summary (default 50). Ignored when verbose=true." },
               "verbose": { "type": "boolean", "description": "List every edit/review site instead of the summarized top-N (default false)." }
           }, "required": ["name", "to"] } },
-        { "name": "predict_impact", "description": "Forecast the consequences of a change BEFORE editing: which graph nodes the changed files define, the reverse-impact blast radius that depends on them, which edited symbols are public API (callers outside the file/module may break), and a verify checklist. Pure-graph and read-only; use time_travel_diff or the `synaptic predict` CLI for new-cycle / removed-API detection.",
+        { "name": "predict_impact", "description": "Full forecast for a multi-file change BEFORE editing (superset of affected_tests): changed nodes, the reverse-impact blast radius, public-API breaks (callers outside the module), and a verify checklist. Pure-graph; for new-cycle / removed-API detection use time_travel_diff.",
           "inputSchema": { "type": "object", "properties": {
               "files": { "type": "array", "items": { "type": "string" }, "description": "Repo-relative changed files to forecast. Omit to use the working-tree diff vs `base`." },
               "base": { "type": "string", "description": "Base branch to diff against when `files` is omitted (default: the repo's default branch)." },
@@ -4557,13 +4650,13 @@ fn tools_list(allow_exec: bool) -> Value {
           }, "required": ["tests","total"] } },
         { "name": "predict_edit", "description": "What breaks if you make a specific kind of edit to a symbol, classified into 'will break' vs 'to review'. kind=delete (every dependent breaks), signature (callers/type-users break, bare imports go to review), or visibility (references from other files break when narrowing to private). Pure-graph; complements plan_rename (which is rename-only).",
           "inputSchema": { "type": "object", "properties": {
-              "symbol": { "type": "string", "description": "The symbol to edit: its name, bare name, or a node id. Shared names: qualify as 'name@file-substring'." },
-              "kind": { "type": "string", "description": "The edit kind: delete, signature, or visibility." },
+              "symbol": { "type": "string", "description": "The symbol to edit: its name, bare name, or a node id. Qualify a shared name as 'name@file'." },
+              "kind": { "type": "string", "enum": ["delete", "signature", "visibility"], "description": "The edit kind (see above for what each breaks)." },
               "depth": { "type": "integer", "description": "Reverse-impact hop bound (default 3, max 16)." },
               "limit": { "type": "integer", "description": "Max entries shown per section (will break / review) before a '+N more' summary (default 20). Each section also prints a by-depth rollup. Ignored when verbose=true." },
               "verbose": { "type": "boolean", "description": "List all instead of the top-N summary (default false)." }
           }, "required": ["symbol", "kind"] } },
-        { "name": "audit_sql", "description": "Audit the codebase's SQL for performance and security problems over the SQL-aware graph: row-level-security gaps, over-broad grants, likely SQL injection, missing indexes on filter/foreign-key columns, SELECT *, non-sargable predicates, and missing primary keys. Findings are ranked by severity, then by confidence within a tier (so high-confidence security findings lead and low-confidence name heuristics sink); each carries a severity, confidence, location, and a fix.",
+        { "name": "audit_sql", "description": "Audit the codebase's SQL for performance and security problems over the SQL-aware graph: RLS gaps, over-broad grants, likely SQL injection, missing indexes on filter/FK columns, SELECT *, non-sargable predicates, missing primary keys. Findings are ranked by severity then confidence; each carries a severity, confidence, location, and fix. To vet a single query you are drafting, use advise_sql.",
           "inputSchema": { "type": "object", "properties": {
               "severity": { "type": "string", "enum": ["critical","high","medium","low","info"], "description": "Only return findings at least this severe (default: all)." },
               "limit": { "type": "integer", "description": "Max findings returned before a '+N more' summary (default 20). Ignored when verbose=true." },
@@ -4588,7 +4681,7 @@ fn tools_list(allow_exec: bool) -> Value {
                   "title": {"type":"string"}, "detail": {"type":"string"}, "location": {"type":"string"},
                   "remediation": {"type":"string"}, "confidence": {"type":"number"} } } }
           }, "required": ["version","summary","findings"] } },
-        { "name": "search_text", "description": "Content (text/regex) search over source files -- the complement to structural_search, which matches the GRAPH and cannot see file content. Use for text-shaped things the graph does not model: string literals, config values, log messages, a TODO's wording, error strings. Every hit is attributed to the enclosing graph node, so you can pivot from a matched line to affected/find_callers on that symbol. Searches every member of a federated graph (respecting ignore files and the source-root jail, skipping Synaptic's own output dirs); scope with `repo`. Regex by default (literal=true for a fixed string); smart-case (case-insensitive unless the pattern has an uppercase letter, so `todo` is broad and `TODO`/`FIXME` precise).",
+        { "name": "search_text", "description": "Regex/literal content search over source files (complements structural_search, which matches the graph, not file text). Use for string literals, config values, log/error messages, TODO wording. Each hit is attributed to its enclosing symbol, so pivot to affected/find_callers. Searches all federated members (scope with `repo`); skips Synaptic's own output dirs. Regex by default (literal=true for a fixed string); smart-case.",
           "inputSchema": { "type": "object", "properties": {
               "pattern": { "type": "string", "description": "Regex (default) or, with literal=true, a fixed string to find in file content." },
               "literal": { "type": "boolean", "description": "Treat `pattern` as a literal string rather than a regex (default false)." },
@@ -5417,6 +5510,7 @@ mod tests {
             ("affected", "label"),
             ("find_callers", "label"),
             ("find_callees", "label"),
+            ("find_references", "label"),
             ("shortest_path", "source"),
             ("shortest_path", "target"),
             ("predict_edit", "symbol"),
@@ -5826,7 +5920,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 28);
+        assert_eq!(names.len(), 29);
         for expected in [
             "query_graph",
             "get_node",
@@ -5843,6 +5937,7 @@ mod tests {
             "affected",
             "find_callers",
             "find_callees",
+            "find_references",
             "list_prs",
             "get_pr_impact",
             "triage_prs",
@@ -7334,6 +7429,244 @@ mod tests {
         assert!(
             !callees.contains("AuthService"),
             "callers must not appear: {callees}"
+        );
+    }
+
+    #[test]
+    fn find_references_includes_type_usages_excludes_ownership_and_members() {
+        // User is a class with a member save(). Several nodes reference User in
+        // different ways; X only calls the member, and Pkg merely contains User.
+        let mut user = node("user", "User", Some(0));
+        user.set_kind(synaptic_core::NodeKind::Class);
+        let mut save = node("save", "save", Some(0));
+        save.set_kind(synaptic_core::NodeKind::Function);
+        let gd = GraphData {
+            nodes: vec![
+                user,
+                save,
+                node("sub", "Sub", Some(0)),
+                node("modfile", "ModFile", Some(0)),
+                node("consumer", "Consumer", Some(0)),
+                node("caller", "Caller", Some(0)),
+                node("pkg", "Pkg", Some(0)),
+                node("xc", "XCaller", Some(0)),
+            ],
+            links: vec![
+                edge("pkg", "user", "contains"),    // ownership -> excluded
+                edge("user", "save", "contains"),   // User's member (outgoing) -> not a reference
+                edge("sub", "user", "implements"),  // structural usage find_callers misses
+                edge("modfile", "user", "imports"), // structural usage find_callers misses
+                edge("consumer", "user", "uses"),   // a use
+                edge("caller", "user", "calls"),    // a call
+                edge("xc", "save", "calls"),        // caller of the member, NOT of User
+            ],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None);
+
+        let refs = call_tool(&mut s, "find_references", json!({"label": "User"}));
+        // Every usage kind, including the structural ones find_callers omits.
+        assert!(
+            refs.contains("Sub") && refs.contains("implements"),
+            "{refs}"
+        );
+        assert!(
+            refs.contains("ModFile") && refs.contains("imports"),
+            "{refs}"
+        );
+        assert!(
+            refs.contains("Consumer") && refs.contains("Caller"),
+            "{refs}"
+        );
+        // Ownership (contains) is not a usage; the container is excluded.
+        assert!(
+            !refs.contains("Pkg"),
+            "ownership container excluded: {refs}"
+        );
+        assert!(
+            !refs.contains("contains"),
+            "no contains relation listed: {refs}"
+        );
+        // No member folding: a caller of the member is not a reference to the type.
+        assert!(!refs.contains("XCaller"), "members not folded in: {refs}");
+
+        // find_callers, by contrast, misses the structural (non-call) usages.
+        let callers = call_tool(&mut s, "find_callers", json!({"label": "User"}));
+        assert!(
+            !callers.contains("Sub"),
+            "find_callers omits implements: {callers}"
+        );
+        assert!(
+            !callers.contains("ModFile"),
+            "find_callers omits imports: {callers}"
+        );
+    }
+
+    #[test]
+    fn find_references_reports_none_when_unreferenced() {
+        let gd = GraphData {
+            // Leaf references User; nobody references Leaf.
+            nodes: vec![node("leaf", "Leaf", Some(0)), node("user", "User", Some(0))],
+            links: vec![edge("leaf", "user", "calls")],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        let refs = call_tool(&mut s, "find_references", json!({"label": "Leaf"}));
+        assert!(refs.contains("No references to Leaf"), "{refs}");
+    }
+
+    #[test]
+    fn structural_search_file_lists_symbols_ordered_by_line() {
+        let mut a = node("a", "alpha", Some(0));
+        a.source_file = "mod.rs".into();
+        a.set_span(synaptic_core::Span {
+            start_line: 30,
+            start_col: 1,
+            end_line: 32,
+            end_col: 1,
+        });
+        let mut b = node("b", "beta", Some(0));
+        b.source_file = "mod.rs".into();
+        b.set_span(synaptic_core::Span {
+            start_line: 10,
+            start_col: 1,
+            end_line: 12,
+            end_col: 1,
+        });
+        let mut c = node("c", "gamma", Some(0));
+        c.source_file = "other.rs".into();
+        let gd = GraphData {
+            nodes: vec![a, b, c],
+            links: vec![],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        let out = call_tool(&mut s, "structural_search", json!({"file": "mod.rs"}));
+        assert!(out.contains("alpha") && out.contains("beta"), "{out}");
+        assert!(!out.contains("gamma"), "scopes to the file: {out}");
+        // Ordered by start line: beta (L10) before alpha (L30).
+        assert!(
+            out.find("beta").unwrap() < out.find("alpha").unwrap(),
+            "ordered by line: {out}"
+        );
+    }
+
+    #[test]
+    fn structural_search_query_takes_precedence_over_file() {
+        let mut a = node("a", "alpha", Some(0));
+        a.source_file = "mod.rs".into();
+        let mut c = node("c", "gamma", Some(0));
+        c.source_file = "other.rs".into();
+        let gd = GraphData {
+            nodes: vec![a, c],
+            links: vec![],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        // Both a query (matches gamma) and file given: the query wins, file ignored.
+        let out = call_tool(
+            &mut s,
+            "structural_search",
+            json!({"query": "MATCH (n) WHERE n.name =~ \"gamma\" RETURN n", "file": "mod.rs"}),
+        );
+        assert!(out.contains("gamma"), "query result present: {out}");
+        assert!(
+            !out.contains("alpha"),
+            "file ignored when query given: {out}"
+        );
+    }
+
+    #[test]
+    fn find_references_surfaces_cross_repo_usages() {
+        // Federated graph: a `web` repo calls an `api` repo's handler across the
+        // service boundary, and an `api`-local helper uses it. find_references must
+        // surface BOTH -- the cross-repo edge is just another incoming edge.
+        let mut handler = node("api::handler", "Handler", Some(0));
+        handler.repo = Some("api".into());
+        handler.source_file = "api/src/handler.rs".into();
+        let mut client = node("web::client", "WebClient", Some(0));
+        client.repo = Some("web".into());
+        client.source_file = "web/src/client.rs".into();
+        let mut helper = node("api::helper", "ApiHelper", Some(0));
+        helper.repo = Some("api".into());
+        helper.source_file = "api/src/helper.rs".into();
+
+        let mut cross = edge("web::client", "api::handler", "calls_service");
+        cross.cross_repo = true;
+        let gd = GraphData {
+            nodes: vec![handler, client, helper],
+            links: vec![cross, edge("api::helper", "api::handler", "uses")],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None);
+
+        let refs = call_tool(&mut s, "find_references", json!({"label": "Handler"}));
+        assert!(
+            refs.contains("WebClient") && refs.contains("calls_service"),
+            "cross-repo reference surfaced: {refs}"
+        );
+        assert!(
+            refs.contains("ApiHelper") && refs.contains("uses"),
+            "same-repo reference surfaced: {refs}"
+        );
+    }
+
+    #[test]
+    fn structural_search_file_outline_handles_federated_tag_prefix() {
+        // Federated nodes carry `tag/rel` source paths. A tag-qualified `file`
+        // scopes to one repo; a bare path matches that file across every member.
+        let mut a = node("a", "ApiBig", Some(0));
+        a.repo = Some("api".into());
+        a.source_file = "api/src/lib.rs".into();
+        a.set_span(synaptic_core::Span {
+            start_line: 20,
+            start_col: 1,
+            end_line: 22,
+            end_col: 1,
+        });
+        let mut b = node("b", "ApiSmall", Some(0));
+        b.repo = Some("api".into());
+        b.source_file = "api/src/lib.rs".into();
+        b.set_span(synaptic_core::Span {
+            start_line: 5,
+            start_col: 1,
+            end_line: 7,
+            end_col: 1,
+        });
+        let mut c = node("c", "WebThing", Some(0));
+        c.repo = Some("web".into());
+        c.source_file = "web/src/lib.rs".into();
+        let gd = GraphData {
+            nodes: vec![a, b, c],
+            links: vec![],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None);
+
+        // Tag-qualified path -> only the `api` member's symbols, ordered by line.
+        let scoped = call_tool(
+            &mut s,
+            "structural_search",
+            json!({"file": "api/src/lib.rs"}),
+        );
+        assert!(
+            scoped.contains("ApiBig") && scoped.contains("ApiSmall"),
+            "{scoped}"
+        );
+        assert!(
+            !scoped.contains("WebThing"),
+            "tag scopes to one member: {scoped}"
+        );
+        assert!(
+            scoped.find("ApiSmall").unwrap() < scoped.find("ApiBig").unwrap(),
+            "ordered by line across the federated member: {scoped}"
+        );
+
+        // Bare path -> the same file in every member (substring match spans repos).
+        let across = call_tool(&mut s, "structural_search", json!({"file": "src/lib.rs"}));
+        assert!(
+            across.contains("ApiBig") && across.contains("WebThing"),
+            "bare path matches across members: {across}"
         );
     }
 

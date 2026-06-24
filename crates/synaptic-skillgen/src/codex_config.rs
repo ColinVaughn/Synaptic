@@ -63,12 +63,9 @@ if not os.path.isfile(os.path.join("synaptic-out", "graph.json")):
     sys.exit(0)
 
 message = (
-    "This repo has a Synaptic knowledge graph (synaptic-out/graph.json). "
-    "Before grepping or reading files broadly, query the graph: run "
-    "`synaptic query \"<question>\"`, `synaptic explain <node>`, or "
-    "`synaptic path <a> <b>`, or use the Synaptic MCP tools (query_graph, "
-    "get_source, affected, find_callers, shortest_path). It is faster and surfaces "
-    "calls, imports, inheritance, and impact. Read raw files once the graph has oriented you."
+    "This repo has a Synaptic knowledge graph (synaptic-out/graph.json). Query it "
+    "(synaptic query/explain/path, or the Synaptic MCP tools) before grepping or "
+    "reading files broadly; the MCP server's instructions list the available tools."
 )
 print(json.dumps({
     "hookSpecificOutput": {

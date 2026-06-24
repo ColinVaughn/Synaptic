@@ -105,6 +105,54 @@ pub struct AffectedHit {
     pub via_relation: String,
 }
 
+/// True for edge relations that denote *ownership / definition* (a container or
+/// definer pointing at what it owns) rather than *usage*. These are excluded from
+/// [`references_to`] so a class is never reported as a "reference" to its own
+/// member, and a file/module is not a reference to the symbols it declares.
+fn is_ownership_relation(relation: &str) -> bool {
+    let r = relation.to_ascii_lowercase();
+    r == "contains"
+        || r == "method"
+        || r == "member_of"
+        || r.starts_with("defines")
+        || r.starts_with("declares")
+        || r.starts_with("has_")
+}
+
+/// One incoming reference to a symbol: the node that uses it, and the relation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Reference {
+    pub id: NodeId,
+    pub label: String,
+    pub relation: String,
+}
+
+/// Every place a symbol is *used* — the "find all references" primitive. Returns
+/// the nodes with an incoming edge to `id` through any non-ownership relation
+/// (calls, imports, inheritance/implements, type uses, cross-language coupling,
+/// and evidence-linked dynamic refs), deduped by (source node, relation).
+///
+/// Distinct from `find_callers` (call/use/reference edges only, so it misses a
+/// type's imports and inheritance) and from [`affected_nodes`] (the transitive
+/// closure). References are to the symbol itself; a type's members are NOT folded
+/// in, matching the IDE "find all references" mental model.
+pub fn references_to(kg: &KnowledgeGraph, id: &NodeId) -> Vec<Reference> {
+    let Some(e) = explain(kg, id) else {
+        return Vec::new();
+    };
+    let mut seen: HashSet<(NodeId, String)> = HashSet::new();
+    e.neighbors
+        .into_iter()
+        .filter(|nb| nb.direction == "in" && !is_ownership_relation(&nb.relation))
+        .filter(|nb| seen.insert((nb.id.clone(), nb.relation.clone())))
+        .map(|nb| Reference {
+            id: nb.id,
+            label: nb.label,
+            relation: nb.relation,
+        })
+        .collect()
+}
+
 /// Split a label into lowercased word tokens (snake_case and camelCase aware).
 fn tokenize(s: &str) -> Vec<String> {
     let mut tokens = Vec::new();
@@ -1343,6 +1391,44 @@ mod tests {
     fn tokenize_handles_camel_and_snake() {
         assert_eq!(tokenize("run_analysis()"), vec!["run", "analysis"]);
         assert_eq!(tokenize("AuthService"), vec!["auth", "service"]);
+    }
+
+    #[test]
+    fn references_to_unions_usages_and_excludes_ownership() {
+        let kg = build(
+            &[
+                ("user", "User"),
+                ("sub", "Sub"),
+                ("mod", "Mod"),
+                ("pkg", "Pkg"),
+            ],
+            &[
+                ("sub", "user", "implements"), // usage (incoming)
+                ("mod", "user", "imports"),    // usage (incoming)
+                ("pkg", "user", "contains"),   // ownership (incoming) -> excluded
+                ("user", "sub", "calls"),      // outgoing -> not a reference to User
+            ],
+        );
+        let refs = references_to(&kg, &NodeId("user".into()));
+        let rels: std::collections::HashSet<&str> =
+            refs.iter().map(|r| r.relation.as_str()).collect();
+        assert!(
+            rels.contains("implements") && rels.contains("imports"),
+            "{rels:?}"
+        );
+        assert!(!rels.contains("contains"), "ownership excluded: {rels:?}");
+        // Only the two incoming usages; the outgoing call is not a reference.
+        assert_eq!(refs.len(), 2, "{refs:?}");
+    }
+
+    #[test]
+    fn is_ownership_relation_classifies_containment() {
+        assert!(is_ownership_relation("contains"));
+        assert!(is_ownership_relation("has_column"));
+        assert!(is_ownership_relation("defines"));
+        assert!(!is_ownership_relation("calls"));
+        assert!(!is_ownership_relation("imports"));
+        assert!(!is_ownership_relation("implements"));
     }
 
     #[test]

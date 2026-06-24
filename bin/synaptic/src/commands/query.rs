@@ -4,13 +4,13 @@ use crate::commands::common::{
     default_graph_path, label_or_id, load_graph, load_scoped_graph, resolve_or_message,
 };
 use anyhow::Result;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use synaptic_core::NodeId;
 use synaptic_graph::KnowledgeGraph;
 use synaptic_query::{
-    affected_including_members, dependents_caveat, explain, query_modal, shortest_path,
-    DynamicHazardIndex, QueryIndex, Recency, RecencyMode, TraversalMode,
+    affected_including_members, dependents_caveat, explain, query_modal, references_to,
+    shortest_path, DynamicHazardIndex, QueryIndex, Recency, RecencyMode, TraversalMode,
     DEFAULT_AFFECTED_RELATIONS,
 };
 
@@ -287,6 +287,56 @@ pub(crate) fn run_affected(
         println!(
             "... (+{} more; pass --verbose for the full list)",
             hits.len() - cap
+        );
+    }
+    Ok(())
+}
+
+/// `references` — every place a symbol is used (calls plus imports, inheritance,
+/// implements, and type uses): the find-all-references view. Mirrors the MCP
+/// `find_references` tool; complements `affected` (transitive) and the
+/// caller-only view.
+pub(crate) fn run_references(
+    node: &str,
+    graph: Option<PathBuf>,
+    repo: Option<&str>,
+    limit: usize,
+    verbose: bool,
+) -> Result<()> {
+    let kg = load_scoped_graph(&default_graph_path(graph), repo)?;
+    let seed = match resolve_or_message(&kg, node) {
+        Ok(id) => id,
+        Err(msg) => {
+            println!("{msg}");
+            return Ok(());
+        }
+    };
+    let refs = references_to(&kg, &seed);
+    println!("References to {}", label_or_id(&kg, &seed));
+    if refs.is_empty() {
+        println!("No references found.");
+        return Ok(());
+    }
+    // Per-relation breakdown so the mix of calls vs imports vs inheritance is
+    // visible even when the list is truncated (mirrors the MCP tool).
+    let mut by_rel: BTreeMap<String, usize> = BTreeMap::new();
+    for r in &refs {
+        *by_rel.entry(r.relation.clone()).or_default() += 1;
+    }
+    let breakdown = by_rel
+        .iter()
+        .map(|(r, c)| format!("{r}: {c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let cap = if verbose { usize::MAX } else { limit.max(1) };
+    println!("Total: {} [{breakdown}]", refs.len());
+    for r in refs.iter().take(cap) {
+        println!("- {} [{}]", label_or_id(&kg, &r.id), r.relation);
+    }
+    if refs.len() > cap {
+        println!(
+            "... (+{} more; pass --verbose for the full list)",
+            refs.len() - cap
         );
     }
     Ok(())
