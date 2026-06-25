@@ -23,6 +23,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - run: cargo test --workspace --all-features
 
+  # End-to-end MCP protocol conformance against the real `codegraph serve`
+  # binary over stdio (handshake + structured tool calls), on every OS. Isolates
+  # a protocol regression from the unit suite and proves the new tiktoken-rs
+  # dependency builds and runs on macOS and Windows.
+  mcp-conformance:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - run: cargo test -p codegraph --test mcp_e2e --all-features
+
   # One job per language grammar: each `lang-*` feature is built and tested in
   # isolation, so a grammar bump that silently drops nodes/edges (or breaks a
   # single language's compile) fails CI on its own rather than hiding in the
