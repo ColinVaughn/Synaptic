@@ -1159,7 +1159,14 @@ impl Server {
             "label" | "source" | "target" => self
                 .kg
                 .nodes()
-                .filter(|n| n.label.to_lowercase().starts_with(&plow))
+                // Match the bare name too: method nodes are labeled ".name()", so
+                // a prefix like "tool_get" must see past the leading punctuation.
+                .filter(|n| {
+                    let l = n.label.to_lowercase();
+                    l.starts_with(&plow)
+                        || l.trim_start_matches(|c: char| !c.is_alphanumeric())
+                            .starts_with(&plow)
+                })
                 .map(|n| sanitize_label(&n.label))
                 .collect(),
             "repo" => self
@@ -1813,6 +1820,29 @@ mod tests {
         assert!(values.contains(&"AuthService"), "{values:?}");
         assert!(!values.contains(&"Database"), "prefix filtered: {values:?}");
         assert_eq!(r["result"]["completion"]["hasMore"], false);
+    }
+
+    #[test]
+    fn completion_sees_past_leading_punctuation_on_methods() {
+        // Method nodes are labeled ".name()"; a bare-name prefix must still match.
+        let gd = GraphData {
+            nodes: vec![node(".tool_get_node()", ".tool_get_node()", Some(0))],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        let r = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":1,"method":"completion/complete",
+                "params":{"argument":{"name":"label","value":"tool_get"}}
+            }))
+            .unwrap();
+        let values: Vec<&str> = r["result"]["completion"]["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(values.contains(&".tool_get_node()"), "{values:?}");
     }
 
     #[test]
