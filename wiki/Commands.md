@@ -293,7 +293,7 @@ Run the MCP server exposing read-only graph tools (and PR tools) to an AI assist
 Syntax:
 
 ```sh
-codegraph serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>]
+codegraph serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root <DIR>]
 ```
 
 | Name | Default | Description |
@@ -301,8 +301,9 @@ codegraph serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>]
 | `--graph` | `codegraph-out/graph.json` | Graph to serve. |
 | `--http` | none (stdio) | Serve over HTTP at this address (for example `127.0.0.1:8765`) instead of stdio. The MCP endpoint is `/mcp`. |
 | `--api-key` | none | Require this API key for HTTP requests (or set `CODEGRAPH_API_KEY`). |
+| `--source-root` | dir above `codegraph-out/` | Trusted root for resolving a node's source file in the `get_source` tool (path-traversal jailed). |
 
-Defaults to stdio transport. When serving HTTP on a wildcard address with no API key, it prints a warning.
+Defaults to stdio transport. The MCP server reports protocol `2025-06-18` and exposes 17 read-only tools, prompts, completions, resource templates/subscriptions, and structured tool output. When serving HTTP on a wildcard address with no API key, it prints a warning.
 
 Example:
 

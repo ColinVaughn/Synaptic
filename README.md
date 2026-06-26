@@ -34,7 +34,9 @@ MCP server so an AI coding assistant can consult the graph before grepping or re
   and GraphML / Cypher / DOT / Obsidian / wiki exports. See [Output Formats](https://github.com/ColinVaughn/CodeGraph/wiki/Output-Formats).
 - **Graph queries**: relevant-subgraph search, shortest path, node explanation, and
   reverse-impact ("what depends on this"). See [Querying](https://github.com/ColinVaughn/CodeGraph/wiki/Querying).
-- **MCP server** exposing read-only graph and PR tools over stdio or HTTP. See
+- **MCP server** (protocol 2025-06-18) exposing 17 read-only tools over stdio or HTTP:
+  subgraph search, source reading, reverse-impact, and PR/working-tree blast radius, plus
+  prompts, completions, resource subscriptions, and structured tool output. See
   [MCP Server](https://github.com/ColinVaughn/CodeGraph/wiki/MCP-Server).
 - **Incremental rebuilds**, file watching, and git hooks keep the graph current. See
   [Incremental Updates](https://github.com/ColinVaughn/CodeGraph/wiki/Incremental-Updates).
@@ -127,13 +129,16 @@ codegraph serve                                                        # stdio M
 codegraph serve --http 127.0.0.1:8765 --api-key "$CODEGRAPH_API_KEY"   # HTTP server
 ```
 
-The server exposes read-only graph tools (`query_graph`, `get_node`, `get_neighbors`,
-`get_community`, `god_nodes`, `graph_stats`, `shortest_path`, federation `list_repos` /
-`repo_stats`) plus PR tools (`list_prs`, `get_pr_impact`, `triage_prs`), and a small REST
-surface (`/api/stats`, `/api/query`, ...) for non-MCP clients. `codegraph install` wires the
-graph into a host assistant (a `PreToolUse` hook for Claude; a native MCP server for Codex,
-with `codegraph install codex --global` for the Codex desktop app). See
-[MCP Server](https://github.com/ColinVaughn/CodeGraph/wiki/MCP-Server) and [Assistant Integration](https://github.com/ColinVaughn/CodeGraph/wiki/Assistant-Integration).
+The server exposes 17 read-only tools: graph navigation (`query_graph`, `get_node`,
+`get_source`, `get_neighbors`, `get_community`, `god_nodes`, `graph_stats`, `shortest_path`),
+impact analysis (`affected`, `find_callers`, `find_callees`), federation (`list_repos`,
+`repo_stats`), and change/PR review (`working_changes_impact`, `list_prs`, `get_pr_impact`,
+`triage_prs`). It also serves MCP prompts, argument completions, resource templates and
+subscriptions, and a small REST surface (`/api/stats`, `/api/query`, ...) for non-MCP
+clients. `codegraph install` wires the graph into a host assistant (a `PreToolUse` hook for
+Claude; a native MCP server for Codex, with `codegraph install codex --global` for the Codex
+desktop app). See [MCP Server](https://github.com/ColinVaughn/CodeGraph/wiki/MCP-Server) and
+[Assistant Integration](https://github.com/ColinVaughn/CodeGraph/wiki/Assistant-Integration).
 
 ## Languages
 
