@@ -1332,9 +1332,12 @@ make no code edits. Query the graph before grepping or reading files broadly; it
 faster and surfaces structure (callers, callees, impact).\n\
 \n\
 Recommended flow: call graph_stats or god_nodes to orient, query_graph for a question \
-(returns a relevant subgraph), then get_neighbors / shortest_path / get_node to drill \
-in. For a multi-repo graph, call list_repos then pass the repo argument to scope. The \
-PR tools (list_prs / get_pr_impact / triage_prs) need the `gh` CLI.\n\
+(returns a relevant subgraph), then get_source to read a symbol's actual code, \
+get_neighbors / find_callers / find_callees / shortest_path to navigate, and get_node \
+for detail. For change impact, affected gives the blast radius of editing a symbol and \
+working_changes_impact does the same for your current git diff. For a multi-repo graph, \
+call list_repos then pass the repo argument to scope. The PR tools (list_prs / \
+get_pr_impact / triage_prs) need the `gh` CLI.\n\
 \n\
 Terms: a 'god node' is a high-degree hub (structurally central); a 'community' is a \
 cluster of densely-connected nodes (roughly a module); edge confidence is EXTRACTED \
