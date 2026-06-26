@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 const SKILL_TEMPLATE: &str = r#"---
 name: codegraph
-description: Queries this repo's CodeGraph knowledge graph (symbols and their calls, imports, and inheritance) instead of grepping or reading files. Use when exploring an unfamiliar codebase, finding what calls or depends on a symbol, tracing how one part reaches another, or judging the blast radius of a change.
+description: Queries this repo's CodeGraph knowledge graph (symbols and their calls, imports, and inheritance) instead of grepping or reading files. Use when exploring an unfamiliar codebase, finding what calls or depends on a symbol, tracing how one part reaches another, reading a symbol's source, or judging the blast radius of a change.
 ---
 
 # CodeGraph for @@HOST@@
@@ -46,16 +46,22 @@ relationships (calls, imports, inheritance, impact).
 - `codegraph affected <node>`: what (transitively) depends on a node.
 
 ## MCP (preferred for @@HOST@@)
-Use the **codegraph** MCP server's tools (`query_graph` first), then
-`get_neighbors`, `shortest_path`, `god_nodes`, `graph_stats`, `get_node`,
-`get_community`, plus the PR tools `list_prs` / `get_pr_impact` / `triage_prs`.
+Use the **codegraph** MCP server's tools. Start with `query_graph`, then:
+- `get_source` -- read a symbol's actual code (no need to open the file).
+- `affected` -- the blast radius of changing a symbol; `working_changes_impact`
+  does the same for your current git diff (no PR needed).
+- `find_callers` / `find_callees` -- who calls a symbol / what it calls.
+- `get_neighbors`, `shortest_path`, `god_nodes`, `graph_stats`, `get_node`,
+  `get_community` -- navigate and inspect the graph.
+- `list_prs` / `get_pr_impact` / `triage_prs` -- graph-aware PR review (need `gh`).
+
 Reference them with your client's MCP prefix (Claude Code:
 `mcp__codegraph__query_graph`). The server's `initialize` reply describes the
 toolset, and each tool documents its parameters. If the server is not already
 connected, start it with `codegraph serve`.
 
-Reach for the graph on "what calls X", "what breaks if I change Y", and "how does
-A reach B". Don't reconstruct those by reading files.
+Reach for the graph on "what calls X", "what breaks if I change Y", "how does A
+reach B", and to read a symbol's code. Don't reconstruct those by reading files.
 "#;
 
 const MARK_START: &str = "<!-- codegraph:start -->";

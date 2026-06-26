@@ -67,8 +67,8 @@ message = (
     "Before grepping or reading files broadly, query the graph: run "
     "`codegraph query \"<question>\"`, `codegraph explain <node>`, or "
     "`codegraph path <a> <b>`, or use the CodeGraph MCP tools (query_graph, "
-    "get_neighbors, god_nodes, shortest_path). It is faster and surfaces calls, "
-    "imports, inheritance, and impact. Read raw files once the graph has oriented you."
+    "get_source, affected, find_callers, shortest_path). It is faster and surfaces "
+    "calls, imports, inheritance, and impact. Read raw files once the graph has oriented you."
 )
 print(json.dumps({
     "hookSpecificOutput": {
