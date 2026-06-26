@@ -1405,7 +1405,7 @@ fn tools_list() -> Value {
           "inputSchema": { "type": "object", "properties": {
               "label": { "type": "string", "description": "Node label, id, or bare name; resolved leniently." },
               "depth": { "type": "integer", "description": "Max hops to walk backward (default 3, max 16)." },
-              "relations": { "type": "array", "items": { "type": "string" }, "description": "Optional edge relations to follow; defaults to the structural-impact set (calls, imports, inherits, implements, uses, references, depends_on, reads_from)." }
+              "relations": { "type": "array", "items": { "type": "string" }, "description": "Optional edge relations to follow; defaults to the structural-impact set: calls, references, imports, imports_from, re_exports, inherits, extends, implements, uses, mixes_in, embeds, depends_on, reads_from." }
           }, "required": ["label"] },
           "outputSchema": { "type": "object", "properties": {
               "seed": {"type":"string"},
