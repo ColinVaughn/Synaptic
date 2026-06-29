@@ -8,6 +8,61 @@ All notable changes to Synaptic are documented here. The format is based on
 > **CodeGraph**, and reference the old `codegraph` command and crate names. They
 > are preserved verbatim as historical record.
 
+## [0.3.15] - 2026-06-28
+
+### Added
+- **`query_graph` flags external-stub nodes.** A node that is an unresolved import
+  target or third-party package (`file_type: code` but no source file) now carries
+  `external_stub: true` in the structured channel and an ` (external)` marker in the
+  text rendering, so an agent does not mistake it for a navigable symbol or try to
+  open it with `get_source`. Emitted only when true to keep the output terse.
+
+### Changed
+- **Type "size" now uses *effective* LOC across the size-aware surfaces.** A
+  class/struct/trait/enum/interface/protocol's bare span covers only its
+  declaration -- its methods live in separate nodes (a Rust `impl` block, a C#
+  partial class, a Go receiver method), so the declaration span undercounts the
+  type's real footprint. `KnowledgeGraph::effective_loc` folds the members reached
+  via `contains`/`method` edges in the same file into the count, and the `god-class`
+  SYNQL pattern (and `c.loc` in SynQL) now use it. The `god-class` pattern also
+  matches any type-like kind (struct/trait/enum/interface/protocol), not just
+  `class`, so it fires on Rust/Go codebases instead of silently missing them.
+- **`shortest_path` annotates each hop with its connecting relation**
+  (`A -[calls]-> B -[uses]-> C`), so a path built from low-signal `references`
+  (type) edges is self-evident rather than reading like an authoritative call chain.
+  When several edges connect two hops the most meaningful relation is chosen
+  deterministically (calls > inheritance > imports > uses/depends > references).
+- **`find_callees` notes when a symbol has no in-graph call targets.** If every
+  outgoing edge is a type/reference use rather than a real call, the output now says
+  so explicitly instead of a bare count that reads like "this function calls N
+  things" (calls into std / third-party symbols are not graph nodes).
+
+### Fixed
+- **C++ template parameters are no longer mistaken for types.** In a class or
+  function template, the placeholder names (`T`, `U`, `Ts`, ...) were emitted as
+  real type-reference nodes and edges -- so a templated file produced phantom `T`/`U`
+  nodes and bogus `references` edges from every member, return, and parameter that
+  used them. The extractor now collects the parameters from every enclosing
+  `template_declaration` (so member templates see both lists) and skips them in
+  parameter/return/field type references and in base-class clauses. Inheriting from
+  a templated base (`class Stack : public Container<T>`) already worked and is
+  covered by a new test.
+- **Inline Rust unit tests are recognized as test code.** A `#[test]` /
+  `#[tokio::test]` / `#[rstest]` function, or any function inside a `#[cfg(test)]`
+  module, living in an ordinary `src/` file is now marked as a test (a new
+  `_is_test` extraction flag that `Node::is_test` consults), which the source-path
+  heuristic alone could not see. Attributes that merely contain the word "test"
+  (e.g. `#[doc = "...test..."]`) are not matched.
+- **`god_nodes` no longer surfaces Rust standard-library types.** `String`, `Vec`,
+  `Option`, `Result`, `Box`, `Arc`, `HashMap`, and other ubiquitous std types
+  accumulate large type-reference degree but are not architectural hubs; they are
+  now filtered like the existing Python/JSON builtin noise, leaving real first-party
+  symbols.
+- **SQL auditor skips query text captured in test code.** A query-text finding
+  (injection, `SELECT *`, ...) firing on a fixture query inside a `#[test]` /
+  `#[cfg(test)]` function (or a test-path file) is a false positive -- the SQL is
+  test scaffolding, not a real call site -- and is now suppressed.
+
 ## [0.3.14] - 2026-06-24
 
 ### Added
