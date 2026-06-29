@@ -1,6 +1,7 @@
 //! `cpp` extraction methods on `Extractor` (split from walker.rs).
 
 use super::Extractor;
+use std::collections::HashSet;
 use synaptic_core::{make_id, NodeId};
 use tree_sitter::Node as TsNode;
 
@@ -31,6 +32,8 @@ impl<'tree> Extractor<'_, '_, 'tree> {
             } else if let Some(ty) = child.child_by_field_name("type") {
                 let mut out = Vec::new();
                 self.collect_cpp_type_refs(ty, false, &mut out);
+                let tparams = self.cpp_template_params(child);
+                out.retain(|(n, _)| !tparams.contains(n));
                 self.emit_field_refs(out, class_nid, stem, line);
             }
         }
@@ -74,15 +77,66 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         stem: &str,
         line: usize,
     ) {
+        let tparams = self.cpp_template_params(decl);
         for child in Self::children(decl) {
             if child.kind() != "base_class_clause" {
                 continue;
             }
             for base in Self::children(child) {
                 if let Some(name) = self.cpp_type_head(base) {
+                    // A base that is itself a template parameter (rare mixin-style
+                    // `class X : T`) is a placeholder, not a real supertype.
+                    if tparams.contains(&name) {
+                        continue;
+                    }
                     self.link_heritage(class_nid, name, stem, line, "inherits");
                 }
             }
+        }
+    }
+
+    /// Names declared as template parameters in any enclosing
+    /// `template_declaration` (`<typename T, class U, ...>`). These are
+    /// placeholders, not resolvable types, so they must not become
+    /// type-reference nodes/edges. Scans the ancestor chain so member templates
+    /// inside a class template see both parameter lists.
+    pub(crate) fn cpp_template_params(&self, node: TsNode<'tree>) -> HashSet<String> {
+        let mut params = HashSet::new();
+        let mut cur = node.parent();
+        while let Some(n) = cur {
+            if n.kind() == "template_declaration" {
+                for c in Self::children(n) {
+                    if c.kind() == "template_parameter_list" {
+                        for p in Self::children(c) {
+                            if let Some(name) = self.template_param_name(p) {
+                                params.insert(name);
+                            }
+                        }
+                    }
+                }
+            }
+            cur = n.parent();
+        }
+        params
+    }
+
+    /// Placeholder name of one template parameter declaration (`typename T`,
+    /// `class T`, `typename... Ts`, `typename T = Def`). Non-type parameters
+    /// (`int N`, `template<...> class C`) carry no type placeholder → `None`.
+    fn template_param_name(&self, p: TsNode<'tree>) -> Option<String> {
+        match p.kind() {
+            "type_parameter_declaration"
+            | "variadic_type_parameter_declaration"
+            | "optional_type_parameter_declaration" => {
+                // The name is the parameter's own direct `type_identifier`; an
+                // optional default (`= Def`) sits nested under a `type_descriptor`,
+                // so taking the first direct child never grabs it.
+                Self::children(p)
+                    .into_iter()
+                    .find(|c| c.kind() == "type_identifier")
+                    .map(|c| self.text(c))
+            }
+            _ => None,
         }
     }
 
@@ -132,7 +186,11 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                 refs.push((n, if g { "generic_arg" } else { "return_type" }));
             }
         }
+        let tparams = self.cpp_template_params(func_node);
         for (name, ctx) in refs {
+            if tparams.contains(&name) {
+                continue;
+            }
             let tgt = self.ensure_named_node(&name, stem, line);
             if &tgt != func_nid {
                 self.add_edge(func_nid.clone(), tgt, "references", line, Some(ctx));

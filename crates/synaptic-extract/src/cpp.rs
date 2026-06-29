@@ -200,6 +200,66 @@ public:
     }
 
     #[test]
+    fn template_class_inheritance_and_members() {
+        // A class template that inherits from a templated base, with members
+        // whose types are the template parameter `T`.
+        let r = extract_cpp_source(
+            "tpl.cpp",
+            br#"
+template <typename T>
+class Container {
+public:
+    T get() { return value; }
+    void set(T v) { value = v; }
+private:
+    T value;
+};
+
+template <typename T>
+class Stack : public Container<T> {
+public:
+    void push(T v) { this->set(v); }
+};
+
+class IntStack : public Stack<int> {
+public:
+    int top() { return this->get(); }
+};
+"#,
+        );
+        // The class template and its specializing subclass are real nodes.
+        let ls = labels(&r);
+        assert!(ls.contains(&"Container".to_string()), "{ls:?}");
+        assert!(ls.contains(&"Stack".to_string()), "{ls:?}");
+        assert!(ls.contains(&"IntStack".to_string()), "{ls:?}");
+
+        // Inheritance follows through the templated base.
+        let inh = rels(&r, "inherits");
+        assert!(
+            inh.contains(&("Stack".to_string(), "Container".to_string())),
+            "{inh:?}"
+        );
+        assert!(
+            inh.contains(&("IntStack".to_string(), "Stack".to_string())),
+            "{inh:?}"
+        );
+
+        // The template parameter `T` is a placeholder, not a type: it must not
+        // become a node nor a `references`/`inherits` target.
+        assert!(
+            !ls.contains(&"T".to_string()),
+            "spurious template-param node T: {ls:?}"
+        );
+        let refs_to_t = r.edges.iter().any(|e| {
+            r.nodes
+                .iter()
+                .find(|n| n.id == e.target)
+                .is_some_and(|n| n.label == "T")
+        });
+        assert!(!refs_to_t, "edges should not target template parameter T");
+    }
+
+    #[test]
     fn structural_edges_extracted_confidence() {
         let r = extract();
         for e in &r.edges {
