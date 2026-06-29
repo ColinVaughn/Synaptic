@@ -6,3 +6,7 @@ synaptic-out/
 /design/
 # Local planning notes (not tracked).
 /docs/
+# Local agent/editor integration for Synaptic (skill, hooks, MCP config). Not tracked.
+/.claude/
+/.mcp.json
+/CLAUDE.md
