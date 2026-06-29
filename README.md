@@ -11,6 +11,45 @@ MCP server so an AI coding assistant can consult the graph before grepping or re
 
 ---
 
+## Token economy (measured)
+
+The whole point is to **read a small answer instead of the codebase**. Measured on
+CodeGraph's own source (199 Rust files, 56,408 lines, **510,966** `cl100k` tokens), one
+`query_graph` answer to a structural question is **~1,950 tokens** (bounded by its token
+budget), versus reading the source files that answer actually touches:
+
+```
+Answer one "how does X work" question about this 511K-token repo (cl100k tokens):
+
+  read the source files behind the answer   ███████████████████████████████  ~60,900
+  one CodeGraph query response               █                                 ~1,950   (31x fewer)
+```
+
+Across six questions spanning different subsystems, querying the graph used **27-38x fewer
+tokens** (about **31x overall**) than reading the files the answer references:
+
+| Question | Query response | Read the files | Fewer tokens |
+|---|--:|--:|--:|
+| http request handling | 1,804 | 48,803 | 27x |
+| session create / reap | 1,974 | 65,578 | 33x |
+| query_graph subgraph  | 2,011 | 53,759 | 27x |
+| extraction walker     | 1,977 | 70,443 | 36x |
+| PR fetch / rank        | 1,926 | 73,231 | 38x |
+| incremental merge     | 2,010 | 53,440 | 27x |
+
+A query response stays small no matter how big the repo gets (it is capped by the token
+budget), so the ratio grows with the codebase. Note the `graph.json` index itself is large
+because it encodes every symbol and edge; you never load it into context, you query it and
+get back only the slice above.
+
+**Reproducible.** Tokens are exact `cl100k_base` counts via
+`cargo run -p codegraph-server --example tokcount`. The baseline is the unique source files
+the result's nodes live in (whole files, the conservative grep-then-read case; it does not
+count the dead-end files you would open without the graph). Run `codegraph extract .` on any
+repo and compare for yourself.
+
+---
+
 ## Why
 
 - **Token economy.** Querying a compact graph costs a fraction of feeding raw files to an
