@@ -132,6 +132,69 @@ impl<'tree> RustExtractor<'_, 'tree> {
         Some(synaptic_core::Visibility::Private)
     }
 
+    /// True when `node` is test code the path heuristic cannot see: it carries a
+    /// test attribute (`#[test]`, `#[tokio::test]`, `#[rstest]`, ...) directly, or
+    /// sits inside a `#[cfg(test)]` module. Catches the inline-unit-test forms
+    /// that live in ordinary `src/` files.
+    fn in_test_scope(&self, node: TsNode<'tree>) -> bool {
+        if self.has_test_attr(node) {
+            return true;
+        }
+        let mut p = node.parent();
+        while let Some(pp) = p {
+            if pp.kind() == "mod_item" && self.has_test_attr(pp) {
+                return true;
+            }
+            p = pp.parent();
+        }
+        false
+    }
+
+    /// True if `node`'s immediately-preceding attribute siblings include a test
+    /// attribute or a `cfg(test)` gate.
+    fn has_test_attr(&self, node: TsNode<'tree>) -> bool {
+        let mut sib = node.prev_sibling();
+        while let Some(s) = sib {
+            match s.kind() {
+                "attribute_item" => {
+                    if Self::attr_is_test(&self.text(s)) {
+                        return true;
+                    }
+                }
+                // Doc/line comments may sit between an attribute and its item.
+                "line_comment" | "block_comment" => {}
+                _ => break,
+            }
+            sib = s.prev_sibling();
+        }
+        false
+    }
+
+    /// Whether an attribute's raw text (`#[...]`) is a test marker: a `test`
+    /// attribute path (`test`, `tokio::test`, `rstest`, ...) or a `cfg`/`cfg_attr`
+    /// gated on the `test` predicate. Avoids matching incidental "test" text such
+    /// as `#[serde(rename = "test")]`.
+    fn attr_is_test(raw: &str) -> bool {
+        let inner: String = raw
+            .trim()
+            .trim_start_matches('#')
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let path = inner.split('(').next().unwrap_or("");
+        if path == "test" || path.ends_with("::test") || path == "rstest" || path == "test_case" {
+            return true;
+        }
+        if path == "cfg" || path == "cfg_attr" {
+            return inner
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|t| t == "test");
+        }
+        false
+    }
+
     fn walk(&mut self, node: TsNode<'tree>, parent_impl: Option<&NodeId>, depth: usize) {
         if depth >= MAX_DEPTH {
             return;
@@ -143,6 +206,7 @@ impl<'tree> RustExtractor<'_, 'tree> {
                     let line = Self::line(node);
                     let vis = Self::rust_vis(node);
                     let sig = crate::signature::extract_signature(node, self.src);
+                    let is_test = self.in_test_scope(node);
                     let func_nid = if let Some(impl_nid) = parent_impl {
                         let nid = NodeId(make_id(&[impl_nid.as_str(), &func_name]));
                         self.b.add_code_node(
@@ -170,6 +234,9 @@ impl<'tree> RustExtractor<'_, 'tree> {
                             .add_edge(self.file_nid.clone(), nid.clone(), "contains", line, None);
                         nid
                     };
+                    if is_test {
+                        self.b.mark_test(&func_nid);
+                    }
                     self.emit_refs(node, &func_nid, line);
                     if let Some(body) = node.child_by_field_name("body") {
                         self.function_bodies.push((func_nid, body));
@@ -572,6 +639,54 @@ mod tests {
             .edges
             .iter()
             .any(|e| e.relation == "imports_from" && e.target.0 == hashmap));
+    }
+
+    #[test]
+    fn inline_cfg_test_functions_are_marked_as_tests() {
+        // A src/ file (not a test path), so only the extraction flag can mark
+        // these inline unit tests -- the case the path heuristic misses.
+        let src = b"pub fn production() {}\n\n#[cfg(test)]\nmod tests {\n    fn helper() {}\n    #[test]\n    fn it_works() {}\n}\n";
+        let r = extract_rust_source("src/lib.rs", src);
+        let marked = |label: &str| {
+            r.nodes
+                .iter()
+                .find(|n| n.label == label)
+                .unwrap_or_else(|| panic!("node {label} missing"))
+                .is_test()
+        };
+        assert!(!marked("production()"), "production code is not a test");
+        assert!(marked("it_works()"), "#[test] inside cfg(test) is a test");
+        assert!(
+            marked("helper()"),
+            "any fn in a #[cfg(test)] mod is test code"
+        );
+    }
+
+    #[test]
+    fn direct_test_attribute_is_marked_outside_a_test_module() {
+        let r = extract_rust_source("src/lib.rs", b"#[tokio::test]\nasync fn runs() {}\n");
+        let n = r
+            .nodes
+            .iter()
+            .find(|n| n.label == "runs()")
+            .expect("fn present");
+        assert!(n.is_test(), "#[tokio::test] marks a test");
+    }
+
+    #[test]
+    fn production_attribute_is_not_mistaken_for_a_test() {
+        // An attribute whose text incidentally contains "test" must not flag the
+        // function (no false positives from string-literal arguments).
+        let r = extract_rust_source(
+            "src/lib.rs",
+            b"#[doc = \"a test of the system\"]\npub fn real() {}\n",
+        );
+        let n = r
+            .nodes
+            .iter()
+            .find(|n| n.label == "real()")
+            .expect("fn present");
+        assert!(!n.is_test(), "#[doc=...] is not a test attribute");
     }
 
     #[test]

@@ -935,13 +935,21 @@ impl Server {
                 } else {
                     ""
                 };
+                // An external stub has no source file and is not openable with
+                // get_source; mark it so the empty source column is self-explanatory.
+                let stub_mark = if n.is_external_stub() {
+                    " (external)"
+                } else {
+                    ""
+                };
                 out.push_str(&format!(
-                    "NODE [{:.2}]{} {} [{}] {}\n",
+                    "NODE [{:.2}]{} {} [{}] {}{}\n",
                     r.scores.get(i).copied().unwrap_or(0.0),
                     mark,
                     sanitize_label(&n.label),
                     file_type_str(&n.file_type),
-                    sanitize_label(&n.source_file)
+                    sanitize_label(&n.source_file),
+                    stub_mark
                 ));
             }
         }
@@ -2190,11 +2198,21 @@ impl Server {
                         "Shortest path is {hops} hops, over the max_hops={max_hops} limit."
                     );
                 }
-                let labels: Vec<String> = path
-                    .iter()
-                    .map(|id| sanitize_label(&self.label_of(id)))
-                    .collect();
-                format!("Shortest path ({hops} hops): {}", labels.join(" -> "))
+                // Annotate each hop with its connecting relation so a path built
+                // from low-signal `references` (type) edges is self-evident rather
+                // than looking like an authoritative call chain.
+                let mut rendered = sanitize_label(&self.label_of(&path[0]));
+                for pair in path.windows(2) {
+                    let rel = self
+                        .relation_between(&pair[0], &pair[1])
+                        .unwrap_or_else(|| "?".to_string());
+                    rendered.push_str(&format!(
+                        " -[{}]-> {}",
+                        sanitize_label(&rel),
+                        sanitize_label(&self.label_of(&pair[1]))
+                    ));
+                }
+                format!("Shortest path ({hops} hops): {rendered}")
             }
             None => format!(
                 "No path between {} and {}.",
@@ -2202,6 +2220,34 @@ impl Server {
                 sanitize_label(&self.label_of(&to))
             ),
         }
+    }
+
+    /// The relation connecting two adjacent path nodes, picking the most
+    /// meaningful one deterministically when several edges connect them: calls >
+    /// inheritance > imports > uses/depends > references > other, ties broken
+    /// lexicographically. Used to annotate `shortest_path` hops.
+    fn relation_between(&self, a: &NodeId, b: &NodeId) -> Option<String> {
+        fn priority(rel: &str) -> u8 {
+            let r = rel.to_lowercase();
+            if r.contains("call") {
+                0
+            } else if r.contains("inherit") || r.contains("implement") || r.contains("extend") {
+                1
+            } else if r.contains("import") {
+                2
+            } else if r.contains("use") || r.contains("depend") {
+                3
+            } else if r.contains("reference") {
+                4
+            } else {
+                5
+            }
+        }
+        self.kg
+            .incident_edges(a)
+            .filter(|e| (&e.source == a && &e.target == b) || (&e.source == b && &e.target == a))
+            .map(|e| e.relation.clone())
+            .min_by(|x, y| priority(x).cmp(&priority(y)).then_with(|| x.cmp(y)))
     }
 
     /// `find_callers` — who calls/uses this node (incoming call-like edges).
@@ -2333,6 +2379,15 @@ impl Server {
                 "\n  ... (+{} more; pass verbose=true for the full list)",
                 total - cap
             ));
+        }
+        // For callees, when not one hit is an actual call edge (only type/reference
+        // uses survive the call_like filter), say so: a bare "N Callees" otherwise
+        // reads as "this function calls N things". Calls into std / third-party
+        // symbols are not graph nodes, so they cannot appear here.
+        if title == "Callees" && !by_rel.keys().any(|r| r.to_lowercase().contains("call")) {
+            out.push_str(
+                "\n  note: no in-graph callee functions; the entries above are type/reference uses (calls to std or third-party symbols are not graph nodes).",
+            );
         }
         out
     }
@@ -3246,7 +3301,7 @@ impl Server {
             .iter()
             .filter_map(|&i| self.kg.node(&r.nodes[i]).map(|n| (i, n)))
             .map(|(i, n)| {
-                json!({
+                let mut obj = json!({
                     "label": sanitize_label(&n.label),
                     "file_type": file_type_str(&n.file_type),
                     "source_file": sanitize_label(&n.source_file),
@@ -3256,7 +3311,15 @@ impl Server {
                     // True when `since` was given and this node's file changed on the
                     // current branch (its score was boosted accordingly).
                     "changed": recency.is_some_and(|rr| rr.changed.contains(&r.nodes[i]))
-                })
+                });
+                // An external stub (unresolved import target / third-party package)
+                // has no source file and cannot be opened with get_source; flag it so
+                // it is not mistaken for a navigable symbol. Emitted only when true to
+                // keep the structured channel terse.
+                if n.is_external_stub() {
+                    obj["external_stub"] = json!(true);
+                }
+                obj
             })
             .collect();
         // Mirror the text path's edge cap so the structured channel stays bounded
@@ -7975,6 +8038,114 @@ mod tests {
         let nodes = res["structuredContent"]["nodes"].as_array().unwrap();
         assert!(!nodes.is_empty());
         assert!(nodes.iter().all(|n| n["changed"] == json!(false)));
+    }
+
+    /// A real symbol that imports an unresolved external target. The import
+    /// target is an external stub: file_type code but empty source_file, so it
+    /// cannot be opened with get_source.
+    fn stub_server() -> Server {
+        let real = node("auth", "AuthService", Some(0));
+        let stub = synaptic_core::Node {
+            id: NodeId("jsonwebtoken".into()),
+            label: "jsonwebtoken".into(),
+            file_type: FileType::Code,
+            source_file: String::new(),
+            source_location: None,
+            community: Some(0),
+            repo: None,
+            extra: Map::new(),
+        };
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![real, stub],
+            links: vec![edge("auth", "jsonwebtoken", "imports_from")],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        Server::from_graph_data(gd, None)
+    }
+
+    #[test]
+    fn query_graph_flags_external_stub_nodes() {
+        let mut s = stub_server();
+        let res = query_graph_structured(
+            &mut s,
+            json!({"question":"AuthService jsonwebtoken","full":true,"token_budget":400}),
+        );
+        let nodes = res["structuredContent"]["nodes"].as_array().unwrap();
+        let stub = nodes
+            .iter()
+            .find(|n| n["label"] == json!("jsonwebtoken"))
+            .expect("stub node present");
+        assert_eq!(stub["external_stub"], json!(true), "stub flagged: {stub}");
+        // A real symbol carries no stub flag (the key is omitted when false).
+        let real = nodes
+            .iter()
+            .find(|n| n["label"] == json!("AuthService"))
+            .expect("real node present");
+        assert_eq!(
+            real.get("external_stub"),
+            None,
+            "real node unflagged: {real}"
+        );
+        // The text rendering marks the stub so a reader knows get_source won't work.
+        let text = res["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("jsonwebtoken") && text.contains("(external)"),
+            "text marks the stub: {text}"
+        );
+    }
+
+    /// A function whose only outgoing edges are type references (no real calls);
+    /// its callees should carry a note that none are in-graph call targets.
+    fn type_ref_only_server() -> Server {
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![
+                node("cof", "communities_of", Some(0)),
+                node("btm", "BTreeMap", Some(0)),
+                node("kg", "KnowledgeGraph", Some(0)),
+            ],
+            links: vec![
+                edge("cof", "btm", "references"),
+                edge("cof", "kg", "references"),
+            ],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        Server::from_graph_data(gd, None)
+    }
+
+    #[test]
+    fn find_callees_notes_when_only_type_references() {
+        let mut s = type_ref_only_server();
+        let text = call_tool(&mut s, "find_callees", json!({"label": "communities_of"}));
+        // The entries are type references, not calls; the output must say so
+        // rather than reading like "this function calls 2 things".
+        assert!(text.contains("BTreeMap"), "{text}");
+        assert!(
+            text.contains("no in-graph callee"),
+            "callee note present: {text}"
+        );
+    }
+
+    #[test]
+    fn shortest_path_shows_relation_per_hop() {
+        let mut s = server();
+        let path = call_tool(
+            &mut s,
+            "shortest_path",
+            json!({"source": "login_user", "target": "Database"}),
+        );
+        // login_user <-calls- AuthService -uses-> Database; the rendered path must
+        // surface the relation on each hop, not just the node labels.
+        assert!(path.starts_with("Shortest path"), "{path}");
+        assert!(path.contains("-[calls]->"), "calls hop shown: {path}");
+        assert!(path.contains("-[uses]->"), "uses hop shown: {path}");
     }
 
     #[test]

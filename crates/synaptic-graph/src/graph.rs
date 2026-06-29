@@ -123,6 +123,45 @@ impl KnowledgeGraph {
         self.node(id).and_then(|n| n.loc())
     }
 
+    /// Effective lines of code for `id`, folding members into a type's
+    /// footprint. A class/struct/trait/enum/interface/protocol's own span covers
+    /// only its declaration -- its methods live in separate nodes (a Rust `impl`
+    /// block, a C# partial class, a Go receiver method), so the bare span
+    /// undercounts the type's real size. This spans the type plus the members it
+    /// reaches via `contains`/`method` edges in the same file. For a non-type
+    /// node (function, file, ...) it equals [`Self::loc`].
+    pub fn effective_loc(&self, id: &NodeId) -> Option<u32> {
+        use synaptic_core::NodeKind::*;
+        let node = self.node(id)?;
+        let span = node.span()?;
+        let is_type = matches!(
+            node.kind(),
+            Some(Class | Interface | Trait | Struct | Enum | Protocol)
+        );
+        if !is_type {
+            return Some(span.line_count());
+        }
+        let mut start = span.start_line;
+        let mut end = span.end_line;
+        for e in self.incident_edges(id) {
+            if &e.source != id
+                || &e.target == id
+                || !matches!(e.relation.as_str(), "contains" | "method")
+            {
+                continue;
+            }
+            if let Some(m) = self.node(&e.target) {
+                if m.source_file == node.source_file {
+                    if let Some(ms) = m.span() {
+                        start = start.min(ms.start_line);
+                        end = end.max(ms.end_line);
+                    }
+                }
+            }
+        }
+        Some(end.saturating_sub(start) + 1)
+    }
+
     /// Insert/overwrite a node (last write wins on duplicate id), preserving
     /// first-seen position. Returns the node's index.
     ///
@@ -283,6 +322,50 @@ mod tests {
         assert_eq!(kg.loc(&NodeId("a".into())), Some(10));
         assert_eq!(kg.loc(&NodeId("b".into())), None);
         assert_eq!(kg.filter_nodes(|n| n.source_file == "b.rs").len(), 1);
+    }
+
+    #[test]
+    fn effective_loc_folds_type_members() {
+        // A struct declared on lines 10-19 with a method spanning 20-200 in the
+        // same file: its own loc is just the 10-line declaration, but its
+        // effective loc covers the impl too. A method in a different file must
+        // NOT inflate it.
+        let mut s = node("s", "Big", "big.rs");
+        s.set_kind(synaptic_core::NodeKind::Struct);
+        s.set_span(synaptic_core::Span {
+            start_line: 10,
+            start_col: 1,
+            end_line: 19,
+            end_col: 1,
+        });
+        let mut m = node("m", ".method()", "big.rs");
+        m.set_kind(synaptic_core::NodeKind::Method);
+        m.set_span(synaptic_core::Span {
+            start_line: 20,
+            start_col: 1,
+            end_line: 200,
+            end_col: 1,
+        });
+        let mut other = node("o", ".elsewhere()", "other.rs");
+        other.set_kind(synaptic_core::NodeKind::Method);
+        other.set_span(synaptic_core::Span {
+            start_line: 1,
+            start_col: 1,
+            end_line: 999,
+            end_col: 1,
+        });
+        let gd = GraphData {
+            nodes: vec![s, m, other],
+            links: vec![edge("s", "m", "method"), edge("s", "o", "method")],
+            ..Default::default()
+        };
+        let kg = KnowledgeGraph::from_graph_data(gd);
+        // The struct's own loc is the declaration only.
+        assert_eq!(kg.loc(&NodeId("s".into())), Some(10));
+        // Effective loc folds the same-file method (10..=200) but not other.rs.
+        assert_eq!(kg.effective_loc(&NodeId("s".into())), Some(191));
+        // A non-type node's effective loc equals its own loc.
+        assert_eq!(kg.effective_loc(&NodeId("m".into())), Some(181));
     }
 
     #[test]

@@ -148,6 +148,16 @@ impl Builder {
         }
     }
 
+    /// Mark an already-added node as test code (an inline `#[test]` /
+    /// `#[cfg(test)]` function the path heuristic cannot see). No-op if the id is
+    /// unknown. Sets the `_is_test` flag that [`synaptic_core::Node::is_test`]
+    /// consults.
+    pub fn mark_test(&mut self, id: &NodeId) {
+        if let Some(n) = self.nodes.iter_mut().find(|n| &n.id == id) {
+            n.set_test(true);
+        }
+    }
+
     /// Add an external stub node (no source file) so an edge to an out-of-corpus
     /// target (e.g. an imported package) survives build's dangling-edge drop.
     pub fn add_external_node(&mut self, id: NodeId, label: String) {

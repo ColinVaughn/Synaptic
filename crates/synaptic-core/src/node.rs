@@ -42,6 +42,7 @@ const SPAN_KEY: &str = "span";
 const SIGNATURE_KEY: &str = "signature";
 const DYNAMIC_SITES_KEY: &str = "dynamic_sites";
 const DYNAMICALLY_REFERENCED_KEY: &str = "dynamically_referenced";
+const TEST_KEY: &str = "_is_test";
 
 impl Node {
     /// The node's kind (class/function/method/...), if the extractor set one.
@@ -144,10 +145,29 @@ impl Node {
             .insert(DYNAMICALLY_REFERENCED_KEY.to_string(), serde_json::json!(v));
     }
 
-    /// True if this node lives in test code (heuristic, by its source path; see
-    /// [`crate::is_test_path`]).
+    /// True if the extractor marked this node as test code via a language test
+    /// signal the path heuristic cannot see -- a Rust inline `#[test]` /
+    /// `#[cfg(test)] mod tests` function in a `src/` file. Consulted by
+    /// [`Self::is_test`].
+    pub fn marked_test(&self) -> bool {
+        self.extra
+            .get(TEST_KEY)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// Mark this node as test code (set only when true, to keep `graph.json`
+    /// terse for the common non-test case).
+    pub fn set_test(&mut self, v: bool) {
+        self.extra
+            .insert(TEST_KEY.to_string(), serde_json::json!(v));
+    }
+
+    /// True if this node lives in test code: either the extractor marked it (an
+    /// inline `#[test]` / `#[cfg(test)]` function -- see [`Self::marked_test`]) or
+    /// its source path matches the test convention (see [`crate::is_test_path`]).
     pub fn is_test(&self) -> bool {
-        crate::is_test_path(&self.source_file)
+        self.marked_test() || crate::is_test_path(&self.source_file)
     }
 
     /// True if this node represents a code symbol eligible for change-impact
@@ -325,6 +345,18 @@ mod tests {
         assert!(!n.is_test(), "src/auth.py is production code");
         n.source_file = "tests/test_auth.py".into();
         assert!(n.is_test(), "a path under tests/ is test code");
+    }
+
+    #[test]
+    fn is_test_consults_extraction_flag() {
+        // An inline Rust unit test lives in a src/ file the path heuristic reads
+        // as production code; the extraction flag must still mark it as a test.
+        let mut n = sample();
+        n.source_file = "crates/synaptic-graph/src/graph.rs".into();
+        assert!(!n.is_test(), "src path alone is not a test");
+        n.set_test(true);
+        assert!(n.is_test(), "the extraction flag marks it as a test");
+        assert!(n.marked_test());
     }
 
     #[test]

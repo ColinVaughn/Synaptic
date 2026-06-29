@@ -43,6 +43,12 @@ pub fn query_snippets(ctx: &AuditCtx) -> Vec<(String, Option<String>, Vec<String
     ctx.kg
         .edges()
         .filter(|e| rels.contains(&e.relation.as_str()))
+        // Skip SQL captured in test code. A query-text rule (injection, SELECT *,
+        // ...) firing on a fixture query inside a #[test] / #[cfg(test)] function
+        // (marked at extraction) or a test-path file is a false positive: the SQL
+        // is test scaffolding, not a real call site. The edge source is the
+        // enclosing symbol (see crosslang `link`), so its is_test() decides.
+        .filter(|e| !ctx.kg.node(&e.source).map(|n| n.is_test()).unwrap_or(false))
         .filter_map(|e| {
             let snip = e.extra.get("sql").and_then(|v| v.as_str())?.to_string();
             if !sql_parses(&snip) {

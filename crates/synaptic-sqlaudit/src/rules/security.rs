@@ -422,6 +422,22 @@ mod tests {
     }
 
     #[test]
+    fn string_built_query_in_test_code_is_not_flagged() {
+        // The query lives in a #[test]/#[cfg(test)] function (marked at
+        // extraction via _is_test); it is a fixture, not production SQL, so the
+        // query-text rules must skip it rather than report a false injection.
+        let kg = graph_from(serde_json::json!({
+            "nodes": [
+                {"id":"app.test","label":"it_builds_sql()","file_type":"code","source_file":"app.py","kind":"function","_is_test":true},
+                {"id":"sql:users","label":"users","file_type":"code","source_file":"s.sql","kind":"table"}
+            ],
+            "links": [{"source":"app.test","target":"sql:users","relation":"queries","confidence":"INFERRED","source_file":"app.py","source_location":"L3","sql":"SELECT * FROM users WHERE name = ' + name + '"}]
+        }));
+        let f = StringBuiltQuery.check(&ctx(&kg));
+        assert!(f.is_empty(), "test-code SQL must not be flagged: {f:?}");
+    }
+
+    #[test]
     fn flags_sqlserver_sensitive_table_without_security_policy() {
         let kg = graph_from(serde_json::json!({
             "nodes": [

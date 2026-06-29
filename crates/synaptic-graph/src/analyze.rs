@@ -59,6 +59,29 @@ const BUILTIN_NOISE_LABELS: &[&str] = &[
     "io",
     "abc",
     "typing",
+    // Rust std types + ubiquitous collections. These accumulate type-reference
+    // degree across the whole crate but are not architectural hubs, mirroring the
+    // Python builtins above.
+    "String",
+    "Vec",
+    "Option",
+    "Result",
+    "Box",
+    "Rc",
+    "Arc",
+    "Cow",
+    "Cell",
+    "RefCell",
+    "Mutex",
+    "RwLock",
+    "HashMap",
+    "HashSet",
+    "BTreeMap",
+    "BTreeSet",
+    "VecDeque",
+    "PathBuf",
+    "Duration",
+    "Instant",
 ];
 const JSON_NOISE_LABELS: &[&str] = &[
     "start",
@@ -1335,6 +1358,37 @@ mod tests {
         );
         let labels: Vec<String> = god_nodes(&kg, 10).into_iter().map(|g| g.label).collect();
         assert!(!labels.contains(&"str".to_string()));
+    }
+
+    #[test]
+    fn god_nodes_excludes_rust_stdlib_types() {
+        // Rust std types (String/Vec/Option/Result) accumulate huge
+        // type-reference degree but are not architectural hubs; they must be
+        // filtered like the Python builtins, leaving real first-party symbols.
+        let kg = build(
+            &[
+                n("string", "String", "src/a.rs"),
+                n("vec", "Vec", "src/b.rs"),
+                n("opt", "Option", "src/c.rs"),
+                n("res", "Result", "src/d.rs"),
+                n("real", "Service", "src/svc.rs"),
+                n("x", "X", "src/x.rs"),
+            ],
+            &[
+                e("string", "real", "references", Confidence::Extracted),
+                e("string", "x", "references", Confidence::Extracted),
+                e("vec", "real", "references", Confidence::Extracted),
+                e("opt", "real", "references", Confidence::Extracted),
+                e("res", "real", "references", Confidence::Extracted),
+                e("real", "x", "references", Confidence::Extracted),
+            ],
+        );
+        let labels: Vec<String> = god_nodes(&kg, 10).into_iter().map(|g| g.label).collect();
+        assert!(!labels.contains(&"String".to_string()));
+        assert!(!labels.contains(&"Vec".to_string()));
+        assert!(!labels.contains(&"Option".to_string()));
+        assert!(!labels.contains(&"Result".to_string()));
+        assert!(labels.contains(&"Service".to_string()));
     }
 
     #[test]

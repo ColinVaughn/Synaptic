@@ -73,7 +73,13 @@ fn prop(kg: &KnowledgeGraph, id: &NodeId, field: Field) -> Val {
             .and_then(|n| n.visibility())
             .map(|v| Val::S(v.as_str().to_string()))
             .unwrap_or(Val::Null),
-        Field::Loc => kg.loc(id).map(|l| Val::N(l as f64)).unwrap_or(Val::Null),
+        // Effective loc folds a type's members (impl methods, ...) into its line
+        // count, so `c.loc` reflects a class/struct's real size rather than its
+        // declaration span alone; equals own loc for non-type nodes.
+        Field::Loc => kg
+            .effective_loc(id)
+            .map(|l| Val::N(l as f64))
+            .unwrap_or(Val::Null),
         Field::FanIn => Val::N(kg.fan_in(id, &[]) as f64),
         Field::FanOut => Val::N(kg.fan_out(id, &[]) as f64),
         Field::Degree => Val::N(kg.degree(id) as f64),

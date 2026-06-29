@@ -13,7 +13,8 @@ pub fn list_patterns() -> Vec<(&'static str, &'static str)> {
     vec![
         (
             "god-class",
-            "Classes over 500 LOC with more than 20 outgoing dependencies.",
+            "Large types (class/struct/trait/enum/interface) over 500 effective LOC \
+             (declaration plus members) with more than 20 outgoing dependencies.",
         ),
         (
             "singleton",
@@ -37,19 +38,7 @@ pub fn list_patterns() -> Vec<(&'static str, &'static str)> {
 /// Run a named pattern, returning a single-column (`node`) result.
 pub fn run_pattern(kg: &KnowledgeGraph, name: &str) -> Result<QueryResult, SynqlError> {
     match name {
-        "god-class" => {
-            let mut r = crate::run(
-                kg,
-                "MATCH (c:class) WHERE c.loc > 500 AND c.fan_out > 20 RETURN c",
-            )?;
-            // Normalize the SYNQL binding (`c`) to the single `node` column this
-            // function documents and every detector-based pattern returns, so
-            // callers see a consistent column name across all patterns.
-            if r.columns.len() == 1 {
-                r.columns[0] = "node".to_string();
-            }
-            Ok(r)
-        }
+        "god-class" => Ok(single(detect_god_class(kg))),
         "singleton" => Ok(single(detect_singleton(kg))),
         "factory" => Ok(single(detect_factory(kg))),
         "observer" => Ok(single(detect_observer(kg))),
@@ -97,6 +86,32 @@ fn impl_indegree(kg: &KnowledgeGraph) -> HashMap<NodeId, HashSet<NodeId>> {
         }
     }
     m
+}
+
+/// God class: a large type with many outgoing dependencies. Matches any
+/// type-like kind (class/struct/trait/enum/interface/protocol), not just
+/// `class`, so it fires on Rust/Go/etc. where types are structs/interfaces; size
+/// is the type's effective loc (declaration plus its members), so an `impl`-heavy
+/// type is not undercounted by its small declaration span.
+fn detect_god_class(kg: &KnowledgeGraph) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    for n in kg.nodes() {
+        let is_type = matches!(
+            n.kind(),
+            Some(
+                NodeKind::Class
+                    | NodeKind::Interface
+                    | NodeKind::Trait
+                    | NodeKind::Struct
+                    | NodeKind::Enum
+                    | NodeKind::Protocol
+            )
+        );
+        if is_type && kg.effective_loc(&n.id).unwrap_or(0) > 500 && kg.fan_out(&n.id, &[]) > 20 {
+            out.push(n.id.clone());
+        }
+    }
+    out
 }
 
 /// Singleton: a class that holds (a `field`) or returns (`return_type`) an
@@ -360,5 +375,32 @@ mod tests {
             );
         }
         assert!(run_pattern(&kg, "bogus").is_err());
+    }
+
+    #[test]
+    fn god_class_matches_large_struct_not_just_class() {
+        // A Rust struct (kind=struct, not class) made large by its impl and
+        // depending on many symbols. The god-class pattern must flag it even
+        // though its kind is `struct` and its declaration span is tiny -- the
+        // size comes from effective loc (declaration + members).
+        let s = node("Big", NodeKind::Struct, Some(0)); // declaration spans lines 1-3
+        let mut m = node("Big_method", NodeKind::Method, Some(0));
+        m.source_file = "Big.rs".into(); // same file as the struct
+        m.set_span(Span {
+            start_line: 4,
+            start_col: 1,
+            end_line: 604,
+            end_col: 1,
+        });
+        let mut nodes = vec![s, m];
+        let mut edges = vec![edge("Big", "Big_method", "method", None)];
+        // 21 distinct out-neighbors to clear fan_out > 20.
+        for i in 0..21 {
+            let dep = format!("dep{i}");
+            nodes.push(node(&dep, NodeKind::Struct, Some(0)));
+            edges.push(edge("Big", &dep, "references", None));
+        }
+        let kg = graph(nodes, edges);
+        assert_eq!(ids(run_pattern(&kg, "god-class").unwrap()), vec!["Big"]);
     }
 }
