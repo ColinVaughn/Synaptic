@@ -18,12 +18,10 @@ CodeGraph's own source (199 Rust files, 56,408 lines, **510,966** `cl100k` token
 `query_graph` answer to a structural question is **~1,950 tokens** (bounded by its token
 budget), versus reading the source files that answer actually touches:
 
-```
-Answer one "how does X work" question about this 511K-token repo (cl100k tokens):
-
-  read the source files behind the answer   ███████████████████████████████  ~60,900
-  one CodeGraph query response               █                                 ~1,950   (31x fewer)
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/token-economy-dark.svg">
+  <img alt="A CodeGraph query uses about 31x fewer tokens than reading the source files it points to: roughly 1,950 versus 60,900" src="assets/token-economy.svg">
+</picture>
 
 Across six questions spanning different subsystems, querying the graph used **27-38x fewer
 tokens** (about **31x overall**) than reading the files the answer references:
