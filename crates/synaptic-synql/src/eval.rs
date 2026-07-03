@@ -104,6 +104,11 @@ fn prop(kg: &KnowledgeGraph, id: &NodeId, field: Field) -> Val {
             .and_then(|v| v.as_str())
             .map(|s| Val::S(s.to_string()))
             .unwrap_or(Val::Null),
+        Field::NodeType => node
+            .and_then(|n| n.extra.get("_node_type"))
+            .and_then(|v| v.as_str())
+            .map(|s| Val::S(s.to_string()))
+            .unwrap_or(Val::Null),
     }
 }
 
@@ -552,6 +557,20 @@ mod tests {
     fn run(kg: &KnowledgeGraph, q: &str) -> Vec<String> {
         let res = run_query(kg, &parse(q).unwrap());
         res.rows.iter().map(|r| r[0].0.clone()).collect()
+    }
+
+    /// E4 (2026-07 audit): boundary stubs carry only `_node_type` -- SYNQL
+    /// needs a `node_type` field to select them at all.
+    #[test]
+    fn filters_by_node_type() {
+        use serde_json::json;
+        let mut route = node("r", "/api/x", NodeKind::Function, 1);
+        route.extra.insert("_node_type".into(), json!("route"));
+        route.source_file = String::new();
+        let plain = node("f", "load()", NodeKind::Function, 3);
+        let kg = graph(vec![route, plain], vec![]);
+        let rows = run(&kg, "MATCH (n) WHERE n.node_type = \"route\" RETURN n");
+        assert_eq!(rows, vec!["r"], "node_type selects boundary stubs");
     }
 
     #[test]

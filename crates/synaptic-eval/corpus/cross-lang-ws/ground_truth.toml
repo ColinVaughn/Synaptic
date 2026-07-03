@@ -1,0 +1,15 @@
+# The JS subscribe() command reaches the C# OnMessage dispatcher through the
+# shared "ws #subscribe" message boundary; ping has no handler case.
+
+[[cross_edge]]
+from = "web/feed.js::subscribe"
+to = "svc/FeedService.cs::OnMessage"
+
+[[cross_nonedge]]
+from = "web/feed.js::sendPing"
+to = "svc/FeedService.cs::OnMessage"
+
+# The service's own dispatch call (labeled for the call-edge scorer).
+[[call_edge]]
+from = "svc/FeedService.cs::OnMessage"
+to = "svc/FeedService.cs::Subscribe"

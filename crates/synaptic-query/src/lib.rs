@@ -50,6 +50,11 @@ pub struct Neighbor {
     pub relation: String,
     /// "out" = this node → neighbour; "in" = neighbour → this node.
     pub direction: &'static str,
+    /// Edge context when present (HTTP method + host, "queue", "ipc", ...) --
+    /// how a boundary edge couples (2026-07 audit: was invisible to consumers).
+    pub context: Option<String>,
+    /// True when the edge spans federated repositories.
+    pub cross_repo: bool,
 }
 
 /// Result of `explain`.
@@ -94,6 +99,11 @@ pub const DEFAULT_AFFECTED_RELATIONS: &[&str] = &[
     // to a unique target points caller->target, so the target's reverse-impact
     // includes the dynamic caller (low-confidence; surfaced with a caveat).
     "dynamic_ref",
+    // Code->SQL couplings (2026-07 audit: these were missing, so a schema
+    // change's blast radius skipped every function that reads/writes the table).
+    "queries",
+    "writes_to",
+    "calls_proc",
 ];
 
 /// One node reached by the reverse-impact walk: which node, how many hops from
@@ -625,6 +635,8 @@ pub fn explain(kg: &KnowledgeGraph, id: &NodeId) -> Option<Explain> {
                 label,
                 relation: e.relation.clone(),
                 direction: "out",
+                context: e.context.clone(),
+                cross_repo: e.cross_repo,
             });
         } else if &e.target == id {
             let label = kg
@@ -636,6 +648,8 @@ pub fn explain(kg: &KnowledgeGraph, id: &NodeId) -> Option<Explain> {
                 label,
                 relation: e.relation.clone(),
                 direction: "in",
+                context: e.context.clone(),
+                cross_repo: e.cross_repo,
             });
         }
     }
@@ -1385,6 +1399,26 @@ mod tests {
             built_at_commit: None,
         };
         KnowledgeGraph::from_graph_data(gd)
+    }
+
+    /// E3 (2026-07 audit): schema-change blast radius -- code that queries a
+    /// table is affected by the table.
+    #[test]
+    fn affected_table_reaches_querying_code() {
+        let kg = build(
+            &[("f", "load_orders()"), ("tbl", "orders")],
+            &[("f", "tbl", "queries")],
+        );
+        let hits = affected_nodes(
+            &kg,
+            &NodeId("tbl".into()),
+            DEFAULT_AFFECTED_RELATIONS,
+            usize::MAX,
+        );
+        assert!(
+            hits.iter().any(|h| h.node_id.0 == "f"),
+            "queries edge must propagate reverse impact"
+        );
     }
 
     #[test]

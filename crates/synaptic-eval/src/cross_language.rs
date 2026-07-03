@@ -25,13 +25,23 @@ use synaptic_core::{GraphData, NodeId};
 
 use crate::scoring::pct;
 
-/// Cross-language relations emitted by the extract/graph layer.
-const CROSS_LANGUAGE_RELATIONS: &[&str] =
-    &["invokes", "binds_native", "calls_service", "handled_by"];
+/// Cross-language relations emitted by the extract/graph layer (one shared
+/// definition -- the 2026-07 audit found the two copies drifting).
+use synaptic_graph::CROSS_LANGUAGE_RELATIONS;
 
 /// `_node_type`s of the synthetic boundary hubs a service consumer and producer
-/// can meet at.
-const SERVICE_BOUNDARY_TYPES: &[&str] = &["route", "grpc_service", "pyo3_module"];
+/// can meet at. Every family counts (2026-07 audit: ws/ipc/event/queue were
+/// invisible to calibration).
+const SERVICE_BOUNDARY_TYPES: &[&str] = &[
+    "route",
+    "grpc_service",
+    "pyo3_module",
+    "queue_topic",
+    "ws_endpoint",
+    "ws_message",
+    "ipc_channel",
+    "event_channel",
+];
 
 /// A single-graph calibration of the cross-language edge layer.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +60,9 @@ pub struct CrossLanguageReport {
     pub invocations_resolved: usize,
     /// `binds_native` (FFI) edges.
     pub ffi_bindings: usize,
+    /// Per boundary `_node_type`: (two-sided count, total count).
+    #[serde(default)]
+    pub two_sided_by_type: BTreeMap<String, (usize, usize)>,
 }
 
 impl CrossLanguageReport {
@@ -136,8 +149,17 @@ pub fn calibrate_cross_language(graph: &GraphData) -> CrossLanguageReport {
             continue;
         }
         report.service_boundaries += 1;
+        let node_type = n
+            .extra
+            .get("_node_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let slot = report.two_sided_by_type.entry(node_type).or_insert((0, 0));
+        slot.1 += 1;
         if has_consumer.contains(&n.id) && has_producer.contains(&n.id) {
             report.service_two_sided += 1;
+            slot.0 += 1;
         }
     }
 
@@ -222,6 +244,40 @@ mod tests {
         assert_eq!(report.service_two_sided, 1, "route has consumer + producer");
         assert_eq!(report.service_connectivity_pct(), 100);
         assert_eq!(report.total_edges, 2);
+    }
+
+    /// F3 (2026-07 audit): queue/ws/ipc/event boundaries were invisible to
+    /// calibration -- entire families had no health signal.
+    #[test]
+    fn queue_and_channel_boundaries_are_calibrated() {
+        let g = graph(
+            vec![
+                file_node("producer", "publish()"),
+                file_node("consumer", "on_orders()"),
+                boundary("q", "queue #orders", "queue_topic"),
+                boundary("w", "ws #subscribe", "ws_message"),
+            ],
+            vec![
+                edge("producer", "q", "calls_service"),
+                edge("q", "consumer", "handled_by"),
+                edge("producer", "w", "calls_service"),
+            ],
+        );
+        let report = calibrate_cross_language(&g);
+        assert_eq!(
+            report.service_boundaries, 2,
+            "queue + ws message both count"
+        );
+        assert_eq!(report.service_two_sided, 1, "queue two-sided, ws half-open");
+        assert_eq!(
+            report.two_sided_by_type.get("queue_topic"),
+            Some(&(1usize, 1usize)),
+            "per-type breakdown (two_sided, total)"
+        );
+        assert_eq!(
+            report.two_sided_by_type.get("ws_message"),
+            Some(&(0usize, 1usize))
+        );
     }
 
     #[test]

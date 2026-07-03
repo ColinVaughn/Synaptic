@@ -281,3 +281,130 @@ fn remote_git_member_is_cloned_over_network() {
     assert_eq!(build.members.len(), 1);
     assert_eq!(build.members[0].source, MemberSource::Remote);
 }
+
+#[test]
+fn federated_pyo3_links_across_repos() {
+    // D1 (2026-07 audit): the PyO3 passes only ran per-member, where the other
+    // side is absent by definition. A Rust extension repo and the Python app
+    // repo that imports it must join at the pyo3 boundary after federation.
+    let dir = tempfile::tempdir().unwrap();
+    let ext = dir.path().join("ext");
+    write(
+        &ext,
+        "src/lib.rs",
+        "use pyo3::prelude::*;\n\n#[pyfunction]\nfn compute(x: i64) -> i64 {\n    x * 2\n}\n\n#[pymodule]\nfn mymod(_py: Python<'_>, m: &PyModule) -> PyResult<()> {\n    m.add_function(wrap_pyfunction!(compute, m)?)?;\n    Ok(())\n}\n",
+    );
+    let app = dir.path().join("app");
+    write(
+        &app,
+        "main.py",
+        "import mymod\n\ndef run():\n    return mymod.compute(21)\n",
+    );
+
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    write_manifest(
+        &ws,
+        &manifest_with(vec![
+            RepoMember {
+                name: "ext".into(),
+                git: None,
+                rev: None,
+                subgraph: None,
+                path: Some(fwd(&ext)),
+            },
+            RepoMember {
+                name: "app".into(),
+                git: None,
+                rev: None,
+                subgraph: None,
+                path: Some(fwd(&app)),
+            },
+        ]),
+    )
+    .unwrap();
+
+    let build = build_workspace(&ws, &WorkspaceBuildOptions::default()).unwrap();
+    let boundary = build
+        .federated
+        .nodes()
+        .find(|n| n.label == "pyo3:mymod")
+        .expect("one pyo3 boundary after federation");
+    assert!(
+        build
+            .federated
+            .edges()
+            .any(|e| e.relation == "handled_by" && e.source == boundary.id),
+        "boundary handled_by the Rust #[pyfunction] across repos"
+    );
+    assert!(
+        build
+            .federated
+            .edges()
+            .any(|e| e.relation == "calls_service" && e.target == boundary.id),
+        "the Python importer calls_service the boundary across repos"
+    );
+}
+
+#[test]
+fn federated_command_resolves_across_repos() {
+    // D1: a subprocess command stub in repo A retargets to the script that
+    // lives in repo B (the resolution pass previously ran per-member only).
+    let dir = tempfile::tempdir().unwrap();
+    let caller = dir.path().join("caller");
+    write(
+        &caller,
+        "run.py",
+        "import subprocess\n\ndef go():\n    subprocess.run([\"mytool\"])\n",
+    );
+    let tools = dir.path().join("tools");
+    write(
+        &tools,
+        "bin/mytool.py",
+        "def main():\n    print(\"tool\")\n",
+    );
+
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    write_manifest(
+        &ws,
+        &manifest_with(vec![
+            RepoMember {
+                name: "caller".into(),
+                git: None,
+                rev: None,
+                subgraph: None,
+                path: Some(fwd(&caller)),
+            },
+            RepoMember {
+                name: "tools".into(),
+                git: None,
+                rev: None,
+                subgraph: None,
+                path: Some(fwd(&tools)),
+            },
+        ]),
+    )
+    .unwrap();
+
+    let build = build_workspace(&ws, &WorkspaceBuildOptions::default()).unwrap();
+    let invoke = build
+        .federated
+        .edges()
+        .find(|e| e.relation == "invokes")
+        .expect("invokes edge survives federation");
+    let target = build
+        .federated
+        .nodes()
+        .find(|n| n.id == invoke.target)
+        .unwrap();
+    assert!(
+        !target.source_file.is_empty(),
+        "command stub resolved to the in-repo file in the OTHER member: {}",
+        target.label
+    );
+    assert!(
+        invoke.cross_repo,
+        "a cross-member resolved invocation is flagged cross_repo"
+    );
+}

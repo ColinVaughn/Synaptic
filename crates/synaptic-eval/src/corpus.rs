@@ -129,13 +129,7 @@ pub fn score_call_edges(gd: &GraphData, gt: &GroundTruth) -> PrF1 {
 /// a server handler through a path-keyed route node (`calls_service` then
 /// `handled_by`); FFI/subprocess couplings use the others. Reachability over
 /// this set, not a single direct edge, is what links the two language sides.
-const CROSS_LANGUAGE_RELATIONS: &[&str] = &[
-    "calls_service",
-    "handled_by",
-    "invokes",
-    "binds_native",
-    "calls_native",
-];
+use synaptic_graph::CROSS_LANGUAGE_RELATIONS;
 
 /// Can `to` be reached from `from` by following cross-language relations forward
 /// (bounded depth)? This is the question a cross-language coupling answers: does
@@ -544,10 +538,14 @@ mod tests {
                 "oo-java" => (100, 100),
                 "systems-go" => (100, 100),
                 "deep-python" => (100, 100),
-                // The cross-lang fixture labels only cross-language couplings, so
-                // it has no call edges (vacuous 100/100); its real assertion is
-                // the cross-edge recall check below.
+                // The cross-lang fixtures label only cross-language couplings,
+                // so they have no call edges (vacuous 100/100); their real
+                // assertion is the cross-edge recall check below.
                 "cross-lang-ts-rust" => (100, 100),
+                "cross-lang-grpc" => (100, 100),
+                "cross-lang-queue" => (100, 100),
+                "cross-lang-pyo3" => (100, 100),
+                "cross-lang-ws" => (100, 100),
                 other => panic!("no baseline recorded for fixture {other}"),
             }
         };
@@ -587,6 +585,22 @@ mod tests {
         assert!(
             pooled.recall_pct() >= 88,
             "pooled call recall regressed: {pooled:?}"
+        );
+
+        // The cross-language fixtures exist to protect this number: every labeled
+        // coupling must link (recall) and no distractor may (precision). Without
+        // this the per-fixture call baselines pass while a coupling silently
+        // fails to connect (2026-07 re-audit found exactly that for pyo3).
+        let cross = report.pooled_cross_edges();
+        assert_eq!(
+            cross.recall_pct(),
+            100,
+            "a labeled cross-language coupling failed to connect: {cross:?}"
+        );
+        assert_eq!(
+            cross.precision_pct(),
+            100,
+            "a distractor cross-language coupling connected: {cross:?}"
         );
 
         // The TS->Rust HTTP coupling is connected end to end, and the labeled

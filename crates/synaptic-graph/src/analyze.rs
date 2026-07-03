@@ -1139,7 +1139,7 @@ pub struct GraphStats {
     /// import/coordinate-resolved links plus the cross-language ones below.
     #[serde(default)]
     pub cross_repo: usize,
-    /// The subset of `cross_repo` edges that are cross-language coupling
+    /// The graph's cross-language coupling edges, counted by RELATION
     /// (HTTP/RPC/FFI/WebSocket: a `calls_service`/`handled_by`/`invokes`/
     /// `binds_native` boundary spanning repos), as opposed to import links.
     #[serde(default)]
@@ -1166,11 +1166,13 @@ pub fn graph_stats(kg: &KnowledgeGraph) -> GraphStats {
         }
         if e.cross_repo {
             cross_repo += 1;
-            // Cross-language coupling is everything cross-repo that isn't an
-            // import link (mirrors the federation build summary).
-            if e.relation != "imports_from" && e.relation != "re_exports" {
-                cross_language += 1;
-            }
+        }
+        // Cross-language coupling is counted by RELATION (HTTP/RPC/FFI/queue/
+        // subprocess/SQL/dynamic_ref boundaries), same-repo included. The old
+        // "cross_repo minus imports" complement reported 0 for any polyglot
+        // single repo and overcounted rewired type references (2026-07 audit).
+        if crate::cross_language::CROSS_LANGUAGE_RELATIONS.contains(&e.relation.as_str()) {
+            cross_language += 1;
         }
     }
     GraphStats {
@@ -1267,6 +1269,71 @@ mod tests {
     }
     fn e(s: &'static str, t: &'static str, rel: &'static str, conf: Confidence) -> E {
         E { s, t, rel, conf }
+    }
+
+    /// E2 (2026-07 audit): cross_language counts by RELATION, same-repo
+    /// included -- a polyglot single repo is not "cross_language: 0".
+    #[test]
+    fn cross_language_counted_same_repo() {
+        let kg = build(
+            &[
+                N {
+                    id: "c",
+                    label: "load()",
+                    source_file: "c.js",
+                },
+                N {
+                    id: "r",
+                    label: "/api/x",
+                    source_file: "",
+                },
+            ],
+            &[E {
+                s: "c",
+                t: "r",
+                rel: "calls_service",
+                conf: Confidence::Inferred,
+            }],
+        );
+        let stats = graph_stats(&kg);
+        assert_eq!(stats.cross_language, 1, "same-repo boundary edge counts");
+        assert_eq!(stats.cross_repo, 0, "nothing spans repos here");
+    }
+
+    /// E2: a rewired plain import that got cross_repo=true is NOT cross-language.
+    #[test]
+    fn cross_repo_import_not_counted_cross_language() {
+        let mut gd = build(
+            &[
+                N {
+                    id: "a",
+                    label: "app",
+                    source_file: "a.ts",
+                },
+                N {
+                    id: "b",
+                    label: "lib",
+                    source_file: "b.ts",
+                },
+            ],
+            &[E {
+                s: "a",
+                t: "b",
+                rel: "imports",
+                conf: Confidence::Inferred,
+            }],
+        )
+        .to_graph_data();
+        for e in &mut gd.links {
+            e.cross_repo = true;
+        }
+        let kg = KnowledgeGraph::from_graph_data(gd);
+        let stats = graph_stats(&kg);
+        assert_eq!(stats.cross_repo, 1);
+        assert_eq!(
+            stats.cross_language, 0,
+            "an import is repo-spanning but not a language boundary"
+        );
     }
 
     #[test]

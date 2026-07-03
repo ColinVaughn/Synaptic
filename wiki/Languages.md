@@ -309,8 +309,9 @@ method or class):
 
 Beyond these single-language framework edges, a separate post-pass adds
 **cross-language** edges (`invokes`, `binds_native`, `calls_service`,
-`handled_by`) for subprocess calls, FFI bindings, and HTTP/gRPC routes that span
-languages. See [Cross-Language-Edges](Cross-Language-Edges).
+`handled_by`) for subprocess calls, FFI bindings, HTTP/gRPC routes, WebSocket
+and message-queue exchanges that span languages. See
+[Cross-Language-Edges](Cross-Language-Edges).
 
 ## Per-language feature flags
 

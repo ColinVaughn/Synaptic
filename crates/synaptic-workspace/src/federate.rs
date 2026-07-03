@@ -65,18 +65,40 @@ pub fn prefix_graph(graph: GraphData, tag: &str) -> GraphData {
     }
 }
 
-/// Collapse `source_file`-less **external** nodes that share a label onto the
-/// first-seen one (third-party deps appearing in multiple repos), rewiring edges
-/// and dropping the self-loops that collapse can produce. This is the external
-/// dedup applied when adding a repo to the global store.
+/// The identity under which an external node deduplicates: its `_node_type`
+/// (so a `command` stub named `orders` never merges with the SQL `table`
+/// `orders` -- 2026-07 audit) plus a canonical label -- `_route_canon` for
+/// routes (so `/users/:id` meets `/users/{id}` cross-repo), else the label
+/// case-folded (same-repo identity is case-folded; cross-repo must agree).
+fn external_dedup_key(n: &synaptic_core::Node) -> (String, String) {
+    let node_type = n
+        .extra
+        .get("_node_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let label = n
+        .extra
+        .get("_route_canon")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| n.label.to_ascii_lowercase());
+    (node_type, label)
+}
+
+/// Collapse `source_file`-less **external** nodes that share an identity onto
+/// the first-seen one (third-party deps appearing in multiple repos), rewiring
+/// edges and dropping the self-loops that collapse can produce. This is the
+/// external dedup applied when adding a repo to the global store.
 pub fn dedup_externals(mut g: GraphData) -> GraphData {
-    let mut canon: HashMap<String, NodeId> = HashMap::new();
+    let mut canon: HashMap<(String, String), NodeId> = HashMap::new();
     let mut remap: HashMap<NodeId, NodeId> = HashMap::new();
     for n in &g.nodes {
         if n.source_file.is_empty() && !n.label.is_empty() {
-            match canon.get(&n.label) {
+            let key = external_dedup_key(n);
+            match canon.get(&key) {
                 None => {
-                    canon.insert(n.label.clone(), n.id.clone());
+                    canon.insert(key, n.id.clone());
                 }
                 Some(c) => {
                     remap.insert(n.id.clone(), c.clone());
@@ -91,7 +113,9 @@ pub fn dedup_externals(mut g: GraphData) -> GraphData {
     g.nodes.retain(|n| !remap.contains_key(&n.id));
 
     let links = std::mem::take(&mut g.links);
-    let mut seen: HashSet<(NodeId, NodeId, String)> = HashSet::new();
+    // Context is part of edge identity: a GET and a POST calls_service between
+    // the same fn and route are two couplings, not a duplicate (wave-2 low).
+    let mut seen: HashSet<(NodeId, NodeId, String, Option<String>)> = HashSet::new();
     let mut kept = Vec::with_capacity(links.len());
     for mut e in links {
         let s = remap.get(&e.source);
@@ -108,7 +132,12 @@ pub fn dedup_externals(mut g: GraphData) -> GraphData {
         if collapsed && e.source == e.target {
             continue;
         }
-        if seen.insert((e.source.clone(), e.target.clone(), e.relation.clone())) {
+        if seen.insert((
+            e.source.clone(),
+            e.target.clone(),
+            e.relation.clone(),
+            e.context.clone(),
+        )) {
             kept.push(e);
         }
     }
@@ -263,5 +292,72 @@ mod tests {
     fn compose_empty_is_empty() {
         let fed = compose(vec![]);
         assert!(fed.nodes.is_empty() && fed.links.is_empty());
+    }
+
+    fn typed_node(id: &str, label: &str, node_type: &str) -> Node {
+        let mut n = node(id, label, "");
+        n.extra
+            .insert("_node_type".into(), serde_json::json!(node_type));
+        n
+    }
+
+    /// D2 (2026-07 audit): label-equal externals of DIFFERENT kinds must not
+    /// merge -- a `command` stub named `orders` is not the SQL `table` `orders`.
+    #[test]
+    fn dedup_requires_matching_node_type() {
+        let a = gd(vec![typed_node("cmd_orders", "orders", "command")], vec![]);
+        let b = gd(vec![typed_node("sql_orders", "orders", "table")], vec![]);
+        let fed = compose(vec![("a".into(), a), ("b".into(), b)]);
+        assert_eq!(
+            fed.nodes.iter().filter(|n| n.label == "orders").count(),
+            2,
+            "different _node_type -> no merge"
+        );
+    }
+
+    /// D2: boundary labels differing only by case merge cross-repo (same-repo
+    /// identity is case-folded; cross-repo must agree).
+    #[test]
+    fn dedup_case_insensitive_for_externals() {
+        let a = gd(
+            vec![typed_node("event_save", "event #Save", "event_channel")],
+            vec![],
+        );
+        let b = gd(
+            vec![typed_node("event_save", "event #save", "event_channel")],
+            vec![],
+        );
+        let fed = compose(vec![("a".into(), a), ("b".into(), b)]);
+        assert_eq!(
+            fed.nodes
+                .iter()
+                .filter(|n| n.label.eq_ignore_ascii_case("event #save"))
+                .count(),
+            1,
+            "case-only label difference merges"
+        );
+    }
+
+    /// D2: route nodes merge by their canonical path (`_route_canon`), so an
+    /// Express `/users/:id` in repo A meets an axum `/users/{id}` in repo B.
+    #[test]
+    fn dedup_routes_by_canon() {
+        let mut ra = typed_node("route_a", "/users/:id", "route");
+        ra.extra
+            .insert("_route_canon".into(), serde_json::json!("/users/{p}"));
+        let mut rb = typed_node("route_b", "/users/{id}", "route");
+        rb.extra
+            .insert("_route_canon".into(), serde_json::json!("/users/{p}"));
+        let a = gd(vec![ra], vec![]);
+        let b = gd(vec![rb], vec![]);
+        let fed = compose(vec![("a".into(), a), ("b".into(), b)]);
+        assert_eq!(
+            fed.nodes
+                .iter()
+                .filter(|n| n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("route"))
+                .count(),
+            1,
+            "equivalent templates merge cross-repo by canon"
+        );
     }
 }

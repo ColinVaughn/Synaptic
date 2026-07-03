@@ -360,10 +360,12 @@ Parameters: none.
 
 Returns `Graph: <n> nodes, <n> edges, <n> communities` and
 `Edges: <n> EXTRACTED, <n> INFERRED, <n> AMBIGUOUS`, plus a `structuredContent`
-mirror. On a federated (multi-repo) graph it adds a `Cross-repo: <n> edge(s) span
-repositories (<n> cross-language: HTTP/RPC/FFI/WebSocket boundaries)` line, and the
-structured output carries `cross_repo` / `cross_language` counts (both 0, and the
-line omitted, for a single-repo graph). When the graph has reflection /
+mirror. A graph with cross-language coupling adds a `Cross-language: <n>
+coupling edge(s) (HTTP/RPC/FFI/WebSocket/queue/SQL boundaries)` line --
+counted by relation, so a polyglot SINGLE repo reports its coupling too -- and
+a federated (multi-repo) graph adds `Cross-repo: <n> edge(s) span
+repositories`. The structured output carries both counts (`cross_language` is
+no longer a subset of `cross_repo`). When the graph has reflection /
 dynamic-dispatch sites it adds a `Dynamic-dispatch sites: <n> (<n> opaque, <n>
 evidence-linked)` line, mirrored in the structured output as `dynamic_sites` /
 `dynamic_sites_opaque` / `dynamic_refs_linked` (see

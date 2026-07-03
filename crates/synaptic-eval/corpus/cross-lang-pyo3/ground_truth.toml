@@ -1,0 +1,19 @@
+# The Python module `import fastmath` couples to the Rust `#[pyfunction]`
+# `compute` it exports, through the `pyo3:fastmath` boundary. The import is
+# module-level, so the coupling is the module (`main.py`) -> `compute` -- not a
+# specific function. `helper` is internal (never registered in the pymodule),
+# so it must stay unreachable from Python: a precision distractor for the
+# pyo3 registration stitch.
+
+[[cross_edge]]
+from = "app/main.py::main.py"
+to = "ext/src/lib.rs::compute"
+
+[[cross_nonedge]]
+from = "app/main.py::main.py"
+to = "ext/src/lib.rs::helper"
+
+# The extension's own call graph (labeled so the call-edge scorer sees it).
+[[call_edge]]
+from = "ext/src/lib.rs::compute"
+to = "ext/src/lib.rs::helper"

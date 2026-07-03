@@ -148,7 +148,11 @@ synaptic path <FROM> <TO> [--graph <PATH>] [--repo <TAG>]
 | `--graph` | `synaptic-out/graph.json` | Source graph. |
 | `--repo` | none | Scope to one federated member (its `repo` tag). |
 
-Prints the path as labels joined by arrows, or a message if one or both endpoints cannot be resolved or no path exists.
+Prints the path as labels joined by relation-annotated arrows (`-[calls]->`,
+`<-[handled_by]-` — the arrow follows the edge's own direction), so a hop that
+crosses an inferred network boundary is distinguishable from a static call
+chain. Prints a message if one or both endpoints cannot be resolved or no path
+exists.
 
 Example:
 
@@ -599,9 +603,9 @@ synaptic eval replay main --min-test-recall 60   # a CI gate
 ### eval cross-language
 
 Calibrate the [cross-language edge layer](Cross-Language-Edges) (subprocess /
-FFI / HTTP / gRPC / PyO3) over a single built graph. These edges are `INFERRED`,
-so the calibration reports not just counts but how grounded they are. No git
-history is involved.
+FFI / HTTP / gRPC / PyO3 / WebSocket / message queue / IPC / event bus) over a
+single built graph. These edges are `INFERRED`, so the calibration reports not
+just counts but how grounded they are. No git history is involved.
 
 Syntax:
 
@@ -615,10 +619,12 @@ synaptic eval cross-language [--graph <PATH>] [--json]
 | `--json` | off | Print the full `CrossLanguageReport` as JSON to stdout. |
 
 It prints the per-relation edge counts plus two precision proxies: **service
-connectivity** (the fraction of service-boundary nodes that are two-sided, with
-both a `calls_service` consumer and a `handled_by` producer) and **invocation
-resolution** (the fraction of `invokes` edges whose target resolved to an
-in-repo file). Example output:
+connectivity** (the fraction of boundary nodes — HTTP route, gRPC service, PyO3
+module, queue topic, WebSocket endpoint/message, IPC/event channel — that are
+two-sided, with both a `calls_service` consumer and a `handled_by` producer,
+broken down per boundary type in `--json` as `two_sided_by_type`) and
+**invocation resolution** (the fraction of `invokes` edges whose target resolved
+to an in-repo file). Example output:
 
 ```
 Cross-language calibration: cross-language: 14 edge(s); service boundaries 4/6 two-sided (66%); invocations 0/0 resolved (0%); 0 FFI binding(s)

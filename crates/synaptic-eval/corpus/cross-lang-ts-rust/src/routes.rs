@@ -10,8 +10,14 @@ pub fn list_items() -> u32 {
     7
 }
 
+pub fn list_users() -> u32 {
+    3
+}
+
 pub fn app() {
+    let api = Router::new().route("/users", get(list_users));
     Router::new()
         .route("/session", post(create_session))
-        .route("/items", get(list_items));
+        .route("/items", get(list_items))
+        .nest("/api", api);
 }

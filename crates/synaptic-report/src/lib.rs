@@ -38,16 +38,17 @@ fn confidence_breakdown(kg: &KnowledgeGraph) -> (usize, usize, usize, Option<f64
     (ext, inf, amb, inf_avg)
 }
 
-/// Cross-repo edge count and its cross-language subset (non-import coupling).
-/// Both zero on a single-repo graph.
+/// Cross-repo edge count and the graph's cross-language edge count, counted by
+/// RELATION (2026-07 audit: the old cross-repo complement reported 0 for a
+/// polyglot single repo). The second number is no longer a subset of the first.
 fn cross_repo_breakdown(kg: &KnowledgeGraph) -> (usize, usize) {
     let (mut total, mut cross_lang) = (0usize, 0usize);
     for e in kg.edges() {
         if e.cross_repo {
             total += 1;
-            if e.relation != "imports_from" && e.relation != "re_exports" {
-                cross_lang += 1;
-            }
+        }
+        if synaptic_graph::CROSS_LANGUAGE_RELATIONS.contains(&e.relation.as_str()) {
+            cross_lang += 1;
         }
     }
     (total, cross_lang)
@@ -103,12 +104,20 @@ pub fn graph_report(
         }
         let _ = writeln!(s, "{line}");
     }
-    // Federated graphs only: cross-repo coupling and its cross-language subset.
+    // Cross-language coupling is counted by relation (so a polyglot single repo
+    // shows it too); cross-repo is the federated subset of ALL edges. The two are
+    // independent numbers (2026-07 audit) -- cross_language is not a subset.
     let (cross_repo, cross_lang) = cross_repo_breakdown(kg);
+    if cross_lang > 0 {
+        let _ = writeln!(
+            s,
+            "- **Cross-language:** {cross_lang} coupling edge(s) (HTTP/RPC/FFI/WebSocket/queue/SQL boundaries)"
+        );
+    }
     if cross_repo > 0 {
         let _ = writeln!(
             s,
-            "- **Cross-repo:** {cross_repo} edge(s) span repositories ({cross_lang} cross-language: HTTP/RPC/FFI/WebSocket)"
+            "- **Cross-repo:** {cross_repo} edge(s) span repositories"
         );
     }
     let _ = writeln!(

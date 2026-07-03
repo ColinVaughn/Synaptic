@@ -176,14 +176,20 @@ below is exact set-comparison against those labels, reproducible with `synaptic 
 | systems-go | systems-go | 100/100/100 | — | 100% / 100% / 1.0 | — |
 | deep-python (multi-hop) | scripting-python | 100/100/100 | 100% | 100% / 100% / 3.0 | — |
 | cross-lang-ts-rust | cross-lang | — | — | — | 100/100/100 |
+| cross-lang-grpc | cross-lang | — | — | — | 100/100/100 |
+| cross-lang-queue | cross-lang | — | — | — | 100/100/100 |
+| cross-lang-pyo3 | cross-lang | 100/100/100 | — | — | 100/100/100 |
+| cross-lang-ws | cross-lang | 100/100/100 | — | — | 100/100/100 |
 
-Across 7 fixtures / 6 language families / 26 labeled symbols (all resolved): pooled call edges
-**precision 100% / recall 93% / F1 96%** over 15 labeled edges; blast-radius **recall 100% with
+Across 11 fixtures / 6 language families / 41 labeled symbols (all resolved): pooled call edges
+**precision 100% / recall 94% / F1 96%** over 17 labeled edges; blast-radius **recall 100% with
 0 distractors leaked**; affected-test **recall 100%** over the labeled linkages with the one
 labeled *unrelated* test correctly **not** selected; cross-language **precision 100% / recall
-100%** with 2 distractor couplings correctly **not** connected. Reading the numbers honestly:
+100% / F1 100%** over 6 labeled couplings with 6 distractor couplings (look-alike routes, a
+wrong-service gRPC stub, an unregistered PyO3 helper, ...) correctly **not** connected. Reading
+the numbers honestly:
 
-- **No false call edges were observed** in this 15-edge corpus (precision 100%); that is a
+- **No false call edges were observed** in this 17-edge corpus (precision 100%); that is a
   result on the corpus, not a guarantee at scale.
 - **Recall is 100%** for Python/TypeScript/Java/Go, which resolve cross-file calls. The **50%**
   on Rust is real and expected: Rust call resolution is intra-file, so a module-qualified
@@ -195,9 +201,13 @@ labeled *unrelated* test correctly **not** selected; cross-language **precision 
 - **Affected-test selection is multi-hop:** the `deep-python` fixture changes a leaf three call
   hops below its test and still selects it, while a deliberately unrelated test is excluded
   (so recall is not bought with precision).
-- **Cross-language precision is earned:** a TypeScript `fetch("/session")` connects to the Rust
-  axum handler that serves it, while `/sessions` (look-alike path) and an unrelated handler are
-  correctly left unconnected.
+- **Cross-language precision is earned across five boundary kinds:** a TypeScript
+  `fetch("/session")` connects to the Rust axum handler that serves it (and a mounted
+  `/api/users` client reaches its prefix-composed route); a Python gRPC client reaches its tonic
+  server; a Kafka producer reaches its consumer; a Python `import` reaches its PyO3-exported Rust
+  function; a JS WebSocket command reaches its C# handler — while every look-alike distractor
+  (a `/sessions` path, a wrong-service stub, a wrong topic, an *unregistered* PyO3 helper, an
+  unhandled message) is correctly left unconnected.
 
 The corpus is intentionally small and hand-verified; it validates extraction *correctness* on
 representative shapes, not internet-scale coverage. The [scale](#scale) section measures real

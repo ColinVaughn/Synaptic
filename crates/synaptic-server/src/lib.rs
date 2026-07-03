@@ -937,7 +937,26 @@ impl Server {
                 };
                 // An external stub has no source file and is not openable with
                 // get_source; mark it so the empty source column is self-explanatory.
-                let stub_mark = if n.is_external_stub() {
+                // A cross-language boundary node (route/queue/channel) is
+                // COUPLING, not an unresolved import (2026-07 audit).
+                const COUPLING_TYPES: &[&str] = &[
+                    "route",
+                    "grpc_service",
+                    "pyo3_module",
+                    "queue_topic",
+                    "ws_endpoint",
+                    "ws_message",
+                    "ipc_channel",
+                    "event_channel",
+                ];
+                let stub_mark = if n.source_file.is_empty()
+                    && n.extra
+                        .get("_node_type")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|t| COUPLING_TYPES.contains(&t))
+                {
+                    " (boundary)"
+                } else if n.is_external_stub() {
                     " (external)"
                 } else {
                     ""
@@ -1819,6 +1838,14 @@ impl Server {
                 sanitize_label(&nb.label),
                 sanitize_label(&nb.relation)
             ));
+            // Boundary detail: how the edge couples (HTTP method + host, queue,
+            // ipc) and whether it spans repos (2026-07 audit: was invisible).
+            if let Some(ctx) = &nb.context {
+                body.push_str(&format!(" ({})", sanitize_label(ctx)));
+            }
+            if nb.cross_repo {
+                body.push_str(" [cross-repo]");
+            }
             if show_sites {
                 if let Some(site_list) =
                     sites.get(&(nb.id.clone(), nb.relation.clone(), nb.direction))
@@ -1892,6 +1919,8 @@ impl Server {
             neighbors.push(json!({
                 "label": nb.label,
                 "relation": nb.relation,
+                "context": nb.context,
+                "cross_repo": nb.cross_repo,
                 "direction": nb.direction,
             }));
         }
@@ -2047,11 +2076,20 @@ impl Server {
             "Graph: {} nodes, {} edges, {} communities\nEdges: {} EXTRACTED, {} INFERRED, {} AMBIGUOUS",
             s.nodes, s.edges, s.communities, s.extracted, s.inferred, s.ambiguous
         );
-        // Only meaningful on a federated (multi-repo) graph; silent otherwise.
+        // Cross-language coupling is counted by relation, same-repo included
+        // (2026-07 audit); cross-repo is the federated subset of ALL edges.
+        if s.cross_language > 0 {
+            out.push_str(&format!(
+                "
+Cross-language: {} coupling edge(s) (HTTP/RPC/FFI/WebSocket/queue/SQL boundaries)",
+                s.cross_language
+            ));
+        }
         if s.cross_repo > 0 {
             out.push_str(&format!(
-                "\nCross-repo: {} edge(s) span repositories ({} cross-language: HTTP/RPC/FFI/WebSocket boundaries)",
-                s.cross_repo, s.cross_language
+                "
+Cross-repo: {} edge(s) span repositories",
+                s.cross_repo
             ));
         }
         let (total, opaque, linked) = self.dynamic_stats();
@@ -2307,7 +2345,7 @@ impl Server {
             std::collections::HashSet::new();
         // The neighbor id is only needed to look up its call sites, so it is
         // cloned only when show_sites is on -- the default path pays nothing extra.
-        let mut hits: Vec<(Option<NodeId>, String, String)> = Vec::new();
+        let mut hits: Vec<(Option<NodeId>, String, String, String)> = Vec::new();
         let mut by_rel: BTreeMap<String, usize> = BTreeMap::new();
         for f in &focus {
             let Some(ex) = explain(&self.kg, f) else {
@@ -2315,8 +2353,17 @@ impl Server {
             };
             for nb in &ex.neighbors {
                 let rel = nb.relation.to_lowercase();
-                let call_like =
-                    rel.contains("call") || rel.contains("use") || rel.contains("reference");
+                // Boundary relations count as calls: a route/queue/IPC channel
+                // handled_by a fn IS that fn's caller side, and an invoked
+                // binary / bound native lib IS a callee (2026-07 audit: the
+                // substring filter hid them, answering "(none)" for handlers).
+                let call_like = rel.contains("call")
+                    || rel.contains("use")
+                    || rel.contains("reference")
+                    || matches!(
+                        rel.as_str(),
+                        "handled_by" | "invokes" | "binds_native" | "dynamic_ref"
+                    );
                 if nb.direction != dir || !call_like || focus_set.contains(&nb.id) {
                     continue;
                 }
@@ -2324,10 +2371,20 @@ impl Server {
                     continue;
                 }
                 *by_rel.entry(nb.relation.clone()).or_default() += 1;
+                // Boundary detail (context + cross-repo) as promised by the tool
+                // description (wave-2 low: it was rendered only in get_neighbors).
+                let mut detail = String::new();
+                if let Some(ctx) = &nb.context {
+                    detail.push_str(&format!(" ({})", sanitize_label(ctx)));
+                }
+                if nb.cross_repo {
+                    detail.push_str(" [cross-repo]");
+                }
                 hits.push((
                     show_sites.then(|| nb.id.clone()),
                     nb.label.clone(),
                     nb.relation.clone(),
+                    detail,
                 ));
             }
         }
@@ -2362,12 +2419,13 @@ impl Server {
         let cap = if verbose { usize::MAX } else { limit.max(1) };
         let total = hits.len();
         let mut out = format!("{note}{total} {title} of {seed}{breakdown}:");
-        for (nid, lbl, rel) in hits.iter().take(cap) {
+        for (nid, lbl, rel, detail) in hits.iter().take(cap) {
             out.push_str(&format!(
                 "\n  {} [{}]",
                 sanitize_label(lbl),
                 sanitize_label(rel)
             ));
+            out.push_str(detail);
             if let Some(nid) = nid {
                 if let Some(site_list) = sites.get(&(nid.clone(), rel.clone(), dir)) {
                     out.push_str(&self.render_sites(site_list, "      ", 3));
@@ -4526,7 +4584,7 @@ fn tools_list(allow_exec: bool) -> Value {
                   "test_count": {"type":"integer", "description": "How many tests transitively exercise this hub; 0 flags an untested high-blast-radius symbol."},
                   "dynamically_referenced": {"type":"boolean", "description": "Present and true when a reflection site names this hub: it is reachable via dynamic dispatch, so its static dependence count understates real coupling."} } } }
           }, "required": ["god_nodes"] } },
-        { "name": "graph_stats", "description": "Graph size and health: node/edge/community counts and the EXTRACTED/INFERRED/AMBIGUOUS edge-confidence breakdown. On a federated (multi-repo) graph it also reports how many edges span repositories (`cross_repo`) and how many of those are cross-language coupling (`cross_language`: HTTP/RPC/FFI/WebSocket boundaries). Good first call to confirm a graph is loaded and how large it is.",
+        { "name": "graph_stats", "description": "Graph size and health: node/edge/community counts and the EXTRACTED/INFERRED/AMBIGUOUS edge-confidence breakdown. Reports the graph's cross-language coupling edges (`cross_language`: HTTP/RPC/FFI/WebSocket/queue/SQL boundaries, same-repo included) and, on a federated (multi-repo) graph, how many edges span repositories (`cross_repo`). Good first call to confirm a graph is loaded and how large it is.",
           "inputSchema": { "type": "object", "properties": {} },
           "outputSchema": { "type": "object", "properties": {
               "nodes": {"type":"integer"}, "edges": {"type":"integer"}, "communities": {"type":"integer"},
@@ -4583,7 +4641,7 @@ fn tools_list(allow_exec: bool) -> Value {
               "aggregated_over_members": {"type":"integer", "description":"When the seed is a class/type, the number of members folded into the reverse-impact (impact attaches to a class's methods, not the bare symbol)."},
               "dynamic_caveat": { "type": "object", "description": "Present only when total=0 AND the symbol may be reached by dynamic dispatch -- so 0 dependents is not proof it is safe to change. Inspect the sites with dynamic_hazards.", "properties": { "opaque_sites_in_scope": {"type":"integer"}, "kinds": {"type":"array","items":{"type":"string"}}, "dynamically_referenced": {"type":"boolean"}, "message": {"type":"string"} } }
           }, "required": ["seed","affected"] } },
-        { "name": "find_callers", "description": "Incoming callers of one SYMBOL ('who calls X'; incoming edges only). Capped with a '+N more' summary; per-relation counts in the header. For a class/type, its methods' callers fold in (labelled). For a type's import/inheritance/type usages (not just calls), use find_references. STATIC callers only: a dynamically-dispatched handler can show 0 yet still run (see server instructions).",
+        { "name": "find_callers", "description": "Incoming callers of one SYMBOL ('who calls X'; incoming edges only). Capped with a '+N more' summary; per-relation counts in the header. For a class/type, its methods' callers fold in (labelled). For a type's import/inheritance/type usages (not just calls), use find_references. Boundary callers included: a route/queue/IPC channel that is handled_by X lists as X's caller side (with edge context like 'GET api.host' or 'queue'). A handler reached only via computed dynamic dispatch can still show 0 yet run (see server instructions).",
           "inputSchema": { "type": "object", "properties": {
               "label": { "type": "string", "description": "Node label, id, or bare name; qualify a shared name as 'name@file'." },
               "limit": { "type": "integer", "description": "Max callers listed before a '+N more' summary (default 50). Ignored when verbose=true." },
@@ -4617,7 +4675,7 @@ fn tools_list(allow_exec: bool) -> Value {
               "limit": { "type": "integer", "description": "Max touched nodes listed when verbose (default 20)." },
               "code_only": { "type": "boolean", "description": "Count and list only code nodes, excluding non-code files (package.json, lockfiles, .md docs) to sharpen the blast radius (default false)." }
           } } },
-        { "name": "structural_search", "description": "Structural (not text) search over the graph via SYNQL, or a named pattern, or a file outline. Matches kind/visibility/loc/fan-in-out. `.name` is the bare symbol (no parentheses); use `=~` for a regex/substring match. Example: 'MATCH (c:class) WHERE c.loc > 500 RETURN c'. Patterns: singleton, factory, observer, service-locator, god-class. Pass `file` to list every symbol defined in a file (an outline, ordered by line) -- no query needed.",
+        { "name": "structural_search", "description": "Structural (not text) search over the graph via SYNQL, or a named pattern, or a file outline. Matches kind/visibility/loc/fan-in-out. `.name` is the bare symbol (no parentheses); use `=~` for a regex/substring match. Example: 'MATCH (c:class) WHERE c.loc > 500 RETURN c'. Patterns: singleton, factory, observer, service-locator, god-class, dangling-endpoints (one-sided cross-language boundaries). Boundary stubs match via `node_type` (route, grpc_service, queue_topic, ...). Pass `file` to list every symbol defined in a file (an outline, ordered by line) -- no query needed.",
           "inputSchema": { "type": "object", "properties": {
               "query": { "type": "string", "description": "A SYNQL query. Omit when using `pattern` or `file`." },
               "pattern": { "type": "string", "description": "A built-in pattern name instead of a query." },
@@ -7111,7 +7169,8 @@ mod tests {
         let mut s = Server::from_graph_data(gd, None);
         let text = call_tool(&mut s, "graph_stats", json!({}));
         assert!(
-            text.contains("Cross-repo: 2 edge(s) span repositories (1 cross-language"),
+            text.contains("Cross-repo: 2 edge(s) span repositories")
+                && text.contains("Cross-language: 1 coupling edge(s)"),
             "{text}"
         );
         let resp = s
@@ -7492,6 +7551,92 @@ mod tests {
         assert!(
             !callees.contains("AuthService"),
             "callers must not appear: {callees}"
+        );
+    }
+
+    /// E4 (2026-07 audit): per-edge context (method/host/queue) and cross_repo
+    /// were invisible in every traversal render.
+    #[test]
+    fn neighbors_render_edge_context_and_cross_repo() {
+        let mut gd = GraphData {
+            nodes: vec![
+                node("client", "load_users", Some(0)),
+                node("route", "/api/users", Some(0)),
+            ],
+            links: vec![edge("client", "route", "calls_service")],
+            ..Default::default()
+        };
+        gd.links[0].context = Some("GET svc".into());
+        gd.links[0].cross_repo = true;
+        let mut s = Server::from_graph_data(gd, None);
+        let out = call_tool(&mut s, "get_neighbors", json!({"label": "load_users"}));
+        assert!(out.contains("GET svc"), "edge context rendered: {out}");
+        assert!(out.contains("cross-repo"), "cross_repo rendered: {out}");
+    }
+
+    /// E4: a boundary stub is coupling, not an unresolved external import.
+    #[test]
+    fn query_graph_boundary_not_external() {
+        let mut route = node("route", "/api/users", Some(0));
+        route.extra.insert("_node_type".into(), json!("route"));
+        route.source_file = String::new();
+        let gd = GraphData {
+            nodes: vec![node("client", "load_users", Some(0)), route],
+            links: vec![edge("client", "route", "calls_service")],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        let out = call_tool(
+            &mut s,
+            "query_graph",
+            json!({"question": "users route", "full": true}),
+        );
+        assert!(
+            out.contains("(boundary)"),
+            "boundary marker rendered: {out}"
+        );
+        assert!(
+            !out.contains("/api/users (external)"),
+            "boundary is not an external stub: {out}"
+        );
+    }
+
+    /// E1 (2026-07 audit): the substring filter (call/use/reference) hid every
+    /// boundary relation -- a handler reached only via its route answered
+    /// "Callers: (none)".
+    #[test]
+    fn find_callers_and_callees_see_boundary_relations() {
+        let gd = GraphData {
+            nodes: vec![
+                node("client", "load_users", Some(0)),
+                node("route", "/api/users", Some(0)),
+                node("handler", "list_users", Some(0)),
+                node("runner", "deploy", Some(0)),
+                node("tool", "mytool.py", Some(0)),
+            ],
+            links: vec![
+                edge("client", "route", "calls_service"),
+                edge("route", "handler", "handled_by"),
+                edge("runner", "tool", "invokes"),
+            ],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None);
+
+        let callers = call_tool(&mut s, "find_callers", json!({"label": "list_users"}));
+        assert!(
+            callers.contains("/api/users"),
+            "handler's incoming handled_by (its route) must be listed: {callers}"
+        );
+        assert!(
+            !callers.contains("(none)"),
+            "boundary-called handler is not a dead end: {callers}"
+        );
+
+        let callees = call_tool(&mut s, "find_callees", json!({"label": "deploy"}));
+        assert!(
+            callees.contains("mytool.py"),
+            "invoked binary must be listed: {callees}"
         );
     }
 

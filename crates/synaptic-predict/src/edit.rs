@@ -204,13 +204,30 @@ pub fn assess_edit(
                 "imports" | "imports_from" | "re_exports" => {
                     Some((false, "imports the symbol; re-check its uses".to_string()))
                 }
+                // An inferred runtime coupling (HTTP/queue/IPC/subprocess) does
+                // not break at compile time -- flag it for a contract review, not
+                // as certain breakage (2026-07 audit).
+                "calls_service" | "handled_by" | "invokes" | "binds_native"
+                | "dynamic_ref" => Some((
+                    false,
+                    format!(
+                        "{rel} the symbol across a runtime boundary (inferred); re-check the wire contract, not the compiler"
+                    ),
+                )),
                 _ => Some((
                     true,
                     format!("{rel} the symbol; a signature change may break it"),
                 )),
             },
             EditKind::Visibility => {
-                if cross_file {
+                // A runtime-boundary dependent is unaffected by language-level
+                // visibility (an HTTP client cannot see `private`).
+                if matches!(
+                    rel.as_str(),
+                    "calls_service" | "handled_by" | "invokes" | "binds_native" | "dynamic_ref"
+                ) {
+                    None
+                } else if cross_file {
                     Some((
                         true,
                         "references the symbol from another file; narrowing visibility blocks it"

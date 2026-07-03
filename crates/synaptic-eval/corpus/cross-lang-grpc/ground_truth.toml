@@ -1,0 +1,11 @@
+# Hand-verified ground truth. The Python client's hello() reaches the tonic
+# say_hello handler through the shared grpc:greeter boundary.
+
+[[cross_edge]]
+from = "client/greet.py::hello"
+to = "server/src/lib.rs::say_hello"
+
+# bye() talks to the un-served Other service; it must not couple to say_hello.
+[[cross_nonedge]]
+from = "client/greet.py::bye"
+to = "server/src/lib.rs::say_hello"
