@@ -18,8 +18,10 @@ pg = ["dep:postgres"]
 # intermediate output so it never lands in (and gets re-indexed from) the
 # ingested dir.
 media = ["dep:tempfile"]
-# Office documents (xlsx) via the pure-Rust `calamine` reader. Off by default.
-office = ["dep:calamine"]
+# Office documents (xlsx/ods) via an in-house zip + roxmltree reader. Off by
+# default. In-house because the ecosystem xlsx readers all pull quick-xml,
+# which keeps landing in advisory trouble (RUSTSEC-2026-0194/0195).
+office = ["dep:zip", "dep:roxmltree"]
 # Google Workspace (.gdoc/.gsheet/.gslides) via the externally-installed `gws`
 # CLI. Off by default; shells out (no extra deps).
 gws = []
@@ -34,10 +36,12 @@ glob = { workspace = true }
 regex = { workspace = true }
 blake3 = { workspace = true }
 postgres = { version = "0.19", optional = true }
-calamine = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }
+roxmltree = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 rust_xlsxwriter = { workspace = true }
 proptest = { workspace = true }
+zip = { workspace = true }

@@ -24,7 +24,7 @@ pg = ["synaptic-ingest/pg"]
 # Media transcription for `synaptic ingest media` + YouTube URLs (shells out to
 # yt-dlp / a transcription CLI; off by default).
 media = ["synaptic-ingest/media"]
-# Office spreadsheet ingest for `synaptic ingest office` (calamine; off by default).
+# Office spreadsheet ingest for `synaptic ingest office` (in-house xlsx/ods reader; off by default).
 office = ["synaptic-ingest/office"]
 # Google-Workspace ingest for `synaptic ingest gws` (shells out to the gws CLI; off by default).
 gws = ["synaptic-ingest/gws"]
