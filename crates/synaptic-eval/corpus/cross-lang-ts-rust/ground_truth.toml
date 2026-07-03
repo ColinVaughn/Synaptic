@@ -17,3 +17,9 @@ to = "src/routes.rs::create_session"
 [[cross_nonedge]]
 from = "web/src/api.ts::createSession"
 to = "src/routes.rs::list_items"
+
+# Prefix composition: the client's /api/users joins the route the server nests
+# under /api (2026-07 audit batch B).
+[[cross_edge]]
+from = "web/src/api.ts::fetchUsers"
+to = "src/routes.rs::list_users"

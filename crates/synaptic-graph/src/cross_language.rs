@@ -262,7 +262,13 @@ pub fn resolve_pyo3_imports(nodes: Vec<Node>, edges: Vec<Edge>) -> (Vec<Node>, V
     let label_of: HashMap<&NodeId, &str> =
         nodes.iter().map(|n| (&n.id, n.label.as_str())).collect();
     let mut new_edges: Vec<Edge> = Vec::new();
-    let mut seen: HashSet<(NodeId, NodeId)> = HashSet::new();
+    // Seed with existing importer->boundary edges so the pass is idempotent:
+    // it runs per-member AND again in federation finalize (wave-2 review).
+    let mut seen: HashSet<(NodeId, NodeId)> = edges
+        .iter()
+        .filter(|e| e.relation == "calls_service")
+        .map(|e| (e.source.clone(), e.target.clone()))
+        .collect();
     for e in &edges {
         if e.relation != "imports" && e.relation != "imports_from" {
             continue;
@@ -382,14 +388,30 @@ fn pyo3_node_name(label: &str) -> &str {
 /// `_route_method`; if it has no `handled_by` edge yet, link it to the uniquely
 /// named function via `handled_by`. An ambiguous handler name is skipped.
 pub fn resolve_route_handlers(nodes: Vec<Node>, edges: Vec<Edge>) -> (Vec<Node>, Vec<Edge>) {
-    // function name -> node (`None` marks an ambiguous name).
+    // function name -> node (`None` marks an ambiguous name), federation-wide
+    // and per-repo. A unique same-repo match is preferred: common handler names
+    // (`health`, `index`) are globally ambiguous in any real federation but
+    // usually unique within the route's own repo (2026-07 audit).
     let mut fns: HashMap<String, Option<NodeId>> = HashMap::new();
+    let mut fns_by_repo: HashMap<(String, String), Option<NodeId>> = HashMap::new();
     for n in &nodes {
         if matches!(
             n.kind(),
             Some(NodeKind::Function | NodeKind::Method | NodeKind::Constructor)
         ) {
-            index_key(&mut fns, pyo3_node_name(&n.label).to_string(), &n.id);
+            let name = pyo3_node_name(&n.label).to_string();
+            index_key(&mut fns, name.clone(), &n.id);
+            if let Some(repo) = n.repo.as_deref() {
+                let key = (repo.to_string(), name);
+                fns_by_repo
+                    .entry(key)
+                    .and_modify(|e| {
+                        if e.as_ref() != Some(&n.id) {
+                            *e = None;
+                        }
+                    })
+                    .or_insert_with(|| Some(n.id.clone()));
+            }
         }
     }
 
@@ -408,30 +430,62 @@ pub fn resolve_route_handlers(nodes: Vec<Node>, edges: Vec<Edge>) -> (Vec<Node>,
         {
             continue;
         }
-        let Some(name) = n.extra.get("_route_handler").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let Some(Some(target)) = fns.get(name) else {
-            continue;
-        };
-        let method = n
-            .extra
-            .get("_route_method")
-            .and_then(|v| v.as_str())
-            .unwrap_or("ANY");
-        new_edges.push(Edge {
-            source: n.id.clone(),
-            target: target.clone(),
-            relation: "handled_by".to_string(),
-            confidence: Confidence::Inferred,
-            source_file: String::new(),
-            source_location: None,
-            confidence_score: Some(Confidence::Inferred.default_score()),
-            weight: 1.0,
-            context: Some(method.to_string()),
-            cross_repo: false,
-            extra: Map::new(),
-        });
+        // Chained registrations record a list of (name, method) pairs in
+        // `_route_handlers`; older graphs carry only the single-slot keys.
+        let pairs: Vec<(String, String)> =
+            match n.extra.get("_route_handlers").and_then(|v| v.as_array()) {
+                Some(arr) if !arr.is_empty() => arr
+                    .iter()
+                    .filter_map(|e| {
+                        Some((
+                            e.get("name")?.as_str()?.to_string(),
+                            e.get("method")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("ANY")
+                                .to_string(),
+                        ))
+                    })
+                    .collect(),
+                _ => match n.extra.get("_route_handler").and_then(|v| v.as_str()) {
+                    Some(name) => vec![(
+                        name.to_string(),
+                        n.extra
+                            .get("_route_method")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("ANY")
+                            .to_string(),
+                    )],
+                    None => continue,
+                },
+            };
+        for (name, pair_method) in &pairs {
+            let name = name.as_str();
+            let same_repo = n
+                .repo
+                .as_deref()
+                .and_then(|r| fns_by_repo.get(&(r.to_string(), name.to_string())))
+                .and_then(|v| v.clone());
+            let target = match same_repo {
+                Some(t) => t,
+                None => match fns.get(name) {
+                    Some(Some(t)) => t.clone(),
+                    _ => continue,
+                },
+            };
+            new_edges.push(Edge {
+                source: n.id.clone(),
+                target: target.clone(),
+                relation: "handled_by".to_string(),
+                confidence: Confidence::Inferred,
+                source_file: String::new(),
+                source_location: None,
+                confidence_score: Some(Confidence::Inferred.default_score()),
+                weight: 1.0,
+                context: Some(pair_method.clone()),
+                cross_repo: false,
+                extra: Map::new(),
+            });
+        }
     }
     if new_edges.is_empty() {
         return (nodes, edges);
@@ -462,20 +516,76 @@ pub fn resolve_sql_queries(nodes: Vec<Node>, edges: Vec<Edge>) -> (Vec<Node>, Ve
     }
     let mut nodes: Vec<Node> = best.into_values().collect();
     nodes.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+
+    // Cross-repo the stub and the real table carry different (tag-prefixed)
+    // ids, so the id-keyed pass above cannot join them (2026-07 audit). Merge a
+    // remaining `table` STUB into the unique REAL table sharing its label.
+    let is_table = |n: &Node| n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("table");
+    let mut real_by_label: HashMap<String, Option<NodeId>> = HashMap::new();
+    for n in &nodes {
+        if is_table(n) && !n.source_file.is_empty() {
+            index_key(&mut real_by_label, n.label.to_ascii_lowercase(), &n.id);
+        }
+    }
+    if real_by_label.is_empty() {
+        return (nodes, edges);
+    }
+    let mut remap: HashMap<NodeId, NodeId> = HashMap::new();
+    for n in &nodes {
+        if is_table(n) && n.source_file.is_empty() {
+            if let Some(Some(real)) = real_by_label.get(&n.label.to_ascii_lowercase()) {
+                remap.insert(n.id.clone(), real.clone());
+            }
+        }
+    }
+    if remap.is_empty() {
+        return (nodes, edges);
+    }
+    let edges = edges
+        .into_iter()
+        .map(|mut e| {
+            if let Some(real) = remap.get(&e.target) {
+                e.target = real.clone();
+            }
+            if let Some(real) = remap.get(&e.source) {
+                e.source = real.clone();
+            }
+            e
+        })
+        .collect();
+    let nodes = nodes
+        .into_iter()
+        .filter(|n| !remap.contains_key(&n.id))
+        .collect();
     (nodes, edges)
 }
 
 /// Cross-language relations whose edges represent a real coupling boundary that
-/// can span repositories in a federated graph.
-const CROSS_LANGUAGE_RELATIONS: &[&str] =
-    &["invokes", "binds_native", "calls_service", "handled_by"];
+/// can span repositories in a federated graph. Includes the evidence-linked
+/// `dynamic_ref` and the code->SQL relations (2026-07 audit: they were omitted,
+/// so a cross-repo reflection target or schema coupling could never be flagged).
+pub const CROSS_LANGUAGE_RELATIONS: &[&str] = &[
+    "invokes",
+    "binds_native",
+    "calls_service",
+    "handled_by",
+    "dynamic_ref",
+    "queries",
+    "writes_to",
+    "calls_proc",
+];
 
-/// Flag cross-language edges (subprocess/FFI/HTTP/gRPC) whose endpoints live in
-/// different repos as `cross_repo`, so a federated graph shows which coupling
-/// boundaries actually span repositories. Runs after federation has merged
-/// shared boundary nodes (route/service/pyo3) by label, so e.g. a client in repo
-/// A and a handler in repo B meet at one node and the client edge is flagged.
-/// Deps and resolved symbols are left to the export-surface resolver.
+/// Flag cross-language edges (subprocess/FFI/HTTP/gRPC/queue/SQL/dynamic_ref)
+/// whose endpoints live in different repos as `cross_repo`. Runs after
+/// federation has merged shared boundary nodes by identity.
+///
+/// A merged boundary node (route/service/pyo3/queue -- no `source_file`) is
+/// repo-NEUTRAL: its `repo` tag is just whichever member composed first, so an
+/// edge through it is judged by the repos of the REAL endpoints on its two
+/// sides (consumers vs providers), never by the boundary's own tag (2026-07
+/// audit: the old tag comparison made flags composition-order-dependent).
+/// Direct real-to-real edges keep the in-repo-backed rule: a deduped external
+/// stub (npm, an external API URL) two repos share is not a dependency.
 pub fn mark_cross_repo_edges(nodes: &[Node], mut edges: Vec<Edge>) -> Vec<Edge> {
     let repo_of: HashMap<&NodeId, &str> = nodes
         .iter()
@@ -483,34 +593,63 @@ pub fn mark_cross_repo_edges(nodes: &[Node], mut edges: Vec<Edge>) -> Vec<Edge> 
         .collect();
     // A real in-repo definition carries a source file (a resolved command -> file,
     // a handler, ...). External stubs (commands, external service URLs, FFI sinks)
-    // do not.
+    // and merged boundary nodes do not.
     let in_repo: HashSet<&NodeId> = nodes
         .iter()
         .filter(|n| !n.source_file.is_empty())
         .map(|n| &n.id)
         .collect();
-    // A service boundary with an in-repo provider is the source of a `handled_by`
-    // edge -- a route/grpc/pyo3 that is actually served in the graph.
-    let provided: HashSet<NodeId> = edges
-        .iter()
-        .filter(|e| e.relation == "handled_by")
-        .map(|e| e.source.clone())
-        .collect();
-    for e in &mut edges {
+    // Real endpoints around each boundary node: providers (targets of its
+    // `handled_by` edges) and consumers (sources of its other incoming edges).
+    let mut provider_repos: HashMap<&NodeId, HashSet<&str>> = HashMap::new();
+    let mut consumer_repos: HashMap<&NodeId, HashSet<&str>> = HashMap::new();
+    for e in &edges {
         if !CROSS_LANGUAGE_RELATIONS.contains(&e.relation.as_str()) {
             continue;
         }
-        let (Some(s), Some(t)) = (repo_of.get(&e.source), repo_of.get(&e.target)) else {
-            continue;
-        };
-        if s == t {
-            continue;
+        if e.relation == "handled_by" && !in_repo.contains(&e.source) {
+            if let Some(r) = repo_of.get(&e.target) {
+                provider_repos.entry(&e.source).or_default().insert(r);
+            }
+        } else if e.relation != "handled_by" && !in_repo.contains(&e.target) {
+            if let Some(r) = repo_of.get(&e.source) {
+                consumer_repos.entry(&e.target).or_default().insert(r);
+            }
         }
-        // Only a coupling to an in-repo-backed target is a genuine cross-repo
-        // dependency. A deduped external stub (npm, cmd, an external API URL) that
-        // two repos happen to share is not -- its repo tag is just whichever repo
-        // was seen first.
-        if in_repo.contains(&e.target) || provided.contains(&e.target) {
+    }
+    let mut flags: Vec<bool> = Vec::with_capacity(edges.len());
+    for e in &edges {
+        if !CROSS_LANGUAGE_RELATIONS.contains(&e.relation.as_str()) {
+            flags.push(false);
+        } else if e.relation != "handled_by" && !in_repo.contains(&e.target) {
+            // consumer -> boundary: cross-repo when some PROVIDER of the boundary
+            // lives in a different repo than the consumer.
+            flags.push(
+                match (repo_of.get(&e.source), provider_repos.get(&e.target)) {
+                    (Some(s), Some(provs)) => provs.iter().any(|p| p != s),
+                    _ => false,
+                },
+            );
+        } else if e.relation == "handled_by" && !in_repo.contains(&e.source) {
+            // boundary -> provider: cross-repo when some CONSUMER of the boundary
+            // lives in a different repo than the provider.
+            flags.push(
+                match (repo_of.get(&e.target), consumer_repos.get(&e.source)) {
+                    (Some(t), Some(cons)) => cons.iter().any(|c| c != t),
+                    _ => false,
+                },
+            );
+        } else {
+            // Direct real-to-real coupling (a resolved command -> file,
+            // dynamic_ref, code -> table): different repos, in-repo-backed target.
+            flags.push(match (repo_of.get(&e.source), repo_of.get(&e.target)) {
+                (Some(s), Some(t)) => s != t && in_repo.contains(&e.target),
+                _ => false,
+            });
+        }
+    }
+    for (e, f) in edges.iter_mut().zip(flags) {
+        if f {
             e.cross_repo = true;
         }
     }
@@ -855,6 +994,149 @@ mod tests {
         assert!(
             !flag("client", "svc_route", "calls"),
             "a non cross-language relation is left alone"
+        );
+    }
+
+    /// D3 (2026-07 audit): dynamic_ref and the SQL relations are cross-language
+    /// couplings too -- they must be flaggable cross_repo.
+    #[test]
+    fn dynamic_ref_and_sql_relations_flag_cross_repo() {
+        let mut caller = file_node("caller", "dispatch()", "repoa/d.js");
+        caller.repo = Some("repoa".into());
+        let mut target = file_node("t", "handleSave()", "repob/h.js");
+        target.repo = Some("repob".into());
+        let mut table = file_node("tbl", "orders", "repob/schema.sql");
+        table.repo = Some("repob".into());
+        let nodes = vec![caller, target, table];
+        let edges = vec![
+            edge("caller", "t", "dynamic_ref"),
+            edge("caller", "tbl", "queries"),
+            edge("caller", "tbl", "writes_to"),
+        ];
+        let edges = mark_cross_repo_edges(&nodes, edges);
+        for e in &edges {
+            assert!(
+                e.cross_repo,
+                "{} edge to an in-repo-backed target in another repo must be cross_repo",
+                e.relation
+            );
+        }
+    }
+
+    /// D4 (2026-07 audit): which repo tag the merged boundary node kept must not
+    /// decide which side's edge is flagged -- both sides of a genuinely
+    /// cross-repo boundary flag, regardless of composition order.
+    #[test]
+    fn cross_repo_flag_is_composition_order_independent() {
+        let build = |boundary_repo: &str| {
+            let mut route = route_node("r", "/api/x");
+            route.repo = Some(boundary_repo.into());
+            let mut client = file_node("client", "load()", "repoa/c.js");
+            client.repo = Some("repoa".into());
+            let mut handler = file_node("h", "serve()", "repob/s.py");
+            handler.repo = Some("repob".into());
+            let nodes = vec![route, client, handler];
+            let edges = vec![
+                edge("client", "r", "calls_service"),
+                edge("r", "h", "handled_by"),
+            ];
+            let edges = mark_cross_repo_edges(&nodes, edges);
+            let calls = edges
+                .iter()
+                .find(|e| e.relation == "calls_service")
+                .unwrap()
+                .cross_repo;
+            let handled = edges
+                .iter()
+                .find(|e| e.relation == "handled_by")
+                .unwrap()
+                .cross_repo;
+            (calls, handled)
+        };
+        let tagged_a = build("repoa");
+        let tagged_b = build("repob");
+        assert_eq!(
+            tagged_a, tagged_b,
+            "flags must not depend on the boundary's first-seen repo tag"
+        );
+        assert_eq!(
+            tagged_a,
+            (true, true),
+            "a client in repoa served by repob is cross-repo on BOTH edges"
+        );
+    }
+
+    /// D4: a boundary whose client and handler live in the SAME repo stays
+    /// unflagged even when the boundary node carries another repo's tag.
+    #[test]
+    fn same_repo_boundary_not_flagged_by_foreign_tag() {
+        let mut route = route_node("r", "/api/x");
+        route.repo = Some("repoz".into()); // stale first-seen tag
+        let mut client = file_node("client", "load()", "repoa/c.js");
+        client.repo = Some("repoa".into());
+        let mut handler = file_node("h", "serve()", "repoa/s.py");
+        handler.repo = Some("repoa".into());
+        let nodes = vec![route, client, handler];
+        let edges = vec![
+            edge("client", "r", "calls_service"),
+            edge("r", "h", "handled_by"),
+        ];
+        let edges = mark_cross_repo_edges(&nodes, edges);
+        assert!(
+            edges.iter().all(|e| !e.cross_repo),
+            "same-repo coupling through a foreign-tagged boundary is not cross-repo"
+        );
+    }
+
+    /// D5 (2026-07 audit): a unique same-repo handler wins over the federation-
+    /// wide index; a name that is only unique globally still binds.
+    #[test]
+    fn route_handler_prefers_same_repo_match() {
+        let mut route = route_node("r", "/health");
+        route.repo = Some("repoa".into());
+        route.extra.insert("_route_handler".into(), json!("health"));
+        let mut ha = fn_node("a_health", "health()", "repoa/h.py");
+        ha.repo = Some("repoa".into());
+        let mut hb = fn_node("b_health", "health()", "repob/h.py");
+        hb.repo = Some("repob".into());
+        let (_n, edges) = resolve_route_handlers(vec![route, ha, hb], vec![]);
+        let e = edges
+            .iter()
+            .find(|e| e.relation == "handled_by")
+            .expect("same-repo unique match binds instead of ambiguous-skip");
+        assert_eq!(e.target.0, "a_health", "same-repo handler preferred");
+    }
+
+    /// D1 (2026-07 audit): cross-repo the stub and the real table have
+    /// DIFFERENT (tag-prefixed) ids -- the join must work by label.
+    #[test]
+    fn sql_stub_joins_real_table_across_ids() {
+        let mut stub = Node {
+            id: NodeId("repoa::sql_orders".into()),
+            label: "orders".into(),
+            file_type: FileType::Code,
+            source_file: String::new(),
+            source_location: None,
+            community: None,
+            repo: Some("repoa".into()),
+            extra: Map::new(),
+        };
+        stub.extra.insert("_node_type".into(), json!("table"));
+        let mut real = file_node("repob::schema_orders", "orders", "repob/schema.sql");
+        real.extra.insert("_node_type".into(), json!("table"));
+        real.repo = Some("repob".into());
+        let caller = file_node("repoa::q", "load()", "repoa/q.py");
+        let nodes = vec![stub, real, caller];
+        let edges = vec![edge("repoa::q", "repoa::sql_orders", "queries")];
+        let (nodes, edges) = resolve_sql_queries(nodes, edges);
+        assert!(
+            !nodes.iter().any(|n| n.id.0 == "repoa::sql_orders"),
+            "stub merged away"
+        );
+        let e = edges.iter().find(|e| e.relation == "queries").unwrap();
+        assert_eq!(
+            e.target.0, "repob::schema_orders",
+            "queries edge rewired onto the real table in the other repo"
         );
     }
 

@@ -9,3 +9,9 @@ export async function createSession(): Promise<Response> {
 export async function getSessions(): Promise<Response> {
     return fetch("/sessions", { method: "GET" });
 }
+
+// fetchUsers calls the PREFIX-COMPOSED route /api/users (the server nests the
+// users router under /api), exercising mount-prefix composition end to end.
+export async function fetchUsers(): Promise<Response> {
+    return fetch("/api/users", { method: "GET" });
+}

@@ -106,10 +106,10 @@ The build prints a summary: federated node/edge/community/member counts, the
 cross-repo report (`extracted`, `inferred`, `cross-language`, `external_package`),
 and per-member node/edge counts. `extracted`/`inferred` count import/coordinate
 resolution (see [Cross-repo symbol resolution](#cross-repo-symbol-resolution));
-`cross-language` counts the HTTP/RPC/FFI/WebSocket boundaries that span repos (see
-[Cross-Language-Edges](Cross-Language-Edges)) — these are flagged on the edge, so
-a graph with only WebSocket or route coupling no longer reads as "0 cross-repo
-links".
+`cross-language` counts the HTTP/RPC/FFI/WebSocket/queue/SQL boundaries that span
+repos (see [Cross-Language-Edges](Cross-Language-Edges)) — these are flagged on
+the edge, so a graph with only WebSocket or route coupling no longer reads as "0
+cross-repo links".
 
 ### `workspace federate`
 
@@ -355,10 +355,16 @@ never `@apple`). On duplicate aliases, the first mapping wins.
 Composition prefixes every member's subgraph with its tag (`id` becomes
 `tag::id`), sets a `repo` attribute on each node, stashes the original id as
 `local_id`, repo-prefixes `source_file`s, and unions the subgraphs. Shared
-third-party **external** nodes (those with an empty `source_file`) that share a
-label are collapsed to one node across repos (so the federated graph has one
-`serde`/`requests` node, not one per repo). After cross-repo resolution the
-merged graph is re-clustered at the workspace level.
+**external** nodes (those with an empty `source_file`) are collapsed to one node
+across repos by a *typed* identity — its `_node_type` plus a canonical label (a
+route's normalized path, else the case-folded label) — so the federated graph
+has one `serde`/`requests` node, an Express `/users/:id` route meets an axum
+`/users/{id}`, but a `command` stub named `orders` never merges with a SQL
+`table` of the same name. Cross-repo resolution then re-runs the boundary passes
+over the composed graph (PyO3 module ↔ importer, subprocess command ↔ in-repo
+binary, code ↔ SQL table), each of which only ever has both sides present once
+the members are federated, and the merged graph is re-clustered at the workspace
+level.
 
 ## The global cross-repo store
 

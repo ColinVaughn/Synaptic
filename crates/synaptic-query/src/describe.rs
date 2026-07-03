@@ -14,7 +14,7 @@ use synaptic_graph::KnowledgeGraph;
 /// Outgoing relations that count as "calls" in a description summary. Includes
 /// the cross-language `invokes`/`calls_service` relations (Track B) so the
 /// summary stays accurate once those edges exist.
-const CALL_RELATIONS: &[&str] = &["calls", "invokes", "calls_service"];
+const CALL_RELATIONS: &[&str] = &["calls", "invokes", "calls_service", "binds_native"];
 
 /// Cap on callees listed in the one-line summary, so it stays compact enough for
 /// model routing. The full list is always available in [`NodeDescription::callees`].

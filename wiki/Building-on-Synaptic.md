@@ -115,11 +115,15 @@ for e in g["links"]:
 def label_to_id(label):
     return next((n["id"] for n in g["nodes"] if n["label"] == label), None)
 
-# "Who calls AuthService?" -- direct incoming call/use edges.
+# "Who calls AuthService?" -- incoming call/use edges PLUS cross-language
+# boundary edges (a route `handled_by` it, a command that `invokes` it), so a
+# handler reached only over HTTP / a queue / FFI is not missed.
+BOUNDARY_RELS = {"handled_by", "invokes", "binds_native", "dynamic_ref"}
 nid = label_to_id("AuthService")
 callers = [by_id[e["source"]]["label"]
            for e in incoming[nid]
-           if "call" in e["relation"] or "use" in e["relation"]]
+           if "call" in e["relation"] or "use" in e["relation"]
+           or e["relation"] in BOUNDARY_RELS]
 ```
 
 The same in JavaScript is a few lines:
@@ -163,12 +167,14 @@ def find_callers(symbol: str) -> list[dict]:
     node = next((n for n in g["nodes"] if n["label"] == symbol), None)
     if not node:
         return []
+    boundary = {"handled_by", "invokes", "binds_native", "dynamic_ref"}
     return [
         {"caller": by_id[e["source"]]["label"],
          "relation": e["relation"],
          "file": e.get("source_file")}
         for e in incoming[node["id"]]
         if "call" in e["relation"] or "use" in e["relation"]
+        or e["relation"] in boundary
     ]
 
 if __name__ == "__main__":

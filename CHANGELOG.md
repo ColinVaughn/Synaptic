@@ -8,6 +8,114 @@ All notable changes to Synaptic are documented here. The format is based on
 > **CodeGraph**, and reference the old `codegraph` command and crate names. They
 > are preserved verbatim as historical record.
 
+## [Unreleased]
+
+> **Upgrade note:** route (and queue/WS/IPC/event channel) node ids changed to a
+> collision-safe canonical format. Graphs extracted with an older binary will
+> not join boundary nodes with newly extracted ones -- re-extract every member
+> (`synaptic extract .` / workspace rebuild) after upgrading.
+
+### Added
+- **HTTP detection for C#, Java/Kotlin, PHP, and Ruby** — previously only
+  Python, JS/TS, Go, and Rust participated. Servers: ASP.NET Core minimal APIs
+  (`MapGet/...`) and attribute routing (`[HttpVerb]` composed with
+  `[Route("api/[controller]")]`), Spring `@GetMapping`/`@RequestMapping` (class
+  prefix composed) and JAX-RS `@GET`+`@Path`, Laravel `Route::verb`, Sinatra /
+  Rails routes. Clients: `HttpClient`, RestTemplate / `java.net.http` / OkHttp /
+  Retrofit, Guzzle and the Laravel `Http::` facade, `Net::HTTP` / Faraday /
+  HTTParty.
+- **More web frameworks** on the already-supported languages: Go
+  gin/echo/chi/fiber verb methods and gorilla `.Methods("X")`; Node any-receiver
+  Express and NestJS `@Controller`/`@Get`; Python Django `urlpatterns`, aiohttp,
+  and `urllib`.
+- **gRPC servers and clients across five languages** (was tonic servers plus
+  Rust/Python clients only): Python `Servicer` subclasses / `add_..._to_server`,
+  Go `Register<Svc>Server` / `New<Svc>Client`, Java `ImplBase` / `new*Stub`, C#
+  `Svc.SvcBase` / `new Svc.SvcClient`, JS `new <Svc>Client` (gated on
+  `@grpc/grpc-js`).
+- **Message-queue / pub-sub tier** — a new `queue #<topic>` boundary node
+  (producers `calls_service`, consumers `handled_by`) for Kafka (kafka-python,
+  kafkajs, Spring `@KafkaListener`/`KafkaTemplate`), RabbitMQ (pika, amqplib),
+  NATS, Redis pub/sub, and Celery task queues (`@app.task` meets
+  `send_task`/`.delay()` at `queue #task:<name>`). Every pattern is gated on its
+  library's token so a generic `.publish(`/`.subscribe(` never fires alone.
+- **WebSocket breadth**: Go gorilla/nhooyr `Dial` clients, Java/Jakarta
+  `@ServerEndpoint` servers, and per-SITE client/server role resolution (a proxy
+  file that both serves and connects no longer gets one half inverted).
+- **FFI / subprocess breadth**: .NET P/Invoke (`[DllImport]`/`[LibraryImport]`),
+  cffi `dlopen`, Rust `#[no_mangle] extern "C"` exports and ctypes call-sites
+  meeting at shared `c_symbol:<name>` sinks; Java `ProcessBuilder`/`Runtime.exec`,
+  C# `Process.Start`/`ProcessStartInfo`, and C/C++ `system`/`popen` invocations.
+- **Vue/Svelte/Astro single-file components are scanned** — `<script>` blocks
+  (and Astro frontmatter) now run through every JS/TS detector with byte offsets
+  preserved, so SFC `fetch`/`axios`/socket calls produce boundary edges.
+- **Shell scripts**: `curl` (honoring `-X`/`--request`) and `wget` are HTTP
+  client edges; interpreter (`python tools/x.py`) and `./script` runner lines are
+  `invokes` edges that resolve to in-repo files.
+- **New boundary affordances**: a SYNQL `node_type` field (boundary stubs are
+  selectable at last) and a `dangling-endpoints` pattern that lists one-sided
+  boundaries (half-open clients / unconsumed servers). The eval corpus gains
+  per-family cross-language fixtures (gRPC, message queue, PyO3, WebSocket) with
+  distractors, and calibration now covers every boundary family with a per-type
+  two-sidedness breakdown (`two_sided_by_type`).
+
+### Changed
+- **Route (and queue / WebSocket / IPC / event-channel) node ids use a
+  collision-safe canonical format.** `/a-b` no longer collides with `/a/b`, a
+  literal `/users/id` no longer merges with the `/users/{id}` template, and
+  whether a shared node is a template no longer depends on file order. Equivalent
+  route templates across frameworks (`:id` / `{id}` / `<int:id>`) intentionally
+  share ONE node, so a polyglot migration links server-to-server. **Re-extract
+  after upgrading** (see the note above).
+- **Route keys compose same-file mount/constructor prefixes** (FastAPI
+  `APIRouter`/`include_router`, Flask `Blueprint`/`register_blueprint`, Express
+  `app.use`, axum `.nest`), and clients are read in their modern spellings:
+  template-literal and f-string URLs (`{param}` segments), single-file
+  constants, and instance clients (`axios.create({baseURL})`,
+  `httpx.Client(base_url=...)`, `requests.Session()`). An absolute URL's
+  authority now rides on the client edge as context (`GET api.github.com`).
+- **`graph_stats` / `GRAPH_REPORT` count cross-language coupling by relation**
+  (HTTP/RPC/FFI/WebSocket/queue/SQL boundaries), so a polyglot single repo shows
+  its coupling; the count is no longer described as, or nested under, the
+  federated cross-repo count.
+- **Cross-language boundary edges are visible everywhere impact is surfaced.**
+  Reverse impact (`affected`, `predict_impact`, `affected_tests`) now traverses
+  `queries`/`writes_to`/`calls_proc`, so a schema change reaches the code that
+  reads or writes the table; `find_callers`/`find_callees` list boundary callers
+  (a route/queue/IPC channel that a handler is `handled_by`) instead of
+  answering "(none)"; `get_neighbors` renders per-edge context and a
+  `[cross-repo]` marker; `query_graph` marks boundary nodes `(boundary)`;
+  `describe_node` counts `binds_native`; `predict_edit` flags a wire-contract
+  review (not certain breakage) for runtime-boundary dependents; and CLI
+  `synaptic path` annotates each hop with its relation and direction.
+- **Federation resolves cross-repo boundaries.** The compose step runs the
+  PyO3, subprocess-command, and SQL passes over the merged graph (each has both
+  sides only once members are federated), dedups external nodes by a typed
+  canonical identity (`_node_type` + canonical/case-folded label, so a `command`
+  stub never merges with a SQL `table`), flags `cross_repo` independent of member
+  composition order, and prefers a same-repo handler match for ambiguous names.
+  `dynamic_ref` and the SQL relations joined the cross-repo-flaggable set.
+
+### Fixed
+- **Extraction no longer crashes on non-ASCII source near a match** — three
+  byte-offset windows (fetch options, WebSocket role detection, axum route spans)
+  could split a multi-byte character and panic the whole `synaptic extract` run;
+  all are now char-boundary-safe and length-bounded.
+- **False positives removed**: an Express `res.send({ type: ... })` response is
+  not a WebSocket message; a clap `Command::new("app")` builder is not a
+  subprocess; `app.get('port')` is not a route; client wrappers
+  (`this.http.post('/x', body)`, `api.post('/x', opts)`) and Ruby request specs
+  are not servers; a commented `# curl ...` in a shell script is masked; gRPC
+  codegen files are skipped; and Django `include(...)`, consul `kv.Get(...)`,
+  C# property `+=`, and non-producer `.send(...)` no longer mint spurious edges.
+- **Correctness**: HTTP methods are recorded faithfully (`fetch` options, Flask
+  method lists, chained axum `get(h).post(h2)` handlers, Go `PostForm`); JNI
+  names demangle (`Java_pkg_Cls_do_1work` → `jni:do_work`); C# events link across
+  files; relative (`./api/x`) and concatenated (`'/users/' + id`) client URLs key
+  the right route; a bare `/` no longer mints a route node; and
+  `resolve_pyo3_imports` is idempotent across the per-member and federation
+  passes.
+
 ## [0.3.15] - 2026-06-28
 
 ### Added

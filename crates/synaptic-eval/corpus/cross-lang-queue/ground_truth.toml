@@ -1,0 +1,10 @@
+# The Python producer of "orders" reaches the kafkajs consumer through the
+# queue #orders boundary; the "audit" producer stays unconnected.
+
+[[cross_edge]]
+from = "orders/producer.py::publish_order"
+to = "worker/consumer.js::run"
+
+[[cross_nonedge]]
+from = "orders/producer.py::publish_audit"
+to = "worker/consumer.js::run"

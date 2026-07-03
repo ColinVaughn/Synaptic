@@ -16,7 +16,8 @@ use std::collections::BTreeMap;
 use synaptic_core::{GraphData, NodeId};
 use synaptic_graph::{
     apply_communities, cluster, link_dynamic_refs, mark_cross_repo_edges,
-    resolve_parameterized_routes, resolve_route_handlers, resolve_sql_queries, ClusterOptions,
+    resolve_command_invocations, resolve_parameterized_routes, resolve_pyo3_imports,
+    resolve_pyo3_modules, resolve_route_handlers, resolve_sql_queries, ClusterOptions,
     KnowledgeGraph,
 };
 use synaptic_incremental::{rebuild, ChangeSet, RebuildOptions};
@@ -108,6 +109,13 @@ fn finalize(
     // finally flag the cross-language edges that end up spanning repos.
     let (hn, he) = resolve_route_handlers(resolved.nodes, resolved.links);
     let (hn, he) = resolve_sql_queries(hn, he);
+    // These three previously ran only in the per-member pipeline, where the
+    // counterpart side is absent by definition (2026-07 audit): a Python repo's
+    // `import mymod` can only meet the Rust repo's `pyo3:mymod` boundary here,
+    // and a command stub can only retarget to a script in ANOTHER member here.
+    let (hn, he) = resolve_pyo3_modules(hn, he);
+    let (hn, he) = resolve_pyo3_imports(hn, he);
+    let (hn, he) = resolve_command_invocations(hn, he);
     let (rn, re) = resolve_parameterized_routes(hn, he);
     // Evidence-link reflection sites to their unique target across the whole
     // federation before cross-repo edges are flagged, so a cross-repo dynamic_ref
@@ -115,13 +123,16 @@ fn finalize(
     let (rn, re) = link_dynamic_refs(rn, re);
     resolved.nodes = rn;
     resolved.links = mark_cross_repo_edges(&resolved.nodes, re);
-    // Cross-language coupling that spans repos (HTTP/RPC/FFI/WebSocket) is flagged
-    // on the edge, not by the import resolver, so count it for the summary here.
+    // Cross-language coupling that spans repos (HTTP/RPC/FFI/WebSocket/queue/
+    // SQL) is flagged on the edge, not by the import resolver; count by the
+    // shared relation set so a rewired type reference is not misreported.
     let mut report = report;
     report.cross_language = resolved
         .links
         .iter()
-        .filter(|e| e.cross_repo && e.relation != "imports_from" && e.relation != "re_exports")
+        .filter(|e| {
+            e.cross_repo && synaptic_graph::CROSS_LANGUAGE_RELATIONS.contains(&e.relation.as_str())
+        })
         .count();
     let mut kg = KnowledgeGraph::from_graph_data(resolved);
     let communities = cluster(&kg, &ClusterOptions::default());

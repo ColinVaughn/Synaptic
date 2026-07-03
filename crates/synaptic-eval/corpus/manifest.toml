@@ -29,3 +29,19 @@ family = "scripting-python"
 [[fixture]]
 dir = "cross-lang-ts-rust"
 family = "cross-lang"
+
+[[fixture]]
+dir = "cross-lang-grpc"
+family = "cross-lang"
+
+[[fixture]]
+dir = "cross-lang-queue"
+family = "cross-lang"
+
+[[fixture]]
+dir = "cross-lang-pyo3"
+family = "cross-lang"
+
+[[fixture]]
+dir = "cross-lang-ws"
+family = "cross-lang"

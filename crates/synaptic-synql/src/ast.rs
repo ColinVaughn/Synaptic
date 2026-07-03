@@ -54,6 +54,9 @@ pub enum Field {
     RlsEnabled,
     Dialect,
     Operation,
+    /// The `_node_type` tag boundary stubs carry (route, grpc_service,
+    /// queue_topic, ws_endpoint, ...) -- the only selector for boundary nodes.
+    NodeType,
 }
 
 impl Field {
@@ -73,13 +76,14 @@ impl Field {
             "rls_enabled" => Field::RlsEnabled,
             "dialect" => Field::Dialect,
             "operation" => Field::Operation,
+            "node_type" => Field::NodeType,
             _ => return None,
         })
     }
 
     /// All valid field names, for error messages.
     pub fn valid_names() -> &'static str {
-        "kind, name, file, lang, visibility, loc, fan_in, fan_out, degree, community, rls_enabled, dialect, operation"
+        "kind, name, file, lang, visibility, loc, fan_in, fan_out, degree, community, rls_enabled, dialect, operation, node_type"
     }
 }
 
@@ -167,6 +171,7 @@ pub fn field_name(f: Field) -> &'static str {
         Field::RlsEnabled => "rls_enabled",
         Field::Dialect => "dialect",
         Field::Operation => "operation",
+        Field::NodeType => "node_type",
     }
 }
 

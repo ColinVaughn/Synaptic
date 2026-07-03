@@ -167,8 +167,31 @@ pub(crate) fn run_path(
     };
     match shortest_path(&kg, &a, &b) {
         Some(path) => {
-            let labels: Vec<String> = path.iter().map(|id| label_or_id(&kg, id)).collect();
-            println!("{}", labels.join(" → "));
+            // Annotate each hop with its connecting relation so a path that
+            // crosses an inferred network boundary is distinguishable from a
+            // static call chain (2026-07 audit; mirrors the MCP tool).
+            let mut out = String::new();
+            for (i, id) in path.iter().enumerate() {
+                if i > 0 {
+                    let prev = &path[i - 1];
+                    let hop = kg.incident_edges(prev).find(|e| {
+                        (&e.source == prev && &e.target == id)
+                            || (&e.target == prev && &e.source == id)
+                    });
+                    let rel = hop
+                        .map(|e| e.relation.clone())
+                        .unwrap_or_else(|| "related".to_string());
+                    // Arrow follows the EDGE's direction, not path order.
+                    let forward = hop.map(|e| &e.source == prev).unwrap_or(true);
+                    if forward {
+                        out.push_str(&format!(" -[{rel}]-> "));
+                    } else {
+                        out.push_str(&format!(" <-[{rel}]- "));
+                    }
+                }
+                out.push_str(&label_or_id(&kg, id));
+            }
+            println!("{out}");
         }
         None => println!("No path between {from} and {to}."),
     }

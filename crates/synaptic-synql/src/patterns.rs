@@ -32,6 +32,10 @@ pub fn list_patterns() -> Vec<(&'static str, &'static str)> {
             "service-locator",
             "Classes accessed (called/referenced) from 3+ distinct communities.",
         ),
+        (
+            "dangling-endpoints",
+            "One-sided cross-language boundaries: a route/service/queue/channel with clients but no in-graph handler (half-open), or with a handler but no in-graph client (unconsumed).",
+        ),
     ]
 }
 
@@ -54,6 +58,7 @@ pub fn run_pattern(kg: &KnowledgeGraph, name: &str) -> Result<QueryResult, Synql
             }
             Ok(single(detect_service_locator(kg)))
         }
+        "dangling-endpoints" => Ok(single(detect_dangling_endpoints(kg))),
         _ => Err(SynqlError::Parse(format!(
             "unknown pattern '{name}'; see --list-patterns"
         ))),
@@ -213,6 +218,48 @@ fn detect_service_locator(kg: &KnowledgeGraph) -> Vec<NodeId> {
         }
     }
     out
+}
+
+/// Boundary `_node_type`s a consumer and producer can meet at.
+const BOUNDARY_TYPES: &[&str] = &[
+    "route",
+    "grpc_service",
+    "pyo3_module",
+    "queue_topic",
+    "ws_endpoint",
+    "ws_message",
+    "ipc_channel",
+    "event_channel",
+];
+
+/// One-sided boundary nodes (2026-07 audit): consumers in (`calls_service`)
+/// with no provider out (`handled_by`), or the reverse. A half-open boundary is
+/// a client of an out-of-graph service, an unserved route, or detector noise --
+/// exactly the things worth listing.
+fn detect_dangling_endpoints(kg: &KnowledgeGraph) -> Vec<NodeId> {
+    let mut consumed: HashSet<&NodeId> = HashSet::new();
+    let mut provided: HashSet<&NodeId> = HashSet::new();
+    for e in kg.edges() {
+        match e.relation.as_str() {
+            "handled_by" => {
+                provided.insert(&e.source);
+            }
+            "calls_service" | "invokes" | "binds_native" => {
+                consumed.insert(&e.target);
+            }
+            _ => {}
+        }
+    }
+    kg.nodes()
+        .filter(|n| {
+            n.extra
+                .get("_node_type")
+                .and_then(|v| v.as_str())
+                .is_some_and(|t| BOUNDARY_TYPES.contains(&t))
+        })
+        .filter(|n| consumed.contains(&n.id) != provided.contains(&n.id))
+        .map(|n| n.id.clone())
+        .collect()
 }
 
 #[cfg(test)]
@@ -402,5 +449,45 @@ mod tests {
         }
         let kg = graph(nodes, edges);
         assert_eq!(ids(run_pattern(&kg, "god-class").unwrap()), vec!["Big"]);
+    }
+
+    /// E4 (2026-07 audit): one-sided boundaries (a route with clients but no
+    /// handler, or a served route no one calls) were inexpressible.
+    #[test]
+    fn dangling_endpoints_lists_one_sided_boundaries() {
+        use serde_json::json;
+        let mk_boundary = |id: &str, nt: &str| {
+            let mut n = node(id, NodeKind::Function, None);
+            n.extra.insert("_node_type".into(), json!(nt));
+            n.source_file = String::new();
+            n
+        };
+        let nodes = vec![
+            mk_boundary("half_open", "route"),  // client, no handler
+            mk_boundary("unconsumed", "route"), // handler, no client
+            mk_boundary("two_sided", "route"),  // both
+            node("client", NodeKind::Function, None),
+            node("h1", NodeKind::Function, None),
+            node("h2", NodeKind::Function, None),
+        ];
+        let edges = vec![
+            edge("client", "half_open", "calls_service", None),
+            edge("unconsumed", "h1", "handled_by", None),
+            edge("client", "two_sided", "calls_service", None),
+            edge("two_sided", "h2", "handled_by", None),
+        ];
+        let kg = KnowledgeGraph::from_graph_data(GraphData {
+            nodes,
+            links: edges,
+            ..Default::default()
+        });
+        let res = run_pattern(&kg, "dangling-endpoints").expect("pattern exists");
+        let mut ids: Vec<&str> = res.rows.iter().map(|r| r[0].0.as_str()).collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["half_open", "unconsumed"],
+            "one-sided boundaries only; two-sided excluded"
+        );
     }
 }

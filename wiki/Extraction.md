@@ -67,11 +67,14 @@ detection; `signature` feeds the MCP `describe_node` tool and the structured
 ## Cross-language edges
 
 Beyond the per-file parse, an opt-in post-pass detects coupling that no single
-language parse can see: subprocess invocations, FFI bindings, and HTTP/gRPC
-service calls. These add `invokes` / `binds_native` / `calls_service` /
-`handled_by` edges at `INFERRED` confidence, so impact analysis traverses
-language boundaries. See [Cross-Language-Edges](Cross-Language-Edges) for the
-full model.
+language parse can see: subprocess invocations, FFI bindings, HTTP/gRPC service
+calls, WebSocket and message-queue exchanges, and (as evidence-linked
+metadata) event-bus / IPC / reflection dispatch. These add `invokes` /
+`binds_native` / `calls_service` / `handled_by` (plus `dynamic_ref`) edges at
+`INFERRED` confidence, across the full language set — Python, JS/TS (incl.
+Vue/Svelte/Astro), Go, Rust, Java/Kotlin, C#, PHP, Ruby, C/C++, and shell — so
+impact analysis traverses language boundaries. See
+[Cross-Language-Edges](Cross-Language-Edges) for the full model.
 
 [architectural search]: Commands
 [time-travel]: Commands

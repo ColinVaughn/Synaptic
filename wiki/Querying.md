@@ -161,8 +161,12 @@ synaptic path AuthService Database
 chain of labels:
 
 ```
-AuthService → SessionStore → Database
+AuthService -[calls]-> SessionStore -[queries]-> Database
 ```
+
+Each hop is annotated with its connecting relation (and arrow direction), so a
+path that crosses an inferred network boundary (`calls_service`, `handled_by`)
+is distinguishable from a static call chain.
 
 Both endpoints are resolved from your arguments: an exact node id is used
 directly, otherwise the first node whose label equals the argument exactly. If
@@ -246,8 +250,10 @@ The same cascade and messaging back the equivalent MCP tools.
 
   `calls`, `references`, `imports`, `imports_from`, `re_exports`, `inherits`,
   `extends`, `implements`, `uses`, `mixes_in`, `embeds`, `depends_on`,
-  `reads_from`, and the cross-language relations `invokes`, `binds_native`,
-  `calls_service`, `handled_by`, and `dynamic_ref`.
+  `reads_from`, the cross-language relations `invokes`, `binds_native`,
+  `calls_service`, `handled_by`, `dynamic_ref`, and the code->SQL relations
+  `queries`, `writes_to`, `calls_proc` (a schema change reaches the code that
+  reads or writes the table).
 
   These cross-language relations mean reverse-impact crosses language
   boundaries: changing an HTTP/gRPC handler reaches the clients that call it, a
