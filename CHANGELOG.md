@@ -8,6 +8,18 @@ All notable changes to Synaptic are documented here. The format is based on
 > **CodeGraph**, and reference the old `codegraph` command and crate names. They
 > are preserved verbatim as historical record.
 
+## [Unreleased]
+
+### Changed
+- **Office ingestion (`--features office`) no longer depends on `calamine`** —
+  `.xlsx`/`.ods` workbooks are now read by an in-house zip + XML reader built
+  on dependencies already in the tree. This removes `quick-xml` (flagged by
+  RUSTSEC-2026-0194 and RUSTSEC-2026-0195 with no fixed upstream path) from the
+  dependency graph entirely instead of ignoring the advisories.
+- Legacy binary `.xls` workbooks are no longer readable (they came along for
+  free with calamine); `synaptic ingest office` now rejects them with a clear
+  convert-to-`.xlsx` error.
+
 ## [0.4.0] - 2026-07-03
 
 > **Upgrade note:** route (and queue/WS/IPC/event channel) node ids changed to a

@@ -909,7 +909,7 @@ pub(crate) enum IngestSource {
     },
     /// A URL — fetched (SSRF-guarded) into synaptic-out/ingested/.
     Url { url: String },
-    /// An office spreadsheet (.xlsx/.xls/.ods) — converted to markdown in
+    /// An office spreadsheet (.xlsx/.ods) — converted to markdown in
     /// synaptic-out/ingested/. Requires a build with `--features office`.
     Office { file: PathBuf },
     /// A Google-Workspace pointer (.gdoc/.gsheet/.gslides) — exported to markdown

@@ -94,7 +94,7 @@ URL fetching is SSRF-guarded:
 
 ## office (feature: `office`)
 
-Convert a spreadsheet to Markdown (a `## Sheet` heading per worksheet, ` | `-joined non-empty rows) and write it into `synaptic-out/ingested/` for the next extract. Uses the pure-Rust `calamine` reader, no external tools.
+Convert a spreadsheet (`.xlsx`/`.ods`) to Markdown (a `## Sheet` heading per worksheet, ` | `-joined non-empty rows) and write it into `synaptic-out/ingested/` for the next extract. Uses an in-house pure-Rust reader (zip + XML), no external tools. Legacy binary `.xls` is not supported; convert it to `.xlsx` first.
 
 ```
 synaptic ingest office data.xlsx
