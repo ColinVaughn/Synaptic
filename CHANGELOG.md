@@ -8,7 +8,7 @@ All notable changes to Synaptic are documented here. The format is based on
 > **CodeGraph**, and reference the old `codegraph` command and crate names. They
 > are preserved verbatim as historical record.
 
-## [Unreleased]
+## [0.4.0] - 2026-07-03
 
 > **Upgrade note:** route (and queue/WS/IPC/event channel) node ids changed to a
 > collision-safe canonical format. Graphs extracted with an older binary will
