@@ -127,6 +127,10 @@ pub(crate) enum Cmd {
         /// Bypass the shrink guard.
         #[arg(long)]
         force: bool,
+        /// Also regenerate the visual/export artifacts (HTML, SVG, GraphML,
+        /// ...). Default writes graph.json + the provenance manifest only.
+        #[arg(long)]
+        artifacts: bool,
     },
     /// Watch the working tree and incrementally rebuild on change (debounced).
     Watch {
@@ -136,6 +140,13 @@ pub(crate) enum Cmd {
         /// Bypass the shrink guard on each rebuild.
         #[arg(long)]
         force: bool,
+        /// Also regenerate the visual/export artifacts on each rebuild.
+        #[arg(long)]
+        artifacts: bool,
+        /// Settle window in ms for batching a burst of saves into one rebuild
+        /// (default 3000; SYNAPTIC_WATCH_DEBOUNCE_MS also works).
+        #[arg(long)]
+        debounce_ms: Option<u64>,
     },
     /// Nodes that (transitively) depend on a node (reverse-impact).
     Affected {
@@ -236,6 +247,11 @@ pub(crate) enum Cmd {
         /// Equivalent to setting SYNAPTIC_CONCISE=1.
         #[arg(long)]
         concise: bool,
+        /// Embed a filesystem watcher: staleness becomes event-driven, so
+        /// queries skip the walk-per-query check and the debounce window
+        /// entirely. Equivalent to setting SYNAPTIC_SERVE_WATCH=1.
+        #[arg(long)]
+        watch: bool,
     },
     /// Ingest an external source into the graph (cargo workspace, MCP config) or
     /// fetch a URL into synaptic-out/ingested/ for the next extract.

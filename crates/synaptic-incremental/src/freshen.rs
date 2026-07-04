@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use synaptic_detect::{detect, DetectResult, FileType, Manifest, ManifestDiff};
+use synaptic_detect::{detect_inputs, DetectResult, FileType, Manifest, ManifestDiff};
 
 /// The build manifest's name under the output dir. Hidden + inside
 /// `synaptic-out/`, so the watcher's ignore rules already skip it (no
@@ -49,14 +49,14 @@ fn inputs_of(det: &DetectResult) -> Vec<PathBuf> {
 
 /// The files that feed the graph for `root` (code + extractable markdown).
 pub fn graph_input_files(root: &Path) -> Vec<PathBuf> {
-    inputs_of(&detect(root))
+    inputs_of(&detect_inputs(root))
 }
 
 /// Write a build manifest under `out_dir` reflecting the current on-disk state of
 /// the graph-input files. Called after every successful build so the serve
 /// catch-up has a baseline to diff against.
 pub fn persist_manifest(out_dir: &Path, root: &Path) -> std::io::Result<()> {
-    persist_manifest_with(out_dir, &detect(root))
+    persist_manifest_with(out_dir, &detect_inputs(root))
 }
 
 /// Like [`persist_manifest`] but reuses an existing detect result instead of
@@ -64,12 +64,17 @@ pub fn persist_manifest(out_dir: &Path, root: &Path) -> std::io::Result<()> {
 /// already scanned. Builds against the prior manifest with the mtime fastpath,
 /// so it only re-hashes files whose mtime moved.
 pub fn persist_manifest_with(out_dir: &Path, det: &DetectResult) -> std::io::Result<()> {
-    let mpath = manifest_path(out_dir);
-    let prior = Manifest::load(&mpath);
+    snapshot_manifest(out_dir, det).save(&manifest_path(out_dir))
+}
+
+/// Build (without saving) the manifest for the current on-disk state of the
+/// graph-input files. A rebuild takes this snapshot BEFORE extracting and saves
+/// it only after success: the manifest then never records file state the graph
+/// didn't ingest, so an edit landing mid-rebuild stays detectable.
+pub fn snapshot_manifest(out_dir: &Path, det: &DetectResult) -> Manifest {
+    let prior = Manifest::load(&manifest_path(out_dir));
     let files = inputs_of(det);
-    let manifest =
-        Manifest::build_incremental(files.iter().map(PathBuf::as_path), &det.scan_root, &prior);
-    manifest.save(&mpath)
+    Manifest::build_incremental(files.iter().map(PathBuf::as_path), &det.scan_root, &prior)
 }
 
 /// What [`detect_changes`] found on disk since the last build.
@@ -119,7 +124,7 @@ pub fn detect_changes(out_dir: &Path, root: &Path) -> ChangeReport {
     let mpath = manifest_path(out_dir);
     let prior_exists = mpath.exists();
     let prior = Manifest::load(&mpath);
-    let det = detect(root);
+    let det = detect_inputs(root);
     let files = inputs_of(&det);
     let root = det.scan_root.as_path();
     let current = if prior_exists {
@@ -254,6 +259,35 @@ mod tests {
             again.is_empty(),
             "re-detection after persisting the manifest must be empty: {:?}",
             again.diff
+        );
+    }
+
+    #[test]
+    fn snapshot_taken_before_an_edit_keeps_the_edit_detectable() {
+        // Regression: `update` used to rebuild the manifest by re-walking the
+        // disk AFTER the rebuild, so a file edited mid-rebuild was stamped as
+        // seen without ever being extracted -- invisible to detect_changes until
+        // its next edit. The fix snapshots the manifest BEFORE extraction and
+        // saves that snapshot after: an edit landing in between stays visible.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let out = root.join("synaptic-out");
+        write(root, "a.py", "x = 1\n");
+        persist_manifest(&out, root).unwrap();
+
+        // Rebuild starts: snapshot the pre-extraction state.
+        let det = detect_inputs(root);
+        let snapshot = snapshot_manifest(&out, &det);
+        // Mid-rebuild edit.
+        write(root, "a.py", "x = 2\n");
+        // Rebuild finishes: persist the snapshot, not a fresh walk.
+        snapshot.save(&manifest_path(&out)).unwrap();
+
+        let report = detect_changes(&out, root);
+        assert_eq!(
+            report.diff.changed,
+            vec!["a.py".to_string()],
+            "an edit during the rebuild must stay detectable"
         );
     }
 

@@ -14,27 +14,33 @@
 //! (C1a); locking/hooks/merge-driver are C1c–C1e.
 #![forbid(unsafe_code)]
 
+pub mod callnames;
 pub mod concurrency;
 pub mod freshen;
 pub mod hooks;
 pub mod merge_driver;
 pub mod watch;
+pub use callnames::{
+    bare_name, call_names, callnames_path, from_raw_calls, load_callnames, save_callnames,
+    CallNames,
+};
 pub use concurrency::{
-    drain_pending, merge_changed_paths, queue_pending, try_acquire_lock, RebuildLock,
+    drain_pending, drain_queued_rounds, merge_changed_paths, queue_pending, try_acquire_lock,
+    RebuildLock,
 };
 pub use freshen::{
     detect_changes, graph_input_files, is_extractable_markdown, manifest_path, persist_manifest,
-    persist_manifest_with, ChangeReport,
+    persist_manifest_with, snapshot_manifest, ChangeReport,
 };
 pub use merge_driver::{run_merge_driver, union_graphs, MergeDriverError};
-pub use watch::{should_ignore_path, ChangeBatch, DEBOUNCE_MS};
+pub use watch::{is_rebuildable, should_ignore_path, ChangeBatch, DEBOUNCE_MS};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 use synaptic_core::{Edge, GraphData, Hyperedge, Node, NodeId};
-use synaptic_detect::{classify_file, detect, DetectResult, FileType};
+use synaptic_detect::{classify_file, detect_inputs, DetectResult, FileType, Manifest};
 use synaptic_extract::cached_extract_source;
 use synaptic_graph::{
     apply_communities, build_from_parts, cluster, deduplicate_entities, guard_shrink,
@@ -105,17 +111,37 @@ pub fn merge_incremental(
         .map(|n| n.id.clone())
         .collect();
 
+    // On a FULL rebuild every file is re-extracted, so every extraction-owned
+    // old edge comes back fresh; preserving the old set too would union stale
+    // edges (a retargeted call keeps its phantom old edge because both
+    // endpoints still live). Extraction-owned means BOTH endpoints are AST:
+    // an edge touching a semantic node in either direction (including a
+    // ghost-remapped concept link sourced at a code symbol) has no fresh
+    // replacement and survives.
+    let ast_ids: HashSet<&NodeId> = if full_rebuild {
+        existing
+            .nodes
+            .iter()
+            .filter(|n| is_ast(n))
+            .map(|n| &n.id)
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
     let preserved_edges: Vec<Edge> = existing
         .links
         .iter()
         .filter(|e| {
             // Keep an edge iff both endpoints survive AND it does not originate
             // from an evicted file (by source node, with the edge's own
-            // source_file as a belt-and-suspenders fallback).
+            // source_file as a belt-and-suspenders fallback) AND, on a full
+            // rebuild, it is not extraction-owned (both endpoints AST).
             live_ids.contains(&e.source)
                 && live_ids.contains(&e.target)
                 && !evicted_node_ids.contains(&e.source)
                 && !evict_sources.contains(&e.source_file)
+                && !(ast_ids.contains(&e.source) && ast_ids.contains(&e.target))
         })
         .cloned()
         .collect();
@@ -153,6 +179,84 @@ fn previous_communities(gd: &GraphData) -> HashMap<NodeId, u32> {
         .collect()
 }
 
+/// A small incremental delta may skip the full re-cluster and place new nodes
+/// locally instead. Above this many unassigned nodes, re-cluster from scratch.
+const LOCAL_ASSIGN_MAX: usize = 64;
+
+/// Cap on how many unchanged files a single rebuild ripple-re-extracts when a
+/// (re)introduced symbol name is widely referenced. Cache hits keep each cheap;
+/// the cap bounds the pathological case (a name like `get` returning).
+const RIPPLE_MAX: usize = 512;
+
+/// Community assignment for a small incremental delta: every previously
+/// assigned node keeps its exact community (no re-cluster, so ids never churn
+/// mid-session); a new node joins the majority community among its neighbors
+/// (two propagation rounds, so a new node chained to another new node still
+/// lands with the group); anything still unplaced opens a fresh community.
+/// Full rebuilds and large deltas re-cluster properly, bounding quality drift.
+fn assign_locally(kg: &KnowledgeGraph, prev: &HashMap<NodeId, u32>) -> BTreeMap<u32, Vec<NodeId>> {
+    let mut assign: HashMap<NodeId, u32> = kg
+        .nodes()
+        .filter_map(|n| prev.get(&n.id).map(|c| (n.id.clone(), *c)))
+        .collect();
+    let mut fresh: Vec<NodeId> = kg
+        .nodes()
+        .filter(|n| !assign.contains_key(&n.id))
+        .map(|n| n.id.clone())
+        .collect();
+    fresh.sort();
+
+    // Undirected adjacency over the new-node set only.
+    let mut adj: HashMap<&NodeId, Vec<&NodeId>> = HashMap::new();
+    let fresh_set: HashSet<&NodeId> = fresh.iter().collect();
+    for e in kg.edges() {
+        if fresh_set.contains(&e.source) {
+            adj.entry(&e.source).or_default().push(&e.target);
+        }
+        if fresh_set.contains(&e.target) {
+            adj.entry(&e.target).or_default().push(&e.source);
+        }
+    }
+
+    for _ in 0..2 {
+        for id in &fresh {
+            if assign.contains_key(id) {
+                continue;
+            }
+            let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
+            for nb in adj.get(id).into_iter().flatten() {
+                if let Some(c) = assign.get(*nb) {
+                    *counts.entry(*c).or_default() += 1;
+                }
+            }
+            // Majority community; ties break to the smallest id (BTreeMap order).
+            if let Some((c, _)) = counts
+                .iter()
+                .max_by_key(|(c, n)| (**n, std::cmp::Reverse(**c)))
+            {
+                assign.insert(id.clone(), *c);
+            }
+        }
+    }
+
+    let mut next = prev.values().copied().max().map_or(0, |m| m + 1);
+    for id in &fresh {
+        if !assign.contains_key(id) {
+            assign.insert(id.clone(), next);
+            next += 1;
+        }
+    }
+
+    let mut communities: BTreeMap<u32, Vec<NodeId>> = BTreeMap::new();
+    for (id, c) in assign {
+        communities.entry(c).or_default().push(id);
+    }
+    for v in communities.values_mut() {
+        v.sort();
+    }
+    communities
+}
+
 /// What changed since the last build.
 #[derive(Debug, Clone)]
 pub enum ChangeSet {
@@ -188,6 +292,18 @@ pub struct RebuildOutcome {
     pub reextracted: usize,
     /// How many source files were evicted.
     pub evicted_sources: usize,
+    /// Manifest keys (repo-relative, POSIX) of changed files that could not be
+    /// read this round (editor/AV lock); their prior nodes were kept and their
+    /// keys are already dropped from [`manifest`](Self::manifest) so they
+    /// re-detect and retry next round. Exposed for caller-side logging.
+    pub unreadable: Vec<String>,
+    /// The provenance manifest to persist once the graph is written: the prior
+    /// manifest advanced for exactly what this rebuild ingested (entries for
+    /// the targets hashed BEFORE extraction, deleted keys removed, unreadable
+    /// keys dropped). Files outside the change set keep their prior entries,
+    /// so an edit the caller didn't list still diffs as changed later instead
+    /// of being stamped as ingested.
+    pub manifest: Manifest,
 }
 
 /// Errors a rebuild can surface.
@@ -211,8 +327,10 @@ pub fn rebuild(
     changes: &ChangeSet,
     existing: Option<&GraphData>,
 ) -> Result<RebuildOutcome, IncrementalError> {
-    // `detect` canonicalizes the root internally and exposes it as `scan_root`.
-    let det = detect(&opts.root);
+    // `detect_inputs` canonicalizes the root internally and exposes it as
+    // `scan_root`; stats-free (no corpus word count) since a rebuild only needs
+    // the classified file lists.
+    let det = detect_inputs(&opts.root);
     rebuild_with_detect(opts, changes, existing, &det)
 }
 
@@ -251,6 +369,10 @@ pub fn rebuild_with_detect(
     let mut full_rebuild = false;
     let mut evict_sources: HashSet<String> = HashSet::new();
     let mut had_deletions = false;
+    let mut deleted_keys: Vec<String> = Vec::new();
+    // Manifest-key derivation shared with synaptic-detect so unreadable /
+    // deleted / sidecar keys always match the manifest's own keys.
+    let rel_key = |p: &Path| synaptic_detect::relative_key(p, root);
     let targets: Vec<PathBuf> = match changes {
         ChangeSet::Full => {
             full_rebuild = true;
@@ -296,34 +418,160 @@ pub fn rebuild_with_detect(
                     wanted.push(abs);
                 } else {
                     had_deletions = true;
+                    deleted_keys.push(rel_key(&abs));
                 }
             }
             wanted
         }
     };
-    let reextracted = targets.len();
+    // Provenance manifest, advanced BEFORE extraction so an edit landing
+    // mid-rebuild still diffs as changed once this manifest is saved. A full
+    // rebuild snapshots the whole input set; an incremental one refreshes only
+    // the target entries -- a file changed on disk but NOT in the change set
+    // keeps its prior entry and stays detectable, instead of being stamped as
+    // ingested without ever being extracted.
+    let out_dir = root.join("synaptic-out");
+    let prior_manifest = Manifest::load(&manifest_path(&out_dir));
+    let fresh_entries =
+        Manifest::build_incremental(targets.iter().map(PathBuf::as_path), root, &prior_manifest);
+    let mut manifest = if full_rebuild {
+        fresh_entries
+    } else {
+        let mut m = prior_manifest;
+        for k in &deleted_keys {
+            m.0.remove(k);
+        }
+        m.0.extend(fresh_entries.0);
+        m
+    };
 
-    // Extract targets in parallel, ordered for determinism, with portable rel ids.
-    let cache_dir = root.join("synaptic-out").join("cache");
-    let extracted: Vec<_> = targets
+    // Extract targets in parallel, ordered for determinism, with portable rel
+    // ids. A read failure is kept distinct from "unsupported extension": the
+    // file exists but is momentarily unreadable (editor/AV lock), and treating
+    // it as deleted would silently evict its symbols.
+    let cache_dir = out_dir.join("cache");
+    let extracted: Vec<(Option<_>, bool)> = targets
         .par_iter()
         .map(|file| {
             let rel = file.strip_prefix(root).unwrap_or(file);
             let rel_str = rel.to_string_lossy();
-            std::fs::read(file)
-                .ok()
-                .and_then(|bytes| cached_extract_source(Some(&cache_dir), rel_str.as_ref(), &bytes))
+            match std::fs::read(file) {
+                Ok(bytes) => (
+                    cached_extract_source(Some(&cache_dir), rel_str.as_ref(), &bytes),
+                    false,
+                ),
+                Err(_) => (None, true),
+            }
         })
         .collect();
+    // Per-file called-name sidecar: rebuilt whole on a full rebuild, otherwise
+    // advanced for this round's extractions and deletions (an unreadable file
+    // keeps its prior entry, like its nodes). Saved only when something
+    // actually changed -- serve-path rounds are frequent and usually no-ops.
+    let mut callnames = if full_rebuild {
+        CallNames::new()
+    } else {
+        load_callnames(&out_dir)
+    };
+    let mut callnames_dirty = full_rebuild;
+    for k in &deleted_keys {
+        callnames_dirty |= callnames.remove(k).is_some();
+    }
+
     let mut fresh_nodes = Vec::new();
     let mut fresh_edges = Vec::new();
     let mut raw_calls = Vec::new();
     let mut imports = Vec::new();
-    for r in extracted.into_iter().flatten() {
+    let mut unreadable: Vec<String> = Vec::new();
+    for (file, (res, read_failed)) in targets.iter().zip(extracted) {
+        if read_failed {
+            // Keep the prior graph's view of this file: re-inject its old nodes
+            // and outgoing edges as if freshly extracted (covers both change
+            // modes: eviction drops the old copies, the full-rebuild rule drops
+            // old AST edges, and these fresh clones survive either way).
+            if let Some(ex) = existing {
+                let norm = norm_source_file(&file.to_string_lossy(), Some(&root_str));
+                let ids: HashSet<&NodeId> = ex
+                    .nodes
+                    .iter()
+                    .filter(|n| norm_source_file(&n.source_file, Some(&root_str)) == norm)
+                    .map(|n| &n.id)
+                    .collect();
+                fresh_edges.extend(ex.links.iter().filter(|e| ids.contains(&e.source)).cloned());
+                fresh_nodes.extend(ex.nodes.iter().filter(|n| ids.contains(&n.id)).cloned());
+            }
+            unreadable.push(rel_key(file));
+            continue;
+        }
+        let Some(r) = res else { continue };
+        let key = rel_key(file);
+        let names = call_names(&r.raw_calls);
+        if callnames.get(&key) != Some(&names) {
+            callnames.insert(key, names);
+            callnames_dirty = true;
+        }
         fresh_nodes.extend(r.nodes);
         fresh_edges.extend(r.edges);
         raw_calls.extend(r.raw_calls);
         imports.extend(r.imports);
+    }
+    let reextracted = targets.len() - unreadable.len();
+    for key in &unreadable {
+        // The unreadable file kept its old nodes; drop it from the manifest so
+        // it re-detects and retries instead of going stale.
+        manifest.0.remove(key);
+    }
+
+    // Ripple: a symbol name this change (re)introduces may be referenced by raw
+    // calls in UNCHANGED files (a definition added after its caller, a rename
+    // back, a move to another file). Those calls exist only in each file's own
+    // extraction, so re-extract the sidecar-indexed candidates (unchanged
+    // content = AST-cache hits) and feed their calls to resolution, which only
+    // ADDS edges. New-ness is judged by node ID, which encodes the file, so a
+    // move also triggers.
+    if matches!(changes, ChangeSet::Incremental(_)) {
+        if let Some(ex) = existing {
+            let existing_ids: HashSet<&NodeId> = ex.nodes.iter().map(|n| &n.id).collect();
+            let introduced: HashSet<&str> = fresh_nodes
+                .iter()
+                .filter(|n| is_ast(n) && !existing_ids.contains(&n.id))
+                .map(|n| bare_name(&n.label))
+                .collect();
+            if !introduced.is_empty() {
+                let extracted_keys: HashSet<String> = targets.iter().map(|f| rel_key(f)).collect();
+                let mut candidates: Vec<&String> = callnames
+                    .iter()
+                    .filter(|(k, names)| {
+                        !extracted_keys.contains(k.as_str())
+                            && names.iter().any(|n| introduced.contains(n.as_str()))
+                    })
+                    .map(|(k, _)| k)
+                    .collect();
+                if candidates.len() > RIPPLE_MAX {
+                    eprintln!(
+                        "note: {} files reference newly introduced symbols; re-resolving only the first {RIPPLE_MAX}",
+                        candidates.len()
+                    );
+                    candidates.truncate(RIPPLE_MAX);
+                }
+                // Rebuild the OS-separator rel path the original extraction
+                // used: the path string feeds both the AST-cache key and the
+                // extractor's node ids, so it must match exactly.
+                let rippled: Vec<_> = candidates
+                    .par_iter()
+                    .filter_map(|key| {
+                        let rel_os = key.replace('/', std::path::MAIN_SEPARATOR_STR);
+                        let abs = root.join(&rel_os);
+                        let bytes = std::fs::read(&abs).ok()?;
+                        cached_extract_source(Some(&cache_dir), &rel_os, &bytes)
+                    })
+                    .collect();
+                for r in rippled {
+                    raw_calls.extend(r.raw_calls);
+                    imports.extend(r.imports);
+                }
+            }
+        }
     }
 
     let empty = GraphData {
@@ -351,87 +599,32 @@ pub fn rebuild_with_detect(
     };
     let mut kg = build_from_parts(nodes, edges, hyper, &build_opts);
 
-    // Cross-file symbol resolution over the (re)extracted raw calls. Resolution
-    // dedups against existing edges, so this only *adds* newly-resolvable calls
-    // (the prior resolved edges are already preserved by the merge).
+    // Cross-file symbol resolution over the (re)extracted raw calls needs the
+    // built graph's index. Resolution dedups against existing edges, so this
+    // only *adds* newly-resolvable calls (the prior resolved edges are already
+    // preserved by the merge).
     let resolved = resolve_symbols(&kg, &raw_calls, &imports);
-    if !resolved.is_empty() {
-        let n: Vec<Node> = kg.nodes().cloned().collect();
-        let mut e: Vec<Edge> = kg.edges().cloned().collect();
-        e.extend(resolved);
-        kg = build_from_parts(n, e, kg.hyperedges.clone(), &build_opts);
-    }
 
-    // Cross-language: retarget subprocess command stubs to in-repo file targets,
-    // matching the one-shot `extract` path so an incremental update produces the
-    // same edges (e.g. subprocess.run("tool") -> src/bin/tool.rs).
-    let before_cmd = kg.node_count();
+    // The remaining passes are pure (nodes, edges) -> (nodes, edges)
+    // transforms, so run them chained on owned vecs and rebuild ONCE at the
+    // end, instead of cloning + rebuilding the whole graph after each pass.
+    // Same pass order as the one-shot `extract`: subprocess commands, named
+    // route handlers (before the parameterized-route merge), SQL table stubs,
+    // parameterized routes, pyo3 modules + imports, dynamic-dispatch evidence,
+    // entity dedup.
     let hyper = kg.hyperedges.clone();
-    let (cn, ce) =
-        resolve_command_invocations(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
-    if cn.len() < before_cmd {
-        kg = build_from_parts(cn, ce, hyper, &build_opts);
-    }
-
-    // Cross-language: resolve named route handlers across files (axum), matching
-    // the one-shot `extract` path. Before the parameterized-route merge.
-    let before_edges = kg.edges().count();
-    let hyper = kg.hyperedges.clone();
-    let (hn, he) =
-        resolve_route_handlers(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
-    if he.len() > before_edges {
-        kg = build_from_parts(hn, he, hyper, &build_opts);
-    }
-
-    // Cross-language: collapse SQL table stubs into real table nodes, matching the
-    // one-shot `extract` path.
-    let before_sql = kg.node_count();
-    let hyper = kg.hyperedges.clone();
-    let (sn, se) =
-        resolve_sql_queries(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
-    if sn.len() < before_sql {
-        kg = build_from_parts(sn, se, hyper, &build_opts);
-    }
-
-    // Cross-language: merge concrete client route paths into the parameterized
-    // server route they match, matching the one-shot `extract` path.
-    let before_routes = kg.node_count();
-    let hyper = kg.hyperedges.clone();
-    let (rn, re) =
-        resolve_parameterized_routes(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
-    if rn.len() < before_routes {
-        kg = build_from_parts(rn, re, hyper, &build_opts);
-    }
-
-    // Cross-language pyo3: stitch #[pymodule] boundaries to their registered
-    // #[pyfunction]/#[pyclass] definitions (across files), then connect Python
-    // importers -- matching the one-shot `extract` path.
-    let before_edges = kg.edges().count();
-    let hyper = kg.hyperedges.clone();
-    let (pn, pe) =
-        resolve_pyo3_modules(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
-    let (pn, pe) = resolve_pyo3_imports(pn, pe);
-    if pe.len() > before_edges {
-        kg = build_from_parts(pn, pe, hyper, &build_opts);
-    }
-
-    // Dynamic-dispatch evidence-link (matches the one-shot `extract` path).
-    let before_edges = kg.edges().count();
-    let (yn, ye) = link_dynamic_refs(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
-    if ye.len() > before_edges {
-        kg = build_from_parts(yn, ye, kg.hyperedges.clone(), &build_opts);
-    }
-
-    // Dedup near-duplicate non-code entities (a no-op on a code-only graph).
-    let before = kg.node_count();
-    let (dn, de) = deduplicate_entities(
-        kg.nodes().cloned().collect(),
-        kg.edges().cloned().collect(),
-        &HashMap::new(),
-    );
-    if dn.len() < before {
-        kg = build_from_parts(dn, de, kg.hyperedges.clone(), &build_opts);
-    }
+    let n: Vec<Node> = kg.nodes().cloned().collect();
+    let mut e: Vec<Edge> = kg.edges().cloned().collect();
+    e.extend(resolved);
+    let (n, e) = resolve_command_invocations(n, e);
+    let (n, e) = resolve_route_handlers(n, e);
+    let (n, e) = resolve_sql_queries(n, e);
+    let (n, e) = resolve_parameterized_routes(n, e);
+    let (n, e) = resolve_pyo3_modules(n, e);
+    let (n, e) = resolve_pyo3_imports(n, e);
+    let (n, e) = link_dynamic_refs(n, e);
+    let (n, e) = deduplicate_entities(n, e, &HashMap::new());
+    kg = build_from_parts(n, e, hyper, &build_opts);
 
     // Refuse a silent shrink (unless forced or an explicit deletion happened).
     // An incremental rebuild is scoped to explicitly-changed files, so any shrink
@@ -446,6 +639,14 @@ pub fn rebuild_with_detect(
         opts.force,
         had_deletions || incremental,
     )?;
+
+    // The sidecar reflects extraction facts, so it advances with the manifest
+    // semantics: only after the rebuild is known good (best-effort write).
+    if callnames_dirty {
+        if let Err(e) = save_callnames(&out_dir, &callnames) {
+            eprintln!("note: could not write call-name sidecar: {e}");
+        }
+    }
 
     // No-change short-circuit: identical topology means reuse the previous
     // community assignment, skip re-clustering, and tell the caller nothing needs
@@ -466,15 +667,27 @@ pub fn rebuild_with_detect(
                 changed: false,
                 reextracted,
                 evicted_sources: evict_sources.len(),
+                unreadable,
+                manifest,
             });
         }
     }
 
-    // Cluster, remapping ids to the previous assignment for cross-build stability.
-    let mut communities = cluster(&kg, &ClusterOptions::default());
-    if let Some(prev) = existing {
-        communities = remap_communities_to_previous(&communities, &previous_communities(prev));
-    }
+    // Cluster. A small incremental delta keeps the previous assignment and
+    // places only the new nodes (exact id stability, O(delta) instead of a full
+    // re-cluster); full rebuilds and large deltas re-cluster from scratch,
+    // remapped to previous ids, so clustering quality never drifts far.
+    let prev = existing.map(previous_communities).unwrap_or_default();
+    let unassigned = kg.nodes().filter(|n| !prev.contains_key(&n.id)).count();
+    let communities = if incremental && !prev.is_empty() && unassigned <= LOCAL_ASSIGN_MAX {
+        assign_locally(&kg, &prev)
+    } else {
+        let mut c = cluster(&kg, &ClusterOptions::default());
+        if !prev.is_empty() {
+            c = remap_communities_to_previous(&c, &prev);
+        }
+        c
+    };
     apply_communities(&mut kg, &communities);
 
     Ok(RebuildOutcome {
@@ -483,6 +696,8 @@ pub fn rebuild_with_detect(
         changed: true,
         reextracted,
         evicted_sources: evict_sources.len(),
+        unreadable,
+        manifest,
     })
 }
 
@@ -690,6 +905,64 @@ mod tests {
     }
 
     #[test]
+    fn full_rebuild_replaces_edges_not_unions_them() {
+        // A FULL rebuild re-extracts every file, so every old AST-sourced edge
+        // comes back fresh; preserving the old set too would union stale edges
+        // (e.g. a call retargeted announce() -> log() across a branch switch
+        // keeps a phantom announce edge because both endpoints still live).
+        let existing = graph_data(
+            vec![
+                node("caller", "caller()", "a.py", Some("ast")),
+                node("announce", "announce()", "lib.py", Some("ast")),
+                node("log", "log()", "lib.py", Some("ast")),
+                node("concept_x", "Auth Flow", "doc.md", Some("semantic")),
+            ],
+            vec![
+                edge_sf("caller", "announce", "calls", "a.py"),
+                // Semantic-node edge: must survive (its source is not AST).
+                edge_sf("concept_x", "caller", "mentions", "doc.md"),
+                // Ghost-remap can leave a semantic edge SOURCED at an AST node
+                // (concept merged onto a code symbol). Extraction never
+                // regenerates it, so it must survive a full rebuild too: only
+                // AST-to-AST edges are extraction-owned and replaceable.
+                edge_sf("caller", "concept_x", "conceptually_related_to", "doc.md"),
+            ],
+        );
+        // Full re-extract: caller now calls log().
+        let fresh = vec![
+            node("caller", "caller()", "a.py", Some("ast")),
+            node("announce", "announce()", "lib.py", Some("ast")),
+            node("log", "log()", "lib.py", Some("ast")),
+        ];
+        let fresh_edges = vec![edge_sf("caller", "log", "calls", "a.py")];
+        let (_, edges, _) = merge_incremental(&existing, fresh, fresh_edges, &HashSet::new(), true);
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.source.0 == "caller" && e.target.0 == "log"),
+            "fresh caller->log edge present: {edges:?}"
+        );
+        assert!(
+            !edges
+                .iter()
+                .any(|e| e.source.0 == "caller" && e.target.0 == "announce"),
+            "stale caller->announce edge must not survive a full rebuild: {edges:?}"
+        );
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.source.0 == "concept_x" && e.target.0 == "caller"),
+            "semantic-sourced edge survives a full rebuild: {edges:?}"
+        );
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.source.0 == "caller" && e.target.0 == "concept_x"),
+            "AST-to-semantic edge (ghost-remapped concept link) survives a full rebuild: {edges:?}"
+        );
+    }
+
+    #[test]
     fn full_rebuild_drops_stale_ast_keeps_semantic() {
         let existing = graph_data(
             vec![
@@ -747,6 +1020,51 @@ mod tests {
             gd.nodes.iter().any(|n| n.source_file == "a.py"),
             "a.py is re-extracted: {ids:?}"
         );
+    }
+
+    #[test]
+    fn local_assignment_places_new_nodes_with_their_neighbors() {
+        // A small incremental delta must not re-cluster the whole graph: prior
+        // nodes keep their exact community, a new node joins the majority
+        // community among its neighbors, and a disconnected new node opens a
+        // fresh community (max previous id + 1).
+        let nodes = vec![
+            node("x1", "x1()", "x.py", Some("ast")),
+            node("x2", "x2()", "x.py", Some("ast")),
+            node("y1", "y1()", "y.py", Some("ast")),
+            node("n1", "n1()", "x.py", Some("ast")),
+            node("n2", "n2()", "z.py", Some("ast")),
+        ];
+        let edges = vec![edge("x1", "x2", "calls"), edge("n1", "x2", "calls")];
+        let kg = build_from_parts(
+            nodes,
+            edges,
+            vec![],
+            &BuildOptions {
+                directed: false,
+                root: None,
+            },
+        );
+        let prev: HashMap<NodeId, u32> = [
+            (NodeId("x1".into()), 5),
+            (NodeId("x2".into()), 5),
+            (NodeId("y1".into()), 9),
+        ]
+        .into_iter()
+        .collect();
+
+        let communities = assign_locally(&kg, &prev);
+        let of = |id: &str| {
+            communities
+                .iter()
+                .find(|(_, v)| v.iter().any(|n| n.0 == id))
+                .map(|(c, _)| *c)
+        };
+        assert_eq!(of("x1"), Some(5), "prior nodes keep their community");
+        assert_eq!(of("x2"), Some(5));
+        assert_eq!(of("y1"), Some(9));
+        assert_eq!(of("n1"), Some(5), "new node joins its neighbors' community");
+        assert_eq!(of("n2"), Some(10), "disconnected new node opens max+1");
     }
 
     #[test]
@@ -878,6 +1196,62 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn unreadable_changed_file_keeps_its_nodes_and_reports_it() {
+        // Editors/AV briefly hold exclusive locks during save. A changed file
+        // that cannot be read must NOT be silently evicted (the incremental
+        // path bypasses the shrink guard); its prior nodes are kept and the
+        // file is reported so the caller drops it from the provenance manifest
+        // and retries next round.
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "a.py", "def a():\n    return 1\n");
+        write(root, "b.py", "def b():\n    return 2\n");
+        let opts = RebuildOptions {
+            root: root.to_path_buf(),
+            directed: false,
+            force: false,
+        };
+        let r1 = rebuild(&opts, &ChangeSet::Full, None).unwrap();
+        let existing = r1.kg.to_graph_data();
+
+        // Exclusive lock: any other open (incl. our fs::read) now fails.
+        let _lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(root.join("b.py"))
+            .unwrap();
+        let r2 = rebuild(
+            &opts,
+            &ChangeSet::Incremental(vec![PathBuf::from("b.py")]),
+            Some(&existing),
+        )
+        .unwrap();
+        let l = labels(&r2.kg);
+        assert!(l.contains("b()"), "locked file's nodes must survive: {l:?}");
+        assert_eq!(
+            r2.unreadable,
+            vec!["b.py".to_string()],
+            "unreadable file reported for manifest retry"
+        );
+    }
+
+    #[test]
+    fn readable_rebuild_reports_no_unreadable_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "a.py", "def a():\n    return 1\n");
+        let opts = RebuildOptions {
+            root: root.to_path_buf(),
+            directed: false,
+            force: false,
+        };
+        let r = rebuild(&opts, &ChangeSet::Full, None).unwrap();
+        assert!(r.unreadable.is_empty());
+    }
+
     /// Sorted `calls` targets (by label) out of the node labelled `caller`.
     fn call_targets(kg: &KnowledgeGraph, caller: &str) -> Vec<String> {
         let Some(cid) = kg.nodes().find(|n| n.label == caller).map(|n| n.id.clone()) else {
@@ -956,6 +1330,146 @@ mod tests {
             call_targets(&r3.kg, "probe()"),
             vec!["log()".to_string()],
             "step 3: only the latest call edge survives (no announce/warn residue)"
+        );
+    }
+
+    #[test]
+    fn incremental_rebuild_manifest_advances_only_the_change_set() {
+        // a.py and b.py both change on disk, but only a.py is in the change
+        // set (e.g. the post-commit hook lists committed files while b.py has
+        // an uncommitted edit). The manifest the rebuild returns must keep
+        // b.py's PRIOR entry so b.py still diffs as changed later; a
+        // whole-tree snapshot would stamp b.py's new state as ingested
+        // without ever extracting it -- permanently invisible now that bare
+        // `update` trusts the manifest.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "a.py", "def a():\n    return 1\n");
+        write(root, "b.py", "def b():\n    return 2\n");
+        let opts = RebuildOptions {
+            root: root.to_path_buf(),
+            directed: false,
+            force: false,
+        };
+        let out = root.join("synaptic-out");
+        let r1 = rebuild(&opts, &ChangeSet::Full, None).unwrap();
+        r1.manifest.save(&manifest_path(&out)).unwrap();
+        let existing = r1.kg.to_graph_data();
+
+        write(root, "a.py", "def a():\n    return 10\n");
+        write(root, "b.py", "def b():\n    return 20\n");
+        let r2 = rebuild(
+            &opts,
+            &ChangeSet::Incremental(vec![PathBuf::from("a.py")]),
+            Some(&existing),
+        )
+        .unwrap();
+        r2.manifest.save(&manifest_path(&out)).unwrap();
+
+        let report = detect_changes(&out, root);
+        assert_eq!(
+            report.diff.changed,
+            vec!["b.py".to_string()],
+            "the unlisted edit must still be detectable"
+        );
+    }
+
+    #[test]
+    fn ripple_relinks_calls_from_unchanged_files_when_a_name_returns() {
+        // lib.py defines announce(); main.py calls it. Renaming announce ->
+        // announce2 (incremental on lib.py only) correctly drops main's edge.
+        // Renaming BACK (again only lib.py changes) must RESTORE the edge from
+        // the unchanged main.py: its raw calls exist only in its own
+        // extraction, so the rebuild has to ripple-re-extract it (AST-cache
+        // hit) when a referenced name (re)appears.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "main.py",
+            "from lib import announce\n\n\ndef probe():\n    announce()\n",
+        );
+        write(root, "lib.py", "def announce():\n    return 1\n");
+        let opts = RebuildOptions {
+            root: root.to_path_buf(),
+            directed: false,
+            force: false,
+        };
+        let r1 = rebuild(&opts, &ChangeSet::Full, None).unwrap();
+        assert_eq!(
+            call_targets(&r1.kg, "probe()"),
+            vec!["announce()".to_string()],
+            "baseline: probe calls announce"
+        );
+        let existing = r1.kg.to_graph_data();
+
+        write(root, "lib.py", "def announce2():\n    return 1\n");
+        let r2 = rebuild(
+            &opts,
+            &ChangeSet::Incremental(vec![PathBuf::from("lib.py")]),
+            Some(&existing),
+        )
+        .unwrap();
+        assert!(
+            call_targets(&r2.kg, "probe()").is_empty(),
+            "renamed away: edge drops"
+        );
+        let existing = r2.kg.to_graph_data();
+
+        write(root, "lib.py", "def announce():\n    return 1\n");
+        let r3 = rebuild(
+            &opts,
+            &ChangeSet::Incremental(vec![PathBuf::from("lib.py")]),
+            Some(&existing),
+        )
+        .unwrap();
+        assert_eq!(
+            call_targets(&r3.kg, "probe()"),
+            vec!["announce()".to_string()],
+            "renamed back: the edge from UNCHANGED main.py must return"
+        );
+    }
+
+    #[test]
+    fn ripple_links_a_new_definition_to_preexisting_callers() {
+        // main.py calls helper() before it exists anywhere. Adding helper() to
+        // lib.py (incremental on lib.py only) must create main -> helper even
+        // though main.py itself was not touched.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "main.py",
+            "from lib import helper\n\n\ndef probe():\n    helper()\n",
+        );
+        write(root, "lib.py", "def unrelated():\n    return 0\n");
+        let opts = RebuildOptions {
+            root: root.to_path_buf(),
+            directed: false,
+            force: false,
+        };
+        let r1 = rebuild(&opts, &ChangeSet::Full, None).unwrap();
+        assert!(
+            call_targets(&r1.kg, "probe()").is_empty(),
+            "helper doesn't exist yet"
+        );
+        let existing = r1.kg.to_graph_data();
+
+        write(
+            root,
+            "lib.py",
+            "def unrelated():\n    return 0\n\n\ndef helper():\n    return 1\n",
+        );
+        let r2 = rebuild(
+            &opts,
+            &ChangeSet::Incremental(vec![PathBuf::from("lib.py")]),
+            Some(&existing),
+        )
+        .unwrap();
+        assert_eq!(
+            call_targets(&r2.kg, "probe()"),
+            vec!["helper()".to_string()],
+            "new definition must attract the pre-existing unresolved call"
         );
     }
 

@@ -33,7 +33,11 @@ pub fn hash_file(path: &Path) -> Option<String> {
     Some(blake3::hash(&bytes).to_hex().to_string())
 }
 
-fn relative_key(path: &Path, root: &Path) -> String {
+/// The manifest key for `path` under `root`: repo-relative, forward-slashed.
+/// Public because every artifact keyed against the manifest (unreadable-file
+/// retries, the call-name sidecar) must derive keys identically or lookups
+/// silently stop matching.
+pub fn relative_key(path: &Path, root: &Path) -> String {
     let rel = path.strip_prefix(root).unwrap_or(path);
     rel.to_string_lossy().replace('\\', "/")
 }

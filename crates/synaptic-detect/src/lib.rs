@@ -15,7 +15,7 @@ pub mod submodule;
 
 pub use classify::classify_file;
 pub use file_type::{FileType, ALL_FILE_TYPES};
-pub use manifest::{hash_file, FileEntry, Manifest, ManifestDiff};
+pub use manifest::{hash_file, relative_key, FileEntry, Manifest, ManifestDiff};
 pub use sensitive::is_sensitive;
 pub use submodule::submodule_paths;
 
@@ -60,6 +60,19 @@ fn count_words(path: &Path) -> usize {
 /// conflicts via the ignore crate's higher custom-ignore precedence tier), prunes
 /// noise dirs, and skips lock + sensitive files.
 pub fn detect(root: &Path) -> DetectResult {
+    detect_impl(root, true)
+}
+
+/// Like [`detect`] but without the corpus word count, which reads every
+/// code/document file and exists only to feed `extract`'s size warning. The
+/// rebuild and staleness-detection paths run a detect per update round / serve
+/// catch-up check, where those reads are O(repo bytes) of waste; they use this.
+/// `total_words`/`needs_graph`/`warning` are not meaningful in the result.
+pub fn detect_inputs(root: &Path) -> DetectResult {
+    detect_impl(root, false)
+}
+
+fn detect_impl(root: &Path, count: bool) -> DetectResult {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
 
     // Both `.synapticignore` and `.gitignore` apply, layered per-directory and up
@@ -122,7 +135,7 @@ pub fn detect(root: &Path) -> DetectResult {
             continue;
         }
         if let Some(ft) = classify_file(path) {
-            if matches!(ft, FileType::Code | FileType::Document | FileType::Paper) {
+            if count && matches!(ft, FileType::Code | FileType::Document | FileType::Paper) {
                 total_words += count_words(path);
             }
             files.entry(ft).or_default().push(path.to_path_buf());
@@ -137,7 +150,9 @@ pub fn detect(root: &Path) -> DetectResult {
 
     let total_files: usize = files.values().map(Vec::len).sum();
     let needs_graph = total_words >= CORPUS_WARN_THRESHOLD;
-    let warning = if !needs_graph {
+    let warning = if !count {
+        None
+    } else if !needs_graph {
         Some(format!(
             "Corpus is ~{total_words} words - fits in a single context window. You may not need a graph."
         ))
@@ -268,6 +283,39 @@ mod tests {
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn detect_inputs_classifies_identically_without_corpus_reads() {
+        // detect() reads every code/doc file to count corpus words -- an
+        // `extract` UX hint only. The rebuild/staleness paths run a detect on
+        // every update round and every serve catch-up check, where those reads
+        // are O(repo bytes) of pure waste. The stats-free variant must walk and
+        // classify identically (same ignore rules, same tsconfig capture) while
+        // skipping the reads.
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        write(r, "src/main.py", "def main():\n    pass\n");
+        write(r, "README.md", "# hi\n");
+        write(r, "tsconfig.json", "{}\n");
+        write(r, "node_modules/x/index.js", "x");
+        write(r, ".gitignore", "generated/\n");
+        write(r, "generated/gen.py", "g = 1\n");
+
+        let full = detect(r);
+        let inputs = detect_inputs(r);
+        assert_eq!(full.files, inputs.files, "identical classification");
+        assert_eq!(full.ts_config_files, inputs.ts_config_files);
+        assert_eq!(full.scan_root, inputs.scan_root);
+        assert_eq!(inputs.total_words, 0, "no corpus reads");
+        assert!(inputs.warning.is_none(), "no corpus warning");
+        assert!(
+            !inputs
+                .of(FileType::Code)
+                .iter()
+                .any(|p| p.to_string_lossy().contains("generated")),
+            "gitignore still honored"
+        );
     }
 
     #[test]

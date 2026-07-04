@@ -60,14 +60,13 @@ pub fn to_json_value(kg: &KnowledgeGraph) -> Value {
     serde_json::to_value(&gd).expect("GraphData serializes")
 }
 
-/// Write `graph.json` (pretty-printed node-link).
+/// Write `graph.json` (pretty-printed node-link) atomically.
 pub fn to_json(kg: &KnowledgeGraph, path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let value = to_json_value(kg);
-    fs::write(path, serde_json::to_string_pretty(&value)?)?;
-    Ok(())
+    synaptic_core::write_atomic(path, serde_json::to_string_pretty(&value)?.as_bytes())
 }
 
 /// Render an interactive `graph.html` (vis-network from CDN; embeds the graph
