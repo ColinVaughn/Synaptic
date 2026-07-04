@@ -8,9 +8,94 @@ All notable changes to Synaptic are documented here. The format is based on
 > **CodeGraph**, and reference the old `codegraph` command and crate names. They
 > are preserved verbatim as historical record.
 
-## [Unreleased]
+## [0.5.0] - 2026-07-03
+
+> **Upgrade note:** `synaptic update`/`watch` now write `graph.json` (+ the
+> provenance manifest) only — pass `--artifacts` if you consume the
+> HTML/SVG/GraphML artifacts from incremental rebuilds. A bare `synaptic
+> update` now performs a manifest catch-up instead of a full rebuild (use
+> `--full` for the old behavior). Re-run `synaptic hook install` to pick up
+> the new `post-merge` hook and the root/merge-commit `post-commit` fix —
+> hook scripts are embedded at install time and do not update themselves.
+
+### Added
+- **Ripple re-resolution**: an incremental update that (re)introduces a symbol
+  — a new definition, a rename back, a move to another file — now re-links
+  calls from **unchanged** files to it. A per-file called-name sidecar
+  (`synaptic-out/.callnames.json`, seeded by `extract` and every rebuild)
+  indexes which files reference which names; matching files are re-extracted
+  from the AST cache and fed to resolution. Previously such edges only
+  reappeared when the calling file itself changed or on a full rebuild.
+- **`serve --watch`** (or `SYNAPTIC_SERVE_WATCH=1`): the MCP server embeds a
+  filesystem watcher, making staleness detection event-driven — queries skip
+  the walk-per-query check and the 1s debounce window entirely, and the first
+  query still catches up on pre-watch edits.
+- **In-band staleness note**: when more files changed than the autofresh cap,
+  every MCP tool result now starts with a `graph is STALE` note telling the
+  agent to run `synaptic update` (previously this was only printed to stderr,
+  which the model never sees). Clears automatically once the graph refreshes.
+- **`post-merge` hook**: `synaptic hook install` now also covers `git merge` /
+  `git pull` — including fast-forwards, which fire neither post-commit nor
+  post-checkout.
+- **`update`/`watch --artifacts`** and **`watch --debounce-ms <n>`** (also
+  `SYNAPTIC_WATCH_DEBOUNCE_MS`).
 
 ### Changed
+- **Bare `synaptic update` now catches up from the manifest diff** — it
+  rebuilds exactly the files that changed since the last build instead of
+  silently running a full rebuild. `update --full` remains the explicit
+  from-scratch rebuild. When no provenance manifest exists (a graph built by
+  an older binary), it falls back to a full rebuild rather than trusting a
+  freshly bootstrapped baseline that would mask existing drift.
+- **`update`/`watch` write `graph.json` + the provenance manifest only** by
+  default; the visual/export artifact suite (HTML, SVG, 3D, GraphML, Cypher,
+  ...) is regenerated with `--artifacts`. `extract` still writes everything.
+- **`watch` catches up at startup** (manifest diff) before entering the event
+  loop, so edits made while it wasn't running are ingested; its ignore rules
+  now delegate to detect's noise list (dist, .next, coverage, ... are skipped
+  like node_modules always was).
+- Incremental updates place a small delta's new nodes into their neighbours'
+  communities instead of re-clustering the whole graph (exact community-id
+  stability while coding); full rebuilds and large deltas still re-cluster.
+- Staleness checks and rebuild scans no longer read every file to count corpus
+  words (that work only feeds `extract`'s size hint): the serve catch-up walk
+  went from O(repo bytes) to O(stats), and one-file updates shed ~7 full-graph
+  clone+rebuild passes by chaining the resolution passes on owned vectors.
+
+### Fixed
+- **Mid-rebuild edits could go permanently stale**: builds stamped the
+  provenance manifest from a *post*-build disk walk, so a file edited while
+  the build ran was recorded as seen without ever being extracted. Every build
+  path (`extract`, `update`, serve catch-up) now snapshots the manifest before
+  extraction and persists it only after the graph is written — and an
+  incremental update advances **only the entries it actually ingested**, so a
+  file changed on disk but outside the given change set (e.g. an uncommitted
+  edit when the post-commit hook lists committed files) still diffs as changed
+  later instead of being silently stamped as seen.
+- **Full rebuilds no longer union stale edges**: a retargeted call (e.g. across
+  a branch switch, where post-checkout runs `update --full`) used to keep its
+  phantom old edge because both endpoints were still live. Only
+  extraction-owned edges (both endpoints AST) are replaced; edges touching
+  semantic/concept nodes are preserved.
+- The staleness note clears correctly under `serve --watch` after an external
+  `synaptic update` (the cap trip re-arms the event flag), and the embedded
+  watcher recovers from dropped/overflowed OS events by falling back to a
+  manifest catch-up (`watch` does the same).
+- The pending-changes queue is claimed by rename instead of read-then-delete,
+  so a path queued concurrently with a drain can no longer be deleted unread;
+  a crashed holder's claimed batch is absorbed by the next drain.
+- **A transiently unreadable changed file no longer loses its symbols**: a
+  read failure (editor/AV lock — common on Windows) kept evicting the file's
+  nodes with nothing to replace them. Its prior nodes and edges are now kept,
+  and the file is dropped from the manifest so it retries next round.
+- **Paths queued while a rebuild ran are drained by that rebuild** instead of
+  sitting in `.pending_changes` until some later update.
+- `graph.json` is written atomically (temp + rename) everywhere, so concurrent
+  readers can no longer observe a truncated file.
+- Auto-freshen disables itself for a federated graph (a single-root rebuild
+  would corrupt member ids); refresh members individually.
+- The watcher filters repo-relative paths, so a checkout under a directory
+  named like a noise dir (e.g. `/build/app`) no longer ignores the whole tree.
 - **Office ingestion (`--features office`) no longer depends on `calamine`** —
   `.xlsx`/`.ods` workbooks are now read by an in-house zip + XML reader built
   on dependencies already in the tree. This removes `quick-xml` (flagged by
