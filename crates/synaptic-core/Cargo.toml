@@ -13,3 +13,6 @@ thiserror = { workspace = true }
 regex = { workspace = true }
 unicode-normalization = { workspace = true }
 caseless = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1488,3 +1488,187 @@ fn merge_graphs_namespaces_inputs() {
         "{ids:?}"
     );
 }
+
+#[test]
+fn update_writes_graph_json_only_unless_artifacts_requested() {
+    // `update` runs on every save in watch/hook flows; regenerating the whole
+    // visual artifact suite (SVG, 3D HTML, GraphML, ...) per save dominates the
+    // rebuild cost and nobody reads them mid-edit. Default = graph.json (+
+    // manifest); `--artifacts` restores the full set.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "a.py", "def a():\n    return 1\n");
+
+    Command::cargo_bin("synaptic")
+        .unwrap()
+        .arg("extract")
+        .arg(root)
+        .assert()
+        .success();
+    let out = root.join("synaptic-out");
+    assert!(out.join("graph.svg").exists(), "extract writes artifacts");
+
+    // Default update: graph.json refreshed, artifacts untouched.
+    fs::remove_file(out.join("graph.svg")).unwrap();
+    let before = fs::read_to_string(out.join("graph.json")).unwrap();
+    write(
+        root,
+        "a.py",
+        "def a():\n    return 1\n\n\ndef b():\n    return 2\n",
+    );
+    Command::cargo_bin("synaptic")
+        .unwrap()
+        .current_dir(root)
+        .args(["update", "a.py"])
+        .assert()
+        .success();
+    let after = fs::read_to_string(out.join("graph.json")).unwrap();
+    assert_ne!(before, after, "graph.json rewritten by default update");
+    assert!(
+        !out.join("graph.svg").exists(),
+        "default update must not regenerate artifacts"
+    );
+
+    // Opt-in: --artifacts writes the full set again.
+    write(
+        root,
+        "a.py",
+        "def a():\n    return 1\n\n\ndef b():\n    return 2\n\n\ndef c():\n    return 3\n",
+    );
+    Command::cargo_bin("synaptic")
+        .unwrap()
+        .current_dir(root)
+        .args(["update", "a.py", "--artifacts"])
+        .assert()
+        .success();
+    assert!(
+        out.join("graph.svg").exists(),
+        "--artifacts regenerates the artifact suite"
+    );
+}
+
+#[test]
+fn extract_seeds_ripple_so_first_update_links_new_definitions() {
+    // The ripple index (.callnames.json) must be seeded by `extract` itself:
+    // otherwise the FIRST incremental update after extract cannot link a new
+    // definition to calls in unchanged files (only later full updates could).
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "main.py",
+        "from lib import helper\n\n\ndef probe():\n    helper()\n",
+    );
+    write(root, "lib.py", "def unrelated():\n    return 0\n");
+
+    Command::cargo_bin("synaptic")
+        .unwrap()
+        .arg("extract")
+        .arg(root)
+        .assert()
+        .success();
+
+    // helper() appears in lib.py only; main.py is untouched.
+    write(
+        root,
+        "lib.py",
+        "def unrelated():\n    return 0\n\n\ndef helper():\n    return 1\n",
+    );
+    Command::cargo_bin("synaptic")
+        .unwrap()
+        .current_dir(root)
+        .args(["update", "lib.py"])
+        .assert()
+        .success();
+
+    let graph = fs::read_to_string(root.join("synaptic-out/graph.json")).unwrap();
+    let gd: serde_json::Value = serde_json::from_str(&graph).unwrap();
+    let has_edge = gd["links"].as_array().unwrap().iter().any(|e| {
+        e["source"].as_str().unwrap_or("").contains("probe")
+            && e["target"].as_str().unwrap_or("").contains("helper")
+            && e["relation"] == "calls"
+    });
+    assert!(
+        has_edge,
+        "first update after extract must link probe -> helper via the seeded ripple index"
+    );
+}
+
+#[test]
+fn bare_update_catches_up_from_the_manifest_diff() {
+    // With a manifest on disk, a bare `synaptic update` should ingest exactly
+    // what changed since the last build (the serve catch-up semantics), not
+    // silently rerun a full rebuild.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "alpha.py", "def alpha_func():\n    return 1\n");
+    Command::cargo_bin("synaptic")
+        .unwrap()
+        .arg("extract")
+        .arg(root)
+        .assert()
+        .success();
+
+    write(root, "beta.py", "def beta_func():\n    return 2\n");
+    let out = Command::cargo_bin("synaptic")
+        .unwrap()
+        .current_dir(root)
+        .arg("update")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("re-extracted 1"),
+        "only the changed file is re-extracted: {stdout}"
+    );
+    let graph = fs::read_to_string(root.join("synaptic-out/graph.json")).unwrap();
+    assert!(graph.contains("beta_func"), "new file ingested");
+
+    // Nothing further changed: the second bare update is a no-op.
+    let out = Command::cargo_bin("synaptic")
+        .unwrap()
+        .current_dir(root)
+        .arg("update")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("No changes"),
+        "clean tree reports no changes: {stdout}"
+    );
+}
+
+#[test]
+fn bare_update_full_rebuilds_when_manifest_is_missing() {
+    // A graph with no provenance manifest (built by an older binary, or the
+    // manifest was deleted) has unknown drift. Bootstrapping a baseline from
+    // the CURRENT disk and reporting "no changes" would permanently mask every
+    // edit made since that graph was built; the only safe answer is a full
+    // rebuild.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "alpha.py", "def alpha_func():\n    return 1\n");
+    Command::cargo_bin("synaptic")
+        .unwrap()
+        .arg("extract")
+        .arg(root)
+        .assert()
+        .success();
+
+    // Simulate the legacy state: drift + no manifest.
+    write(root, "beta.py", "def beta_func():\n    return 2\n");
+    fs::remove_file(root.join("synaptic-out/.manifest.json")).unwrap();
+
+    Command::cargo_bin("synaptic")
+        .unwrap()
+        .current_dir(root)
+        .arg("update")
+        .assert()
+        .success();
+    let graph = fs::read_to_string(root.join("synaptic-out/graph.json")).unwrap();
+    assert!(
+        graph.contains("beta_func"),
+        "drifted file must be ingested by the fallback full rebuild"
+    );
+}

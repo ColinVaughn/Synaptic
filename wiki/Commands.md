@@ -294,17 +294,18 @@ Incrementally rebuild the graph after files change, or do a full rebuild.
 Syntax:
 
 ```sh
-synaptic update [PATHS...] [--full] [--directed] [--force]
+synaptic update [PATHS...] [--full] [--directed] [--force] [--artifacts]
 ```
 
 | Name | Default | Description |
 | --- | --- | --- |
-| `PATHS...` | none | Changed file paths (repo-relative). Empty plus no `--full` triggers a full rebuild. |
+| `PATHS...` | none | Changed file paths (repo-relative). Empty plus no `--full` catches up from the manifest diff. |
 | `--full` | off | Rebuild every code file from scratch (preserves semantic nodes). |
 | `--directed` | off | Build directed when there is no existing graph to inherit from. |
 | `--force` | off | Bypass the shrink guard. |
+| `--artifacts` | off | Also regenerate the visual/export artifact suite (default writes `graph.json` + the provenance manifest only). |
 
-Behavior: when no paths are given on the command line (and not `--full`), changed paths are read from the `SYNAPTIC_CHANGED` environment variable (newline-delimited), which is how the post-commit hook passes them. The command inherits the existing graph and its `directed` flag when present, serializes concurrent rebuilds with a lock (queuing paths if another rebuild holds it), and writes the same artifact set as [`extract`](#extract).
+Behavior: when no paths are given on the command line (and not `--full`), changed paths are read from the `SYNAPTIC_CHANGED` environment variable (newline-delimited), which is how the post-commit/post-merge hooks pass them. If that is also empty, a bare `update` diffs the working tree against the provenance manifest and rebuilds exactly what changed since the last build. The command inherits the existing graph and its `directed` flag when present, and serializes concurrent rebuilds with a lock (queuing paths if another rebuild holds it; the holder drains the queue, including paths queued mid-rebuild).
 
 Example:
 
@@ -322,15 +323,17 @@ Watch the working tree and rebuild incrementally on change, debounced.
 Syntax:
 
 ```sh
-synaptic watch [--directed] [--force]
+synaptic watch [--directed] [--force] [--artifacts] [--debounce-ms <n>]
 ```
 
 | Name | Default | Description |
 | --- | --- | --- |
 | `--directed` | off | Build directed when there is no existing graph to inherit from. |
 | `--force` | off | Bypass the shrink guard on each rebuild. |
+| `--artifacts` | off | Also regenerate the visual/export artifacts on each rebuild. |
+| `--debounce-ms` | 3000 | Settle window for batching a burst of saves (also `SYNAPTIC_WATCH_DEBOUNCE_MS`). |
 
-Watches the current directory recursively, debounces a burst of saves into one rebuild, ignores the output/VCS/build subtrees (so writing `graph.json` cannot self-trigger), and rebuilds on changed code and Markdown (`.md`, `.mdx`, `.qmd`) files. Stop with Ctrl-C.
+Watches the current directory recursively, first catching up on anything that changed while it was not running (manifest diff). Debounces a burst of saves into one rebuild, ignores the output/VCS/build/dependency subtrees (detect's noise rules, so writing `graph.json` cannot self-trigger), and rebuilds on changed code and Markdown (`.md`, `.mdx`, `.qmd`) files. Stop with Ctrl-C.
 
 Example:
 
@@ -788,7 +791,7 @@ Run the MCP server exposing read-only graph tools (and PR tools) to an AI assist
 Syntax:
 
 ```sh
-synaptic serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root <DIR>] [--allow-exec] [--concise]
+synaptic serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root <DIR>] [--allow-exec] [--concise] [--watch]
 ```
 
 | Name | Default | Description |
@@ -799,6 +802,7 @@ synaptic serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root
 | `--source-root` | dir above `synaptic-out/` | Trusted root for resolving a node's source file in the `get_source` tool (path-traversal jailed). |
 | `--allow-exec` | off | Expose the command-running `speculate` tool (the 28th tool). This makes the server no longer read-only, so enable it only for trusted clients. See [MCP Server](MCP-Server). |
 | `--concise` | off | Token-lean output: lower the default list/budget sizes so tool results return less to the model (or set `SYNAPTIC_CONCISE`). An explicit per-call argument always wins. |
+| `--watch` | off | Embed a filesystem watcher so the auto-freshen staleness check is event-driven — no walk or debounce window per query (or set `SYNAPTIC_SERVE_WATCH=1`). See [Incremental-Updates](Incremental-Updates). |
 
 Defaults to stdio transport. The MCP server reports protocol `2025-11-25` and exposes 29 read-only tools (30 with `--allow-exec`, which adds the command-running `speculate` tool), prompts, completions, resource templates/subscriptions, and structured tool output. When serving HTTP on a wildcard address with no API key, it prints a warning.
 

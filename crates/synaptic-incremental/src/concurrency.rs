@@ -99,21 +99,60 @@ pub fn queue_pending(out_dir: &Path, paths: &[PathBuf]) -> std::io::Result<()> {
 
 /// Read and clear the pending queue, returning the order-preserving deduped
 /// paths. Missing queue → empty.
+///
+/// Claims the queue by RENAME rather than read-then-delete: an append racing
+/// the drain either lands before the rename (in the claimed batch) or creates
+/// a fresh queue file for the next drain; the old protocol deleted an append
+/// landing between the read and the remove. Only the rebuild-lock holder
+/// drains, so a pre-existing claim file is a crashed holder's orphan and is
+/// absorbed first. A rename blocked by a concurrent appender's open handle
+/// (Windows sharing violation) leaves the queue intact for the next drain.
 pub fn drain_pending(out_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     let path = out_dir.join(PENDING_FILE);
-    let content = match fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e),
+    let claimed = out_dir.join(format!("{PENDING_FILE}.claimed"));
+    let mut lines: Vec<PathBuf> = Vec::new();
+    let absorb = |p: &Path, lines: &mut Vec<PathBuf>| {
+        if let Ok(content) = fs::read_to_string(p) {
+            lines.extend(
+                content
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(PathBuf::from),
+            );
+            let _ = fs::remove_file(p);
+        }
     };
-    let _ = fs::remove_file(&path);
-    let lines: Vec<PathBuf> = content
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(PathBuf::from)
-        .collect();
+    absorb(&claimed, &mut lines);
+    if fs::rename(&path, &claimed).is_ok() {
+        absorb(&claimed, &mut lines);
+    }
     Ok(dedup_preserving_order(lines))
+}
+
+/// Drain-and-process loop for the lock holder: after its own rebuild, paths may
+/// have been queued by callers that lost the lock mid-rebuild. Repeatedly drain
+/// the queue and run `process` on each batch until the queue stays empty or
+/// `max_rounds` is hit (a backstop against a pathological re-queuing writer).
+/// Returns `(rounds_run, drained_clean)`; when not clean, the remainder stays
+/// queued for the next update.
+pub fn drain_queued_rounds<E: From<std::io::Error>>(
+    out_dir: &Path,
+    max_rounds: usize,
+    mut process: impl FnMut(Vec<PathBuf>) -> Result<(), E>,
+) -> Result<(usize, bool), E> {
+    let mut rounds = 0;
+    while rounds < max_rounds {
+        let queued = drain_pending(out_dir).map_err(E::from)?;
+        if queued.is_empty() {
+            return Ok((rounds, true));
+        }
+        rounds += 1;
+        process(queued)?;
+    }
+    // Cap hit: clean only if nothing arrived during the last round.
+    let leftover = out_dir.join(PENDING_FILE).exists();
+    Ok((rounds, !leftover))
 }
 
 /// Order-preserving union of two changed-path lists.
@@ -170,6 +209,96 @@ mod tests {
         );
         // Draining again is empty (the queue was cleared).
         assert!(drain_pending(out).unwrap().is_empty());
+    }
+
+    #[test]
+    fn drain_absorbs_an_orphaned_claim_file() {
+        // The claim-by-rename protocol (which closes the read-then-delete
+        // window where a concurrent append was silently lost) can leave a
+        // .claimed file behind if the holder crashes mid-drain. Only the lock
+        // holder drains, so a pre-existing claim is always a crash orphan and
+        // must be absorbed, not leaked.
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path();
+        fs::write(out.join(".pending_changes.claimed"), "orphan.py\n").unwrap();
+        queue_pending(out, &[PathBuf::from("fresh.py")]).unwrap();
+        let drained = drain_pending(out).unwrap();
+        assert_eq!(
+            drained,
+            vec![PathBuf::from("orphan.py"), PathBuf::from("fresh.py")],
+            "orphaned claim absorbed ahead of the fresh queue"
+        );
+        assert!(
+            !out.join(".pending_changes.claimed").exists(),
+            "claim file cleaned up"
+        );
+    }
+
+    #[test]
+    fn drain_queued_rounds_covers_paths_queued_during_a_round() {
+        // Regression: paths queued while a rebuild ran (by callers that lost the
+        // lock) sat in the queue until the NEXT update invocation, leaving the
+        // graph stale. The lock holder must keep draining until the queue stays
+        // empty.
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_path_buf();
+        // Queued during the initial rebuild.
+        queue_pending(&out, &[PathBuf::from("a.py")]).unwrap();
+
+        let mut rounds: Vec<Vec<PathBuf>> = Vec::new();
+        let out_c = out.clone();
+        let (n, clean) = drain_queued_rounds::<std::io::Error>(&out, 5, |paths| {
+            if rounds.is_empty() {
+                // A lock loser queues while our round is running.
+                queue_pending(&out_c, &[PathBuf::from("late.py")]).unwrap();
+            }
+            rounds.push(paths);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(n, 2, "one round per drained batch");
+        assert!(clean, "queue fully drained");
+        assert_eq!(
+            rounds,
+            vec![vec![PathBuf::from("a.py")], vec![PathBuf::from("late.py")]]
+        );
+        assert!(
+            drain_pending(&out).unwrap().is_empty(),
+            "nothing left queued"
+        );
+    }
+
+    #[test]
+    fn drain_queued_rounds_is_a_noop_on_an_empty_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut called = false;
+        let (n, clean) = drain_queued_rounds::<std::io::Error>(dir.path(), 5, |_| {
+            called = true;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(n, 0);
+        assert!(clean);
+        assert!(!called, "process never runs without queued paths");
+    }
+
+    #[test]
+    fn drain_queued_rounds_stops_at_the_round_cap() {
+        // A pathological writer that re-queues every round must not spin forever;
+        // the cap leaves the remainder queued (not clean) for the next update.
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_path_buf();
+        queue_pending(&out, &[PathBuf::from("x.py")]).unwrap();
+        let out_c = out.clone();
+        let (n, clean) = drain_queued_rounds::<std::io::Error>(&out, 3, |_| {
+            queue_pending(&out_c, &[PathBuf::from("x.py")]).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(n, 3, "capped");
+        assert!(!clean, "remainder still queued");
+        assert_eq!(drain_pending(&out).unwrap(), vec![PathBuf::from("x.py")]);
     }
 
     #[test]

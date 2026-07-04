@@ -58,6 +58,10 @@ pub(crate) fn run_extract(
 
     let out_dir = root.join("synaptic-out");
     let cache_dir = out_dir.join("cache");
+    // Provenance snapshot BEFORE extraction (extract is the longest build, so
+    // the likeliest to overlap an edit): saving a post-extraction walk instead
+    // would stamp a mid-build edit as seen without ever ingesting it.
+    let manifest_snapshot = synaptic_incremental::snapshot_manifest(&out_dir, &det);
 
     // LLM client for the optional semantic pass + dedup tiebreaker. Opt-in
     // (`--semantic`) so we never make surprise paid API calls; needs a backend
@@ -236,64 +240,57 @@ pub(crate) fn run_extract(
     let mut kg = build_from_parts(nodes, edges, vec![], &opts);
 
     // Cross-file symbol resolution: raw calls + import evidence -> `calls` edges
-    // (import-guided EXTRACTED, single-candidate INFERRED). Rebuild so the new
-    // edges go through the same endpoint reconciliation + dedup as everything else.
+    // (import-guided EXTRACTED, single-candidate INFERRED). Needs the built
+    // graph's index; the passes after it are pure (nodes, edges) transforms, so
+    // they chain on owned vecs and the graph is rebuilt ONCE at the end (the
+    // final build applies the same endpoint reconciliation + dedup to every
+    // pass's additions). Mirrored by synaptic-incremental::rebuild_with_detect;
+    // keep the pass order in sync.
     let resolved = resolve_symbols(&kg, &raw_calls, &imports);
     if !resolved.is_empty() {
-        let n = resolved.len();
-        let nodes2: Vec<_> = kg.nodes().cloned().collect();
-        let mut edges2: Vec<_> = kg.edges().cloned().collect();
-        edges2.extend(resolved);
-        kg = build_from_parts(nodes2, edges2, vec![], &opts);
-        println!("Resolved {n} cross-file call edge(s)");
+        println!("Resolved {} cross-file call edge(s)", resolved.len());
     }
+    let n: Vec<_> = kg.nodes().cloned().collect();
+    let mut e: Vec<_> = kg.edges().cloned().collect();
+    e.extend(resolved);
 
     // Cross-language: retarget subprocess command stubs to a matching in-repo file
     // node (e.g. Python subprocess.run("tool") -> the Rust binary src/bin/tool.rs).
-    let before_cmd = kg.node_count();
-    let (cn, ce) =
-        resolve_command_invocations(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
-    if cn.len() < before_cmd {
-        let n = before_cmd - cn.len();
-        kg = build_from_parts(cn, ce, vec![], &opts);
-        println!("Resolved {n} command invocation(s) to in-repo targets");
+    let before = n.len();
+    let (n, e) = resolve_command_invocations(n, e);
+    if n.len() < before {
+        println!(
+            "Resolved {} command invocation(s) to in-repo targets",
+            before - n.len()
+        );
     }
 
     // Cross-language: resolve named route handlers (axum `.route("/p", get(h))`)
     // to the handler fn when it is defined in another file. Runs before the
     // parameterized-route merge so a cross-file-resolved server route is not
     // mistaken for a client route.
-    let before_edges = kg.edges().count();
-    let (hn, he) =
-        resolve_route_handlers(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
-    if he.len() > before_edges {
-        let n = he.len() - before_edges;
-        kg = build_from_parts(hn, he, vec![], &opts);
-        println!("Resolved {n} cross-file route handler(s)");
+    let before = e.len();
+    let (n, e) = resolve_route_handlers(n, e);
+    if e.len() > before {
+        println!("Resolved {} cross-file route handler(s)", e.len() - before);
     }
 
     // Cross-language: collapse SQL table stubs (from scan_sql code-side detection)
     // into the real table node defined in a .sql file (same id, stub has empty
     // source_file). Runs after route resolution; edges are unchanged.
-    let before_sql = kg.node_count();
-    let (sn, se) =
-        resolve_sql_queries(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
-    if sn.len() < before_sql {
-        let n = before_sql - sn.len();
-        kg = build_from_parts(sn, se, vec![], &opts);
-        println!("Resolved {n} SQL table stub(s)");
+    let before = n.len();
+    let (n, e) = resolve_sql_queries(n, e);
+    if n.len() < before {
+        println!("Resolved {} SQL table stub(s)", before - n.len());
     }
 
     // Cross-language: merge concrete client route paths into the parameterized
     // server route they match (/users/7 -> /users/{id}), so a client call connects
     // to the route's handler.
-    let before_routes = kg.node_count();
-    let (rn, re) =
-        resolve_parameterized_routes(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
-    if rn.len() < before_routes {
-        let n = before_routes - rn.len();
-        kg = build_from_parts(rn, re, vec![], &opts);
-        println!("Resolved {n} parameterized route(s)");
+    let before = n.len();
+    let (n, e) = resolve_parameterized_routes(n, e);
+    if n.len() < before {
+        println!("Resolved {} parameterized route(s)", before - n.len());
     }
 
     // Cross-language pyo3: first stitch each #[pymodule] boundary to the
@@ -301,14 +298,14 @@ pub(crate) fn run_extract(
     // files), then connect Python importers of the module to that boundary -- so
     // impact crosses from the Rust impl to the Python caller even when the module
     // and the function are in different files.
-    let before_edges = kg.edges().count();
-    let (pn, pe) =
-        resolve_pyo3_modules(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
-    let (pn, pe) = resolve_pyo3_imports(pn, pe);
-    if pe.len() > before_edges {
-        let n = pe.len() - before_edges;
-        kg = build_from_parts(pn, pe, vec![], &opts);
-        println!("Connected {n} pyo3 edge(s) (module exports + imports)");
+    let before = e.len();
+    let (n, e) = resolve_pyo3_modules(n, e);
+    let (n, e) = resolve_pyo3_imports(n, e);
+    if e.len() > before {
+        println!(
+            "Connected {} pyo3 edge(s) (module exports + imports)",
+            e.len() - before
+        );
     }
 
     // Dynamic-dispatch evidence-link: resolve reflection sites whose key is a
@@ -316,29 +313,26 @@ pub(crate) fn run_extract(
     // `dynamic_ref` edge so the target shows up as a (caveated) dependent and is
     // flagged `dynamically_referenced`. Runs after cross-language resolution so the
     // full symbol set (incl. cross-file/cross-repo) is present.
-    let before_edges = kg.edges().count();
-    let (yn, ye) = link_dynamic_refs(kg.nodes().cloned().collect(), kg.edges().cloned().collect());
-    if ye.len() > before_edges {
-        let n = ye.len() - before_edges;
-        kg = build_from_parts(yn, ye, vec![], &opts);
-        println!("Evidence-linked {n} dynamic-dispatch site(s)");
+    let before = e.len();
+    let (n, e) = link_dynamic_refs(n, e);
+    if e.len() > before {
+        println!(
+            "Evidence-linked {} dynamic-dispatch site(s)",
+            e.len() - before
+        );
     }
 
     // Merge near-duplicate non-code entities (documents/concepts). A no-op on a
     // code-only graph (code symbols are keyed by id, never label-merged) but
     // ready for the semantic layer (B5). Community boost is off here (no
-    // communities yet); rebuild only when a merge actually happened.
-    let before = kg.node_count();
-    let (dn, de) = deduplicate_entities(
-        kg.nodes().cloned().collect(),
-        kg.edges().cloned().collect(),
-        &std::collections::HashMap::new(),
-    );
-    if dn.len() < before {
-        let merged = before - dn.len();
-        kg = build_from_parts(dn, de, vec![], &opts);
-        println!("Deduplicated {merged} node(s)");
+    // communities yet).
+    let before = n.len();
+    let (n, e) = deduplicate_entities(n, e, &std::collections::HashMap::new());
+    if n.len() < before {
+        println!("Deduplicated {} node(s)", before - n.len());
     }
+
+    kg = build_from_parts(n, e, vec![], &opts);
 
     // Dedup tiebreaker: resolve ambiguous concept pairs (fuzzy score in the 75-92
     // band) the structural pass left unmerged. With an LLM (--semantic) the model
@@ -448,8 +442,14 @@ pub(crate) fn run_extract(
     // (survives `cache clear`) that `synaptic serve` diffs against to learn which
     // files an agent added/changed since this build. Distinct from the cache-dir
     // manifest above, which only drives the "changes since last build" line.
-    if let Err(e) = synaptic_incremental::persist_manifest_with(&out_dir, &det) {
+    if let Err(e) = manifest_snapshot.save(&synaptic_incremental::manifest_path(&out_dir)) {
         eprintln!("note: could not write serve provenance manifest: {e}");
+    }
+    // Seed the per-file called-name sidecar so the FIRST incremental update can
+    // already ripple-re-resolve new definitions against unchanged callers.
+    let callnames = synaptic_incremental::from_raw_calls(&raw_calls);
+    if let Err(e) = synaptic_incremental::save_callnames(&out_dir, &callnames) {
+        eprintln!("note: could not write call-name sidecar: {e}");
     }
     println!("Wrote {}/{{{}}}", out_dir.display(), extras);
     Ok(())

@@ -2,9 +2,11 @@
 //!
 //! Hooks call the native `synaptic` binary directly. `post-commit` runs an
 //! incremental update on the commit's changed files (backgrounded so it never
-//! blocks the commit); `post-checkout` runs a full rebuild on a branch switch.
-//! Both are marker-guarded for idempotent install/uninstall and skip during
-//! rebase/merge/cherry-pick and when only `synaptic-out/` changed (anti-loop).
+//! blocks the commit); `post-checkout` runs a full rebuild on a branch switch;
+//! `post-merge` covers `git merge`/`git pull` (incl. fast-forward, which fires
+//! neither of the other two). All are marker-guarded for idempotent
+//! install/uninstall and skip during rebase/merge/cherry-pick and when only
+//! `synaptic-out/` changed (anti-loop).
 //! `hook install` also registers the `graph.json` merge driver via
 //! `.gitattributes` + git config.
 
@@ -13,7 +15,22 @@ use std::process::Command;
 
 const MARKER_START: &str = "# >>> synaptic hook >>>";
 const MARKER_END: &str = "# <<< synaptic hook <<<";
-const HOOKS: &[&str] = &["post-commit", "post-checkout"];
+const HOOKS: &[&str] = &["post-commit", "post-checkout", "post-merge"];
+
+/// The git invocation post-commit uses to list the commit's changed files.
+/// `--root` covers the repo's first commit (no parent to diff against) and
+/// `-m` covers merge commits (which print nothing under plain diff-tree);
+/// `-m` over-includes by diffing each parent, which is harmless (dedup +
+/// unchanged content is a no-op re-extract) and never misses a file.
+const CHANGED_FILES_GIT_ARGS: &[&str] = &[
+    "diff-tree",
+    "--root",
+    "--no-commit-id",
+    "--name-only",
+    "-r",
+    "-m",
+    "HEAD",
+];
 
 /// Per-hook install/uninstall state for reporting.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +181,7 @@ fn current_bin() -> String {
 }
 
 fn post_commit_script(bin: &str) -> String {
+    let changed_cmd = format!("git {}", CHANGED_FILES_GIT_ARGS.join(" "));
     format!(
         r#"{MARKER_START}
 [ "$SYNAPTIC_SKIP_HOOK" = "1" ] && exit 0
@@ -171,11 +189,34 @@ GD=$(git rev-parse --git-dir 2>/dev/null) || exit 0
 for m in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD; do
   [ -e "$GD/$m" ] && exit 0
 done
-CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || git diff --name-only HEAD 2>/dev/null)
+CHANGED=$({changed_cmd} 2>/dev/null)
 REAL=$(printf '%s\n' "$CHANGED" | grep -v '^synaptic-out/' || true)
 [ -z "$REAL" ] && exit 0
 # Pass changed files via an env var (newline-delimited), never as argv, so paths
 # with spaces or shell-glob characters aren't word-split / glob-expanded.
+export SYNAPTIC_CHANGED="$REAL"
+( "{bin}" update >synaptic-out/.rebuild.log 2>&1 & )
+{MARKER_END}"#
+    )
+}
+
+fn post_merge_script(bin: &str) -> String {
+    // Fires after `git merge` / `git pull` -- including a fast-forward, which
+    // triggers neither post-commit (no commit) nor post-checkout (no branch
+    // switch). ORIG_HEAD is the pre-merge tip, so the diff is the merged-in
+    // set. The in-progress guard matters for history surgery (e.g. `git
+    // rebase --rebase-merges` replaying merges), which would otherwise fire a
+    // backgrounded update per replayed merge.
+    format!(
+        r#"{MARKER_START}
+[ "$SYNAPTIC_SKIP_HOOK" = "1" ] && exit 0
+GD=$(git rev-parse --git-dir 2>/dev/null) || exit 0
+for m in rebase-merge rebase-apply CHERRY_PICK_HEAD; do
+  [ -e "$GD/$m" ] && exit 0
+done
+CHANGED=$(git diff --name-only ORIG_HEAD HEAD 2>/dev/null)
+REAL=$(printf '%s\n' "$CHANGED" | grep -v '^synaptic-out/' || true)
+[ -z "$REAL" ] && exit 0
 export SYNAPTIC_CHANGED="$REAL"
 ( "{bin}" update >synaptic-out/.rebuild.log 2>&1 & )
 {MARKER_END}"#
@@ -197,6 +238,7 @@ fn script_for(hook: &str, bin: &str) -> String {
     match hook {
         "post-commit" => post_commit_script(bin),
         "post-checkout" => post_checkout_script(bin),
+        "post-merge" => post_merge_script(bin),
         _ => unreachable!("unknown hook {hook}"),
     }
 }
@@ -440,6 +482,103 @@ mod tests {
         assert!(
             !dir.join("post-checkout").exists(),
             "solely-ours hook removed"
+        );
+    }
+
+    fn commit_all(root: &Path, msg: &str) {
+        for (k, v) in [("user.email", "t@test"), ("user.name", "t")] {
+            Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["config", k, v])
+                .output()
+                .unwrap();
+        }
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["add", "-A"])
+            .output()
+            .unwrap();
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["commit", "-qm", msg])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(ok, "commit failed");
+    }
+
+    fn changed_files(root: &Path) -> Vec<String> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(CHANGED_FILES_GIT_ARGS)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn post_commit_changed_files_cover_root_normal_and_merge_commits() {
+        // Regression: `git diff --name-only HEAD~1 HEAD` fails on the root
+        // commit (no parent) and its fallback returned nothing, so the very
+        // first commit in a repo never updated the graph. The diff-tree form
+        // must list changed files for root, normal, AND merge commits.
+        let repo = init_repo();
+        let root = repo.path();
+
+        std::fs::write(root.join("a.py"), "a = 1\n").unwrap();
+        commit_all(root, "c1");
+        assert_eq!(changed_files(root), vec!["a.py"], "root commit covered");
+
+        std::fs::write(root.join("b.py"), "b = 2\n").unwrap();
+        commit_all(root, "c2");
+        assert_eq!(changed_files(root), vec!["b.py"], "normal commit covered");
+
+        // Merge commit: a side branch adds c.py, merged with --no-ff.
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        git(&["checkout", "-qb", "side", "HEAD~1"]);
+        std::fs::write(root.join("c.py"), "c = 3\n").unwrap();
+        commit_all(root, "c3");
+        git(&["checkout", "-q", "-"]);
+        git(&["merge", "-q", "--no-ff", "side", "-m", "merge"]);
+        let merged = changed_files(root);
+        assert!(
+            merged.contains(&"c.py".to_string()),
+            "merge commit must list the merged-in files: {merged:?}"
+        );
+    }
+
+    #[test]
+    fn post_merge_hook_is_installed_and_diffs_orig_head() {
+        // A fast-forward `git pull` fires neither post-commit (no commit) nor
+        // post-checkout (no branch switch); post-merge is the only hook that
+        // sees it. It must diff ORIG_HEAD..HEAD for the merged-in files.
+        assert!(
+            HOOKS.contains(&"post-merge"),
+            "post-merge must be an installed hook: {HOOKS:?}"
+        );
+        let script = script_for("post-merge", "synaptic");
+        assert!(
+            script.contains("ORIG_HEAD"),
+            "post-merge diffs ORIG_HEAD..HEAD: {script}"
+        );
+        assert!(
+            script.contains("SYNAPTIC_CHANGED"),
+            "changed files passed via env, not argv: {script}"
         );
     }
 

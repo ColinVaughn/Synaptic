@@ -173,6 +173,14 @@ pub struct Server {
     /// Last time the catch-up staleness walk ran, for debouncing. Interior
     /// mutability so the cheap gate can run under the HTTP shared read lock.
     last_fresh_check: Mutex<Option<Instant>>,
+    /// Files changed beyond the autofresh cap (0 = not stale). The MCP client's
+    /// model never sees stderr, so tool results state this staleness in-band.
+    /// Atomic so the gate can record it under the HTTP shared read lock.
+    stale_files: std::sync::atomic::AtomicUsize,
+    /// `serve --watch`: event-driven dirty flag set by the embedded filesystem
+    /// watcher. When present it replaces the debounced walk-per-query gate: a
+    /// clean flag means no staleness walk at all; the catch-up consumes it.
+    watch_dirty: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Configuration for the serve catch-up path: detect files an agent
@@ -193,15 +201,28 @@ struct FreshenConfig {
     max_files: usize,
 }
 
+/// Boolean env flag with one parse rule for every SYNAPTIC_* toggle: unset or
+/// empty means `default`; an explicit off token (`0`/`false`/`no`/`off`) means
+/// false; anything else means true. One rule, so `=on` and `=1` behave the
+/// same on every flag.
+pub fn env_flag(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(v) => match v.trim() {
+            "" => default,
+            "0" | "false" | "no" | "off" => false,
+            _ => true,
+        },
+        Err(_) => default,
+    }
+}
+
 impl FreshenConfig {
     /// Derive config from the repo root + graph path, honoring env overrides.
     /// Returns `None` (disabling auto-freshen) when there is no graph path to
     /// locate the output dir.
     fn from_env(root: PathBuf, graph_path: Option<&Path>) -> Option<FreshenConfig> {
         let out_dir = graph_path?.parent()?.to_path_buf();
-        let enabled = std::env::var("SYNAPTIC_SERVE_AUTOFRESH")
-            .map(|v| !matches!(v.trim(), "0" | "false" | "no" | "off"))
-            .unwrap_or(true);
+        let enabled = env_flag("SYNAPTIC_SERVE_AUTOFRESH", true);
         let debounce = std::env::var("SYNAPTIC_SERVE_AUTOFRESH_DEBOUNCE_MS")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
@@ -248,13 +269,10 @@ fn read_repo_hashes(graph_path: Option<&Path>) -> HashMap<String, String> {
     out
 }
 
-/// Whether token-lean output mode is on from the environment. Truthy unless the
-/// value is an explicit off token, mirroring the `SYNAPTIC_SERVE_AUTOFRESH`
-/// parse; unset = off (default output sizes unchanged).
+/// Whether token-lean output mode is on from the environment; unset = off
+/// (default output sizes unchanged).
 fn concise_from_env() -> bool {
-    std::env::var("SYNAPTIC_CONCISE")
-        .map(|v| !matches!(v.trim(), "" | "0" | "false" | "no" | "off"))
-        .unwrap_or(false)
+    env_flag("SYNAPTIC_CONCISE", false)
 }
 
 fn reload_key_for(path: &Path) -> Option<(u64, u64)> {
@@ -269,10 +287,7 @@ fn reload_key_for(path: &Path) -> Option<(u64, u64)> {
 }
 
 fn query_log_path() -> Option<PathBuf> {
-    let disabled = std::env::var("SYNAPTIC_QUERY_LOG_DISABLE")
-        .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
-        .unwrap_or(false);
-    if disabled {
+    if env_flag("SYNAPTIC_QUERY_LOG_DISABLE", false) {
         return None;
     }
     std::env::var("SYNAPTIC_QUERY_LOG").ok().map(PathBuf::from)
@@ -407,6 +422,8 @@ impl Server {
             concise: concise_from_env(),
             freshen: None,
             last_fresh_check: Mutex::new(None),
+            stale_files: std::sync::atomic::AtomicUsize::new(0),
+            watch_dirty: None,
         }
     }
 
@@ -428,6 +445,20 @@ impl Server {
     /// tools). Stored as-is; resolution canonicalizes per request.
     pub fn with_source_root(mut self, root: PathBuf) -> Server {
         self.freshen = FreshenConfig::from_env(root.clone(), self.graph_path.as_deref());
+        // A federated graph aggregates member repos; the catch-up's
+        // single-root incremental rebuild would re-extract parent-root files
+        // with non-member ids and corrupt the graph. Refresh members with
+        // `synaptic workspace` / a per-repo update instead. Federation is
+        // judged from the LOADED GRAPH (repo-tagged nodes), not from marker
+        // files next to it: a leftover workspace-state.json from an old
+        // `workspace` run must not silently disable autofresh for a graph
+        // that has since been re-extracted as single-repo.
+        if self.freshen.is_some() && self.kg.nodes().any(|n| n.repo.is_some()) {
+            eprintln!(
+                "[synaptic] auto-freshen disabled: federated graph (refresh members individually)"
+            );
+            self.freshen = None;
+        }
         self.source_root = Some(root);
         self
     }
@@ -627,9 +658,16 @@ impl Server {
         if !cfg.enabled {
             return None;
         }
-        // Debounce: walk the tree at most once per window. Interior mutability so
-        // this gate runs under the HTTP shared read lock.
-        {
+        if let Some(flag) = &self.watch_dirty {
+            // Event-driven gate (`serve --watch`): the walk runs only after the
+            // watcher saw a relevant change; consuming the flag here, before the
+            // walk, means an event landing mid-walk re-dirties for next time.
+            if !flag.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                return None;
+            }
+        } else {
+            // Debounce: walk the tree at most once per window. Interior
+            // mutability so this gate runs under the HTTP shared read lock.
             let mut last = self.last_fresh_check.lock().ok()?;
             if let Some(t) = *last {
                 if t.elapsed() < cfg.debounce {
@@ -640,10 +678,20 @@ impl Server {
         }
         let report = synaptic_incremental::detect_changes(&cfg.out_dir, &cfg.root);
         if report.is_empty() {
+            self.stale_files
+                .store(0, std::sync::atomic::Ordering::Relaxed);
             return None;
         }
         let changed = report.changed_paths().len();
         if cfg.max_files != 0 && changed > cfg.max_files {
+            // Serving stale: record it so tool results say so in-band (the MCP
+            // client's model cannot see this stderr line). Re-arm the watch
+            // flag: the `synaptic update` this asks for writes only under
+            // synaptic-out (no watch event), so without re-arming the walk
+            // never runs again and the note would latch on forever.
+            self.re_dirty();
+            self.stale_files
+                .store(changed, std::sync::atomic::Ordering::Relaxed);
             eprintln!(
                 "[synaptic] {} files changed since the graph was built (> autofresh max {}); \
                  run `synaptic update` to refresh -- serving the current graph.",
@@ -651,7 +699,26 @@ impl Server {
             );
             return None;
         }
+        self.stale_files
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         Some(report)
+    }
+
+    /// Install the event-driven dirty flag from `serve --watch`: the embedded
+    /// filesystem watcher sets it on relevant changes, and the staleness gate
+    /// consumes it instead of running the debounced walk-per-query check. Pass
+    /// the flag pre-set (true) so the first query still catches up on edits
+    /// made before the watcher started.
+    pub fn set_watch_dirty(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.watch_dirty = Some(flag);
+    }
+
+    /// Re-arm the watch flag after a failed catch-up, so the change is not
+    /// lost until the next filesystem event.
+    fn re_dirty(&self) {
+        if let Some(flag) = &self.watch_dirty {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
     }
 
     /// Run a synchronous incremental rebuild under the rebuild lock, persist
@@ -671,9 +738,16 @@ impl Server {
         // the mtime hot-reload picks it up on a later request.
         let _lock = match synaptic_incremental::try_acquire_lock(&cfg.out_dir) {
             Ok(Some(guard)) => guard,
-            Ok(None) => return,
+            Ok(None) => {
+                // Another rebuild owns the lock; it rewrites graph.json and the
+                // mtime hot-reload picks it up. Re-arm the watch flag so an
+                // event-gated server still re-checks the manifest next query.
+                self.re_dirty();
+                return;
+            }
             Err(e) => {
                 eprintln!("[synaptic] auto-freshen: could not acquire rebuild lock: {e}");
+                self.re_dirty();
                 return;
             }
         };
@@ -694,26 +768,46 @@ impl Server {
             Ok(o) => o,
             Err(e) => {
                 eprintln!("[synaptic] auto-freshen: rebuild failed: {e}");
+                self.re_dirty();
                 return;
             }
         };
-        // Advance provenance even when topology is unchanged (a comment-only edit
-        // still moves the manifest, so we don't re-detect it on every query). The
-        // manifest was already built by detect_changes; just persist it.
-        if let Err(e) = report
-            .current
-            .save(&synaptic_incremental::manifest_path(&cfg.out_dir))
-        {
-            eprintln!("[synaptic] auto-freshen: could not write manifest: {e}");
+        for key in &outcome.unreadable {
+            eprintln!(
+                "[synaptic] auto-freshen: could not read {key}; kept its previous nodes (will retry)"
+            );
         }
+        // graph.json first, then the manifest, so provenance never runs ahead
+        // of the graph on disk: a failed graph write leaves the changes
+        // re-detectable on the next query instead of stamped as ingested.
+        let mut graph_written = true;
         if outcome.changed {
             // Persist graph.json so other processes and our own next mtime check
-            // agree, then update reload_key so that check is a no-op.
+            // agree, then update reload_key so that check is a no-op. Temp +
+            // rename: a concurrent reader (CLI query, second serve) must never
+            // observe a truncated graph.json.
+            graph_written = false;
             if let Ok(bytes) = serde_json::to_vec_pretty(&outcome.kg.to_graph_data()) {
-                if std::fs::write(&graph_path, &bytes).is_ok() {
+                graph_written = synaptic_core::write_atomic(&graph_path, &bytes).is_ok();
+                if graph_written {
                     self.reload_key = reload_key_for(&graph_path);
                 }
             }
+        }
+        // The rebuild's manifest advances exactly what it ingested (targets
+        // hashed pre-extraction, unreadable keys dropped); a comment-only edit
+        // still advances it, so it doesn't re-detect on every query.
+        if graph_written {
+            if let Err(e) = outcome
+                .manifest
+                .save(&synaptic_incremental::manifest_path(&cfg.out_dir))
+            {
+                eprintln!("[synaptic] auto-freshen: could not write manifest: {e}");
+            }
+        } else {
+            self.re_dirty();
+        }
+        if outcome.changed {
             self.reindex_from(outcome.kg);
         }
     }
@@ -3517,7 +3611,9 @@ Cross-repo: {} edge(s) span repositories",
             // host can set it, and never emit below it.
             "logging/setLevel" => Ok(json!({})),
             "completion/complete" => self.dispatch_completion(&params),
-            "tools/call" => self.dispatch_tool(&params),
+            "tools/call" => self
+                .dispatch_tool(&params)
+                .map(|v| self.with_staleness_note(v)),
             "resources/read" => self.dispatch_resource(&params),
             other => Err((-32601, format!("Method not found: {other}"))),
         };
@@ -3770,6 +3866,31 @@ Cross-repo: {} edge(s) span repositories",
             out.push_str("\n(pass verbose=true for each finding's detail and fix)");
         }
         out
+    }
+
+    /// Prepend the staleness warning to a tool result's text content. Set when
+    /// the autofresh cap refused a catch-up: the graph being served no longer
+    /// matches the working tree, and the model must learn that from the tool
+    /// output itself (it cannot see the server's stderr).
+    fn with_staleness_note(&self, mut result: Value) -> Value {
+        let n = self.stale_files.load(std::sync::atomic::Ordering::Relaxed);
+        if n == 0 {
+            return result;
+        }
+        if let Some(text) = result
+            .get_mut("content")
+            .and_then(Value::as_array_mut)
+            .and_then(|a| a.first_mut())
+            .and_then(|c| c.get_mut("text"))
+        {
+            if let Some(t) = text.as_str() {
+                *text = json!(format!(
+                    "note: graph is STALE -- {n} file(s) changed since it was built \
+                     (above the autofresh cap). Run `synaptic update` to refresh.\n\n{t}"
+                ));
+            }
+        }
+        result
     }
 
     fn dispatch_tool(&self, params: &Value) -> Result<Value, (i64, String)> {
@@ -4501,7 +4622,9 @@ returns its candidates (id, file, degree).\n\
 \n\
 Coverage: the graph is static. Electron IPC and WebSocket/socket.io channels ARE modelled; \
 inline tests beside the code may not be linked. Treat a surprising 0-caller as 'no STATIC \
-caller' (see dynamic_hazards), not dead code.\n\
+caller' (see dynamic_hazards), not dead code. Edits are ingested on the next query \
+(auto-freshen); a result prefixed 'graph is STALE' means too many files changed at once -- \
+run `synaptic update`, then re-query.\n\
 \n\
 Terms: a 'community' is a densely-connected cluster (roughly a module); edge confidence on \
 a relationship is EXTRACTED, INFERRED, or AMBIGUOUS.";
@@ -5508,6 +5631,280 @@ mod tests {
         assert!(
             text.contains("beta_func"),
             "new file's symbol must be queryable after auto-freshen: {text}"
+        );
+    }
+
+    #[test]
+    fn autofresh_is_disabled_for_a_federated_graph() {
+        use std::fs;
+        // A federated graph aggregates member repos. The catch-up's
+        // single-root incremental rebuild would re-extract parent-root files
+        // with non-member ids and corrupt the graph, so autofresh must
+        // disable itself when the loaded graph carries repo-tagged (member)
+        // nodes -- and must NOT trip on a mere leftover marker file.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let out = root.join("synaptic-out");
+        fs::create_dir_all(&out).unwrap();
+        fs::write(root.join("alpha.py"), "def alpha_func():\n    return 1\n").unwrap();
+
+        let opts = synaptic_incremental::RebuildOptions {
+            root: root.clone(),
+            directed: false,
+            force: false,
+        };
+        let outcome =
+            synaptic_incremental::rebuild(&opts, &synaptic_incremental::ChangeSet::Full, None)
+                .unwrap();
+        let mut gd = outcome.kg.to_graph_data();
+        // Tag a node with a member repo: the federation signal.
+        gd.nodes[0].repo = Some("member1".into());
+        let graph_path = out.join("graph.json");
+        fs::write(&graph_path, serde_json::to_vec(&gd).unwrap()).unwrap();
+        synaptic_incremental::persist_manifest(&out, &root).unwrap();
+
+        let server = Server::load(graph_path.clone())
+            .unwrap()
+            .with_source_root(root.clone());
+        assert!(
+            server.freshen.is_none(),
+            "autofresh must be off for a repo-tagged (federated) graph"
+        );
+
+        // Untagged graph + leftover marker file: autofresh must stay ON.
+        gd.nodes[0].repo = None;
+        fs::write(&graph_path, serde_json::to_vec(&gd).unwrap()).unwrap();
+        fs::write(out.join("workspace-state.json"), b"{}").unwrap();
+        let server = Server::load(graph_path)
+            .unwrap()
+            .with_source_root(root.clone());
+        assert!(
+            server.freshen.is_some(),
+            "a stale marker file must not disable autofresh for a single-repo graph"
+        );
+    }
+
+    #[test]
+    fn watch_flag_gates_the_staleness_walk() {
+        use std::fs;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        // With an embedded watcher (`serve --watch`), the per-query staleness
+        // walk is gated by an O(1) dirty flag: no FS events means no walk (and
+        // no debounce window to wait out); a set flag runs the catch-up and is
+        // consumed by it.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let out = root.join("synaptic-out");
+        fs::create_dir_all(&out).unwrap();
+        fs::write(root.join("alpha.py"), "def alpha_func():\n    return 1\n").unwrap();
+
+        let opts = synaptic_incremental::RebuildOptions {
+            root: root.clone(),
+            directed: false,
+            force: false,
+        };
+        let outcome =
+            synaptic_incremental::rebuild(&opts, &synaptic_incremental::ChangeSet::Full, None)
+                .unwrap();
+        let graph_path = out.join("graph.json");
+        fs::write(
+            &graph_path,
+            serde_json::to_vec(&outcome.kg.to_graph_data()).unwrap(),
+        )
+        .unwrap();
+        synaptic_incremental::persist_manifest(&out, &root).unwrap();
+
+        let mut server = Server::load(graph_path)
+            .unwrap()
+            .with_source_root(root.clone());
+        server.freshen.as_mut().unwrap().debounce = std::time::Duration::ZERO;
+        let flag = Arc::new(AtomicBool::new(false));
+        server.set_watch_dirty(flag.clone());
+
+        fs::write(root.join("beta.py"), "def beta_func():\n    return 2\n").unwrap();
+        let text = call_tool(
+            &mut server,
+            "query_graph",
+            json!({ "question": "beta_func" }),
+        );
+        assert!(
+            !text.contains("beta_func"),
+            "clean flag: no walk, no catch-up (the watcher is the signal): {text}"
+        );
+
+        flag.store(true, Ordering::Release);
+        let text = call_tool(
+            &mut server,
+            "query_graph",
+            json!({ "question": "beta_func" }),
+        );
+        assert!(
+            text.contains("beta_func"),
+            "dirty flag: catch-up ingests the new file: {text}"
+        );
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "the catch-up consumes the flag"
+        );
+    }
+
+    #[test]
+    fn stale_note_clears_after_external_refresh_under_watch() {
+        use std::fs;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        // Under `serve --watch`, a cap trip must re-arm the dirty flag: the
+        // external `synaptic update` the note demands only writes under
+        // synaptic-out (which the watcher ignores), so without re-arming the
+        // staleness walk never runs again and the note latches on forever
+        // over a graph that is actually fresh.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let out = root.join("synaptic-out");
+        fs::create_dir_all(&out).unwrap();
+        fs::write(root.join("alpha.py"), "def alpha_func():\n    return 1\n").unwrap();
+
+        let opts = synaptic_incremental::RebuildOptions {
+            root: root.clone(),
+            directed: false,
+            force: false,
+        };
+        let outcome =
+            synaptic_incremental::rebuild(&opts, &synaptic_incremental::ChangeSet::Full, None)
+                .unwrap();
+        let graph_path = out.join("graph.json");
+        fs::write(
+            &graph_path,
+            serde_json::to_vec(&outcome.kg.to_graph_data()).unwrap(),
+        )
+        .unwrap();
+        synaptic_incremental::persist_manifest(&out, &root).unwrap();
+
+        let mut server = Server::load(graph_path.clone())
+            .unwrap()
+            .with_source_root(root.clone());
+        server.freshen.as_mut().unwrap().max_files = 1;
+        let flag = Arc::new(AtomicBool::new(false));
+        server.set_watch_dirty(flag.clone());
+
+        // Two new files (> cap of 1); the watcher flags them.
+        fs::write(root.join("beta.py"), "def b():\n    return 2\n").unwrap();
+        fs::write(root.join("gamma.py"), "def c():\n    return 3\n").unwrap();
+        flag.store(true, Ordering::Release);
+        let text = call_tool(
+            &mut server,
+            "query_graph",
+            json!({ "question": "alpha_func" }),
+        );
+        assert!(text.contains("STALE"), "cap trip: note present: {text}");
+
+        // External `synaptic update` (simulated): graph + manifest advance,
+        // with NO watcher event (synaptic-out is an ignored subtree).
+        let existing = server.kg.to_graph_data();
+        let refreshed = synaptic_incremental::rebuild(
+            &opts,
+            &synaptic_incremental::ChangeSet::Full,
+            Some(&existing),
+        )
+        .unwrap();
+        fs::write(
+            &graph_path,
+            serde_json::to_vec(&refreshed.kg.to_graph_data()).unwrap(),
+        )
+        .unwrap();
+        synaptic_incremental::persist_manifest(&out, &root).unwrap();
+
+        let text = call_tool(
+            &mut server,
+            "query_graph",
+            json!({ "question": "alpha_func" }),
+        );
+        assert!(
+            !text.contains("STALE"),
+            "note must clear after the external refresh: {text}"
+        );
+    }
+
+    #[test]
+    fn autofresh_cap_trip_surfaces_staleness_in_tool_output() {
+        use std::fs;
+        // When more files changed than the autofresh cap, the server keeps
+        // serving the stale graph -- but an MCP client's model never sees our
+        // stderr, so the staleness must be stated in the tool result itself,
+        // and must clear once the graph is refreshed.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let out = root.join("synaptic-out");
+        fs::create_dir_all(&out).unwrap();
+        fs::write(root.join("alpha.py"), "def alpha_func():\n    return 1\n").unwrap();
+
+        let opts = synaptic_incremental::RebuildOptions {
+            root: root.clone(),
+            directed: false,
+            force: false,
+        };
+        let outcome =
+            synaptic_incremental::rebuild(&opts, &synaptic_incremental::ChangeSet::Full, None)
+                .unwrap();
+        let graph_path = out.join("graph.json");
+        fs::write(
+            &graph_path,
+            serde_json::to_vec(&outcome.kg.to_graph_data()).unwrap(),
+        )
+        .unwrap();
+        synaptic_incremental::persist_manifest(&out, &root).unwrap();
+
+        let mut server = Server::load(graph_path.clone())
+            .unwrap()
+            .with_source_root(root.clone());
+        {
+            let cfg = server.freshen.as_mut().expect("freshen configured");
+            cfg.max_files = 2;
+            cfg.debounce = std::time::Duration::ZERO;
+        }
+
+        // 3 new files > cap of 2: autofresh refuses, graph stays stale.
+        for name in ["beta.py", "gamma.py", "delta.py"] {
+            fs::write(root.join(name), "def extra():\n    return 0\n").unwrap();
+        }
+        let text = call_tool(
+            &mut server,
+            "query_graph",
+            json!({ "question": "alpha_func" }),
+        );
+        assert!(
+            text.contains("STALE") && text.contains("synaptic update"),
+            "tool output must state the graph is stale and how to fix it: {text}"
+        );
+        assert!(
+            !server.kg.nodes().any(|n| n.label.contains("extra")),
+            "cap trip means the new files were NOT ingested"
+        );
+
+        // The user runs `synaptic update` (simulated): graph + manifest advance.
+        let existing = server.kg.to_graph_data();
+        let refreshed = synaptic_incremental::rebuild(
+            &opts,
+            &synaptic_incremental::ChangeSet::Full,
+            Some(&existing),
+        )
+        .unwrap();
+        fs::write(
+            &graph_path,
+            serde_json::to_vec(&refreshed.kg.to_graph_data()).unwrap(),
+        )
+        .unwrap();
+        synaptic_incremental::persist_manifest(&out, &root).unwrap();
+
+        let text = call_tool(
+            &mut server,
+            "query_graph",
+            json!({ "question": "alpha_func" }),
+        );
+        assert!(
+            !text.contains("STALE"),
+            "staleness note must clear after the graph is refreshed: {text}"
         );
     }
 
