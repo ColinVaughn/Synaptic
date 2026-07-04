@@ -15,7 +15,10 @@ broadly; it is faster and surfaces relationships and impact that text search can
 
 ## Build / refresh
 - `synaptic extract .`: build the graph into `synaptic-out/`.
-- `synaptic update <changed files>`: incremental rebuild after edits.
+- `synaptic update [changed files]`: incremental rebuild after edits; with no
+  arguments it catches up on everything changed since the last build.
+- A tool result prefixed `graph is STALE` means too many files changed for the
+  serve-time catch-up: run `synaptic update` to refresh, then re-query.
 
 ## Capabilities (CLI command -- MCP tool)
 Prefer the MCP tools when Claude Code has the **synaptic** server connected; the CLI
