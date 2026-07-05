@@ -135,10 +135,11 @@ pub struct ShardProvider {
     /// Content fingerprint of all shards (sorted `tag:source_hash`); the cache key
     /// for streaming aggregates, bumped whenever any shard changes.
     version: String,
-    /// Cross-repo edges (traversed only on the opt-in cross-repo path).
+    /// Cross-repo edges, loaded up front (small relative to any shard).
     bridge: Vec<Edge>,
-    /// Whether walks may follow bridge edges into other shards
-    /// (`SYNAPTIC_CROSS_REPO`; per-repo isolation otherwise).
+    /// Whether walks may follow bridge edges into other shards. On by default
+    /// when the store has bridge edges (auto-detected); `SYNAPTIC_CROSS_REPO=0`
+    /// forces per-repo isolation, `=1` forces traversal on.
     cross_repo: bool,
     #[allow(dead_code)] // consumed by the streaming aggregator tasks
     agg: AggregateCache,
@@ -328,9 +329,7 @@ impl GraphProvider {
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
             .unwrap_or(DEFAULT_SHARD_LRU);
-        let cross_repo = std::env::var("SYNAPTIC_CROSS_REPO")
-            .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
-            .unwrap_or(false);
+        let cross_repo = synaptic_store::cross_repo_mode().resolve(!bridge.is_empty());
         GraphProvider::Shard(Box::new(ShardProvider {
             store,
             lru: Mutex::new(ShardLru::new(cap)),
@@ -688,7 +687,8 @@ impl GraphProvider {
         matches!(self, GraphProvider::Shard(_))
     }
 
-    /// Whether cross-repo bridge traversal is opted in (`SYNAPTIC_CROSS_REPO`).
+    /// Whether walks traverse cross-repo bridge edges. Defaults to whether the
+    /// store has any (`SYNAPTIC_CROSS_REPO` overrides: `0` isolates, `1` forces).
     /// Always false for a single graph (its edges are all in-graph anyway).
     pub fn cross_repo(&self) -> bool {
         match self {
@@ -697,8 +697,17 @@ impl GraphProvider {
         }
     }
 
-    /// Builder override for the cross-repo opt-in (tests; the env is read at
-    /// construction). No effect on a single graph.
+    /// True when the store holds cross-repo bridge edges. Always false for a
+    /// single graph, whose edges are all in-graph.
+    pub fn has_bridge(&self) -> bool {
+        match self {
+            GraphProvider::Single(_) => false,
+            GraphProvider::Shard(sp) => !sp.bridge.is_empty(),
+        }
+    }
+
+    /// Builder override for cross-repo traversal (tests; env + auto-detection
+    /// are applied at construction). No effect on a single graph.
     pub fn with_cross_repo(mut self, on: bool) -> Self {
         if let GraphProvider::Shard(sp) = &mut self {
             sp.cross_repo = on;
@@ -1058,6 +1067,32 @@ mod tests {
         let mut store = ShardStore::open(&store_dir).unwrap();
         migrate::migrate_into(&mut store, gd).unwrap();
         GraphProvider::from_store(ShardStore::open(&store_dir).unwrap())
+    }
+
+    /// Cross-repo traversal defaults on exactly when the store holds bridge
+    /// edges (auto-detection; assumes SYNAPTIC_CROSS_REPO is unset in the test
+    /// env, like every env-default test).
+    #[test]
+    fn cross_repo_auto_detects_bridge_presence() {
+        let bridged = shard_provider_over(&two_repo_gd());
+        assert!(bridged.has_bridge(), "fixture migrates a bridge edge");
+        assert!(
+            bridged.cross_repo(),
+            "bridge present: walks follow it by default"
+        );
+
+        let mut gd = two_repo_gd();
+        gd.links.retain(|e| !e.cross_repo);
+        let isolated = shard_provider_over(&gd);
+        assert!(!isolated.has_bridge());
+        assert!(
+            !isolated.cross_repo(),
+            "no bridge edges: nothing to traverse, auto resolves off"
+        );
+
+        // The builder override still forces isolation.
+        let forced = shard_provider_over(&two_repo_gd()).with_cross_repo(false);
+        assert!(!forced.cross_repo());
     }
 
     #[test]

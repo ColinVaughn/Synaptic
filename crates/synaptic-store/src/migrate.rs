@@ -133,7 +133,8 @@ pub fn migrate_into(store: &mut ShardStore, gd: &GraphData) -> Result<MigrateRep
         shard_tags.push(tag.clone());
     }
     // Store the cross-repo bridge (edges spanning two repos) apart from the
-    // per-repo shards; traversed only on an opt-in cross-repo query.
+    // per-repo shards; queries graft it by default when it is non-empty
+    // (SYNAPTIC_CROSS_REPO=0 isolates).
     store.write_bridge(&split.bridge, gd.directed)?;
     Ok(MigrateReport {
         shard_tags,

@@ -73,7 +73,7 @@ OpenAI, DeepSeek, Azure OpenAI, Bedrock, Ollama. Set `SYNAPTIC_BACKEND` to force
 |---|---|
 | `HOME` / `USERPROFILE` | Locate the global store `~/.synaptic` (falls back to `.synaptic` in the working directory) |
 | `SYNAPTIC_STORE` | Graph backend: `redb` (per-repo sharded store under `synaptic-out/store/`), `json`, or unset = auto (prefer a store that is at least as fresh as `graph.json`) |
-| `SYNAPTIC_CROSS_REPO` | Opt an unscoped federated query into traversing the cross-repo bridge edges (default: per-repo isolation) |
+| `SYNAPTIC_CROSS_REPO` | Cross-repo bridge traversal on unscoped federated queries: unset = auto (follow bridge edges whenever the store has them), `0` = per-repo isolation, `1` = force on |
 | `SYNAPTIC_SHARD_LRU` | Max shards kept materialized in RAM by a federated serve (default 8); bounds the working set |
 | `SYNAPTIC_MAX_SHARD_MB` | Byte cap (MiB) per store shard (default 2048; `0` disables). A DoS guard per repo, not an aggregate cap |
 | `SYNAPTIC_MAX_SHARD_NODES` | Node cap per store shard (default 5000000; `0` disables) |
