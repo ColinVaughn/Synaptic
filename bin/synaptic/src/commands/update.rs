@@ -128,6 +128,7 @@ pub(crate) fn run_update(
         if outcome.changed {
             synaptic_output::to_json(&outcome.kg, &out_dir.join("graph.json"))
                 .context("writing graph.json")?;
+            super::common::warn_if_over_caps(&out_dir.join("graph.json"), outcome.kg.node_count());
         }
         if let Err(e) = outcome.manifest.save(&manifest_path(&out_dir)) {
             eprintln!("note: could not write serve provenance manifest: {e}");

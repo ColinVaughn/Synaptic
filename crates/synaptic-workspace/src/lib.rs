@@ -29,11 +29,6 @@ pub mod state;
 mod tsconfig;
 pub mod workspace_build;
 
-/// Refuse to load a graph/surface file larger than this (memory-bomb guard),
-/// matching the merge driver's 50 MB cap.
-pub const MAX_GRAPH_BYTES: u64 = 50 * 1024 * 1024;
-/// Refuse graphs with more nodes than this (100k-node safety cap).
-pub const MAX_NODES: usize = 100_000;
 /// Current `export-surface.json` schema version. Bump on a breaking change.
 pub const SURFACE_SCHEMA_VERSION: u32 = 1;
 
@@ -58,12 +53,16 @@ pub enum WorkspaceError {
         path: String,
         source: serde_json::Error,
     },
-    /// A loaded file exceeded a safety cap.
-    #[error("{path} exceeds the {limit}-byte cap ({size} bytes)")]
+    /// A loaded file exceeded the byte safety cap (memory-bomb guard).
+    #[error("{path} is {size} bytes, over the {limit}-byte graph cap (set SYNAPTIC_MAX_GRAPH_MB to raise it; 0 = no cap)")]
     TooBig { path: String, size: u64, limit: u64 },
     /// A loaded/merged graph exceeded the node cap.
-    #[error("{path} has {count} nodes, over the {MAX_NODES} cap")]
-    TooManyNodes { path: String, count: usize },
+    #[error("{path} has {count} nodes, over the {limit}-node cap (set SYNAPTIC_MAX_NODES to raise it; 0 = no cap)")]
+    TooManyNodes {
+        path: String,
+        count: usize,
+        limit: usize,
+    },
     /// A per-member rebuild failed.
     #[error("building member {member}: {source}")]
     Member {
@@ -92,21 +91,41 @@ use std::path::Path;
 
 use synaptic_core::GraphData;
 
-/// Load a `graph.json` with the byte + node safety caps applied. Shared by the
-/// merge-graphs, global-store, and artifact-federation paths.
+/// Enforce the byte cap on a file about to be loaded (fails with the env-var
+/// hint so an over-cap graph is raisable, not a dead end).
+pub(crate) fn check_size(label: &str, size: u64, limit: u64) -> Result<()> {
+    if size > limit {
+        return Err(WorkspaceError::TooBig {
+            path: label.to_string(),
+            size,
+            limit,
+        });
+    }
+    Ok(())
+}
+
+/// Enforce the node cap on a loaded/merged graph.
+pub(crate) fn check_nodes(label: &str, count: usize, limit: usize) -> Result<()> {
+    if count > limit {
+        return Err(WorkspaceError::TooManyNodes {
+            path: label.to_string(),
+            count,
+            limit,
+        });
+    }
+    Ok(())
+}
+
+/// Load a `graph.json` with the byte + node safety caps applied (defaults
+/// 50 MiB / 100k nodes; see [`synaptic_core::limits`] for the env overrides).
+/// Shared by the merge-graphs, global-store, and artifact-federation paths.
 pub fn load_graph(path: &Path) -> Result<GraphData> {
     let label = path.display().to_string();
     let meta = std::fs::metadata(path).map_err(|source| WorkspaceError::Io {
         context: format!("reading {label}"),
         source,
     })?;
-    if meta.len() > MAX_GRAPH_BYTES {
-        return Err(WorkspaceError::TooBig {
-            path: label,
-            size: meta.len(),
-            limit: MAX_GRAPH_BYTES,
-        });
-    }
+    check_size(&label, meta.len(), synaptic_core::max_graph_bytes())?;
     let bytes = std::fs::read(path).map_err(|source| WorkspaceError::Io {
         context: format!("reading {label}"),
         source,
@@ -115,24 +134,18 @@ pub fn load_graph(path: &Path) -> Result<GraphData> {
         path: label.clone(),
         source,
     })?;
-    if g.nodes.len() > MAX_NODES {
-        return Err(WorkspaceError::TooManyNodes {
-            path: label,
-            count: g.nodes.len(),
-        });
-    }
+    check_nodes(&label, g.nodes.len(), synaptic_core::max_nodes())?;
     Ok(g)
 }
 
 /// Write a `graph.json` (pretty, matching the rest of the toolchain), creating
 /// the parent directory if needed.
 pub fn write_graph(path: &Path, g: &GraphData) -> Result<()> {
-    if g.nodes.len() > MAX_NODES {
-        return Err(WorkspaceError::TooManyNodes {
-            path: path.display().to_string(),
-            count: g.nodes.len(),
-        });
-    }
+    check_nodes(
+        &path.display().to_string(),
+        g.nodes.len(),
+        synaptic_core::max_nodes(),
+    )?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|source| WorkspaceError::Io {
             context: format!("creating {}", parent.display()),
@@ -173,6 +186,28 @@ pub fn sanitize_tag(s: &str) -> String {
         "repo".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::{check_nodes, check_size};
+
+    #[test]
+    fn oversized_file_error_names_the_env_override() {
+        check_size("g.json", 50, 50).unwrap();
+        let msg = check_size("g.json", 60, 50).unwrap_err().to_string();
+        assert!(msg.contains("SYNAPTIC_MAX_GRAPH_MB"), "{msg}");
+        assert!(msg.contains("60"), "{msg}");
+        assert!(msg.contains("g.json"), "{msg}");
+    }
+
+    #[test]
+    fn over_node_cap_error_names_the_env_override() {
+        check_nodes("g.json", 4, 4).unwrap();
+        let msg = check_nodes("g.json", 5, 4).unwrap_err().to_string();
+        assert!(msg.contains("SYNAPTIC_MAX_NODES"), "{msg}");
+        assert!(msg.contains('5'), "{msg}");
     }
 }
 

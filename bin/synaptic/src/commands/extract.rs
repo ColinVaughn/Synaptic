@@ -501,6 +501,7 @@ pub(crate) fn write_outputs(
     wiki: bool,
 ) -> Result<String> {
     to_json(kg, &out_dir.join("graph.json")).context("writing graph.json")?;
+    super::common::warn_if_over_caps(&out_dir.join("graph.json"), kg.node_count());
     to_html(kg, &out_dir.join("graph.html")).context("writing graph.html")?;
     write_report(
         kg,

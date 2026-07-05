@@ -222,16 +222,19 @@ fn clone_repo(repo: &RepoMember, url: &str, cache: &Path) -> Result<PathBuf> {
 
 /// Fetch a remote subgraph through the SSRF-guarded fetcher. **Untested offline.**
 fn fetch_subgraph(name: &str, url: &str) -> Result<GraphData> {
-    let bytes = synaptic_ingest::safe_fetch(url, crate::MAX_GRAPH_BYTES).map_err(|e| {
-        WorkspaceError::Remote {
-            member: name.to_string(),
-            reason: format!("fetching {url}: {e}"),
-        }
-    })?;
-    serde_json::from_slice(&bytes).map_err(|source| WorkspaceError::Json {
+    let bytes =
+        synaptic_ingest::safe_fetch(url, synaptic_core::max_graph_bytes()).map_err(|e| {
+            WorkspaceError::Remote {
+                member: name.to_string(),
+                reason: format!("fetching {url}: {e}"),
+            }
+        })?;
+    let g: GraphData = serde_json::from_slice(&bytes).map_err(|source| WorkspaceError::Json {
         path: url.to_string(),
         source,
-    })
+    })?;
+    crate::check_nodes(url, g.nodes.len(), synaptic_core::max_nodes())?;
+    Ok(g)
 }
 
 /// A declared `[[repos]]` member resolved into a subgraph (+ optional surface).

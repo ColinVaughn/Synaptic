@@ -8,6 +8,26 @@ All notable changes to Synaptic are documented here. The format is based on
 > **CodeGraph**, and reference the old `codegraph` command and crate names. They
 > are preserved verbatim as historical record.
 
+## [Unreleased]
+
+### Added
+- **Configurable graph safety caps.** The 50 MiB byte cap and 100,000-node cap
+  that guard the merge driver, federation, global-store, and remote-subgraph
+  loads are now env-overridable: `SYNAPTIC_MAX_GRAPH_MB` and
+  `SYNAPTIC_MAX_NODES` (`0` disables a cap; unset or unparseable values keep
+  the defaults). Both caps live in one place (`synaptic-core`) instead of
+  being duplicated per crate.
+- **Write-time cap warnings.** `synaptic extract`/`update` now warn on stderr
+  when the `graph.json` they just wrote exceeds the effective caps, naming the
+  env override — previously an over-cap graph extracted fine and only failed
+  later, at merge or federation time, with no recourse.
+
+### Changed
+- Cap violations now report the actual size, the effective limit, and the env
+  var that raises it (previously a bare "exceeds the cap" with hard-coded
+  limits). Remote subgraph fetches additionally enforce the node cap, matching
+  local artifact loads.
+
 ## [0.5.0] - 2026-07-03
 
 > **Upgrade note:** `synaptic update`/`watch` now write `graph.json` (+ the
