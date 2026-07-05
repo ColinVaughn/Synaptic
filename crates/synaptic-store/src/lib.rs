@@ -28,11 +28,53 @@ pub const QUERY_INDEX_BLOB: &str = "query_index";
 /// Index-blob name for a shard's persisted `ReverseImpactIndex`.
 pub const AFFECTED_INDEX_BLOB: &str = "affected_index";
 
+/// Env var steering cross-repo bridge traversal on unscoped federated queries.
+pub const CROSS_REPO_ENV: &str = "SYNAPTIC_CROSS_REPO";
+
+/// How federated queries treat the cross-repo bridge: follow it when the store
+/// actually holds bridge edges (`Auto`, the unset default), always (`On`), or
+/// never (`Off`, per-repo isolation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrossRepoMode {
+    /// Detect: traverse the bridge exactly when the store has bridge edges.
+    Auto,
+    /// Always traverse (a no-op on a store with no bridge edges).
+    On,
+    /// Never traverse: per-repo isolation.
+    Off,
+}
+
+impl CrossRepoMode {
+    /// The effective traversal decision given whether bridge edges exist.
+    pub fn resolve(self, has_bridge: bool) -> bool {
+        match self {
+            CrossRepoMode::On => true,
+            CrossRepoMode::Off => false,
+            CrossRepoMode::Auto => has_bridge,
+        }
+    }
+}
+
+/// Parse a raw [`CROSS_REPO_ENV`] value: `1`/`true`/`yes`/`on` force traversal,
+/// `0`/`false`/`no`/`off` isolate, anything else (unset included) auto-detects.
+pub fn parse_cross_repo(raw: Option<&str>) -> CrossRepoMode {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("1") | Some("true") | Some("yes") | Some("on") => CrossRepoMode::On,
+        Some("0") | Some("false") | Some("no") | Some("off") => CrossRepoMode::Off,
+        _ => CrossRepoMode::Auto,
+    }
+}
+
+/// [`parse_cross_repo`] over the process env ([`CROSS_REPO_ENV`]).
+pub fn cross_repo_mode() -> CrossRepoMode {
+    parse_cross_repo(std::env::var(CROSS_REPO_ENV).ok().as_deref())
+}
+
 /// What a query (or export) ranges over.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
-    /// Every shard (per-repo isolation by default; cross-repo edges are not
-    /// traversed unless explicitly requested).
+    /// Every shard's own content; the cross-repo bridge is grafted separately
+    /// (see `ShardStore::export_cross_repo` and [`CrossRepoMode`]).
     All,
     /// A single repo shard.
     Repo(String),
@@ -59,3 +101,34 @@ pub enum StoreError {
 }
 
 pub use tag::sanitize_tag;
+
+#[cfg(test)]
+mod cross_repo_tests {
+    use super::*;
+
+    #[test]
+    fn parse_cross_repo_is_tristate() {
+        // Unset, empty, or unrecognized values mean auto-detection.
+        assert_eq!(parse_cross_repo(None), CrossRepoMode::Auto);
+        assert_eq!(parse_cross_repo(Some("")), CrossRepoMode::Auto);
+        assert_eq!(parse_cross_repo(Some("auto")), CrossRepoMode::Auto);
+        assert_eq!(parse_cross_repo(Some("maybe")), CrossRepoMode::Auto);
+        // Truthy forms force traversal on.
+        for v in ["1", "true", "yes", "on", " ON ", "True"] {
+            assert_eq!(parse_cross_repo(Some(v)), CrossRepoMode::On, "{v:?}");
+        }
+        // Falsy forms isolate per repo.
+        for v in ["0", "false", "no", "off", " Off "] {
+            assert_eq!(parse_cross_repo(Some(v)), CrossRepoMode::Off, "{v:?}");
+        }
+    }
+
+    #[test]
+    fn auto_resolves_from_bridge_presence() {
+        assert!(CrossRepoMode::Auto.resolve(true));
+        assert!(!CrossRepoMode::Auto.resolve(false));
+        // Explicit settings ignore detection.
+        assert!(CrossRepoMode::On.resolve(false));
+        assert!(!CrossRepoMode::Off.resolve(true));
+    }
+}

@@ -184,8 +184,8 @@ impl ShardStore {
     }
 
     /// Materialize every repo shard **plus** the cross-repo bridge into one graph
-    /// (the opt-in `--all-repos` view that recovers today's unified-graph
-    /// behavior). [`export_graph`](Self::export_graph) is the isolation default.
+    /// (the unified view, the default for federated queries when bridge edges
+    /// exist). [`export_graph`](Self::export_graph) is the bridge-less export.
     pub fn export_cross_repo(&self) -> Result<KnowledgeGraph, StoreError> {
         let mut union = GraphData::default();
         for (i, e) in self.manifest.shards.iter().enumerate() {
@@ -229,7 +229,8 @@ impl ShardStore {
     /// `Scope::Repo` is exactly that shard. `Scope::All` with a single shard is
     /// that shard (so a single-repo store round-trips byte-identically); with
     /// several shards it unions them in tag order. The cross-repo bridge is not
-    /// included here — isolation-default export is per-repo content only.
+    /// included here — this export is per-repo content only (see
+    /// [`export_cross_repo`](Self::export_cross_repo) for the grafted view).
     pub fn export_graph(&self, scope: &Scope) -> Result<KnowledgeGraph, StoreError> {
         match scope {
             Scope::Repo(tag) => self.materialize(tag),

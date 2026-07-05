@@ -1372,8 +1372,8 @@ impl Server {
     }
 
     /// Resolve `label` and materialize the shard that owns it: the seed tools
-    /// walk within this shard (per-repo isolation is the default; a single
-    /// graph is the one-shard case, so behavior there is unchanged).
+    /// walk within this shard, crossing the bridge only where the tool handles
+    /// it (a single graph is the one-shard case, so behavior there is unchanged).
     fn seed_ctx(
         &self,
         label: &str,
@@ -2406,10 +2406,19 @@ Cross-language: {} coupling edge(s) (HTTP/RPC/FFI/WebSocket/queue/SQL boundaries
             ));
         }
         if s.cross_repo > 0 {
+            // On a sharded serve, say whether walks actually follow them (auto
+            // on when the bridge exists; SYNAPTIC_CROSS_REPO=0 isolates).
+            let traversal = if !self.provider.is_sharded() {
+                ""
+            } else if self.provider.cross_repo() {
+                " (walks follow them; SYNAPTIC_CROSS_REPO=0 isolates per repo)"
+            } else {
+                " (not traversed: SYNAPTIC_CROSS_REPO=0)"
+            };
             out.push_str(&format!(
                 "
-Cross-repo: {} edge(s) span repositories",
-                s.cross_repo
+Cross-repo: {} edge(s) span repositories{}",
+                s.cross_repo, traversal
             ));
         }
         let (total, opaque, linked) = self.dynamic_stats();
@@ -2509,22 +2518,25 @@ Cross-repo: {} edge(s) span repositories",
             return format!("No node matches '{}'.", sanitize_label(source));
         };
         if sh.kg.node(&to).is_none() {
-            // The target lives in another shard. With the cross-repo opt-in the
-            // path may take ONE bridge hop (from-shard leg + bridge + to-shard
-            // leg); under isolation it is reported honestly instead.
+            // The target lives in another shard. When cross-repo traversal is
+            // on (the default with bridge edges) the path may take ONE bridge
+            // hop (from-shard leg + bridge + to-shard leg); under isolation it
+            // is reported honestly instead.
             if self.provider.cross_repo() {
                 if let Some(path) = self.bridge_hop_path(&sh, &from, &to) {
                     return self.render_path(source, path, max_hops);
                 }
             }
             return format!(
-                "No path between {} and {} (they live in different repos; per-repo isolation does not path across members{}).",
+                "No path between {} and {} (they live in different repos{}).",
                 sanitize_label(&self.label_of(&from)),
                 sanitize_label(&self.label_of(&to)),
                 if self.provider.cross_repo() {
-                    ", and no bridge edge connects their repos on this route"
+                    "; no bridge edge connects their repos on this route"
+                } else if self.provider.has_bridge() {
+                    "; cross-repo traversal is off (SYNAPTIC_CROSS_REPO=0); unset it to path across the bridge"
                 } else {
-                    "; set SYNAPTIC_CROSS_REPO=1 to path across the bridge"
+                    "; the store has no cross-repo bridge edges to path across"
                 }
             );
         }
@@ -9387,10 +9399,15 @@ mod tests {
         );
         let q = server.tool_query_graph("payment", TraversalMode::Bfs, 1200, &[]);
         assert!(q.contains("PaymentService"), "{q}");
-        // In-shard caller listed; the cross-repo caller stays out (isolation).
+        // In-shard caller listed; the cross-repo caller follows the bridge by
+        // default (auto-detected from the store's bridge edges), annotated.
         let callers = server.tool_find_callers("PaymentService", 10, false, false);
         assert!(callers.contains("format_invoice"), "{callers}");
-        assert!(!callers.contains("PaymentWidget"), "isolation: {callers}");
+        assert!(
+            callers.contains("PaymentWidget"),
+            "auto cross-repo: {callers}"
+        );
+        assert!(callers.contains("[cross-repo]"), "{callers}");
         let d = server.tool_describe_node("format_invoice");
         assert!(d.contains("format_invoice"), "{d}");
         let sr = server.tool_structural_search(Some("MATCH (n) RETURN n"), None, None, 10);
@@ -9453,10 +9470,10 @@ mod tests {
         );
     }
 
-    /// Cross-repo opt-in: with SYNAPTIC_CROSS_REPO the walk tools follow bridge
-    /// edges into other shards (callers/neighbors/affected/path), each hit
-    /// annotated; isolation mode (the default) is covered by
-    /// shard_mode_server_answers_tools_end_to_end.
+    /// Cross-repo default: on a store with bridge edges the walk tools follow
+    /// them into other shards (callers/neighbors/affected/path) without any
+    /// env opt-in, each hit annotated. SYNAPTIC_CROSS_REPO=0 isolation is
+    /// covered by shard_mode_isolation_opt_out_stops_at_the_boundary.
     #[test]
     fn shard_mode_cross_repo_walks_follow_the_bridge() {
         use synaptic_store::{migrate, ShardStore};
@@ -9501,8 +9518,7 @@ mod tests {
         let mut store = ShardStore::open(&store_dir).unwrap();
         migrate::migrate_into(&mut store, &gd).unwrap();
         let server = Server::from_provider(
-            provider::GraphProvider::from_store(ShardStore::open(&store_dir).unwrap())
-                .with_cross_repo(true),
+            provider::GraphProvider::from_store(ShardStore::open(&store_dir).unwrap()),
             None,
         );
 
@@ -9523,5 +9539,70 @@ mod tests {
         let p = server.tool_shortest_path("format_invoice", "PaymentWidget", 5);
         assert!(p.contains("Shortest path (2 hops)"), "{p}");
         assert!(p.contains("PaymentWidget"), "{p}");
+    }
+
+    /// SYNAPTIC_CROSS_REPO=0 (here the builder override, same switch) keeps
+    /// every walk inside the seed's repo even though bridge edges exist, and
+    /// the path tool says how to lift the isolation.
+    #[test]
+    fn shard_mode_isolation_opt_out_stops_at_the_boundary() {
+        use synaptic_store::{migrate, ShardStore};
+        let mk = |id: &str, label: &str, repo: &str| synaptic_core::Node {
+            id: NodeId(id.into()),
+            label: label.into(),
+            file_type: synaptic_core::FileType::Code,
+            source_file: format!("{repo}/{id}.rs"),
+            source_location: Some("L1".into()),
+            community: Some(1),
+            repo: Some(repo.into()),
+            extra: serde_json::Map::new(),
+        };
+        let mke = |sr: &str, t: &str, cross: bool| synaptic_core::Edge {
+            source: NodeId(sr.into()),
+            target: NodeId(t.into()),
+            relation: "calls".into(),
+            confidence: synaptic_core::Confidence::Extracted,
+            source_file: format!("{sr}.rs"),
+            source_location: Some("L2".into()),
+            confidence_score: None,
+            weight: 1.0,
+            context: None,
+            cross_repo: cross,
+            extra: serde_json::Map::new(),
+        };
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: serde_json::Map::new(),
+            nodes: vec![
+                mk("b_pay", "PaymentService", "billing"),
+                mk("b_util", "format_invoice", "billing"),
+                mk("w_pay", "PaymentWidget", "web"),
+            ],
+            links: vec![mke("b_util", "b_pay", false), mke("w_pay", "b_pay", true)],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store_dir = dir.path().join("store");
+        let mut store = ShardStore::open(&store_dir).unwrap();
+        migrate::migrate_into(&mut store, &gd).unwrap();
+        let server = Server::from_provider(
+            provider::GraphProvider::from_store(ShardStore::open(&store_dir).unwrap())
+                .with_cross_repo(false),
+            None,
+        );
+
+        let callers = server.tool_find_callers("PaymentService", 10, false, false);
+        assert!(callers.contains("format_invoice"), "{callers}");
+        assert!(!callers.contains("PaymentWidget"), "isolated: {callers}");
+
+        let aff = server.tool_affected("PaymentService", 3, &[], 50, true);
+        assert!(!aff.contains("PaymentWidget"), "isolated: {aff}");
+
+        // The refusal names the switch: bridges exist but are switched off.
+        let p = server.tool_shortest_path("format_invoice", "PaymentWidget", 5);
+        assert!(p.contains("No path"), "{p}");
+        assert!(p.contains("SYNAPTIC_CROSS_REPO=0"), "{p}");
     }
 }

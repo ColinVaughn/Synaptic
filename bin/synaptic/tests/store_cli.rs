@@ -90,7 +90,7 @@ const CROSS_REPO_GRAPH: &str = r#"{
 }"#;
 
 #[test]
-fn cross_repo_affected_is_opt_in() {
+fn cross_repo_affected_default_on_and_opt_out() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("synaptic-out");
     fs::create_dir_all(&out).unwrap();
@@ -104,8 +104,9 @@ fn cross_repo_affected_is_opt_in() {
         .assert()
         .success();
 
-    // Isolation default: the cross-repo caller is not a dependent.
-    let iso_out = Command::cargo_bin("synaptic")
+    // Default (unset): the store has bridge edges, so the cross-repo caller
+    // is a dependent with no opt-in needed; stderr names the opt-out.
+    let def_out = Command::cargo_bin("synaptic")
         .unwrap()
         .args(["affected", "biller", "--graph"])
         .arg(&graph)
@@ -115,18 +116,36 @@ fn cross_repo_affected_is_opt_in() {
         .success()
         .get_output()
         .clone();
-    let iso = iso_out.stdout;
     assert!(
-        !String::from_utf8_lossy(&iso).contains("webcaller"),
-        "isolation default must not traverse the cross-repo bridge"
+        String::from_utf8_lossy(&def_out.stdout).contains("webcaller"),
+        "bridge edges present: the default must traverse them"
     );
-    // and the user is told the cross-repo edges exist + how to include them
     assert!(
-        String::from_utf8_lossy(&iso_out.stderr).contains("SYNAPTIC_CROSS_REPO=1"),
-        "isolation default should hint at the cross-repo opt-in"
+        String::from_utf8_lossy(&def_out.stderr).contains("SYNAPTIC_CROSS_REPO=0"),
+        "default traversal should name the isolation opt-out"
     );
 
-    // Opt-in: the cross-repo caller appears.
+    // Opt-out: per-repo isolation, with a note that edges were skipped.
+    let iso_out = Command::cargo_bin("synaptic")
+        .unwrap()
+        .args(["affected", "biller", "--graph"])
+        .arg(&graph)
+        .env("SYNAPTIC_STORE", "redb")
+        .env("SYNAPTIC_CROSS_REPO", "0")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    assert!(
+        !String::from_utf8_lossy(&iso_out.stdout).contains("webcaller"),
+        "SYNAPTIC_CROSS_REPO=0 must not traverse the cross-repo bridge"
+    );
+    assert!(
+        String::from_utf8_lossy(&iso_out.stderr).contains("not traversed"),
+        "isolation should say the cross-repo edges were skipped"
+    );
+
+    // Legacy opt-in still forces traversal.
     let cross = Command::cargo_bin("synaptic")
         .unwrap()
         .args(["affected", "biller", "--graph"])
@@ -140,7 +159,7 @@ fn cross_repo_affected_is_opt_in() {
         .clone();
     assert!(
         String::from_utf8_lossy(&cross).contains("webcaller"),
-        "SYNAPTIC_CROSS_REPO must graft the bridge so the cross-repo caller appears"
+        "SYNAPTIC_CROSS_REPO=1 must graft the bridge so the cross-repo caller appears"
     );
 }
 

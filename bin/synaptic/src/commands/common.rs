@@ -58,15 +58,6 @@ fn store_is_fresh(store_dir: &Path, graph_path: &Path) -> bool {
     }
 }
 
-/// Whether unscoped redb queries should traverse the cross-repo bridge. Off by
-/// default (per-repo isolation); `SYNAPTIC_CROSS_REPO=1` (or true/yes) opts in,
-/// recovering the unified cross-repo view federated users have today.
-pub(crate) fn cross_repo_enabled() -> bool {
-    std::env::var("SYNAPTIC_CROSS_REPO")
-        .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
-}
-
 /// The shard store directory for a given `graph.json` path: a `store/` sibling
 /// of the graph (i.e. `synaptic-out/store`).
 pub(crate) fn store_dir_for(graph_path: &Path) -> PathBuf {
@@ -102,29 +93,36 @@ pub(crate) fn load_graph_data_backend(
         StoreBackend::Redb => {
             let store = ShardStore::open(store_dir)
                 .with_context(|| format!("opening shard store at {}", store_dir.display()))?;
-            // Per-repo isolation is the default; an unscoped query grafts the
-            // cross-repo bridge only when SYNAPTIC_CROSS_REPO opts in.
+            // An unscoped query grafts the cross-repo bridge by default when the
+            // store has bridge edges; SYNAPTIC_CROSS_REPO=0 isolates per repo.
+            // Both notes go to stderr so machine-read stdout stays clean.
             let kg = match repo {
                 Some(r) => store
                     .export_graph(&Scope::Repo(r.to_string()))
                     .with_context(|| format!("materializing repo {r:?} from the shard store"))?,
-                None if cross_repo_enabled() => store
-                    .export_cross_repo()
-                    .context("materializing all repos + cross-repo bridge")?,
                 None => {
-                    // Federated store queried in isolation: tell the user the
-                    // cross-repo edges exist and how to include them (stderr, so
-                    // it never pollutes machine-read stdout).
                     let bridge = store.bridge_edge_count();
-                    if bridge > 0 {
-                        eprintln!(
-                            "[synaptic] note: {bridge} cross-repo edge(s) not traversed \
-                             (per-repo isolation); set SYNAPTIC_CROSS_REPO=1 to include them"
-                        );
+                    if synaptic_store::cross_repo_mode().resolve(bridge > 0) {
+                        if bridge > 0 {
+                            eprintln!(
+                                "[synaptic] including {bridge} cross-repo edge(s); set \
+                                 SYNAPTIC_CROSS_REPO=0 to isolate per repo"
+                            );
+                        }
+                        store
+                            .export_cross_repo()
+                            .context("materializing all repos + cross-repo bridge")?
+                    } else {
+                        if bridge > 0 {
+                            eprintln!(
+                                "[synaptic] {bridge} cross-repo edge(s) not traversed \
+                                 (SYNAPTIC_CROSS_REPO=0)"
+                            );
+                        }
+                        store
+                            .export_graph(&Scope::All)
+                            .context("materializing all repos from the shard store")?
                     }
-                    store
-                        .export_graph(&Scope::All)
-                        .context("materializing all repos from the shard store")?
                 }
             };
             Ok(kg.to_graph_data())

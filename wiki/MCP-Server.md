@@ -171,14 +171,17 @@ size.
   repos), communities, `structural_search` (per-shard evaluation with `LIMIT`
   applied after the merge), `list_repos`/`repo_stats`, and `dynamic_hazards`
   stream the shards and return the same answer as running on the union.
-- **Walks stay in the seed's repo by default** (per-repo isolation): callers,
-  callees, references, neighbors, `affected`, forecasts, renames. Cross-repo
-  edges still appear as annotated boundary evidence where they touch a result.
-- **`SYNAPTIC_CROSS_REPO=1` opts walks into the bridge**: callers/neighbors
-  gain hits from other repos (annotated `[cross-repo]`), `affected` crosses
-  once and continues in the neighbor repo, and `shortest_path` may take one
-  bridge hop. Without it, cross-repo questions answer honestly with the
-  opt-in hint.
+- **Walks follow the cross-repo bridge automatically.** When the store holds
+  bridge edges, callers/neighbors gain hits from other repos (annotated
+  `[cross-repo]`), `affected` crosses once and continues in the neighbor repo,
+  and `shortest_path` may take one bridge hop -- no opt-in needed (`graph_stats`
+  reports the traversal state). On a store with no bridge edges walks stay
+  in the seed's repo, which is the same thing.
+- **`SYNAPTIC_CROSS_REPO=0` isolates per repo**: every walk stops at the repo
+  boundary; cross-repo edges still appear as annotated boundary evidence where
+  they touch a result, and cross-repo questions answer honestly with the
+  opt-out named. (`=1` forces traversal on, the pre-0.6 opt-in spelling.)
+  Forecasts and renames always walk per-repo.
 - **Hot reload is manifest-keyed**: any store rewrite (a member re-extracted
   into its shard) is picked up on the next data request; shards rematerialize
   on demand from persisted indexes.
