@@ -8,7 +8,17 @@ All notable changes to Synaptic are documented here. The format is based on
 > **CodeGraph**, and reference the old `codegraph` command and crate names. They
 > are preserved verbatim as historical record.
 
-## [Unreleased]
+## [0.6.0] - 2026-07-05
+
+> **Upgrade note:** the sharded store is opt-in and non-regressive. Existing
+> `graph.json` workflows are unchanged. To lift the federation-size ceiling,
+> build the store (`synaptic workspace build --store`, or `synaptic migrate`
+> on an existing federated `graph.json`) and serve with `SYNAPTIC_STORE=redb`
+> (or leave it unset: a store at least as fresh as `graph.json` is preferred
+> automatically). Callers/impact/paths follow cross-repo bridge edges
+> automatically whenever the store holds them — matching what a federated
+> `graph.json` always did — and `SYNAPTIC_CROSS_REPO=0` opts a serve or query
+> into per-repo isolation.
 
 ### Added
 - **Shard-aware federated serve (redb store).** `synaptic serve` over a
@@ -19,9 +29,15 @@ All notable changes to Synaptic are documented here. The format is based on
   `structural_search` with deferred `LIMIT`, repo counts) stream shards and
   are provably equal to running on the union; seed tools (callers/callees/
   references/affected/predict/rename/SQL audit) resolve a symbol's owning
-  shard and walk there (per-repo isolation; cross-repo edges surface as
-  boundary evidence). Removes the federation-size ceiling: memory is bounded
+  shard and walk there. Removes the federation-size ceiling: memory is bounded
   by the LRU working set, not the sum of all members.
+- **Cross-repo walks are on by default, auto-detected.** `SYNAPTIC_CROSS_REPO`
+  is tri-state: unset detects (walks follow the bridge exactly when the store
+  holds bridge edges — callers/neighbors annotate hits `[cross-repo]`,
+  `affected` crosses once and continues in the neighbor repo, `shortest_path`
+  may take one bridge hop), `0` isolates per repo, `1` forces on. `graph_stats`
+  and a CLI stderr note report the traversal state, and a refused cross-repo
+  path names the actual reason (isolation vs no bridge edges at all).
 - **Per-shard store guards** are env-configurable: `SYNAPTIC_MAX_SHARD_MB` /
   `SYNAPTIC_MAX_SHARD_NODES` (defaults 2 GiB / 5M nodes; `0` disables),
   alongside the graph.json caps below.
@@ -41,6 +57,9 @@ All notable changes to Synaptic are documented here. The format is based on
   var that raises it (previously a bare "exceeds the cap" with hard-coded
   limits). Remote subgraph fetches additionally enforce the node cap, matching
   local artifact loads.
+- Dependencies (grouped Dependabot update #15): `zip` 7.2 -> 8.6,
+  `rust_xlsxwriter` 0.95 -> 0.96, `tree-sitter` 0.26.10, `redis` 1.3,
+  `ignore` 0.4.27.
 
 ## [0.5.0] - 2026-07-03
 
