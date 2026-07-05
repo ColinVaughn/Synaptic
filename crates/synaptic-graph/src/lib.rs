@@ -15,9 +15,9 @@ mod minhash;
 pub mod symbol_resolution;
 
 pub use analyze::{
-    analyze, find_import_cycles, god_nodes, graph_diff, graph_stats, strongly_connected_components,
-    suggest_questions, surprising_connections, AnalysisResult, GodNode, GraphDelta, GraphStats,
-    ImportCycle, Question, Surprise,
+    analyze, find_import_cycles, god_nodes, god_nodes_with_extra, graph_diff, graph_stats,
+    strongly_connected_components, suggest_questions, surprising_connections, AnalysisResult,
+    GodNode, GraphDelta, GraphStats, ImportCycle, Question, Surprise,
 };
 pub use build::{build_from_parts, guard_shrink, BuildOptions};
 pub use cluster::{

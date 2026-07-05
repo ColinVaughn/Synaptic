@@ -34,7 +34,7 @@ pub use fsio::write_atomic;
 pub use graph_data::GraphData;
 pub use hyperedge::Hyperedge;
 pub use id::{make_id, NodeId};
-pub use limits::{max_graph_bytes, max_nodes};
+pub use limits::{max_graph_bytes, max_nodes, max_shard_bytes, max_shard_nodes};
 pub use node::Node;
 pub use node_kind::{NodeKind, Visibility};
 pub use raw_call::{ImportRecord, RawCall};

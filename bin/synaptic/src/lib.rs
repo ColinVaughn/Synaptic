@@ -19,6 +19,7 @@ use commands::hook::run_hook;
 use commands::ingest::run_ingest;
 use commands::install::{run_install, run_uninstall};
 use commands::merge::run_merge_graphs;
+use commands::migrate::run_migrate;
 use commands::predict::run_predict;
 use commands::prs::run_prs;
 use commands::query::{
@@ -68,7 +69,8 @@ fn run() -> Result<()> {
             wiki,
             semantic,
             no_columns,
-        } => run_extract(&path, directed, obsidian, wiki, semantic, no_columns),
+            store,
+        } => run_extract(&path, directed, obsidian, wiki, semantic, no_columns, store),
         Cmd::Query {
             text,
             graph,
@@ -158,6 +160,7 @@ fn run() -> Result<()> {
             all,
             global,
         } => run_uninstall(&platform, all, global),
+        Cmd::Migrate { graph, store } => run_migrate(graph, store),
         Cmd::Serve {
             graph,
             http,

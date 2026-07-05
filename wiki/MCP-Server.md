@@ -156,6 +156,33 @@ port) are accepted; others get 403 (`forbidden host`). Binding to a wildcard
 address (`0.0.0.0` / `::`) disables this check, treated as an intentional public
 exposure.
 
+## Serving a federated store (shard-aware)
+
+When the graph was built into the per-repo shard store (`workspace build
+--store`, or `synaptic migrate` on a federated `graph.json`) and `SYNAPTIC_STORE`
+selects it (`redb`, or unset with a store at least as fresh as `graph.json`),
+`serve` runs **shard-aware**: the union of all members is never materialized.
+Each repo's shard loads on demand behind a bounded LRU (`SYNAPTIC_SHARD_LRU`,
+default 8 resident shards), so memory is the working set, not the federation
+size.
+
+- **Aggregates are exact.** `graph_stats`, `god_nodes`, `query_graph` (ranking
+  uses a global document-frequency index so scores are comparable across
+  repos), communities, `structural_search` (per-shard evaluation with `LIMIT`
+  applied after the merge), `list_repos`/`repo_stats`, and `dynamic_hazards`
+  stream the shards and return the same answer as running on the union.
+- **Walks stay in the seed's repo by default** (per-repo isolation): callers,
+  callees, references, neighbors, `affected`, forecasts, renames. Cross-repo
+  edges still appear as annotated boundary evidence where they touch a result.
+- **`SYNAPTIC_CROSS_REPO=1` opts walks into the bridge**: callers/neighbors
+  gain hits from other repos (annotated `[cross-repo]`), `affected` crosses
+  once and continues in the neighbor repo, and `shortest_path` may take one
+  bridge hop. Without it, cross-repo questions answer honestly with the
+  opt-in hint.
+- **Hot reload is manifest-keyed**: any store rewrite (a member re-extracted
+  into its shard) is picked up on the next data request; shards rematerialize
+  on demand from persisted indexes.
+
 ## MCP tools
 
 `tools/list` reports 29 tools by default (30 with `--allow-exec`, which adds

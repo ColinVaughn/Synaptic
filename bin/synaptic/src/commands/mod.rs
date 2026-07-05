@@ -11,6 +11,7 @@ pub(crate) mod hook;
 pub(crate) mod ingest;
 pub(crate) mod install;
 pub(crate) mod merge;
+pub(crate) mod migrate;
 pub(crate) mod predict;
 pub(crate) mod prs;
 pub(crate) mod query;

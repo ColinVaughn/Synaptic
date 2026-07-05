@@ -195,15 +195,11 @@ fn scan_changed(kg: &KnowledgeGraph, changed_files: &[String]) -> (Vec<NodeRef>,
 /// (the changed nodes themselves are already excluded from `hits` by the walk).
 /// Shared by both forecast entry points; cross-revision fields are left empty for
 /// [`fold_diff_report`] to fill.
-fn assemble_forecast(
-    kg: &KnowledgeGraph,
-    changed_files: &[String],
-    opts: &ForecastOptions,
-    changed_nodes: Vec<NodeRef>,
-    hits: Vec<AffectedHit>,
-) -> ChangeForecast {
-    let mut all: Vec<(ImpactHit, bool)> = hits
-        .into_iter()
+/// Resolve raw impact hits against the graph that produced them: display
+/// fields plus the is-test flag. Split out so a federated caller can resolve
+/// per shard (while that shard is resident) and assemble once.
+fn resolve_hits(kg: &KnowledgeGraph, hits: Vec<AffectedHit>) -> Vec<(ImpactHit, bool)> {
+    hits.into_iter()
         .filter_map(|hit| {
             kg.node(&hit.node_id).map(|n| {
                 (
@@ -218,7 +214,28 @@ fn assemble_forecast(
                 )
             })
         })
-        .collect();
+        .collect()
+}
+
+fn assemble_forecast(
+    kg: &KnowledgeGraph,
+    changed_files: &[String],
+    opts: &ForecastOptions,
+    changed_nodes: Vec<NodeRef>,
+    hits: Vec<AffectedHit>,
+) -> ChangeForecast {
+    let all = resolve_hits(kg, hits);
+    assemble_resolved(changed_files, opts, changed_nodes, all)
+}
+
+/// The kg-free assembly shared by the single-graph and federated paths: sort,
+/// split tests, cap, score risk, and render the checklist + summary.
+fn assemble_resolved(
+    changed_files: &[String],
+    opts: &ForecastOptions,
+    changed_nodes: Vec<NodeRef>,
+    mut all: Vec<(ImpactHit, bool)>,
+) -> ChangeForecast {
     all.sort_by(|a, b| impact_cmp(&a.0, &b.0));
 
     // Tests at risk: the test subset, NOT capped by max_hits (it is the
@@ -281,6 +298,46 @@ fn assemble_forecast(
 /// (co-change, diff, risk). Idempotent.
 pub fn refresh_summary(forecast: &mut ChangeForecast) {
     forecast.summary = summary_line(forecast);
+}
+
+/// Fold-style federated forecast: each shard graph contributes the changed
+/// nodes its files define and its resolved reverse-impact hits (a per-repo
+/// isolation walk), then [`finish`](Self::finish) assembles risk/checklist/
+/// summary exactly like the single-graph path. A shard whose files are not in
+/// the change set contributes nothing, so callers can fold every shard.
+pub struct ForecastFold {
+    opts: ForecastOptions,
+    changed_files: Vec<String>,
+    changed_nodes: Vec<NodeRef>,
+    resolved: Vec<(ImpactHit, bool)>,
+}
+
+impl ForecastFold {
+    pub fn new(changed_files: &[String], opts: &ForecastOptions) -> Self {
+        ForecastFold {
+            opts: opts.clone(),
+            changed_files: changed_files.to_vec(),
+            changed_nodes: Vec::new(),
+            resolved: Vec::new(),
+        }
+    }
+
+    /// Scan + walk one shard and fold its contribution in.
+    pub fn add(&mut self, kg: &KnowledgeGraph, index: &ReverseImpactIndex) {
+        let (mut nodes, seeds) = scan_changed(kg, &self.changed_files);
+        let hits = index.affected_multi(kg, &seeds, self.opts.depth);
+        self.changed_nodes.append(&mut nodes);
+        self.resolved.extend(resolve_hits(kg, hits));
+    }
+
+    pub fn finish(self) -> ChangeForecast {
+        assemble_resolved(
+            &self.changed_files,
+            &self.opts,
+            self.changed_nodes,
+            self.resolved,
+        )
+    }
 }
 
 /// Re-score the forecast's risk with git-derived size/history (the graph-only

@@ -26,6 +26,7 @@ use synaptic_output::{
 use synaptic_report::write_report;
 use synaptic_semantic::{label_communities, llm_tiebreak, run_semantic_pass};
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_extract(
     root: &Path,
     directed: bool,
@@ -33,6 +34,7 @@ pub(crate) fn run_extract(
     wiki: bool,
     semantic: bool,
     no_columns: bool,
+    store: bool,
 ) -> Result<()> {
     // Process-wide SQL extraction switch; set before any file is extracted.
     if no_columns {
@@ -452,6 +454,20 @@ pub(crate) fn run_extract(
         eprintln!("note: could not write call-name sidecar: {e}");
     }
     println!("Wrote {}/{{{}}}", out_dir.display(), extras);
+    if store {
+        let report =
+            crate::commands::common::write_store(&kg.to_graph_data(), &out_dir.join("store"))?;
+        println!(
+            "Wrote {}/store ({} shard(s){})",
+            out_dir.display(),
+            report.shard_tags.len(),
+            if report.bridge_edges > 0 {
+                format!(", {} bridge edge(s)", report.bridge_edges)
+            } else {
+                String::new()
+            }
+        );
+    }
     Ok(())
 }
 
