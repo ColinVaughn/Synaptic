@@ -11,12 +11,9 @@ use std::path::Path;
 
 use synaptic_core::{GraphData, Node, NodeId};
 
-/// Refuse inputs larger than this (memory-bomb / runaway guard): a 50 MB cap.
-const MAX_GRAPH_BYTES: u64 = 50 * 1024 * 1024;
-/// Refuse graphs with more nodes than this: a 100k cap.
-const MAX_NODES: usize = 100_000;
-
-/// Errors the merge driver can surface (all fail-loud).
+/// Errors the merge driver can surface (all fail-loud). The byte and node caps
+/// default to 50 MiB / 100k (`synaptic_core::limits`) and honor the
+/// `SYNAPTIC_MAX_GRAPH_MB` / `SYNAPTIC_MAX_NODES` overrides.
 #[derive(Debug, thiserror::Error)]
 pub enum MergeDriverError {
     #[error("reading {path}: {source}")]
@@ -24,15 +21,15 @@ pub enum MergeDriverError {
         path: String,
         source: std::io::Error,
     },
-    #[error("{path} exceeds the {MAX_GRAPH_BYTES}-byte cap ({size} bytes)")]
-    TooBig { path: String, size: u64 },
+    #[error("{path} is {size} bytes, over the {limit}-byte graph cap (set SYNAPTIC_MAX_GRAPH_MB to raise it; 0 = no cap)")]
+    TooBig { path: String, size: u64, limit: u64 },
     #[error("parsing {path} as graph.json: {source}")]
     Parse {
         path: String,
         source: serde_json::Error,
     },
-    #[error("merged graph has {0} nodes, over the {MAX_NODES} cap")]
-    TooManyNodes(usize),
+    #[error("merged graph has {count} nodes, over the {limit}-node cap (set SYNAPTIC_MAX_NODES to raise it; 0 = no cap)")]
+    TooManyNodes { count: usize, limit: usize },
     #[error("writing {path}: {source}")]
     Write {
         path: String,
@@ -89,16 +86,17 @@ pub fn union_graphs(current: GraphData, other: GraphData) -> GraphData {
     }
 }
 
-fn load(path: &Path) -> Result<GraphData, MergeDriverError> {
+fn load(path: &Path, byte_cap: u64) -> Result<GraphData, MergeDriverError> {
     let label = path.display().to_string();
     let meta = std::fs::metadata(path).map_err(|source| MergeDriverError::Read {
         path: label.clone(),
         source,
     })?;
-    if meta.len() > MAX_GRAPH_BYTES {
+    if meta.len() > byte_cap {
         return Err(MergeDriverError::TooBig {
             path: label,
             size: meta.len(),
+            limit: byte_cap,
         });
     }
     let bytes = std::fs::read(path).map_err(|source| MergeDriverError::Read {
@@ -112,13 +110,31 @@ fn load(path: &Path) -> Result<GraphData, MergeDriverError> {
 }
 
 /// Run the git merge driver: union `current` and `other`, write the result back
-/// to `current`. Returns the merged node count.
+/// to `current`. Returns the merged node count. Caps come from
+/// `synaptic_core::limits` (env-overridable).
 pub fn run_merge_driver(current: &Path, other: &Path) -> Result<usize, MergeDriverError> {
-    let cur = load(current)?;
-    let oth = load(other)?;
+    merge_with_caps(
+        current,
+        other,
+        synaptic_core::max_graph_bytes(),
+        synaptic_core::max_nodes(),
+    )
+}
+
+fn merge_with_caps(
+    current: &Path,
+    other: &Path,
+    byte_cap: u64,
+    node_cap: usize,
+) -> Result<usize, MergeDriverError> {
+    let cur = load(current, byte_cap)?;
+    let oth = load(other, byte_cap)?;
     let merged = union_graphs(cur, oth);
-    if merged.nodes.len() > MAX_NODES {
-        return Err(MergeDriverError::TooManyNodes(merged.nodes.len()));
+    if merged.nodes.len() > node_cap {
+        return Err(MergeDriverError::TooManyNodes {
+            count: merged.nodes.len(),
+            limit: node_cap,
+        });
     }
     let n = merged.nodes.len();
     let bytes = serde_json::to_vec_pretty(&merged).map_err(|source| MergeDriverError::Parse {
@@ -231,6 +247,45 @@ mod tests {
             ids.contains(&"a") && ids.contains(&"b"),
             "union written to current"
         );
+    }
+
+    #[test]
+    fn over_node_cap_merge_fails_with_env_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let cur = dir.path().join("current.json");
+        let oth = dir.path().join("other.json");
+        std::fs::write(
+            &cur,
+            serde_json::to_vec(&gd(vec![node("a", "A")], vec![])).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &oth,
+            serde_json::to_vec(&gd(vec![node("b", "B")], vec![])).unwrap(),
+        )
+        .unwrap();
+        let msg = merge_with_caps(&cur, &oth, u64::MAX, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("SYNAPTIC_MAX_NODES"), "{msg}");
+        assert!(msg.contains('2'), "merged count in message: {msg}");
+    }
+
+    #[test]
+    fn oversized_input_fails_with_env_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let cur = dir.path().join("current.json");
+        let oth = dir.path().join("other.json");
+        std::fs::write(
+            &cur,
+            serde_json::to_vec(&gd(vec![node("a", "A")], vec![])).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&oth, serde_json::to_vec(&gd(vec![], vec![])).unwrap()).unwrap();
+        let msg = merge_with_caps(&cur, &oth, 10, usize::MAX)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("SYNAPTIC_MAX_GRAPH_MB"), "{msg}");
     }
 
     #[test]

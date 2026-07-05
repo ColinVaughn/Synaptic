@@ -21,6 +21,30 @@ pub(crate) fn default_graph_path(graph: Option<PathBuf>) -> PathBuf {
     graph.unwrap_or_else(|| PathBuf::from("synaptic-out/graph.json"))
 }
 
+/// Warn on stderr when a just-written graph.json exceeds the effective safety
+/// caps. The write itself succeeds, but the merge driver and federation refuse
+/// over-cap files, so surface the env override here instead of at merge time.
+pub(crate) fn warn_if_over_caps(path: &Path, node_count: usize) {
+    let node_cap = synaptic_core::max_nodes();
+    if node_count > node_cap {
+        eprintln!(
+            "warning: graph has {node_count} nodes, over the {node_cap}-node cap; \
+             merge and federation will refuse it (set SYNAPTIC_MAX_NODES to raise it; 0 = no cap)"
+        );
+    }
+    let byte_cap = synaptic_core::max_graph_bytes();
+    if let Ok(meta) = fs::metadata(path) {
+        if meta.len() > byte_cap {
+            eprintln!(
+                "warning: {} is {} bytes, over the {byte_cap}-byte graph cap; \
+                 merge and federation will refuse it (set SYNAPTIC_MAX_GRAPH_MB to raise it; 0 = no cap)",
+                path.display(),
+                meta.len()
+            );
+        }
+    }
+}
+
 pub(crate) fn load_graph(path: &Path) -> Result<KnowledgeGraph> {
     let text = fs::read_to_string(path)
         .with_context(|| format!("reading {} (run `synaptic extract` first?)", path.display()))?;

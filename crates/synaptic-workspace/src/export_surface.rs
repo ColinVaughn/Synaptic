@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use synaptic_core::{Confidence, FileType, GraphData, NodeId};
 
 use crate::coordinate::{Coordinate, Ecosystem};
-use crate::{Result, WorkspaceError, MAX_GRAPH_BYTES, SURFACE_SCHEMA_VERSION};
+use crate::{check_size, Result, WorkspaceError, SURFACE_SCHEMA_VERSION};
 
 /// One exported symbol: an importable name and the member-local node it resolves
 /// to.
@@ -138,13 +138,7 @@ pub fn load_surface(path: &Path) -> Result<ExportSurface> {
         context: format!("reading {label}"),
         source,
     })?;
-    if meta.len() > MAX_GRAPH_BYTES {
-        return Err(WorkspaceError::TooBig {
-            path: label,
-            size: meta.len(),
-            limit: MAX_GRAPH_BYTES,
-        });
-    }
+    check_size(&label, meta.len(), synaptic_core::max_graph_bytes())?;
     let bytes = std::fs::read(path).map_err(|source| WorkspaceError::Io {
         context: format!("reading {label}"),
         source,
