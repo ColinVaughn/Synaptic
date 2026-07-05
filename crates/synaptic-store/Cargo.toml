@@ -1,0 +1,21 @@
+[package]
+name = "synaptic-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+synaptic-core = { workspace = true }
+synaptic-graph = { workspace = true }
+synaptic-output = { workspace = true }
+redb = { workspace = true }
+rmp-serde = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }

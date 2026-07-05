@@ -24,8 +24,14 @@
 // output schemas); the default 128 macro-expansion depth is not enough.
 #![recursion_limit = "256"]
 
+// `provider`/`aggregate` are the shard-aware graph-access layer. They are wired
+// into `Server` in a follow-up task; allow dead_code until then.
+#[allow(dead_code)]
+mod aggregate;
 mod http;
 mod prompts;
+#[allow(dead_code)]
+mod provider;
 mod search;
 pub mod session;
 mod source;
@@ -41,22 +47,18 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use synaptic_core::{sanitize_label, GraphData, Node, NodeId};
 use synaptic_graph::{
-    god_nodes, graph_stats, suggest_questions, surprising_connections, GodNode, GraphStats,
-    KnowledgeGraph,
+    suggest_questions, surprising_connections, GodNode, GraphStats, KnowledgeGraph,
 };
-use synaptic_predict::{
-    assess_edit, forecast_changes_with_index, ChangeForecast, EditKind, ForecastOptions,
-};
+use synaptic_predict::{assess_edit, ChangeForecast, EditKind, ForecastOptions};
 use synaptic_prs::{
     compute_pr_impact, detect_default_branch, fetch_pr, fetch_pr_files, fetch_prs, fetch_worktrees,
     format_pr_detail, format_prs_text, today_epoch_days, CommandRunner, ImpactIndex, PrInfo,
     Status, SystemCommands,
 };
 use synaptic_query::{
-    affected_including_members, candidate_details, dependents_caveat, describe_node, explain,
-    is_type_like, references_to, resolve_detailed, shortest_path, type_member_ids, AffectedHit,
-    DynamicCaveat, DynamicHazardIndex, QueryIndex, Recency, RecencyMode, Resolution,
-    ReverseImpactIndex, TraversalMode, DEFAULT_AFFECTED_RELATIONS,
+    affected_including_members, dependents_caveat, describe_node, explain, is_type_like,
+    references_to, shortest_path, type_member_ids, AffectedHit, DynamicCaveat, QueryIndex, Recency,
+    RecencyMode, ReverseImpactIndex, TraversalMode, DEFAULT_AFFECTED_RELATIONS,
 };
 use synaptic_sandbox::{
     render_markdown as render_speculate_md, speculate, Change, SpeculateOptions,
@@ -116,24 +118,12 @@ fn negotiate_protocol(requested: Option<&str>) -> &'static str {
 /// (the stdio path); the HTTP transport shares one behind an `Arc<RwLock<Server>>`,
 /// so read requests run concurrently and the write lock is taken only to hot-reload.
 pub struct Server {
-    kg: KnowledgeGraph,
-    communities: BTreeMap<u32, Vec<NodeId>>,
-    /// IDF + adjacency index for `query_graph`, built once at load/reload so
-    /// queries don't rebuild it per request (H1).
-    query_index: QueryIndex,
-    /// Reverse-impact adjacency over `DEFAULT_AFFECTED_RELATIONS`, built once at
-    /// load/reload so the predict tools (`predict_impact`, `affected_tests`,
-    /// `speculate`) walk the blast radius without rebuilding it per request.
-    affected_index: ReverseImpactIndex,
-    /// Dynamic-dispatch hazard catalog (opaque reflection sites + evidence-linked
-    /// node set), built once at load/reload to power the honesty caveat and the
-    /// `dynamic_hazards` tool.
-    hazard_index: DynamicHazardIndex,
-    /// Headline stats, computed once at load/reload (H3).
-    stats: GraphStats,
-    /// Full degree-ranked god-node list, computed once at load/reload; tools
-    /// slice the requested `top_n` from it instead of recomputing (H3).
-    god_nodes_all: Vec<GodNode>,
+    /// The graph-access layer: `Single` (one in-RAM graph + its indexes, == today)
+    /// or `Shard` (per-repo shards materialized on demand). The tool handlers read
+    /// through `provider` accessors (`kg()`, `query_index()`, `communities()`, …)
+    /// rather than touching a single graph directly, so a federated serve never
+    /// holds the union in RAM.
+    provider: provider::GraphProvider,
     /// Path the graph was loaded from (its parent dir holds `GRAPH_REPORT.md`).
     graph_path: Option<PathBuf>,
     /// `(mtime_secs, size)` of the loaded graph.json, for the hot-reload check.
@@ -275,6 +265,35 @@ fn concise_from_env() -> bool {
     env_flag("SYNAPTIC_CONCISE", false)
 }
 
+/// Call-like relation filter shared by the in-shard and bridge caller/callee
+/// walks. Boundary relations count as calls: a route/queue/IPC channel
+/// handled_by a fn IS that fn's caller side, and an invoked binary / bound
+/// native lib IS a callee (2026-07 audit: the substring filter hid them).
+fn call_like_relation(relation: &str) -> bool {
+    let rel = relation.to_lowercase();
+    rel.contains("call")
+        || rel.contains("use")
+        || rel.contains("reference")
+        || matches!(
+            rel.as_str(),
+            "handled_by" | "invokes" | "binds_native" | "dynamic_ref"
+        )
+}
+
+/// The file whose (mtime, size) signals a reload: the store manifest for a
+/// sharded provider (every shard write rewrites it), graph.json otherwise.
+fn reload_watch_path(
+    provider: &provider::GraphProvider,
+    graph_path: Option<&Path>,
+) -> Option<PathBuf> {
+    let p = graph_path?;
+    if provider.is_sharded() {
+        Some(p.parent()?.join("store").join("manifest.json"))
+    } else {
+        Some(p.to_path_buf())
+    }
+}
+
 fn reload_key_for(path: &Path) -> Option<(u64, u64)> {
     let meta = std::fs::metadata(path).ok()?;
     let mtime = meta
@@ -391,26 +410,60 @@ fn glob_to_regex(glob: &str) -> String {
     re
 }
 
+/// Pre-built derived indexes injected at server construction so a redb load can
+/// deserialize them from the shard store instead of rebuilding (H1). Any field
+/// left `None` is built from the graph as before.
+#[derive(Default)]
+pub struct PreparedIndexes {
+    pub query_index: Option<QueryIndex>,
+    pub affected_index: Option<ReverseImpactIndex>,
+}
+
 impl Server {
-    /// Build a server from already-parsed graph data.
+    /// Build a server from already-parsed graph data, building every derived
+    /// index from the graph (the json load path; unchanged behavior).
     pub fn from_graph_data(gd: GraphData, graph_path: Option<PathBuf>) -> Server {
-        let kg = KnowledgeGraph::from_graph_data(gd);
-        let communities = communities_of(&kg);
-        let query_index = QueryIndex::build(&kg);
-        let affected_index = ReverseImpactIndex::build(&kg, DEFAULT_AFFECTED_RELATIONS);
-        let hazard_index = DynamicHazardIndex::build(&kg);
-        let stats = graph_stats(&kg);
-        let god_nodes_all = god_nodes(&kg, usize::MAX);
-        let reload_key = graph_path.as_deref().and_then(reload_key_for);
+        Server::from_graph_data_with(gd, graph_path, PreparedIndexes::default())
+    }
+
+    /// Build a server, reusing any pre-built indexes in `prepared` (a redb load
+    /// supplies persisted ones) and building the rest. The persisted index must
+    /// have been built against the same graph content; the store guarantees this
+    /// by keying index blobs on the shard's `source_hash`.
+    pub fn from_graph_data_with(
+        gd: GraphData,
+        graph_path: Option<PathBuf>,
+        prepared: PreparedIndexes,
+    ) -> Server {
+        let provider = provider::GraphProvider::single(
+            gd,
+            provider::Prepared {
+                query_index: prepared.query_index,
+                affected_index: prepared.affected_index,
+            },
+        );
+        Server::from_provider(provider, graph_path)
+    }
+
+    /// Build a server over an arbitrary graph provider (`Single` or `Shard`). The
+    /// federated serve path constructs a `Shard` provider; tests use it to compare
+    /// fan-out output against a `Single` over the equivalent unified graph.
+    /// Serve a federated shard store without materializing the union: shards
+    /// load on demand behind the LRU and every tool fans out per shard.
+    pub fn from_shard_store(
+        store: synaptic_store::ShardStore,
+        graph_path: Option<PathBuf>,
+    ) -> Server {
+        Server::from_provider(provider::GraphProvider::from_store(store), graph_path)
+    }
+
+    pub fn from_provider(provider: provider::GraphProvider, graph_path: Option<PathBuf>) -> Server {
+        let reload_key = reload_watch_path(&provider, graph_path.as_deref())
+            .as_deref()
+            .and_then(reload_key_for);
         let repo_hashes = read_repo_hashes(graph_path.as_deref());
         Server {
-            kg,
-            communities,
-            query_index,
-            affected_index,
-            hazard_index,
-            stats,
-            god_nodes_all,
+            provider,
             graph_path,
             reload_key,
             runner: Box::new(SystemCommands),
@@ -435,6 +488,31 @@ impl Server {
         Ok(Server::from_graph_data(gd, Some(path)))
     }
 
+    /// The query index, for persisting it to the shard store after a (re)build.
+    pub fn query_index(&self) -> &QueryIndex {
+        self.provider.query_index()
+    }
+
+    /// The reverse-impact index, for persisting it after a (re)build.
+    pub fn affected_index(&self) -> &ReverseImpactIndex {
+        self.provider.affected_index()
+    }
+
+    // Graph + aggregate accessors the tool handlers read through; each delegates
+    // to the provider (one shard for `Single`).
+    fn kg(&self) -> &KnowledgeGraph {
+        self.provider.kg()
+    }
+    fn communities(&self) -> &BTreeMap<u32, Vec<NodeId>> {
+        self.provider.communities()
+    }
+    fn stats(&self) -> &GraphStats {
+        self.provider.stats()
+    }
+    fn god_nodes_all(&self) -> &[GodNode] {
+        self.provider.god_nodes_all()
+    }
+
     /// Override the gh/git command runner (tests inject a mock).
     pub fn with_runner(mut self, runner: Box<dyn CommandRunner>) -> Server {
         self.runner = runner;
@@ -453,7 +531,7 @@ impl Server {
         // files next to it: a leftover workspace-state.json from an old
         // `workspace` run must not silently disable autofresh for a graph
         // that has since been re-extracted as single-repo.
-        if self.freshen.is_some() && self.kg.nodes().any(|n| n.repo.is_some()) {
+        if self.freshen.is_some() && !self.provider.repo_counts().is_empty() {
             eprintln!(
                 "[synaptic] auto-freshen disabled: federated graph (refresh members individually)"
             );
@@ -572,7 +650,10 @@ impl Server {
     /// neighbor; for an in-edge it is where the neighbor calls `id`. Used by
     /// `show_sites` to turn "A calls B" into "A calls B at file:line: <code>".
     fn edge_sites(&self, id: &NodeId, into: &mut SiteMap) {
-        for e in self.kg.incident_edges(id) {
+        let Some(sh) = self.provider.owner_shard(id) else {
+            return;
+        };
+        for e in sh.kg.incident_edges(id) {
             let (nb, dir): (NodeId, &'static str) = if &e.source == id && &e.target != id {
                 (e.target.clone(), "out")
             } else if &e.target == id && &e.source != id {
@@ -617,16 +698,30 @@ impl Server {
     /// Best-effort: a missing/corrupt file keeps the current graph
     /// (serve-stale-on-error).
     fn maybe_reload(&mut self) {
-        let Some(path) = self.graph_path.clone() else {
+        let Some(watch) = reload_watch_path(&self.provider, self.graph_path.as_deref()) else {
             return;
         };
-        let Some(key) = reload_key_for(&path) else {
+        let Some(key) = reload_key_for(&watch) else {
             return; // file vanished, keep serving the current graph
         };
         if self.reload_key == Some(key) {
             return; // unchanged
         }
-        if let Ok(bytes) = std::fs::read(&path) {
+        if self.provider.is_sharded() {
+            // A store write rewrote the manifest: rebuild the provider over a
+            // fresh handle. Shards rematerialize on demand (persisted indexes
+            // keep that cheap) and the aggregate caches drop with the old
+            // provider, so nothing stale survives.
+            if let Some(dir) = watch.parent() {
+                if let Ok(store) = synaptic_store::ShardStore::open(dir) {
+                    self.provider = provider::GraphProvider::from_store(store);
+                    self.repo_hashes = read_repo_hashes(self.graph_path.as_deref());
+                    self.reload_key = Some(key);
+                }
+            }
+            return;
+        }
+        if let Ok(bytes) = std::fs::read(&watch) {
             if let Ok(gd) = serde_json::from_slice::<GraphData>(&bytes) {
                 self.reindex_from(KnowledgeGraph::from_graph_data(gd));
                 self.reload_key = Some(key);
@@ -638,13 +733,7 @@ impl Server {
     /// god-nodes). Shared by [`maybe_reload`](Server::maybe_reload) and the
     /// catch-up path so both refresh the server's view identically.
     fn reindex_from(&mut self, kg: KnowledgeGraph) {
-        self.kg = kg;
-        self.communities = communities_of(&self.kg);
-        self.query_index = QueryIndex::build(&self.kg);
-        self.affected_index = ReverseImpactIndex::build(&self.kg, DEFAULT_AFFECTED_RELATIONS);
-        self.hazard_index = DynamicHazardIndex::build(&self.kg);
-        self.stats = graph_stats(&self.kg);
-        self.god_nodes_all = god_nodes(&self.kg, usize::MAX);
+        self.provider = provider::GraphProvider::single_from_kg(kg, provider::Prepared::default());
         self.repo_hashes = read_repo_hashes(self.graph_path.as_deref());
     }
 
@@ -727,6 +816,11 @@ impl Server {
     /// whole catch-up walks the tree only once. Best-effort: lock contention or a
     /// rebuild error leaves the current graph in place.
     fn apply_freshen(&mut self, report: synaptic_incremental::ChangeReport) {
+        // The sharded store freshens per shard via the manifest (T14); the
+        // json rebuild below only fits the single-graph provider.
+        if self.provider.is_sharded() {
+            return;
+        }
         let Some(cfg) = self.freshen.clone() else {
             return;
         };
@@ -751,10 +845,10 @@ impl Server {
                 return;
             }
         };
-        let existing = self.kg.to_graph_data();
+        let existing = self.kg().to_graph_data();
         let opts = synaptic_incremental::RebuildOptions {
             root: cfg.root.clone(),
-            directed: self.kg.directed,
+            directed: self.kg().directed,
             force: false,
         };
         let changes = synaptic_incremental::ChangeSet::Incremental(report.changed_paths());
@@ -813,14 +907,14 @@ impl Server {
     }
 
     fn label_of(&self, id: &NodeId) -> String {
-        self.kg
-            .node(id)
-            .map(|n| n.label.clone())
+        self.provider
+            .node_cloned(id)
+            .map(|n| n.label)
             .unwrap_or_else(|| id.0.clone())
     }
 
     fn degree(&self, id: &NodeId) -> usize {
-        self.kg.degree(id)
+        self.provider.degree_of(id)
     }
 
     /// The type-container members of `id` when it is a class/struct/interface/...
@@ -828,8 +922,11 @@ impl Server {
     /// blast radius reflects the members' incoming calls (where a class's real
     /// coupling lives), not just the bare type symbol.
     fn type_members(&self, id: &NodeId) -> Vec<NodeId> {
-        match self.kg.node(id).and_then(|n| n.kind()) {
-            Some(k) if is_type_like(k) => type_member_ids(&self.kg, id),
+        let Some(sh) = self.provider.owner_shard(id) else {
+            return Vec::new();
+        };
+        match sh.kg.node(id).and_then(|n| n.kind()) {
+            Some(k) if is_type_like(k) => type_member_ids(&sh.kg, id),
             _ => Vec::new(),
         }
     }
@@ -838,15 +935,78 @@ impl Server {
     /// `affected` command so both surfaces give a class the same non-empty blast
     /// radius). Returns the hits and the member count (0 for a non-type node).
     fn affected_for(&self, id: &NodeId, rels: &[&str], depth: usize) -> (Vec<AffectedHit>, usize) {
-        affected_including_members(&self.kg, id, rels, depth)
+        let Some(sh) = self.provider.owner_shard(id) else {
+            return (Vec::new(), 0);
+        };
+        let (mut hits, member_count) = affected_including_members(&sh.kg, id, rels, depth);
+        // Cross-repo opt-in: a bridge edge INTO the seed (or a member, or any
+        // in-shard hit) means its source repo depends on it; count that source
+        // and continue the walk in ITS shard. One bridge crossing per walk (a
+        // chain that re-crosses is beyond the opt-in's scope).
+        if self.provider.cross_repo() && depth >= 1 {
+            let mut at_depth: HashMap<NodeId, usize> = HashMap::new();
+            at_depth.insert(id.clone(), 0);
+            for m in self.type_members(id) {
+                at_depth.insert(m, 0);
+            }
+            for h in &hits {
+                at_depth.insert(h.node_id.clone(), h.depth);
+            }
+            let mut seen: std::collections::HashSet<NodeId> = at_depth.keys().cloned().collect();
+            let targets: Vec<(NodeId, usize)> =
+                at_depth.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            for (target, tdepth) in targets {
+                for e in self.provider.bridge_edges_of(&target) {
+                    if e.target != target || !rels.contains(&e.relation.as_str()) {
+                        continue;
+                    }
+                    let cross_depth = tdepth + 1;
+                    if cross_depth > depth {
+                        continue;
+                    }
+                    let src = e.source.clone();
+                    if seen.insert(src.clone()) {
+                        hits.push(AffectedHit {
+                            node_id: src.clone(),
+                            depth: cross_depth,
+                            via_relation: e.relation.clone(),
+                        });
+                    }
+                    if cross_depth < depth {
+                        if let Some(osh) = self.provider.owner_shard(&src) {
+                            for h2 in osh.affected_index.affected_multi(
+                                &osh.kg,
+                                std::slice::from_ref(&src),
+                                depth - cross_depth,
+                            ) {
+                                if seen.insert(h2.node_id.clone()) {
+                                    hits.push(AffectedHit {
+                                        node_id: h2.node_id,
+                                        depth: cross_depth + h2.depth,
+                                        via_relation: h2.via_relation,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            hits.sort_by(|a, b| {
+                a.depth
+                    .cmp(&b.depth)
+                    .then_with(|| a.node_id.cmp(&b.node_id))
+            });
+        }
+        (hits, member_count)
     }
 
     /// The dynamic-dispatch honesty caveat for `id`, if its "0 dependents" answer
     /// is untrustworthy (reflection in its file, or it was evidence-linked). `None`
     /// when the node has real static dependents or no dynamic-hazard signal.
     fn dynamic_caveat_for(&self, id: &NodeId) -> Option<DynamicCaveat> {
-        let node = self.kg.node(id)?;
-        dependents_caveat(&self.kg, &self.hazard_index, node)
+        let sh = self.provider.owner_shard(id)?;
+        let node = sh.kg.node(id)?;
+        dependents_caveat(&sh.kg, &sh.hazard_index, node)
     }
 
     /// One-line note prepended to a type's reverse-impact / caller output,
@@ -858,8 +1018,8 @@ impl Server {
             return String::new();
         }
         let kind = self
-            .kg
-            .node(id)
+            .provider
+            .node_cloned(id)
             .and_then(|n| n.kind())
             .map(|k| k.as_str())
             .unwrap_or("type");
@@ -897,9 +1057,9 @@ impl Server {
             mode: recency_mode,
             boost: RECENCY_BOOST,
         });
-        let r =
-            self.query_index
-                .query_with_recency(&self.kg, question, max_nodes, mode, rec.as_ref());
+        let r = self
+            .provider
+            .query_with_recency(question, max_nodes, mode, rec.as_ref());
         let keep: Vec<usize> = r
             .nodes
             .iter()
@@ -909,10 +1069,10 @@ impl Server {
                     return true;
                 }
                 let sf = self
-                    .kg
-                    .node(id)
-                    .map(|n| n.source_file.as_str())
-                    .unwrap_or("");
+                    .provider
+                    .node_cloned(id)
+                    .map(|n| n.source_file)
+                    .unwrap_or_default();
                 context_filter.iter().any(|f| sf.contains(f.as_str()))
             })
             .map(|(i, _)| i)
@@ -965,7 +1125,7 @@ impl Server {
         // Map changed files to graph nodes (one pass over the graph).
         let mut changed = std::collections::HashSet::new();
         let mut churn = std::collections::HashMap::new();
-        for n in self.kg.nodes() {
+        self.provider.for_each_node(&mut |n| {
             let sf = n.source_file.replace('\\', "/");
             if let Some(&lines) = file_churn.get(&sf) {
                 // Binary files (lines == 0) keep a small floor so they still boost.
@@ -977,7 +1137,7 @@ impl Server {
                 changed.insert(n.id.clone());
                 churn.insert(n.id.clone(), w);
             }
-        }
+        });
         if changed.is_empty() {
             return None; // files changed, but none map to graph nodes
         }
@@ -1023,7 +1183,7 @@ impl Server {
             ));
         }
         for &i in keep {
-            if let Some(n) = self.kg.node(&r.nodes[i]) {
+            if let Some(n) = self.provider.node_cloned(&r.nodes[i]) {
                 let mark = if recency.is_some_and(|rr| rr.changed.contains(&r.nodes[i])) {
                     " (changed)"
                 } else {
@@ -1107,50 +1267,129 @@ impl Server {
         self.render_query_text(&r, &keep, mode, token_budget, recency.as_ref(), usize::MAX)
     }
 
+    /// Explain a seed within its owning shard, appending bridge neighbors when
+    /// the cross-repo opt-in is on (each annotated cross_repo, so the render
+    /// paths mark them without special-casing). Shared by get_neighbors'
+    /// text and structured paths.
+    fn explain_seed(&self, id: &NodeId) -> Option<synaptic_query::Explain> {
+        let sh = self.provider.owner_shard(id)?;
+        let mut ex = explain(&sh.kg, id)?;
+        if self.provider.cross_repo() {
+            for e in self.provider.bridge_edges_of(id) {
+                let (nid, direction) = if &e.source == id {
+                    (e.target.clone(), "out")
+                } else {
+                    (e.source.clone(), "in")
+                };
+                ex.neighbors.push(synaptic_query::Neighbor {
+                    label: self.label_of(&nid),
+                    id: nid,
+                    relation: e.relation.clone(),
+                    direction,
+                    context: e.context.clone(),
+                    cross_repo: true,
+                });
+            }
+        }
+        Some(ex)
+    }
+
+    /// The ambiguity error listing each candidate with its file + degree
+    /// (enriched in its owning shard), and the shared not-found message.
+    /// Format matches the long-standing single-graph output so every tool
+    /// reports resolution the same way.
+    fn ambiguity_msg(&self, label: &str, hits: &[(String, NodeId)]) -> String {
+        // Enrich only the shown prefix (`+N more` already conveys the rest),
+        // so a name shared by thousands of files does not pay degree/clone
+        // for candidates it will never print.
+        let shown = hits.len().min(10);
+        let mut lines = String::new();
+        for (tag, id) in &hits[..shown] {
+            let (file, degree) = self
+                .provider
+                .shard(tag)
+                .ok()
+                .map(|sh| {
+                    (
+                        sh.kg
+                            .node(id)
+                            .map(|n| n.source_file.clone())
+                            .unwrap_or_default(),
+                        sh.kg.degree(id),
+                    )
+                })
+                .unwrap_or_default();
+            let file = if file.is_empty() {
+                "-".to_string()
+            } else {
+                sanitize_label(&file)
+            };
+            lines.push_str(&format!(
+                "\n  {} [{}] (degree {})",
+                sanitize_label(&id.0),
+                file,
+                degree
+            ));
+        }
+        let more = if hits.len() > 10 {
+            format!("\n  +{} more", hits.len() - 10)
+        } else {
+            String::new()
+        };
+        format!(
+            "'{}' is ambiguous - {} candidates:{}{}\nPass a node id (or qualify as name@file) to disambiguate.",
+            sanitize_label(label),
+            hits.len(),
+            lines,
+            more
+        )
+    }
+
     /// Resolve a user-supplied name/id to a single node, or a consistent error
     /// message. On ambiguity the message lists candidate ids (unlike a bare "no
     /// node matches"), so every tool reports the same way. Shared by all
     /// name-taking tools.
     fn resolve_or_msg(&self, label: &str) -> Result<NodeId, String> {
-        match resolve_detailed(&self.kg, label) {
-            Resolution::Unique(id) => Ok(id),
-            Resolution::Ambiguous(ids) => {
-                // List each candidate with its file + degree inline so a caller can
-                // pick one without a follow-up get_node round-trip. Enrich only the
-                // shown prefix (`+N more` already conveys the rest from ids.len()),
-                // so a name shared by thousands of files does not pay degree/clone
-                // for candidates it will never print.
-                let shown = ids.len().min(10);
-                let lines: String = candidate_details(&self.kg, &ids[..shown])
-                    .iter()
-                    .map(|c| {
-                        let file = if c.file.is_empty() {
-                            "-".to_string()
-                        } else {
-                            sanitize_label(&c.file)
-                        };
-                        format!(
-                            "\n  {} [{}] (degree {})",
-                            sanitize_label(&c.id.0),
-                            file,
-                            c.degree
-                        )
-                    })
-                    .collect();
-                let more = if ids.len() > 10 {
-                    format!("\n  +{} more", ids.len() - 10)
-                } else {
-                    String::new()
-                };
-                Err(format!(
-                    "'{}' is ambiguous - {} candidates:{}{}\nPass a node id (or qualify as name@file) to disambiguate.",
-                    sanitize_label(label),
-                    ids.len(),
-                    lines,
-                    more
-                ))
+        self.seed_ctx(label).map(|(_, id)| id)
+    }
+
+    /// Provider-based resolution for the structured mirrors: `Unique` yields
+    /// the id, ambiguity/not-found yield the shared json error shapes (matching
+    /// the text path's resolution outcome).
+    fn resolve_json(&self, label: &str) -> Result<NodeId, Value> {
+        match self.provider.resolve(label) {
+            provider::ScopedResolution::Unique(_, id) => Ok(id),
+            provider::ScopedResolution::Ambiguous(hits) => Err(json!({
+                "found": false,
+                "ambiguous": true,
+                "query": sanitize_label(label),
+                "candidates": self.candidates_json(&hits)
+            })),
+            provider::ScopedResolution::NotFound => {
+                Err(json!({ "found": false, "query": sanitize_label(label) }))
             }
-            Resolution::NotFound => Err(format!("No node matches '{}'.", sanitize_label(label))),
+        }
+    }
+
+    /// Resolve `label` and materialize the shard that owns it: the seed tools
+    /// walk within this shard (per-repo isolation is the default; a single
+    /// graph is the one-shard case, so behavior there is unchanged).
+    fn seed_ctx(
+        &self,
+        label: &str,
+    ) -> Result<(std::sync::Arc<provider::MaterializedShard>, NodeId), String> {
+        match self.provider.resolve(label) {
+            provider::ScopedResolution::Unique(tag, id) => {
+                let sh = self
+                    .provider
+                    .shard(&tag)
+                    .map_err(|e| format!("shard {}: {e}", sanitize_label(&tag)))?;
+                Ok((sh, id))
+            }
+            provider::ScopedResolution::Ambiguous(hits) => Err(self.ambiguity_msg(label, &hits)),
+            provider::ScopedResolution::NotFound => {
+                Err(format!("No node matches '{}'.", sanitize_label(label)))
+            }
         }
     }
 
@@ -1160,7 +1399,7 @@ impl Server {
             Ok(id) => id,
             Err(msg) => return msg,
         };
-        let Some(n) = self.kg.node(&id) else {
+        let Some(n) = self.provider.node_cloned(&id) else {
             return format!("No node matches '{}'.", sanitize_label(label));
         };
         // Enrichment is shown only when present, so a pre-enrichment
@@ -1194,21 +1433,11 @@ impl Server {
     /// structured channel sees the same resolution outcome as the text instead of a
     /// plain-text-only ambiguity message.
     fn get_node_json(&self, label: &str) -> Value {
-        let id = match resolve_detailed(&self.kg, label) {
-            Resolution::Unique(id) => id,
-            Resolution::Ambiguous(ids) => {
-                return json!({
-                    "found": false,
-                    "ambiguous": true,
-                    "query": sanitize_label(label),
-                    "candidates": self.candidates_json(&ids)
-                });
-            }
-            Resolution::NotFound => {
-                return json!({ "found": false, "query": sanitize_label(label) });
-            }
+        let id = match self.resolve_json(label) {
+            Ok(id) => id,
+            Err(v) => return v,
         };
-        let Some(n) = self.kg.node(&id) else {
+        let Some(n) = self.provider.node_cloned(&id) else {
             return json!({ "found": false, "query": sanitize_label(label) });
         };
         let mut obj = serde_json::Map::new();
@@ -1260,7 +1489,11 @@ impl Server {
             Ok(id) => id,
             Err(msg) => return msg,
         };
-        let Some(d) = describe_node(&self.kg, &id) else {
+        let Some(d) = self
+            .provider
+            .owner_shard(&id)
+            .and_then(|sh| describe_node(&sh.kg, &id))
+        else {
             return format!("No node matches '{}'.", sanitize_label(label));
         };
         let mut out = sanitize_label(&d.summary);
@@ -1306,21 +1539,15 @@ impl Server {
     /// through the unified resolver so an ambiguous name reports candidates (not a
     /// silent pick), matching the text path.
     fn describe_node_json(&self, label: &str) -> Value {
-        let id = match resolve_detailed(&self.kg, label) {
-            Resolution::Unique(id) => id,
-            Resolution::Ambiguous(ids) => {
-                return json!({
-                    "found": false,
-                    "ambiguous": true,
-                    "query": sanitize_label(label),
-                    "candidates": self.candidates_json(&ids)
-                });
-            }
-            Resolution::NotFound => {
-                return json!({ "found": false, "query": sanitize_label(label) });
-            }
+        let id = match self.resolve_json(label) {
+            Ok(id) => id,
+            Err(v) => return v,
         };
-        let Some(d) = describe_node(&self.kg, &id) else {
+        let Some(d) = self
+            .provider
+            .owner_shard(&id)
+            .and_then(|sh| describe_node(&sh.kg, &id))
+        else {
             return json!({ "found": false, "query": sanitize_label(label) });
         };
         let mut obj = serde_json::Map::new();
@@ -1350,8 +1577,8 @@ impl Server {
             obj.insert("member_count".into(), json!(members.len()));
         }
         if self
-            .kg
-            .node(&id)
+            .provider
+            .node_cloned(&id)
             .is_some_and(|n| n.dynamically_referenced())
         {
             obj.insert("dynamically_referenced".into(), json!(true));
@@ -1390,10 +1617,10 @@ impl Server {
             Ok(id) => id,
             Err(msg) => return msg,
         };
-        let Some(n) = self.kg.node(&id) else {
+        let Some(n) = self.provider.node_cloned(&id) else {
             return format!("No node matches '{}'.", sanitize_label(label));
         };
-        let path = match self.locate_source(n) {
+        let path = match self.locate_source(&n) {
             SourceLookup::Found(p) => p,
             SourceLookup::NotConfigured => {
                 return format!(
@@ -1515,7 +1742,7 @@ impl Server {
     /// honor a `repo` filter for a multi-repo graph served over a single parent
     /// source root (no registered per-member roots).
     fn graph_has_repo(&self, tag: &str) -> bool {
-        self.kg.nodes().any(|n| n.repo.as_deref() == Some(tag))
+        self.provider.repo_counts().contains_key(tag)
     }
 
     /// The roots `search_text` walks. With no `only`, that is every registered
@@ -1621,13 +1848,16 @@ impl Server {
         // pass over the graph instead of a scan per hit.
         let hit_files: std::collections::HashSet<&str> =
             outcome.hits.iter().map(|h| h.graph_path.as_str()).collect();
-        let mut by_file: HashMap<&str, Vec<&Node>> = HashMap::new();
+        let mut by_file: HashMap<String, Vec<Node>> = HashMap::new();
         if !hit_files.is_empty() {
-            for n in self.kg.nodes() {
+            self.provider.for_each_node(&mut |n| {
                 if hit_files.contains(n.source_file.as_str()) && n.span().is_some() {
-                    by_file.entry(n.source_file.as_str()).or_default().push(n);
+                    by_file
+                        .entry(n.source_file.clone())
+                        .or_default()
+                        .push(n.clone());
                 }
-            }
+            });
         }
         // The innermost (smallest) span containing the line wins.
         let enclosing = |file: &str, line: u64| -> Option<&Node> {
@@ -1644,7 +1874,6 @@ impl Server {
                     let s = n.span().unwrap();
                     s.end_line.saturating_sub(s.start_line)
                 })
-                .copied()
         };
 
         let total = outcome.hits.len();
@@ -1677,8 +1906,8 @@ impl Server {
         // The federation tags the graph knows about, so a hit can report its repo
         // even when the search ran over a single parent root (tag-less walk): the
         // enclosing node's `repo`, else the `tag/` prefix of the graph path.
-        let known_repos: std::collections::HashSet<&str> =
-            self.kg.nodes().filter_map(|n| n.repo.as_deref()).collect();
+        let known_repos: std::collections::HashSet<String> =
+            self.provider.repo_counts().into_keys().collect();
         let repo_of = |h: &search::RawHit, node: Option<&Node>| -> Option<String> {
             h.repo
                 .clone()
@@ -1687,7 +1916,7 @@ impl Server {
                     h.graph_path
                         .split_once('/')
                         .map(|(head, _)| head)
-                        .filter(|head| known_repos.contains(head))
+                        .filter(|head| known_repos.contains(*head))
                         .map(str::to_string)
                 })
         };
@@ -1768,31 +1997,30 @@ impl Server {
         // target scoping: the symbol name (matches keyed sites) + the files that
         // define it (an opaque site there could reach it).
         let tnorm = target.map(hazard_bare);
-        let target_files: std::collections::HashSet<String> = match &tnorm {
-            Some(tn) => self
-                .kg
-                .nodes()
-                .filter(|n| !n.source_file.is_empty() && hazard_bare(&n.label) == *tn)
-                .map(|n| n.source_file.clone())
-                .collect(),
-            None => std::collections::HashSet::new(),
-        };
+        let mut target_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Some(tn) = &tnorm {
+            self.provider.for_each_node(&mut |n| {
+                if !n.source_file.is_empty() && hazard_bare(&n.label) == *tn {
+                    target_files.insert(n.source_file.clone());
+                }
+            });
+        }
 
         let mut total = 0usize;
         let mut truncated = false;
         let mut rows: Vec<HazardRow> = Vec::new();
-        for n in self.kg.nodes() {
+        self.provider.for_each_node(&mut |n| {
             if let Some(r) = repo {
                 if n.repo.as_deref() != Some(r) {
-                    continue;
+                    return;
                 }
             }
             if n.source_file.is_empty() {
-                continue;
+                return;
             }
             if let Some(re) = &glob_re {
                 if !re.is_match(&n.source_file.replace('\\', "/")) {
-                    continue;
+                    return;
                 }
             }
             for s in n.dynamic_sites() {
@@ -1823,7 +2051,7 @@ impl Server {
                     truncated = true;
                 }
             }
-        }
+        });
         rows.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)).then(a.3.cmp(b.3)));
 
         let mut text = if total == 0 {
@@ -1886,7 +2114,7 @@ impl Server {
             Ok(id) => id,
             Err(msg) => return msg,
         };
-        let Some(ex) = explain(&self.kg, &id) else {
+        let Some(ex) = self.explain_seed(&id) else {
             return format!("No node matches '{}'.", sanitize_label(label));
         };
         let seed = sanitize_label(&ex.label);
@@ -1989,7 +2217,7 @@ impl Server {
         let Ok(id) = self.resolve_or_msg(label) else {
             return Value::Null;
         };
-        let Some(ex) = explain(&self.kg, &id) else {
+        let Some(ex) = self.explain_seed(&id) else {
             return Value::Null;
         };
         let rel_filter = relation_filter.map(str::to_lowercase);
@@ -2036,7 +2264,7 @@ impl Server {
     /// sorted community index (kept fresh across hot-reloads).
     pub fn tool_get_community(&self, community_id: u32, offset: usize, limit: usize) -> String {
         let Some(ids) = self
-            .communities
+            .communities()
             .get(&community_id)
             .filter(|v| !v.is_empty())
         else {
@@ -2051,7 +2279,7 @@ impl Server {
             page.len()
         );
         for id in page {
-            if let Some(n) = self.kg.node(id) {
+            if let Some(n) = self.provider.node_cloned(id) {
                 out.push_str(&format!(
                     "\n  {} [{}]",
                     sanitize_label(&n.label),
@@ -2076,13 +2304,13 @@ impl Server {
     /// page could run a walk per node across the whole graph — page with `offset`
     /// instead. Returns the rows and the absolute start index (for 1-based ranks).
     fn god_nodes_page(&self, top_n: usize, offset: usize) -> (Vec<GodNodeRow>, usize) {
-        let total = self.god_nodes_all.len();
+        let total = self.god_nodes_all().len();
         let start = offset.min(total);
         // `max(1)` keeps the historical "one node even for top_n == 0" behavior;
         // `min(cap)` bounds the per-page reverse-impact work.
         let cap = top_n.clamp(1, GOD_NODES_PAGE_CAP);
         let end = start.saturating_add(cap).min(total);
-        let rows = self.god_nodes_all[start..end]
+        let rows = self.god_nodes_all()[start..end]
             .iter()
             .map(|g| GodNodeRow {
                 id: g.id.clone(),
@@ -2090,8 +2318,8 @@ impl Server {
                 degree: g.degree,
                 test_count: self.test_count_for(&g.id),
                 dynamically_referenced: self
-                    .kg
-                    .node(&g.id)
+                    .provider
+                    .node_cloned(&g.id)
                     .is_some_and(|n| n.dynamically_referenced()),
             })
             .collect();
@@ -2150,22 +2378,20 @@ impl Server {
     /// the default impact forecast depth so the count agrees with `affected_tests`.
     fn test_count_for(&self, id: &NodeId) -> usize {
         const GOD_TEST_DEPTH: usize = 3;
-        self.affected_index
-            .affected_multi(&self.kg, std::slice::from_ref(id), GOD_TEST_DEPTH)
+        let Some(sh) = self.provider.owner_shard(id) else {
+            return 0;
+        };
+        sh.affected_index
+            .affected_multi(&sh.kg, std::slice::from_ref(id), GOD_TEST_DEPTH)
             .iter()
-            .filter(|h| {
-                self.kg
-                    .node(&h.node_id)
-                    .map(|n| n.is_test())
-                    .unwrap_or(false)
-            })
+            .filter(|h| sh.kg.node(&h.node_id).map(|n| n.is_test()).unwrap_or(false))
             .count()
     }
 
     /// `graph_stats` — counts + confidence breakdown (+ cross-repo coupling on a
     /// federated graph).
     pub fn tool_graph_stats(&self) -> String {
-        let s = &self.stats;
+        let s = self.stats();
         let mut out = format!(
             "Graph: {} nodes, {} edges, {} communities\nEdges: {} EXTRACTED, {} INFERRED, {} AMBIGUOUS",
             s.nodes, s.edges, s.communities, s.extracted, s.inferred, s.ambiguous
@@ -2198,13 +2424,13 @@ Cross-repo: {} edge(s) span repositories",
     /// `(total dynamic-dispatch sites, opaque sites, evidence-linked dynamic_ref
     /// edges)` across the graph, for the stats surfaces.
     fn dynamic_stats(&self) -> (usize, usize, usize) {
-        let total: usize = self.kg.nodes().map(|n| n.dynamic_sites().len()).sum();
-        let opaque = self.hazard_index.opaque_total();
-        let linked = self
-            .kg
-            .edges()
-            .filter(|e| e.relation == "dynamic_ref")
-            .count();
+        let mut total = 0usize;
+        self.provider
+            .for_each_node(&mut |n| total += n.dynamic_sites().len());
+        let opaque = self.provider.opaque_hazards_total();
+        let mut linked = 0usize;
+        self.provider
+            .for_each_edge(&mut |e| linked += usize::from(e.relation == "dynamic_ref"));
         (total, opaque, linked)
     }
 
@@ -2212,23 +2438,7 @@ Cross-repo: {} edge(s) span repositories",
     /// Edges are counted under their source node's repo. Empty for a single-repo
     /// graph (no `repo` tags).
     pub fn tool_list_repos(&self) -> String {
-        use std::collections::{BTreeMap, HashMap};
-        let node_repo: HashMap<&str, &str> = self
-            .kg
-            .nodes()
-            .filter_map(|n| n.repo.as_deref().map(|r| (n.id.0.as_str(), r)))
-            .collect();
-        let mut counts: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
-        for n in self.kg.nodes() {
-            if let Some(r) = n.repo.as_deref() {
-                counts.entry(r).or_default().0 += 1;
-            }
-        }
-        for e in self.kg.edges() {
-            if let Some(r) = node_repo.get(e.source.0.as_str()) {
-                counts.entry(r).or_default().1 += 1;
-            }
-        }
+        let counts = self.provider.repo_counts();
         if counts.is_empty() {
             return "No federated repos (single-repo graph).".to_string();
         }
@@ -2236,7 +2446,7 @@ Cross-repo: {} edge(s) span repositories",
         for (repo, (n, ed)) in &counts {
             let fresh = self
                 .repo_hashes
-                .get(*repo)
+                .get(repo.as_str())
                 .map(|h| format!(", src {h}"))
                 .unwrap_or_default();
             out.push_str(&format!(
@@ -2253,30 +2463,16 @@ Cross-repo: {} edge(s) span repositories",
     /// Structured mirror of `list_repos`: `{ repos: [{ repo, nodes, edges }] }`,
     /// an empty array for a single-repo graph.
     fn list_repos_json(&self) -> Value {
-        let node_repo: HashMap<&str, &str> = self
-            .kg
-            .nodes()
-            .filter_map(|n| n.repo.as_deref().map(|r| (n.id.0.as_str(), r)))
-            .collect();
-        let mut counts: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
-        for n in self.kg.nodes() {
-            if let Some(r) = n.repo.as_deref() {
-                counts.entry(r).or_default().0 += 1;
-            }
-        }
-        for e in self.kg.edges() {
-            if let Some(r) = node_repo.get(e.source.0.as_str()) {
-                counts.entry(r).or_default().1 += 1;
-            }
-        }
-        let repos: Vec<Value> = counts
+        let repos: Vec<Value> = self
+            .provider
+            .repo_counts()
             .into_iter()
             .map(|(repo, (nodes, edges))| {
                 let mut obj = serde_json::Map::new();
                 obj.insert("repo".into(), json!(repo));
                 obj.insert("nodes".into(), json!(nodes));
                 obj.insert("edges".into(), json!(edges));
-                if let Some(h) = self.repo_hashes.get(repo) {
+                if let Some(h) = self.repo_hashes.get(&repo) {
                     obj.insert("source_hash".into(), json!(h));
                 }
                 Value::Object(obj)
@@ -2287,26 +2483,13 @@ Cross-repo: {} edge(s) span repositories",
 
     /// `repo_stats` — node/edge counts for one federated member.
     pub fn tool_repo_stats(&self, repo: &str) -> String {
-        use std::collections::HashSet;
-        let ids: HashSet<&str> = self
-            .kg
-            .nodes()
-            .filter(|n| n.repo.as_deref() == Some(repo))
-            .map(|n| n.id.0.as_str())
-            .collect();
-        if ids.is_empty() {
-            return format!("No nodes for repo {}.", sanitize_label(repo));
+        match self.provider.repo_counts().get(repo) {
+            Some((nodes, edges)) => format!(
+                "Repo {}: {nodes} nodes, {edges} edges",
+                sanitize_label(repo)
+            ),
+            None => format!("No nodes for repo {}.", sanitize_label(repo)),
         }
-        let edges = self
-            .kg
-            .edges()
-            .filter(|e| ids.contains(e.source.0.as_str()))
-            .count();
-        format!(
-            "Repo {}: {} nodes, {edges} edges",
-            sanitize_label(repo),
-            ids.len()
-        )
     }
 
     /// `shortest_path` — keyword-resolved source→target path, ≤ max_hops.
@@ -2322,36 +2505,108 @@ Cross-repo: {} edge(s) span repositories",
         if from == to {
             return "Source and target resolve to the same node.".to_string();
         }
-        match shortest_path(&self.kg, &from, &to) {
-            Some(path) => {
-                let hops = path.len().saturating_sub(1);
-                if hops > max_hops {
-                    return format!(
-                        "Shortest path is {hops} hops, over the max_hops={max_hops} limit."
-                    );
+        let Some(sh) = self.provider.owner_shard(&from) else {
+            return format!("No node matches '{}'.", sanitize_label(source));
+        };
+        if sh.kg.node(&to).is_none() {
+            // The target lives in another shard. With the cross-repo opt-in the
+            // path may take ONE bridge hop (from-shard leg + bridge + to-shard
+            // leg); under isolation it is reported honestly instead.
+            if self.provider.cross_repo() {
+                if let Some(path) = self.bridge_hop_path(&sh, &from, &to) {
+                    return self.render_path(source, path, max_hops);
                 }
-                // Annotate each hop with its connecting relation so a path built
-                // from low-signal `references` (type) edges is self-evident rather
-                // than looking like an authoritative call chain.
-                let mut rendered = sanitize_label(&self.label_of(&path[0]));
-                for pair in path.windows(2) {
-                    let rel = self
-                        .relation_between(&pair[0], &pair[1])
-                        .unwrap_or_else(|| "?".to_string());
-                    rendered.push_str(&format!(
-                        " -[{}]-> {}",
-                        sanitize_label(&rel),
-                        sanitize_label(&self.label_of(&pair[1]))
-                    ));
-                }
-                format!("Shortest path ({hops} hops): {rendered}")
             }
+            return format!(
+                "No path between {} and {} (they live in different repos; per-repo isolation does not path across members{}).",
+                sanitize_label(&self.label_of(&from)),
+                sanitize_label(&self.label_of(&to)),
+                if self.provider.cross_repo() {
+                    ", and no bridge edge connects their repos on this route"
+                } else {
+                    "; set SYNAPTIC_CROSS_REPO=1 to path across the bridge"
+                }
+            );
+        }
+        match shortest_path(&sh.kg, &from, &to) {
+            Some(path) => self.render_path(source, path, max_hops),
             None => format!(
                 "No path between {} and {}.",
                 sanitize_label(&self.label_of(&from)),
                 sanitize_label(&self.label_of(&to))
             ),
         }
+    }
+
+    /// Render a resolved path with relation-annotated hops. `_source` keeps the
+    /// signature aligned with the tool entry; the annotation falls back to the
+    /// bridge relation for a cross-shard hop.
+    fn render_path(&self, _source: &str, path: Vec<NodeId>, max_hops: usize) -> String {
+        let hops = path.len().saturating_sub(1);
+        if hops > max_hops {
+            return format!("Shortest path is {hops} hops, over the max_hops={max_hops} limit.");
+        }
+        // Annotate each hop with its connecting relation so a path built
+        // from low-signal `references` (type) edges is self-evident rather
+        // than looking like an authoritative call chain.
+        let mut rendered = sanitize_label(&self.label_of(&path[0]));
+        for pair in path.windows(2) {
+            let rel = self
+                .relation_between(&pair[0], &pair[1])
+                .unwrap_or_else(|| "?".to_string());
+            rendered.push_str(&format!(
+                " -[{}]-> {}",
+                sanitize_label(&rel),
+                sanitize_label(&self.label_of(&pair[1]))
+            ));
+        }
+        format!("Shortest path ({hops} hops): {rendered}")
+    }
+
+    /// The best single-bridge-hop path from `from` (in shard `sh`) to `to` in
+    /// another shard: from-shard leg + one bridge edge + to-shard leg, shortest
+    /// total. `None` when no bridge edge connects the two legs.
+    fn bridge_hop_path(
+        &self,
+        sh: &provider::MaterializedShard,
+        from: &NodeId,
+        to: &NodeId,
+    ) -> Option<Vec<NodeId>> {
+        let tsh = self.provider.owner_shard(to)?;
+        let mut best: Option<Vec<NodeId>> = None;
+        for e in self.provider.bridge() {
+            // Orient the edge: `a` must live in the from-shard, `b` in the
+            // to-shard (paths are undirected, matching shortest_path).
+            let (a, b) = if sh.kg.node(&e.source).is_some() && tsh.kg.node(&e.target).is_some() {
+                (e.source.clone(), e.target.clone())
+            } else if sh.kg.node(&e.target).is_some() && tsh.kg.node(&e.source).is_some() {
+                (e.target.clone(), e.source.clone())
+            } else {
+                continue;
+            };
+            let leg1 = if &a == from {
+                vec![from.clone()]
+            } else {
+                match shortest_path(&sh.kg, from, &a) {
+                    Some(p) => p,
+                    None => continue,
+                }
+            };
+            let leg2 = if &b == to {
+                vec![to.clone()]
+            } else {
+                match shortest_path(&tsh.kg, &b, to) {
+                    Some(p) => p,
+                    None => continue,
+                }
+            };
+            let mut path = leg1;
+            path.extend(leg2);
+            if best.as_ref().is_none_or(|b| path.len() < b.len()) {
+                best = Some(path);
+            }
+        }
+        best
     }
 
     /// The relation connecting two adjacent path nodes, picking the most
@@ -2375,11 +2630,14 @@ Cross-repo: {} edge(s) span repositories",
                 5
             }
         }
-        self.kg
+        let sh = self.provider.owner_shard(a)?;
+        sh.kg
             .incident_edges(a)
             .filter(|e| (&e.source == a && &e.target == b) || (&e.source == b && &e.target == a))
             .map(|e| e.relation.clone())
             .min_by(|x, y| priority(x).cmp(&priority(y)).then_with(|| x.cmp(y)))
+            // A cross-shard hop's relation lives in the bridge, not any shard.
+            .or_else(|| self.provider.bridge_relation(a, b))
     }
 
     /// `find_callers` — who calls/uses this node (incoming call-like edges).
@@ -2413,11 +2671,11 @@ Cross-repo: {} edge(s) span repositories",
         verbose: bool,
         show_sites: bool,
     ) -> String {
-        let id = match self.resolve_or_msg(label) {
-            Ok(id) => id,
+        let (sh, id) = match self.seed_ctx(label) {
+            Ok(pair) => pair,
             Err(msg) => return msg,
         };
-        if self.kg.node(&id).is_none() {
+        if sh.kg.node(&id).is_none() {
             return format!("No node matches '{}'.", sanitize_label(label));
         }
         let seed = sanitize_label(&self.label_of(&id));
@@ -2442,7 +2700,8 @@ Cross-repo: {} edge(s) span repositories",
         let mut hits: Vec<(Option<NodeId>, String, String, String)> = Vec::new();
         let mut by_rel: BTreeMap<String, usize> = BTreeMap::new();
         for f in &focus {
-            let Some(ex) = explain(&self.kg, f) else {
+            // Members live in the seed's shard, so one shard serves the walk.
+            let Some(ex) = explain(&sh.kg, f) else {
                 continue;
             };
             for nb in &ex.neighbors {
@@ -2451,13 +2710,7 @@ Cross-repo: {} edge(s) span repositories",
                 // handled_by a fn IS that fn's caller side, and an invoked
                 // binary / bound native lib IS a callee (2026-07 audit: the
                 // substring filter hid them, answering "(none)" for handlers).
-                let call_like = rel.contains("call")
-                    || rel.contains("use")
-                    || rel.contains("reference")
-                    || matches!(
-                        rel.as_str(),
-                        "handled_by" | "invokes" | "binds_native" | "dynamic_ref"
-                    );
+                let call_like = call_like_relation(&rel);
                 if nb.direction != dir || !call_like || focus_set.contains(&nb.id) {
                     continue;
                 }
@@ -2480,6 +2733,40 @@ Cross-repo: {} edge(s) span repositories",
                     nb.relation.clone(),
                     detail,
                 ));
+            }
+        }
+        // Cross-repo opt-in: bridge edges touching the focus set contribute
+        // callers/callees living in other shards.
+        if self.provider.cross_repo() {
+            for f in &focus {
+                for e in self.provider.bridge_edges_of(f) {
+                    let (nb_id, matches_dir) = if &e.target == f {
+                        (e.source.clone(), dir == "in")
+                    } else {
+                        (e.target.clone(), dir == "out")
+                    };
+                    if !matches_dir
+                        || !call_like_relation(&e.relation)
+                        || focus_set.contains(&nb_id)
+                    {
+                        continue;
+                    }
+                    if !seen.insert((nb_id.clone(), e.relation.clone())) {
+                        continue;
+                    }
+                    *by_rel.entry(e.relation.clone()).or_default() += 1;
+                    let mut detail = String::new();
+                    if let Some(ctx) = &e.context {
+                        detail.push_str(&format!(" ({})", sanitize_label(ctx)));
+                    }
+                    detail.push_str(" [cross-repo]");
+                    hits.push((
+                        show_sites.then(|| nb_id.clone()),
+                        self.label_of(&nb_id),
+                        e.relation.clone(),
+                        detail,
+                    ));
+                }
             }
         }
         if hits.is_empty() {
@@ -2559,11 +2846,14 @@ Cross-repo: {} edge(s) span repositories",
             Ok(id) => id,
             Err(msg) => return msg,
         };
-        if self.kg.node(&id).is_none() {
+        if self.provider.node_cloned(&id).is_none() {
             return format!("No node matches '{}'.", sanitize_label(label));
         }
         let seed = sanitize_label(&self.label_of(&id));
-        let refs = references_to(&self.kg, &id);
+        let refs = match self.provider.owner_shard(&id) {
+            Some(sh) => references_to(&sh.kg, &id),
+            None => Vec::new(),
+        };
         if refs.is_empty() {
             return format!("No references to {seed}.");
         }
@@ -2689,13 +2979,13 @@ Cross-repo: {} edge(s) span repositories",
     }
 
     fn graph_impact(&self, files: &[String], code_only: bool) -> (Vec<u32>, usize) {
-        compute_pr_impact(
-            self.kg
-                .nodes()
-                .filter(|n| !code_only || n.file_type == synaptic_core::FileType::Code)
-                .map(|n| (n.source_file.as_str(), n.community)),
-            files,
-        )
+        let mut rows: Vec<(String, Option<u32>)> = Vec::new();
+        self.provider.for_each_node(&mut |n| {
+            if !code_only || n.file_type == synaptic_core::FileType::Code {
+                rows.push((n.source_file.clone(), n.community));
+            }
+        });
+        compute_pr_impact(rows.iter().map(|(f, c)| (f.as_str(), *c)), files)
     }
 
     /// `working_changes_impact` — graph blast radius of the working-tree diff
@@ -2764,25 +3054,26 @@ Cross-repo: {} edge(s) span repositories",
         // Touched nodes: those whose source_file path-matches a changed file
         // (same boundary-safe match `graph_impact` uses). With `code_only`, drop
         // non-code nodes (config/docs) so the list matches the filtered count.
-        let touched: Vec<&synaptic_core::Node> = self
-            .kg
-            .nodes()
-            .filter(|n| !code_only || n.file_type == synaptic_core::FileType::Code)
-            .filter(|n| {
-                files
+        let mut touched: Vec<synaptic_core::Node> = Vec::new();
+        self.provider.for_each_node(&mut |n| {
+            if (!code_only || n.file_type == synaptic_core::FileType::Code)
+                && files
                     .iter()
                     .any(|f| synaptic_prs::path_match(&n.source_file, f))
-            })
-            .collect();
+            {
+                touched.push(n.clone());
+            }
+        });
         if touched.is_empty() {
             return;
         }
-        // Degree = incident edges (in + out), one pass over the edge list.
-        let mut degree: HashMap<&str, usize> = HashMap::new();
-        for e in self.kg.edges() {
-            *degree.entry(e.source.0.as_str()).or_default() += 1;
-            *degree.entry(e.target.0.as_str()).or_default() += 1;
-        }
+        // Degree = incident edges (in + out), one pass over the edge list
+        // (bridge edges included via for_each_edge).
+        let mut degree: HashMap<String, usize> = HashMap::new();
+        self.provider.for_each_edge(&mut |e| {
+            *degree.entry(e.source.0.clone()).or_default() += 1;
+            *degree.entry(e.target.0.clone()).or_default() += 1;
+        });
         let deg = |n: &synaptic_core::Node| degree.get(n.id.0.as_str()).copied().unwrap_or(0);
         let mut ranked = touched.clone();
         ranked.sort_by(|a, b| deg(b).cmp(&deg(a)).then_with(|| a.label.cmp(&b.label)));
@@ -2854,12 +3145,7 @@ Cross-repo: {} edge(s) span repositories",
             depth: depth.clamp(1, 16),
             ..Default::default()
         };
-        Some(forecast_changes_with_index(
-            &self.kg,
-            &self.affected_index,
-            &changed,
-            &opts,
-        ))
+        Some(self.provider.forecast(&changed, &opts))
     }
 
     pub fn tool_predict_impact(
@@ -2984,7 +3270,7 @@ Cross-repo: {} edge(s) span repositories",
             depth: depth.clamp(1, 16),
             ..Default::default()
         };
-        let forecast = forecast_changes_with_index(&self.kg, &self.affected_index, &changed, &opts);
+        let forecast = self.provider.forecast(&changed, &opts);
         let mut seen = std::collections::HashSet::new();
         let mut test_files = Vec::new();
         for h in &forecast.at_risk_tests {
@@ -3077,41 +3363,65 @@ Cross-repo: {} edge(s) span repositories",
                 sanitize_label(kind)
             );
         };
-        let Some(impact) = assess_edit(&self.kg, symbol, kind_enum, depth.clamp(1, 16)) else {
-            // Surface candidates with file + degree inline when the name is
-            // ambiguous, consistent with the other name-taking tools (the @file
-            // hint covers disambiguation here).
-            if let Resolution::Ambiguous(ids) = resolve_detailed(&self.kg, symbol) {
-                let shown = ids.len().min(10);
-                let lines: String = candidate_details(&self.kg, &ids[..shown])
-                    .iter()
-                    .map(|c| {
-                        let file = if c.file.is_empty() {
-                            "-".to_string()
-                        } else {
-                            sanitize_label(&c.file)
-                        };
-                        format!(
-                            "\n  {} [{}] (degree {})",
-                            sanitize_label(&c.id.0),
-                            file,
-                            c.degree
-                        )
-                    })
-                    .collect();
-                let more = if ids.len() > 10 {
-                    format!("\n  +{} more", ids.len() - 10)
+        // Resolve first so the assessment runs in the symbol's owning shard;
+        // ambiguity surfaces candidates with file + degree inline, consistent
+        // with the other name-taking tools (the @file hint disambiguates).
+        let sh = match self.provider.resolve(symbol) {
+            provider::ScopedResolution::Unique(tag, _) => match self.provider.shard(&tag) {
+                Ok(sh) => sh,
+                Err(e) => return format!("shard {}: {e}", sanitize_label(&tag)),
+            },
+            provider::ScopedResolution::Ambiguous(hits) => {
+                let shown = hits.len().min(10);
+                let mut lines = String::new();
+                for (tag, id) in &hits[..shown] {
+                    let (file, degree) = self
+                        .provider
+                        .shard(tag)
+                        .ok()
+                        .map(|sh| {
+                            (
+                                sh.kg
+                                    .node(id)
+                                    .map(|n| n.source_file.clone())
+                                    .unwrap_or_default(),
+                                sh.kg.degree(id),
+                            )
+                        })
+                        .unwrap_or_default();
+                    let file = if file.is_empty() {
+                        "-".to_string()
+                    } else {
+                        sanitize_label(&file)
+                    };
+                    lines.push_str(&format!(
+                        "\n  {} [{}] (degree {})",
+                        sanitize_label(&id.0),
+                        file,
+                        degree
+                    ));
+                }
+                let more = if hits.len() > 10 {
+                    format!("\n  +{} more", hits.len() - 10)
                 } else {
                     String::new()
                 };
                 return format!(
                     "'{}' is ambiguous - {} candidates:{}{}\nQualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts'), or pass a node id.",
                     sanitize_label(symbol),
-                    ids.len(),
+                    hits.len(),
                     lines,
                     more
                 );
             }
+            provider::ScopedResolution::NotFound => {
+                return format!(
+                    "No node matches '{}'. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts'), or pass a node id.",
+                    sanitize_label(symbol)
+                );
+            }
+        };
+        let Some(impact) = assess_edit(&sh.kg, symbol, kind_enum, depth.clamp(1, 16)) else {
             return format!(
                 "No node matches '{}'. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts'), or pass a node id.",
                 sanitize_label(symbol)
@@ -3226,11 +3536,12 @@ Cross-repo: {} edge(s) span repositories",
         // once; order is preserved so it zips back onto `actionable`.
         let files = fetch_pr_files_concurrent(&*self.runner, &actionable, repo);
         // Build the source_file -> impact index once, then reuse it per PR (H5).
-        let impact = ImpactIndex::build(
-            self.kg
-                .nodes()
-                .map(|n| (n.source_file.as_str(), n.community)),
-        );
+        let impact = {
+            let mut rows: Vec<(String, Option<u32>)> = Vec::new();
+            self.provider
+                .for_each_node(&mut |n| rows.push((n.source_file.clone(), n.community)));
+            ImpactIndex::build(rows.iter().map(|(f, c)| (f.as_str(), *c)))
+        };
         for (p, fc) in actionable.iter_mut().zip(files) {
             p.worktree_path = worktrees.get(&p.branch).cloned();
             p.files_changed = fc;
@@ -3295,7 +3606,7 @@ Cross-repo: {} edge(s) span repositories",
     // structured (typed) tool output, mirroring the text for outputSchema tools
 
     fn stats_json(&self) -> Value {
-        let s = &self.stats;
+        let s = self.stats();
         let (total, opaque, linked) = self.dynamic_stats();
         json!({
             "nodes": s.nodes, "edges": s.edges, "communities": s.communities,
@@ -3317,20 +3628,20 @@ Cross-repo: {} edge(s) span repositories",
         // structured channel never silently picks one of several candidates and
         // returns a misleading empty/total:0 (which reads as "nothing depends on
         // it"). Ambiguity / not-found are reported explicitly instead.
-        let id = match resolve_detailed(&self.kg, label) {
-            Resolution::Unique(id) => id,
-            Resolution::Ambiguous(ids) => {
+        let id = match self.provider.resolve(label) {
+            provider::ScopedResolution::Unique(_, id) => id,
+            provider::ScopedResolution::Ambiguous(hits) => {
                 return json!({
                     "seed": sanitize_label(label),
                     "resolved": false,
                     "ambiguous": true,
-                    "candidates": self.candidates_json(&ids),
+                    "candidates": self.candidates_json(&hits),
                     "affected": [],
                     "total": 0,
                     "truncated": false
                 });
             }
-            Resolution::NotFound => {
+            provider::ScopedResolution::NotFound => {
                 return json!({
                     "seed": sanitize_label(label),
                     "resolved": false,
@@ -3395,11 +3706,27 @@ Cross-repo: {} edge(s) span repositories",
     /// Candidate list for an ambiguous structured resolution: `[{id, file,
     /// degree}]`, capped like the text path. Lets an agent reading only the
     /// structured channel disambiguate without a `get_node` round-trip.
-    fn candidates_json(&self, ids: &[NodeId]) -> Value {
-        let shown = ids.len().min(10);
-        let arr: Vec<Value> = candidate_details(&self.kg, &ids[..shown])
+    fn candidates_json(&self, hits: &[(String, NodeId)]) -> Value {
+        let shown = hits.len().min(10);
+        let arr: Vec<Value> = hits[..shown]
             .iter()
-            .map(|c| json!({ "id": c.id.0, "file": c.file, "degree": c.degree }))
+            .map(|(tag, id)| {
+                let (file, degree) = self
+                    .provider
+                    .shard(tag)
+                    .ok()
+                    .map(|sh| {
+                        (
+                            sh.kg
+                                .node(id)
+                                .map(|n| n.source_file.clone())
+                                .unwrap_or_default(),
+                            sh.kg.degree(id),
+                        )
+                    })
+                    .unwrap_or_default();
+                json!({ "id": id.0, "file": file, "degree": degree })
+            })
             .collect();
         Value::Array(arr)
     }
@@ -3429,7 +3756,7 @@ Cross-repo: {} edge(s) span repositories",
             return json!({ "columns": r.columns, "groups": groups });
         }
         let results: Vec<Value> = r
-            .node_views(&self.kg)
+            .node_views_by(|id| self.provider.node_cloned(id))
             .iter()
             .take(limit)
             .map(|row| Value::Array(row.iter().map(node_view_to_json).collect()))
@@ -3451,7 +3778,7 @@ Cross-repo: {} edge(s) span repositories",
             keep.iter().map(|&i| &r.nodes[i]).collect();
         let nodes: Vec<Value> = keep
             .iter()
-            .filter_map(|&i| self.kg.node(&r.nodes[i]).map(|n| (i, n)))
+            .filter_map(|&i| self.provider.node_cloned(&r.nodes[i]).map(|n| (i, n)))
             .map(|(i, n)| {
                 let mut obj = json!({
                     "label": sanitize_label(&n.label),
@@ -3504,7 +3831,14 @@ Cross-repo: {} edge(s) span repositories",
     }
 
     fn resource_surprises(&self) -> String {
-        let s = surprising_connections(&self.kg, &self.communities, 10);
+        // Per-shard sweep (a heuristic resource: bridge edges are boundary
+        // evidence, not in-shard edges, so they do not rank here).
+        let mut s = Vec::new();
+        let _ = self.provider.for_each_shard(&mut |_t, sh| {
+            s.extend(surprising_connections(&sh.kg, self.communities(), 10));
+            Ok(())
+        });
+        s.truncate(10);
         if s.is_empty() {
             return "No surprising connections.".to_string();
         }
@@ -3521,7 +3855,7 @@ Cross-repo: {} edge(s) span repositories",
     }
 
     fn resource_audit(&self) -> String {
-        let s = &self.stats;
+        let s = self.stats();
         format!(
             "Confidence audit:\n  EXTRACTED: {}\n  INFERRED: {}\n  AMBIGUOUS: {}",
             s.extracted, s.inferred, s.ambiguous
@@ -3529,7 +3863,17 @@ Cross-repo: {} edge(s) span repositories",
     }
 
     fn resource_questions(&self) -> String {
-        let qs = suggest_questions(&self.kg, &self.communities, &BTreeMap::new(), 7);
+        let mut qs = Vec::new();
+        let _ = self.provider.for_each_shard(&mut |_t, sh| {
+            qs.extend(suggest_questions(
+                &sh.kg,
+                self.communities(),
+                &BTreeMap::new(),
+                7,
+            ));
+            Ok(())
+        });
+        qs.truncate(7);
         if qs.is_empty() {
             return "No suggested questions.".to_string();
         }
@@ -3630,10 +3974,10 @@ Cross-repo: {} edge(s) span repositories",
     /// `false` when there's no path or the file vanished (serve-stale-on-error),
     /// matching `maybe_reload`'s own decision.
     pub fn is_stale(&self) -> bool {
-        let Some(path) = &self.graph_path else {
+        let Some(watch) = reload_watch_path(&self.provider, self.graph_path.as_deref()) else {
             return false;
         };
-        match reload_key_for(path) {
+        match reload_key_for(&watch) {
             Some(key) => self.reload_key != Some(key),
             None => false,
         }
@@ -3659,17 +4003,7 @@ Cross-repo: {} edge(s) span repositories",
         pattern: Option<&str>,
         file: Option<&str>,
     ) -> Result<synaptic_synql::QueryResult, String> {
-        let raw = if let Some(p) = pattern {
-            synaptic_synql::patterns::run_pattern(&self.kg, p)
-        } else if let Some(q) = query {
-            synaptic_synql::run(&self.kg, q)
-        } else if let Some(f) = file {
-            // File-outline shorthand (escaped + line-ordered), shared with the CLI.
-            synaptic_synql::file_outline(&self.kg, f)
-        } else {
-            return Err("Provide a SYNQL query, a pattern name, or a file.".to_string());
-        };
-        raw.map_err(|e| format!("search error: {e}"))
+        self.provider.structural_search(query, pattern, file)
     }
 
     pub fn tool_structural_search(
@@ -3751,8 +4085,21 @@ Cross-repo: {} edge(s) span repositories",
         limit: usize,
         verbose: bool,
     ) -> String {
+        // Resolve the owning shard: raw-id first, then name resolution (a
+        // single graph is the one-shard case, so its behavior is unchanged).
+        let raw = synaptic_core::NodeId(id.unwrap_or(name).to_string());
+        let sh = self
+            .provider
+            .owner_shard(&raw)
+            .or_else(|| match self.provider.resolve(name) {
+                provider::ScopedResolution::Unique(tag, _) => self.provider.shard(&tag).ok(),
+                _ => None,
+            });
+        let Some(sh) = sh else {
+            return format!("No node matches '{}'.", sanitize_label(name));
+        };
         // `name` may be a node id; pin it only when --id is not given.
-        let (old, opt_id) = match (id, self.kg.node(&synaptic_core::NodeId(name.to_string()))) {
+        let (old, opt_id) = match (id, sh.kg.node(&synaptic_core::NodeId(name.to_string()))) {
             (Some(_), _) => (name.to_string(), id.map(str::to_string)),
             (None, Some(n)) => (n.label.clone(), Some(n.id.0.clone())),
             (None, None) => (name.to_string(), None),
@@ -3764,11 +4111,11 @@ Cross-repo: {} edge(s) span repositories",
             scan_text: false,
             ..Default::default()
         };
-        let plan =
-            match synaptic_refactor::plan_rename(&self.kg, &old, to, &self.repo_root(), &opts) {
-                Ok(p) => p,
-                Err(e) => return format!("rename error: {e}"),
-            };
+        let plan = match synaptic_refactor::plan_rename(&sh.kg, &old, to, &self.repo_root(), &opts)
+        {
+            Ok(p) => p,
+            Err(e) => return format!("rename error: {e}"),
+        };
         let mut o = format!(
             "Rename {} -> {} [{:?}], {} edit(s) across {} file(s), {} to review, {} affected",
             plan.old_name,
@@ -3811,7 +4158,15 @@ Cross-repo: {} edge(s) span repositories",
             root: None,
             min_severity: severity.and_then(synaptic_sqlaudit::Severity::parse),
         };
-        synaptic_sqlaudit::audit(&self.kg, &opts)
+        let mut findings = Vec::new();
+        let mut unparsed = Vec::new();
+        let _ = self.provider.for_each_shard(&mut |_t, sh| {
+            let r = synaptic_sqlaudit::audit(&sh.kg, &opts);
+            findings.extend(r.findings);
+            unparsed.extend(r.unparsed);
+            Ok(())
+        });
+        synaptic_sqlaudit::AuditReport::from_findings(findings, unparsed)
     }
 
     fn advise_sql_report(
@@ -3819,7 +4174,15 @@ Cross-repo: {} edge(s) span repositories",
         query: &str,
         dialect: Option<&str>,
     ) -> synaptic_sqlaudit::AuditReport {
-        synaptic_sqlaudit::advise(&self.kg, query, dialect)
+        let mut findings = Vec::new();
+        let mut unparsed = Vec::new();
+        let _ = self.provider.for_each_shard(&mut |_t, sh| {
+            let r = synaptic_sqlaudit::advise(&sh.kg, query, dialect);
+            findings.extend(r.findings);
+            unparsed.extend(r.unparsed);
+            Ok(())
+        });
+        synaptic_sqlaudit::AuditReport::from_findings(findings, unparsed)
     }
 
     /// Compact text rendering of an audit report for the MCP text channel.
@@ -4332,28 +4695,30 @@ Cross-repo: {} edge(s) span repositories",
             .unwrap_or("");
         let plow = prefix.to_lowercase();
         let mut values: Vec<String> = match arg_name {
-            "label" | "source" | "target" => self
-                .kg
-                .nodes()
+            "label" | "source" | "target" => {
+                let mut v = Vec::new();
                 // Match the bare name too: method nodes are labeled ".name()", so
                 // a prefix like "tool_get" must see past the leading punctuation.
-                .filter(|n| {
+                self.provider.for_each_node(&mut |n| {
                     let l = n.label.to_lowercase();
-                    l.starts_with(&plow)
+                    if l.starts_with(&plow)
                         || l.trim_start_matches(|c: char| !c.is_alphanumeric())
                             .starts_with(&plow)
-                })
-                .map(|n| sanitize_label(&n.label))
-                .collect(),
+                    {
+                        v.push(sanitize_label(&n.label));
+                    }
+                });
+                v
+            }
             "repo" => self
-                .kg
-                .nodes()
-                .filter_map(|n| n.repo.clone())
+                .provider
+                .repo_counts()
+                .into_keys()
                 .filter(|r| r.to_lowercase().starts_with(&plow))
                 .map(|r| sanitize_label(&r))
                 .collect(),
             "community_id" => self
-                .communities
+                .communities()
                 .keys()
                 .map(|c| c.to_string())
                 .filter(|c| c.starts_with(prefix))
@@ -4388,27 +4753,6 @@ Cross-repo: {} edge(s) span repositories",
         }
         Ok(())
     }
-}
-
-fn communities_of(kg: &KnowledgeGraph) -> BTreeMap<u32, Vec<NodeId>> {
-    let mut communities: BTreeMap<u32, Vec<NodeId>> = BTreeMap::new();
-    for n in kg.nodes() {
-        // A community lists the real code symbols that belong to a subsystem. Skip
-        // nodes that carry a community label from clustering but are not subsystem
-        // members: external stubs (import targets / third-party packages with no
-        // source file) and non-code-symbol nodes (rationale TODO/NOTE comments,
-        // markdown headings, config keys). Listing those is noise.
-        if n.is_external_stub() || !n.is_code_symbol() {
-            continue;
-        }
-        if let Some(c) = n.community {
-            communities.entry(c).or_default().push(n.id.clone());
-        }
-    }
-    for v in communities.values_mut() {
-        v.sort();
-    }
-    communities
 }
 
 /// Data requests that should pick up a rebuilt graph.json before answering.
@@ -5618,7 +5962,7 @@ mod tests {
             .unwrap()
             .with_source_root(root.clone());
         assert!(
-            !server.kg.nodes().any(|n| n.label.contains("beta_func")),
+            !server.kg().nodes().any(|n| n.label.contains("beta_func")),
             "beta_func absent before the file is written"
         );
 
@@ -5801,7 +6145,7 @@ mod tests {
 
         // External `synaptic update` (simulated): graph + manifest advance,
         // with NO watcher event (synaptic-out is an ignored subtree).
-        let existing = server.kg.to_graph_data();
+        let existing = server.kg().to_graph_data();
         let refreshed = synaptic_incremental::rebuild(
             &opts,
             &synaptic_incremental::ChangeSet::Full,
@@ -5878,12 +6222,12 @@ mod tests {
             "tool output must state the graph is stale and how to fix it: {text}"
         );
         assert!(
-            !server.kg.nodes().any(|n| n.label.contains("extra")),
+            !server.kg().nodes().any(|n| n.label.contains("extra")),
             "cap trip means the new files were NOT ingested"
         );
 
         // The user runs `synaptic update` (simulated): graph + manifest advance.
-        let existing = server.kg.to_graph_data();
+        let existing = server.kg().to_graph_data();
         let refreshed = synaptic_incremental::rebuild(
             &opts,
             &synaptic_incremental::ChangeSet::Full,
@@ -5943,7 +6287,7 @@ mod tests {
             .unwrap()
             .with_source_root(root.clone());
         assert!(
-            server.kg.nodes().any(|n| n.label.contains("gone_func")),
+            server.kg().nodes().any(|n| n.label.contains("gone_func")),
             "symbol present before the edit"
         );
 
@@ -5955,11 +6299,11 @@ mod tests {
             json!({ "question": "keep_func" }),
         );
         assert!(
-            !server.kg.nodes().any(|n| n.label.contains("gone_func")),
+            !server.kg().nodes().any(|n| n.label.contains("gone_func")),
             "removed symbol must leave the graph after auto-freshen"
         );
         assert!(
-            server.kg.nodes().any(|n| n.label.contains("keep_func")),
+            server.kg().nodes().any(|n| n.label.contains("keep_func")),
             "kept symbol remains"
         );
     }
@@ -8984,5 +9328,200 @@ mod tests {
             "god_nodes must reflect the reloaded graph: {gods}"
         );
         assert!(call_tool(&mut s, "graph_stats", json!({})).contains("4 nodes, 3 edges"));
+    }
+
+    /// End-to-end shard mode: a federated (multi-shard) store served via
+    /// from_shard_store answers the tool surface without materializing the
+    /// union (and without hitting an unmigrated accessor panic).
+    #[test]
+    fn shard_mode_server_answers_tools_end_to_end() {
+        use synaptic_store::{migrate, ShardStore};
+        let mk = |id: &str, label: &str, repo: &str| synaptic_core::Node {
+            id: NodeId(id.into()),
+            label: label.into(),
+            file_type: synaptic_core::FileType::Code,
+            source_file: format!("{repo}/{id}.rs"),
+            source_location: Some("L1".into()),
+            community: Some(1),
+            repo: Some(repo.into()),
+            extra: serde_json::Map::new(),
+        };
+        let mke = |sr: &str, t: &str, cross: bool| synaptic_core::Edge {
+            source: NodeId(sr.into()),
+            target: NodeId(t.into()),
+            relation: "calls".into(),
+            confidence: synaptic_core::Confidence::Extracted,
+            source_file: format!("{sr}.rs"),
+            source_location: Some("L2".into()),
+            confidence_score: None,
+            weight: 1.0,
+            context: None,
+            cross_repo: cross,
+            extra: serde_json::Map::new(),
+        };
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: serde_json::Map::new(),
+            nodes: vec![
+                mk("b_pay", "PaymentService", "billing"),
+                mk("b_util", "format_invoice", "billing"),
+                mk("w_pay", "PaymentWidget", "web"),
+            ],
+            links: vec![mke("b_util", "b_pay", false), mke("w_pay", "b_pay", true)],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store_dir = dir.path().join("store");
+        let mut store = ShardStore::open(&store_dir).unwrap();
+        migrate::migrate_into(&mut store, &gd).unwrap();
+        let server = Server::from_shard_store(ShardStore::open(&store_dir).unwrap(), None);
+
+        let stats = server.tool_graph_stats();
+        assert!(stats.contains("3 nodes"), "{stats}");
+        let repos = server.tool_list_repos();
+        assert!(
+            repos.contains("billing") && repos.contains("web"),
+            "{repos}"
+        );
+        let q = server.tool_query_graph("payment", TraversalMode::Bfs, 1200, &[]);
+        assert!(q.contains("PaymentService"), "{q}");
+        // In-shard caller listed; the cross-repo caller stays out (isolation).
+        let callers = server.tool_find_callers("PaymentService", 10, false, false);
+        assert!(callers.contains("format_invoice"), "{callers}");
+        assert!(!callers.contains("PaymentWidget"), "isolation: {callers}");
+        let d = server.tool_describe_node("format_invoice");
+        assert!(d.contains("format_invoice"), "{d}");
+        let sr = server.tool_structural_search(Some("MATCH (n) RETURN n"), None, None, 10);
+        assert!(sr.contains("3 result(s)"), "{sr}");
+        let g = server.tool_god_nodes(5, 0);
+        assert!(g.contains("PaymentService"), "{g}");
+    }
+
+    /// Shard-mode hot reload: a store rewrite (new manifest) is picked up on the
+    /// next data request without restarting the server, and the aggregate caches
+    /// drop with the old provider.
+    #[test]
+    fn shard_mode_hot_reload_picks_up_a_store_rewrite() {
+        use synaptic_store::{migrate, ShardStore};
+        let mk = |id: &str, repo: &str| synaptic_core::Node {
+            id: NodeId(id.into()),
+            label: format!("{id}_fn"),
+            file_type: synaptic_core::FileType::Code,
+            source_file: format!("{repo}/{id}.rs"),
+            source_location: Some("L1".into()),
+            community: Some(1),
+            repo: Some(repo.into()),
+            extra: serde_json::Map::new(),
+        };
+        let gd = |ids: &[(&str, &str)]| GraphData {
+            directed: true,
+            multigraph: false,
+            graph: serde_json::Map::new(),
+            nodes: ids.iter().map(|(i, r)| mk(i, r)).collect(),
+            links: vec![],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let graph_path = dir.path().join("graph.json");
+        let store_dir = dir.path().join("store");
+        let mut store = ShardStore::open(&store_dir).unwrap();
+        migrate::migrate_into(&mut store, &gd(&[("a", "billing"), ("b", "web")])).unwrap();
+        let mut server =
+            Server::from_shard_store(ShardStore::open(&store_dir).unwrap(), Some(graph_path));
+        assert!(server.tool_graph_stats().contains("2 nodes"));
+
+        // Rewrite the store with an extra node (manifest changes); ensure a
+        // distinct mtime for filesystems with coarse timestamps.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let mut store = ShardStore::open(&store_dir).unwrap();
+        migrate::migrate_into(
+            &mut store,
+            &gd(&[("a", "billing"), ("b", "web"), ("c", "web")]),
+        )
+        .unwrap();
+
+        let req = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name":"graph_stats","arguments":{}}});
+        let res = server.handle_request(&req).unwrap();
+        let text = res["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("3 nodes"),
+            "reload picks up the rewrite: {text}"
+        );
+    }
+
+    /// Cross-repo opt-in: with SYNAPTIC_CROSS_REPO the walk tools follow bridge
+    /// edges into other shards (callers/neighbors/affected/path), each hit
+    /// annotated; isolation mode (the default) is covered by
+    /// shard_mode_server_answers_tools_end_to_end.
+    #[test]
+    fn shard_mode_cross_repo_walks_follow_the_bridge() {
+        use synaptic_store::{migrate, ShardStore};
+        let mk = |id: &str, label: &str, repo: &str| synaptic_core::Node {
+            id: NodeId(id.into()),
+            label: label.into(),
+            file_type: synaptic_core::FileType::Code,
+            source_file: format!("{repo}/{id}.rs"),
+            source_location: Some("L1".into()),
+            community: Some(1),
+            repo: Some(repo.into()),
+            extra: serde_json::Map::new(),
+        };
+        let mke = |sr: &str, t: &str, cross: bool| synaptic_core::Edge {
+            source: NodeId(sr.into()),
+            target: NodeId(t.into()),
+            relation: "calls".into(),
+            confidence: synaptic_core::Confidence::Extracted,
+            source_file: format!("{sr}.rs"),
+            source_location: Some("L2".into()),
+            confidence_score: None,
+            weight: 1.0,
+            context: None,
+            cross_repo: cross,
+            extra: serde_json::Map::new(),
+        };
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: serde_json::Map::new(),
+            nodes: vec![
+                mk("b_pay", "PaymentService", "billing"),
+                mk("b_util", "format_invoice", "billing"),
+                mk("w_pay", "PaymentWidget", "web"),
+            ],
+            links: vec![mke("b_util", "b_pay", false), mke("w_pay", "b_pay", true)],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store_dir = dir.path().join("store");
+        let mut store = ShardStore::open(&store_dir).unwrap();
+        migrate::migrate_into(&mut store, &gd).unwrap();
+        let server = Server::from_provider(
+            provider::GraphProvider::from_store(ShardStore::open(&store_dir).unwrap())
+                .with_cross_repo(true),
+            None,
+        );
+
+        // Callers cross the bridge, annotated.
+        let callers = server.tool_find_callers("PaymentService", 10, false, false);
+        assert!(callers.contains("PaymentWidget"), "{callers}");
+        assert!(callers.contains("[cross-repo]"), "{callers}");
+
+        // Neighbors include the bridge edge.
+        let nb = server.tool_get_neighbors("PaymentService", None, false, 10, true);
+        assert!(nb.contains("PaymentWidget"), "{nb}");
+
+        // Reverse impact crosses the bridge (the widget depends on the service).
+        let aff = server.tool_affected("PaymentService", 3, &[], 50, true);
+        assert!(aff.contains("PaymentWidget"), "{aff}");
+
+        // Path takes one bridge hop, relation-annotated from the bridge.
+        let p = server.tool_shortest_path("format_invoice", "PaymentWidget", 5);
+        assert!(p.contains("Shortest path (2 hops)"), "{p}");
+        assert!(p.contains("PaymentWidget"), "{p}");
     }
 }

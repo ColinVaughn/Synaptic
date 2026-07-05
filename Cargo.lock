@@ -2270,6 +2270,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "redb"
+version = "2.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eca1e9d98d5a7e9002d0013e18d5a9b000aee942eb134883a82f06ebffb6c01"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "redis"
 version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3025,6 +3034,7 @@ dependencies = [
  "synaptic-server",
  "synaptic-skillgen",
  "synaptic-sqlaudit",
+ "synaptic-store",
  "synaptic-synql",
  "synaptic-upgrade",
  "synaptic-workspace",
@@ -3333,6 +3343,7 @@ dependencies = [
  "synaptic-refactor",
  "synaptic-sandbox",
  "synaptic-sqlaudit",
+ "synaptic-store",
  "synaptic-synql",
  "tempfile",
  "tiktoken-rs",
@@ -3367,6 +3378,23 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "synaptic-store"
+version = "0.5.0"
+dependencies = [
+ "blake3",
+ "proptest",
+ "redb",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "synaptic-core",
+ "synaptic-graph",
+ "synaptic-output",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

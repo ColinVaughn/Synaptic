@@ -28,6 +28,42 @@ pub fn max_nodes() -> usize {
     parse_node_cap(std::env::var(MAX_NODES_ENV).ok().as_deref())
 }
 
+/// Default per-shard byte ceiling for the redb store: 2 GiB. A DoS guard on one
+/// shard, not an aggregate cap (shards are materialized one at a time).
+pub const DEFAULT_MAX_SHARD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Default per-shard node ceiling for the redb store: 5M nodes.
+pub const DEFAULT_MAX_SHARD_NODES: u64 = 5_000_000;
+/// Env var overriding the per-shard byte cap, in MiB (`0` = no cap).
+pub const MAX_SHARD_MB_ENV: &str = "SYNAPTIC_MAX_SHARD_MB";
+/// Env var overriding the per-shard node cap (`0` = no cap).
+pub const MAX_SHARD_NODES_ENV: &str = "SYNAPTIC_MAX_SHARD_NODES";
+
+/// Effective per-shard byte cap, honoring [`MAX_SHARD_MB_ENV`] (`0` disables).
+pub fn max_shard_bytes() -> u64 {
+    parse_shard_bytes(std::env::var(MAX_SHARD_MB_ENV).ok().as_deref())
+}
+
+/// Effective per-shard node cap, honoring [`MAX_SHARD_NODES_ENV`] (`0` disables).
+pub fn max_shard_nodes() -> u64 {
+    parse_shard_nodes(std::env::var(MAX_SHARD_NODES_ENV).ok().as_deref())
+}
+
+fn parse_shard_bytes(raw: Option<&str>) -> u64 {
+    match raw.map(str::trim).and_then(|s| s.parse::<u64>().ok()) {
+        Some(0) => u64::MAX,
+        Some(mb) => mb.saturating_mul(1024 * 1024),
+        None => DEFAULT_MAX_SHARD_BYTES,
+    }
+}
+
+fn parse_shard_nodes(raw: Option<&str>) -> u64 {
+    match raw.map(str::trim).and_then(|s| s.parse::<u64>().ok()) {
+        Some(0) => u64::MAX,
+        Some(n) => n,
+        None => DEFAULT_MAX_SHARD_NODES,
+    }
+}
+
 fn parse_graph_bytes(raw: Option<&str>) -> u64 {
     match raw.map(str::trim).and_then(|s| s.parse::<u64>().ok()) {
         Some(0) => u64::MAX,
@@ -87,5 +123,17 @@ mod tests {
         assert_eq!(parse_node_cap(Some("250000")), 250_000);
         assert_eq!(parse_node_cap(Some(" 42 ")), 42);
         assert_eq!(parse_node_cap(Some("0")), usize::MAX);
+    }
+
+    #[test]
+    fn shard_caps_default_and_override() {
+        assert_eq!(parse_shard_bytes(None), DEFAULT_MAX_SHARD_BYTES);
+        assert_eq!(parse_shard_bytes(Some("4096")), 4096 * 1024 * 1024);
+        assert_eq!(parse_shard_bytes(Some("0")), u64::MAX);
+        assert_eq!(parse_shard_bytes(Some("junk")), DEFAULT_MAX_SHARD_BYTES);
+        assert_eq!(parse_shard_nodes(None), DEFAULT_MAX_SHARD_NODES);
+        assert_eq!(parse_shard_nodes(Some("junk")), DEFAULT_MAX_SHARD_NODES);
+        assert_eq!(parse_shard_nodes(Some("9000000")), 9_000_000);
+        assert_eq!(parse_shard_nodes(Some("0")), u64::MAX);
     }
 }

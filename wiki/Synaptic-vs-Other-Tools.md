@@ -16,7 +16,7 @@ claim could not be confirmed from a primary source, it is not made here.
 
 | Tool | What it is for | How it models code | Languages | Runs where | AI / LLM role | License |
 |---|---|---|---|---|---|---|
-| **Synaptic** | Persistent code knowledge graph you query, diff across git history, and refactor against, instead of re-reading source | Symbols + typed edges, clustered into communities; every edge tagged `Extracted` / `Inferred` / `Ambiguous`; nodes carry kind/visibility/line-spans | tree-sitter, 30+ languages | Single static binary, local, offline by default | MCP server (29 read-only tools) over the graph, incl. content search, find-all-references, dynamic-dispatch hazards, change forecasting, predictive test selection, edit-impact prediction, structural search, describe-node, time-travel diff, and plan-only rename | AGPL-3.0, open source |
+| **Synaptic** | Persistent code knowledge graph you query, diff across git history, forecast changes against, and refactor against, instead of re-reading source | Symbols + typed edges, clustered into communities; every edge tagged `Extracted` / `Inferred` / `Ambiguous`; nodes carry kind/visibility/line-spans; plus boundary edges across language / process / repo (HTTP, FFI, WebSocket, IPC, event bus) and flagged dynamic-dispatch sites | tree-sitter, 30+ languages | Single static binary, local, offline by default | MCP server (29 read-only tools) over the graph, incl. content search, find-all-references, dynamic-dispatch hazards, change forecasting, predictive test selection, edit-impact prediction, structural search, describe-node, time-travel diff, and plan-only rename | AGPL-3.0, open source |
 | **Sourcegraph / Cody** | Org-scale code search and navigation; Cody is its AI assistant | Search index, plus precise navigation from uploaded SCIP indexes (opt-in) [2][3] | Search works broadly; precise nav has SCIP indexers for ~8 languages [11] | Self-hosted (Kubernetes / Docker) or Sourcegraph Cloud [4] | Cody answers and edits using search + code-graph context [7] | Main product not open source; enterprise pricing [5][9] |
 | **CodeQL** | Semantic analysis to find security vulnerabilities and their variants [12] | Relational "CodeQL database" queried with the QL language [13] | C/C++, C#, Go, Java, Kotlin, JS, TS, Python, Ruby, Rust, Swift, GitHub Actions [14] | CLI; compiled languages need a build observed during extraction [13] | None; it is a query engine (powers GitHub code scanning) [12] | Free on open-source/public code; paid for private code [15][16] |
 | **Joern** | Static analysis for vulnerability discovery via code property graphs [17] | Code Property Graph (AST + control-flow + data-flow in one graph), Scala-based query language [18] | C/C++, Java, JS, Python, Kotlin, PHP, Go, Ruby, Swift, C#, JVM bytecode, x86/x64 [17] | Local shell/CLI; imports code even without a working build [17] | None | Apache-2.0, open source [19] |
@@ -28,16 +28,46 @@ Every competitor claim in this table is expanded and sourced in the sections bel
 
 ## What's distinctive about Synaptic
 
-Beyond building and querying a structural graph, Synaptic layers three capabilities that, as
-a set on one offline graph, none of the tools below combine. Each works on the same
-confidence-tagged graph and is exposed at the CLI (and the first two over MCP):
+Beyond building and querying a structural graph, Synaptic layers a set of capabilities that,
+together on one offline, confidence-tagged graph, none of the tools below combine. Each is
+exposed at the CLI, and most over the MCP server as well:
 
+- **Change forecasting and speculative verification** ([Commands: predict](Commands#predict),
+  [Commands: speculate](Commands#speculate)). Given the files (or `git diff`) a change touches,
+  Synaptic forecasts its consequences *before* the edit is made: the reverse-impact blast
+  radius, the tests that exercise the changed code (`affected_tests`, predictive test selection),
+  which edited symbols are public API, new import cycles or removed APIs (from a time-travel
+  diff), git-history co-change coupling that no static edge captures, and a heuristic risk score
+  with a verify checklist. `synaptic predict --edit <symbol>` does the same analytically for a
+  single symbol edit, classifying each dependent as "will break" vs "to review". With
+  `serve --allow-exec`, the `speculate` tool then *proves* the forecast by applying the change in
+  a throwaway git worktree and running the build plus the at-risk tests. Forecasting a change
+  before you make it, then proving it by running it in a sandbox, is a loop none of the other
+  tools here offer.
+- **Impact that crosses language, process, and repository boundaries**
+  ([Cross-Language Edges](Cross-Language-Edges)). A post-extraction pass mints boundary nodes so
+  reverse-impact and shortest-path traverse coupling no single-language parse can see: HTTP/RPC
+  routes (Flask/FastAPI, Express, axum/actix, Go net/http, gRPC), FFI bindings (PyO3, ctypes,
+  JNI, cgo, N-API), subprocess invocations, WebSocket / socket.io message channels, Electron
+  `ipcMain` / `ipcRenderer` IPC, and event buses (Node `EventEmitter`, DOM `CustomEvent`, C#
+  events). These resolve across files and across repositories in a federation, so `affected` on a
+  backend handler reaches the front-end code that invokes it over HTTP or a socket, even though
+  no import connects them.
+- **Honest handling of dynamic dispatch — "0 dependents" is not "safe"**
+  ([Commands: hazards](Commands#hazards)). Static analysis cannot see reflection, dispatch
+  tables, or fully-dynamic calls, so a symbol reached only that way looks like a safe leaf.
+  Synaptic detects what it can — a dynamic call whose target is a string literal resolving to one
+  symbol becomes a low-confidence `dynamic_ref` edge — and is explicit about the rest: `affected`,
+  `get_node`, and `describe_node` attach a `dynamic_caveat` when a 0-dependent symbol's scope uses
+  dynamic dispatch, and the `dynamic_hazards` MCP tool (and `synaptic hazards` CLI) catalogs every
+  reflection / `eval` / `Reflect.*` / `getattr` / `Class.forName` site. The graph tells you when
+  it might be under-reporting instead of asserting a false "safe to change".
 - **Time-travel architectural diff** ([Commands: diff](Commands#diff)). `synaptic diff
   <rev1> [rev2]` (or `--since <date>`) builds the graph at each git revision in a throwaway
   worktree and reports what changed *architecturally*, added/removed module dependencies,
   removed APIs, coupling drift, newly-introduced dependency cycles, and change hotspots, as
   terminal output, Markdown, or a self-contained HTML report. This is a diff of the structure,
-  not of the text; search and security tools below diff or index a single snapshot.
+  not of the text; the search and security tools below diff or index a single snapshot.
 - **Architectural search with a query language (SYNQL)** ([Commands: search](Commands#search)).
   A small Cypher-inspired language matches on *structure*, kind, visibility, lines-of-code,
   fan-in/out, degree, community, and relationship patterns including variable-length paths
@@ -50,6 +80,14 @@ confidence-tagged graph and is exposed at the CLI (and the first two over MCP):
   to apply; Synaptic never edits source. `synaptic refactor verify` then rebuilds and checks
   the graph held its shape (the symbol was renamed/relocated, no references were lost, no new
   cycles appeared). The graph is used to make an agent's edit auditable, not to perform it.
+- **Past pure structure: graph-attributed content search and a SQL auditor.** `search_text`
+  ([MCP Server](MCP-Server#search_text)) runs a ripgrep-backed content/regex search over the real
+  source — through the same per-repo containment jail and federation routing as the graph — and
+  attributes every hit to the symbol whose body encloses it, so a matched string literal is a
+  pivot straight to `affected` / `find_callers`. And a built-in SQL performance and security
+  auditor ([SQL Auditing](SQL-Auditing)) runs a rule engine over a SQL-aware graph (row-level
+  security gaps, string-concatenation injection, over-broad grants, unindexed foreign keys,
+  `SELECT *`, `UPDATE`/`DELETE` with no `WHERE`, and more), with an optional live `EXPLAIN`.
 
 The rest of this page maps Synaptic against each neighbouring tool, including where those
 tools are the better choice.
@@ -131,9 +169,14 @@ its own query language, SYNQL, but it matches on graph *structure*, kind, visibi
 lines-of-code, fan-in/out, communities, and relationship paths, not the data-flow and taint
 facts QL and Joern's Scala queries are built for. It needs no build and no query language to
 get a useful first result, and it federates across repositories
-([Workspaces and Federation](Workspaces-and-Federation)). If your goal is security analysis,
-reach for CodeQL or Joern; if it is understanding and querying structure, Synaptic is a
-closer fit.
+([Workspaces and Federation](Workspaces-and-Federation)). Synaptic does ship one focused
+security-and-performance layer of its own — a SQL auditor ([SQL Auditing](SQL-Auditing)) whose
+rule engine flags row-level-security gaps, string-concatenation injection, over-broad grants,
+and unindexed-key performance traps from the SQL it extracts (optionally confirmed with a live
+`EXPLAIN`) — but that is rule matching over a SQL-aware graph, not the general taint and
+data-flow analysis CodeQL and Joern are built for. If your goal is general security analysis
+across a codebase, reach for CodeQL or Joern; if it is understanding and querying structure
+(with SQL-specific auditing alongside), Synaptic is a closer fit.
 
 ## AI repo maps (Aider and Cursor)
 
@@ -157,8 +200,10 @@ sent with each request; [20] it is a context feature of one assistant. Synaptic 
 *persistent* graph you can query repeatedly, visualize, export, diff incrementally
 ([Incremental Updates](Incremental-Updates)), federate across repos, and expose to any MCP
 client rather than a single tool ([MCP Server](MCP-Server)). The same graph also powers
-analyzes a per-request context map does not attempt, time-travel architectural diff and
-agent-executable refactor plans ([Commands](Commands)).
+analyses a per-request context map does not attempt: time-travel architectural diff, change
+forecasting with predictive test selection (and optional speculative verification), impact that
+crosses language and process boundaries, and agent-executable refactor plans
+([Commands](Commands)).
 
 **Cursor** is an AI code editor whose codebase indexing takes the other approach: semantic
 similarity rather than structure. Cursor "breaks your code into meaningful chunks (functions,
@@ -171,9 +216,10 @@ cloud; the indexing is designed so raw code is not persisted and file paths are 
 The contrast with Synaptic is paradigm, not detail. Embeddings find code that is
 *semantically similar* to a query, which is powerful for "where is something like this," but
 they do not encode explicit relationships. Synaptic models who-calls-whom and
-who-depends-on-what as concrete edges, which is what makes reverse-impact and shortest-path
-queries possible ([Querying](Querying)), and it runs fully offline with the index staying on
-your machine. Cursor's indexing is also tied to the Cursor editor; Synaptic's graph is a
+who-depends-on-what as concrete edges — including across HTTP, FFI, WebSocket, and IPC
+boundaries an embedding cannot represent — which is what makes reverse-impact and shortest-path
+queries (and change forecasting) possible ([Querying](Querying)), and it runs fully offline with
+the index staying on your machine. Cursor's indexing is also tied to the Cursor editor; Synaptic's graph is a
 standalone artifact usable from any client.
 
 ## graphify
@@ -206,8 +252,13 @@ prompts, completions, resource subscriptions, and structured tool output
 repositories through export surfaces and import / tsconfig / module-federation aliases
 ([Workspaces and Federation](Workspaces-and-Federation)), where graphify's global graph merges
 per-project graphs and deduplicates external-library nodes by label, a lighter form of
-linking. [26] The two are also licensed differently: Synaptic is AGPL-3.0 (copyleft, including
-over a network), graphify is MIT (permissive). [26]
+linking. [26] On the analysis side, Synaptic adds layers aimed at editing safely: change
+forecasting with predictive test selection and speculative worktree verification, impact edges
+across process boundaries (WebSocket / IPC / event bus), explicit dynamic-dispatch hazard
+flagging, and a SQL performance and security auditor — the capabilities detailed in
+[What's distinctive about Synaptic](#whats-distinctive-about-synaptic). The two are also licensed
+differently: Synaptic is AGPL-3.0 (copyleft, including over a network), graphify is MIT
+(permissive). [26]
 
 Both tools ingest non-code material as well, and both run code extraction fully offline with
 tree-sitter, so neither has a clear edge on corpus breadth or offline operation. The practical
@@ -217,21 +268,31 @@ graph-database / Obsidian / Mermaid outputs.
 
 ## When to use which
 
-- **Org-wide code search and navigation across many repos, hosted, with a team UI:**
-  Sourcegraph.
+- **Org-wide code search and navigation as a hosted service — thousands of repos, a team web
+  UI, admin controls, and precise SCIP "go to definition":** Sourcegraph. (Synaptic also
+  resolves references across repositories, but as a local federation you run yourself, not a
+  hosted org-scale search engine.)
 - **Finding security vulnerabilities, taint, and data-flow bugs:** CodeQL (especially with a
-  build and GitHub integration) or Joern (open source, no build required).
-- **In-the-moment context for one AI assistant's edit loop:** Aider's repo map (graph-based)
-  or Cursor's indexing (embedding-based), inside those tools.
+  build and GitHub integration) or Joern (open source, no build required). (For SQL-specific
+  security and performance auditing, Synaptic's auditor overlaps; for general taint and
+  data-flow, these are the right tools.)
+- **Zero-setup context baked into one specific tool's own edit loop:** Aider's repo map
+  (graph-based) or Cursor's indexing (embedding-based), inside those tools.
 - **A near-identical knowledge graph you install as a `/graphify` skill across many
   assistants, with mixed-media ingest and Neo4j / FalkorDB / Obsidian / Mermaid outputs, in
   Python:** graphify.
+- **A persistent, structural map any AI assistant can query over MCP** — explicit
+  who-calls-whom / who-depends-on-what edges (across language, process, and repository
+  boundaries) rather than a per-request repo map or an embedding index, available to Claude
+  Code, Cursor, Copilot, and any other MCP client at once, fully offline: Synaptic.
 - **A persistent, offline, auditable structural graph you can query, visualize, export, and
-  hand to any LLM over MCP, with cross-repo federation, as a single dependency-free Rust
-  binary:** Synaptic.
+  federate across repos, as a single dependency-free Rust binary:** Synaptic.
 - **A diff of a codebase's *architecture* across git history, a structural query language
   (SYNQL) for "find every class over 500 LOC with 20+ dependencies", or a confidence-scored,
   verifiable rename/move plan for an AI agent to apply:** Synaptic.
+- **Forecasting what a change will break (with predictive test selection) and optionally
+  proving it in a throwaway worktree, tracing impact across HTTP / FFI / WebSocket / IPC /
+  event-bus boundaries, or auditing SQL for security and performance:** Synaptic.
 
 These categories overlap, and several of these tools are complementary to Synaptic rather
 than alternatives to it.

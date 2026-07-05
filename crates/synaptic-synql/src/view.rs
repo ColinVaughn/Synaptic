@@ -30,7 +30,13 @@ impl NodeView {
     /// Resolve a single node id. A dangling id (no node in `kg`) yields a view
     /// labeled by the id with empty metadata, so output stays total.
     pub fn resolve(kg: &KnowledgeGraph, id: &NodeId) -> NodeView {
-        match kg.node(id) {
+        Self::from_found(id, kg.node(id))
+    }
+
+    /// Build a view from an already-looked-up node (or the dangling fallback),
+    /// shared by the single-graph and federated resolution paths.
+    pub fn from_found(id: &NodeId, node: Option<&synaptic_core::Node>) -> NodeView {
+        match node {
             Some(n) => NodeView {
                 id: n.id.0.clone(),
                 label: n.label.clone(),
@@ -62,6 +68,23 @@ impl QueryResult {
         self.rows
             .iter()
             .map(|row| row.iter().map(|id| NodeView::resolve(kg, id)).collect())
+            .collect()
+    }
+
+    /// Like [`node_views`](Self::node_views) but resolving each id through
+    /// `lookup`, for callers whose nodes live across several graphs (the
+    /// federated per-shard server resolves each id in its owning shard).
+    pub fn node_views_by(
+        &self,
+        mut lookup: impl FnMut(&NodeId) -> Option<synaptic_core::Node>,
+    ) -> Vec<Vec<NodeView>> {
+        self.rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|id| NodeView::from_found(id, lookup(id).as_ref()))
+                    .collect()
+            })
             .collect()
     }
 }

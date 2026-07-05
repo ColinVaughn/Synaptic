@@ -299,7 +299,26 @@ fn node_community(communities: &BTreeMap<u32, Vec<NodeId>>) -> HashMap<NodeId, u
 /// Top `top_n` most-connected real entities, excluding file/concept/json-key/
 /// builtin-noise nodes.
 pub fn god_nodes(kg: &KnowledgeGraph, top_n: usize) -> Vec<GodNode> {
-    let degrees = degree_map(kg);
+    let mut all = god_nodes_with_extra(kg, &HashMap::new());
+    all.truncate(top_n);
+    all
+}
+
+/// Per-shard variant of [`god_nodes`] for streaming aggregation: `extra` adds
+/// degree contributions not present in `kg` (a federated store keeps cross-repo
+/// bridge edges outside the member shards, so each endpoint's degree is its
+/// in-shard degree plus its distinct bridge neighbors). Returns every candidate
+/// (no `top_n`), ranked (degree desc, id asc); the caller merges shard lists and
+/// re-ranks, which equals running [`god_nodes`] on the union because the noise
+/// filters are per-node and see the total degree. Ids in `extra` that `kg` does
+/// not contain are skipped (they rank in their own shard).
+pub fn god_nodes_with_extra(kg: &KnowledgeGraph, extra: &HashMap<NodeId, usize>) -> Vec<GodNode> {
+    let mut degrees = degree_map(kg);
+    for (id, bump) in extra {
+        if let Some(d) = degrees.get_mut(id) {
+            *d += bump;
+        }
+    }
     let mut sorted: Vec<(NodeId, usize)> = degrees.iter().map(|(k, v)| (k.clone(), *v)).collect();
     sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
@@ -318,9 +337,6 @@ pub fn god_nodes(kg: &KnowledgeGraph, top_n: usize) -> Vec<GodNode> {
             label,
             degree: deg,
         });
-        if result.len() >= top_n {
-            break;
-        }
     }
     result
 }

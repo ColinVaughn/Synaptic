@@ -11,6 +11,20 @@ All notable changes to Synaptic are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **Shard-aware federated serve (redb store).** `synaptic serve` over a
+  multi-shard store no longer materializes the union graph: shards load on
+  demand behind a bounded LRU (`SYNAPTIC_SHARD_LRU`, default 8) and every MCP
+  tool fans out per shard. Whole-graph aggregates (`graph_stats`, `god_nodes`,
+  `query_graph` ranking with a global document-frequency index, communities,
+  `structural_search` with deferred `LIMIT`, repo counts) stream shards and
+  are provably equal to running on the union; seed tools (callers/callees/
+  references/affected/predict/rename/SQL audit) resolve a symbol's owning
+  shard and walk there (per-repo isolation; cross-repo edges surface as
+  boundary evidence). Removes the federation-size ceiling: memory is bounded
+  by the LRU working set, not the sum of all members.
+- **Per-shard store guards** are env-configurable: `SYNAPTIC_MAX_SHARD_MB` /
+  `SYNAPTIC_MAX_SHARD_NODES` (defaults 2 GiB / 5M nodes; `0` disables),
+  alongside the graph.json caps below.
 - **Configurable graph safety caps.** The 50 MiB byte cap and 100,000-node cap
   that guard the merge driver, federation, global-store, and remote-subgraph
   loads are now env-overridable: `SYNAPTIC_MAX_GRAPH_MB` and

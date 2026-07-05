@@ -39,6 +39,11 @@ pub(crate) enum Cmd {
         /// schemas, at the cost of column-level SQL audit rules.
         #[arg(long)]
         no_columns: bool,
+        /// Also build the sharded redb store (synaptic-out/store) alongside
+        /// graph.json, so read commands can use `SYNAPTIC_STORE=redb` (or the
+        /// auto-default) without a separate `synaptic migrate` step.
+        #[arg(long)]
+        store: bool,
     },
     /// Re-emit an output format from an existing graph.json — no re-extraction —
     /// or push the graph live to a database. Formats: json, html, svg, graphml,
@@ -221,6 +226,17 @@ pub(crate) enum Cmd {
     Hook {
         #[command(subcommand)]
         action: HookAction,
+    },
+    /// Build a sharded on-disk redb store from an existing graph.json. Once
+    /// migrated, set `SYNAPTIC_STORE=redb` for read commands (query/serve/...) to
+    /// load per-repo shards from the store instead of parsing graph.json.
+    Migrate {
+        /// Source graph.json (default: synaptic-out/graph.json).
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        /// Store directory (default: a `store/` sibling of the graph.json).
+        #[arg(long)]
+        store: Option<PathBuf>,
     },
     /// Run the MCP server (read-only graph tools + PR tools for an AI assistant).
     /// Defaults to stdio; `--http <addr>` serves over HTTP instead.
@@ -870,6 +886,10 @@ pub(crate) enum WorkspaceAction {
         /// Produce a directed federated graph.
         #[arg(long)]
         directed: bool,
+        /// Also build the sharded redb store (synaptic-out/store) from the
+        /// federated graph, for `SYNAPTIC_STORE=redb` / the auto-default.
+        #[arg(long)]
+        store: bool,
     },
     /// Compose from a directory of published <member>/graph.json artifacts.
     Federate { dir: PathBuf },

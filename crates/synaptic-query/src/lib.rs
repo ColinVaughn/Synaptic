@@ -13,7 +13,7 @@ pub use dynamic::{dependents_caveat, DynamicCaveat, DynamicHazardIndex, SiteRef}
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use synaptic_core::{NodeId, NodeKind};
 use synaptic_graph::KnowledgeGraph;
 
@@ -275,6 +275,7 @@ pub fn query(kg: &KnowledgeGraph, query_text: &str, max_nodes: usize) -> QueryRe
 /// only scores and expands. Build it **once** and reuse it across many queries —
 /// the MCP server does this at graph load/reload instead of rebuilding the index
 /// on every request (H1).
+#[derive(Serialize, Deserialize)]
 pub struct QueryIndex {
     /// `node_count().max(1)` as the IDF denominator base.
     n: f64,
@@ -304,6 +305,19 @@ fn hub_penalty(degree: usize, avg_degree: f64) -> f64 {
 }
 
 impl QueryIndex {
+    /// Serialize the index to bytes for persistence (a shard index blob), so a
+    /// long-lived server deserializes it at load instead of rebuilding (H1).
+    pub fn to_bytes(&self) -> serde_json::Result<Vec<u8>> {
+        serde_json::to_vec(self)
+    }
+
+    /// Reconstruct an index from [`to_bytes`](Self::to_bytes) output. The caller
+    /// must only use a blob built against the same graph content (the store keys
+    /// blobs by the shard's `source_hash` to guarantee this).
+    pub fn from_bytes(bytes: &[u8]) -> serde_json::Result<Self> {
+        serde_json::from_slice(bytes)
+    }
+
     /// Build the index from a graph (the query-independent work).
     pub fn build(kg: &KnowledgeGraph) -> Self {
         let n = kg.node_count().max(1) as f64;
@@ -358,6 +372,114 @@ impl QueryIndex {
         mode: TraversalMode,
         recency: Option<&Recency>,
     ) -> QueryResult {
+        let ranked = self.rank(query_text, max_nodes, mode, recency);
+        let node_set: HashSet<&NodeId> = ranked.nodes.iter().collect();
+        let edges: Vec<EdgeRef> = kg
+            .edges()
+            .filter(|e| node_set.contains(&e.source) && node_set.contains(&e.target))
+            .map(|e| EdgeRef {
+                source: e.source.clone(),
+                target: e.target.clone(),
+                relation: e.relation.clone(),
+            })
+            .collect();
+        let edges = rank_result_edges(edges, &ranked.nodes, &ranked.scores);
+        QueryResult {
+            seeds: ranked.seeds,
+            nodes: ranked.nodes,
+            scores: ranked.scores,
+            edges,
+        }
+    }
+
+    /// An empty index to fold shard indexes into via [`absorb`](Self::absorb);
+    /// finish with [`finalize_merge`](Self::finalize_merge).
+    pub fn empty() -> QueryIndex {
+        QueryIndex {
+            n: 1.0,
+            node_tokens: HashMap::new(),
+            df: HashMap::new(),
+            adjacency: HashMap::new(),
+            avg_degree: 0.0,
+        }
+    }
+
+    /// Fold one shard's index into this accumulator. Shards partition the
+    /// nodes, so token sets and adjacency rows are disjoint and document
+    /// frequencies sum. Streaming-friendly: only one part need be resident.
+    pub fn absorb(&mut self, part: &QueryIndex) {
+        for (id, toks) in &part.node_tokens {
+            self.node_tokens.insert(id.clone(), toks.clone());
+        }
+        for (t, c) in &part.df {
+            *self.df.entry(t.clone()).or_insert(0) += c;
+        }
+        for (id, nbrs) in &part.adjacency {
+            self.adjacency
+                .entry(id.clone())
+                .or_default()
+                .extend(nbrs.iter().cloned());
+        }
+    }
+
+    /// Add cross-repo bridge pairs to the adjacency (both directions).
+    pub fn add_bridge_pairs(&mut self, bridge: &[(NodeId, NodeId)]) {
+        for (a, b) in bridge {
+            if a == b {
+                continue;
+            }
+            self.adjacency.entry(a.clone()).or_default().push(b.clone());
+            self.adjacency.entry(b.clone()).or_default().push(a.clone());
+        }
+    }
+
+    /// Normalize after the last [`absorb`](Self::absorb) /
+    /// [`add_bridge_pairs`](Self::add_bridge_pairs): sort+dedup adjacency and
+    /// recompute the IDF base and mean degree, exactly as
+    /// [`build`](Self::build) would on the union graph.
+    pub fn finalize_merge(&mut self) {
+        for v in self.adjacency.values_mut() {
+            v.sort();
+            v.dedup();
+        }
+        self.n = self.node_tokens.len().max(1) as f64;
+        self.avg_degree = if self.adjacency.is_empty() {
+            0.0
+        } else {
+            self.adjacency.values().map(|v| v.len()).sum::<usize>() as f64
+                / self.adjacency.len() as f64
+        };
+    }
+
+    /// Merge per-shard indexes into one global index, adding the cross-repo
+    /// `bridge` pairs to the adjacency. The result ranks identically to an
+    /// index built on the union graph (the global `df` is what keeps IDF
+    /// scores comparable across shards).
+    pub fn merge_with_bridge<'a>(
+        parts: impl IntoIterator<Item = &'a QueryIndex>,
+        bridge: &[(NodeId, NodeId)],
+    ) -> QueryIndex {
+        let mut m = QueryIndex::empty();
+        for p in parts {
+            m.absorb(p);
+        }
+        m.add_bridge_pairs(bridge);
+        m.finalize_merge();
+        m
+    }
+
+    /// The kg-free core of [`query_with_recency`](Self::query_with_recency):
+    /// IDF-score seeds and best-first-expand to `max_nodes`, returning ranked
+    /// node ids + scores. Callers that hold the graph(s) separately (the
+    /// federated per-shard server) collect result edges themselves and reuse
+    /// [`rank_result_edges`] for identical ordering.
+    pub fn rank(
+        &self,
+        query_text: &str,
+        max_nodes: usize,
+        mode: TraversalMode,
+        recency: Option<&Recency>,
+    ) -> RankedIds {
         let idf =
             |t: &str| ((self.n + 1.0) / (1.0 + *self.df.get(t).unwrap_or(&0) as f64)).ln() + 1.0;
 
@@ -472,11 +594,6 @@ impl QueryIndex {
 
         // Re-rank the included set by score descending (id tie-break) so the most
         // relevant nodes lead, regardless of the order the frontier settled them.
-        let score_of: HashMap<&NodeId, f64> = included
-            .iter()
-            .zip(scores.iter())
-            .map(|(n, s)| (n, *s))
-            .collect();
         let mut order: Vec<usize> = (0..included.len()).collect();
         order.sort_by(|&a, &b| {
             scores[b]
@@ -486,40 +603,51 @@ impl QueryIndex {
         let nodes: Vec<NodeId> = order.iter().map(|&i| included[i].clone()).collect();
         let scores: Vec<f64> = order.iter().map(|&i| scores[i]).collect();
 
-        let node_set: HashSet<&NodeId> = nodes.iter().collect();
-        let mut edges: Vec<EdgeRef> = kg
-            .edges()
-            .filter(|e| node_set.contains(&e.source) && node_set.contains(&e.target))
-            .map(|e| EdgeRef {
-                source: e.source.clone(),
-                target: e.target.clone(),
-                relation: e.relation.clone(),
-            })
-            .collect();
-        // Rank edges by the relevance of their weaker endpoint (descending), so
-        // signal edges lead; lexicographic order only breaks ties for determinism.
-        let edge_rank = |e: &EdgeRef| -> f64 {
-            let s = score_of.get(&e.source).copied().unwrap_or(0.0);
-            let t = score_of.get(&e.target).copied().unwrap_or(0.0);
-            s.min(t)
-        };
-        edges.sort_by(|a, b| {
-            edge_rank(b).total_cmp(&edge_rank(a)).then_with(|| {
-                (a.source.as_str(), a.target.as_str(), a.relation.as_str()).cmp(&(
-                    b.source.as_str(),
-                    b.target.as_str(),
-                    b.relation.as_str(),
-                ))
-            })
-        });
-
-        QueryResult {
+        RankedIds {
             seeds,
             nodes,
             scores,
-            edges,
         }
     }
+}
+
+/// The kg-free half of a [`QueryResult`]: ranked node ids + scores + the seeds
+/// that anchored the expansion. Produced by [`QueryIndex::rank`].
+pub struct RankedIds {
+    pub seeds: Vec<NodeId>,
+    pub nodes: Vec<NodeId>,
+    pub scores: Vec<f64>,
+}
+
+/// Rank result edges by the relevance of their weaker endpoint (descending),
+/// with lexicographic tie-breaks for determinism. Shared by the single-graph
+/// query path and the federated per-shard edge assembly so both order edges
+/// identically.
+pub fn rank_result_edges(
+    mut edges: Vec<EdgeRef>,
+    nodes: &[NodeId],
+    scores: &[f64],
+) -> Vec<EdgeRef> {
+    let score_of: HashMap<&NodeId, f64> = nodes
+        .iter()
+        .zip(scores.iter())
+        .map(|(n, s)| (n, *s))
+        .collect();
+    let edge_rank = |e: &EdgeRef| -> f64 {
+        let s = score_of.get(&e.source).copied().unwrap_or(0.0);
+        let t = score_of.get(&e.target).copied().unwrap_or(0.0);
+        s.min(t)
+    };
+    edges.sort_by(|a, b| {
+        edge_rank(b).total_cmp(&edge_rank(a)).then_with(|| {
+            (a.source.as_str(), a.target.as_str(), a.relation.as_str()).cmp(&(
+                b.source.as_str(),
+                b.target.as_str(),
+                b.relation.as_str(),
+            ))
+        })
+    });
+    edges
 }
 
 /// One entry on the best-first expansion frontier. `Ord` makes a `BinaryHeap`
@@ -1269,12 +1397,23 @@ pub fn affected_including_members(
 /// forecasts many changes against a static graph can build it once per graph load
 /// rather than per request. The relation set is fixed at build time; rebuild the
 /// index whenever the graph or the relation set changes.
+#[derive(Serialize, Deserialize)]
 pub struct ReverseImpactIndex {
     /// target -> [(source, relation)] over the chosen impact relations.
     rev: HashMap<NodeId, Vec<(NodeId, String)>>,
 }
 
 impl ReverseImpactIndex {
+    /// Serialize the reverse-impact adjacency to bytes for persistence.
+    pub fn to_bytes(&self) -> serde_json::Result<Vec<u8>> {
+        serde_json::to_vec(self)
+    }
+
+    /// Reconstruct from [`to_bytes`](Self::to_bytes) output (same-graph blob only).
+    pub fn from_bytes(bytes: &[u8]) -> serde_json::Result<Self> {
+        serde_json::from_slice(bytes)
+    }
+
     /// Build the reverse adjacency over `relations` (e.g.
     /// [`DEFAULT_AFFECTED_RELATIONS`]). Self-loops and edges whose relation is not
     /// in the set are skipped.
@@ -1463,6 +1602,67 @@ mod tests {
         assert!(!is_ownership_relation("calls"));
         assert!(!is_ownership_relation("imports"));
         assert!(!is_ownership_relation("implements"));
+    }
+
+    #[test]
+    fn merged_shard_indexes_rank_like_the_union() {
+        // Union: a,b in one repo; c,d in another; b->c is the cross-repo bridge.
+        // Single-token labels keep every f64 sum single-term, so scores compare
+        // exactly (no float-order slack).
+        let union = build(
+            &[("a", "alpha"), ("b", "beta"), ("c", "beta"), ("d", "delta")],
+            &[
+                ("a", "b", "calls"),
+                ("b", "c", "calls"),
+                ("c", "d", "calls"),
+            ],
+        );
+        let shard1 = build(&[("a", "alpha"), ("b", "beta")], &[("a", "b", "calls")]);
+        let shard2 = build(&[("c", "beta"), ("d", "delta")], &[("c", "d", "calls")]);
+        let u = QueryIndex::build(&union);
+        let s1 = QueryIndex::build(&shard1);
+        let s2 = QueryIndex::build(&shard2);
+        let m =
+            QueryIndex::merge_with_bridge([&s1, &s2], &[(NodeId("b".into()), NodeId("c".into()))]);
+        let ru = u.rank("beta", 10, TraversalMode::Bfs, None);
+        let rm = m.rank("beta", 10, TraversalMode::Bfs, None);
+        assert!(!ru.nodes.is_empty(), "fixture must rank something");
+        assert_eq!(rm.seeds, ru.seeds, "global df must make seeds identical");
+        assert_eq!(rm.nodes, ru.nodes, "bridge adjacency must drive expansion");
+        assert_eq!(rm.scores, ru.scores);
+    }
+
+    #[test]
+    fn query_index_round_trips_via_bytes() {
+        let kg = build(
+            &[
+                ("auth", "AuthService"),
+                ("login", "login"),
+                ("db", "Database"),
+            ],
+            &[("auth", "db", "calls"), ("login", "auth", "calls")],
+        );
+        let idx = QueryIndex::build(&kg);
+        let back = QueryIndex::from_bytes(&idx.to_bytes().unwrap()).unwrap();
+        // A deserialized index must produce identical query results.
+        let a = idx.query(&kg, "auth", 10, TraversalMode::Bfs);
+        let b = back.query(&kg, "auth", 10, TraversalMode::Bfs);
+        assert_eq!(a.seeds, b.seeds);
+        assert_eq!(a.nodes, b.nodes);
+    }
+
+    #[test]
+    fn reverse_impact_index_round_trips_via_bytes() {
+        let kg = build(
+            &[("a", "a"), ("b", "b"), ("c", "c")],
+            &[("a", "b", "calls"), ("b", "c", "calls")],
+        );
+        let idx = ReverseImpactIndex::build(&kg, DEFAULT_AFFECTED_RELATIONS);
+        let back = ReverseImpactIndex::from_bytes(&idx.to_bytes().unwrap()).unwrap();
+        let seeds = vec![NodeId("c".into())];
+        let a = idx.affected_multi(&kg, &seeds, 3);
+        let b = back.affected_multi(&kg, &seeds, 3);
+        assert_eq!(a.len(), b.len());
     }
 
     #[test]

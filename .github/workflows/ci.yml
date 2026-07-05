@@ -53,6 +53,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p synaptic --test mcp_e2e --all-features --locked
 
+  # The sharded redb store + json/redb backend parity, isolated on every OS so a
+  # store regression -- especially the Windows file-handling edges of the redb
+  # backend (atomic rename, RCU versioned files) -- fails on its own rather than
+  # hiding in the workspace suite.
+  store-backend:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p synaptic-store --all-features --locked
+      - run: cargo test -p synaptic --test store_cli --all-features --locked
+
   # Catch broken intra-doc links and doc-comment examples that the test/lint jobs
   # don't surface. Does not gate on the dependency graph (--no-deps).
   docs:

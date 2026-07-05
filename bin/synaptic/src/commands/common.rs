@@ -5,6 +5,254 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use synaptic_core::{GraphData, NodeId};
 use synaptic_graph::KnowledgeGraph;
+use synaptic_query::{QueryIndex, ReverseImpactIndex, DEFAULT_AFFECTED_RELATIONS};
+use synaptic_server::{PreparedIndexes, Server};
+use synaptic_store::{Scope, ShardStore, AFFECTED_INDEX_BLOB, QUERY_INDEX_BLOB};
+
+/// Which on-disk representation read commands load from. `Json` is today's
+/// single `graph.json`; `Redb` is the per-repo sharded store. Selected by the
+/// `SYNAPTIC_STORE` env var (default `json`) so every read command switches
+/// uniformly without a per-command flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoreBackend {
+    Json,
+    Redb,
+}
+
+/// Resolve the backend for a given graph + store location.
+///
+/// `SYNAPTIC_STORE=redb`/`json` forces a backend. Unset is **auto**: prefer the
+/// redb store, but only when it exists and is at least as fresh as `graph.json`
+/// (a store older than the graph would serve stale results). Otherwise fall back
+/// to json. So a graph.json-only user is unchanged, a user who ran `synaptic
+/// migrate` gets the store automatically, and a re-extract without re-migrate
+/// safely falls back to json rather than serving a stale store.
+pub(crate) fn resolve_backend(graph_path: &Path, store_dir: &Path) -> StoreBackend {
+    match std::env::var("SYNAPTIC_STORE").ok().as_deref() {
+        Some("redb") => StoreBackend::Redb,
+        Some("json") => StoreBackend::Json,
+        _ => {
+            if store_is_fresh(store_dir, graph_path) {
+                StoreBackend::Redb
+            } else {
+                StoreBackend::Json
+            }
+        }
+    }
+}
+
+/// True when a usable, non-stale store exists: its `manifest.json` is present and
+/// at least as new as `graph.json` (or `graph.json` is absent, making the store
+/// the only source).
+fn store_is_fresh(store_dir: &Path, graph_path: &Path) -> bool {
+    let Ok(store_meta) = std::fs::metadata(store_dir.join("manifest.json")) else {
+        return false;
+    };
+    match std::fs::metadata(graph_path) {
+        // No graph.json -> the store is the only source; use it.
+        Err(_) => true,
+        Ok(graph_meta) => match (store_meta.modified(), graph_meta.modified()) {
+            (Ok(s), Ok(g)) => s >= g,
+            _ => false,
+        },
+    }
+}
+
+/// Whether unscoped redb queries should traverse the cross-repo bridge. Off by
+/// default (per-repo isolation); `SYNAPTIC_CROSS_REPO=1` (or true/yes) opts in,
+/// recovering the unified cross-repo view federated users have today.
+pub(crate) fn cross_repo_enabled() -> bool {
+    std::env::var("SYNAPTIC_CROSS_REPO")
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+/// The shard store directory for a given `graph.json` path: a `store/` sibling
+/// of the graph (i.e. `synaptic-out/store`).
+pub(crate) fn store_dir_for(graph_path: &Path) -> PathBuf {
+    graph_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("store")
+}
+
+/// Load `GraphData` for a scope from an explicit backend. The pure core of the
+/// read path: `Json` parses `graph.json` (optionally repo-filtered, exactly as
+/// today); `Redb` materializes the scope from the shard store.
+pub(crate) fn load_graph_data_backend(
+    backend: StoreBackend,
+    graph_path: &Path,
+    store_dir: &Path,
+    repo: Option<&str>,
+) -> Result<GraphData> {
+    match backend {
+        StoreBackend::Json => {
+            let text = fs::read_to_string(graph_path).with_context(|| {
+                format!(
+                    "reading {} (run `synaptic extract` first?)",
+                    graph_path.display()
+                )
+            })?;
+            let gd: GraphData = serde_json::from_str(&text).context("parsing graph.json")?;
+            match repo {
+                Some(r) => Ok(synaptic_workspace::repo_scope::filter_repo(&gd, r)),
+                None => Ok(gd),
+            }
+        }
+        StoreBackend::Redb => {
+            let store = ShardStore::open(store_dir)
+                .with_context(|| format!("opening shard store at {}", store_dir.display()))?;
+            // Per-repo isolation is the default; an unscoped query grafts the
+            // cross-repo bridge only when SYNAPTIC_CROSS_REPO opts in.
+            let kg = match repo {
+                Some(r) => store
+                    .export_graph(&Scope::Repo(r.to_string()))
+                    .with_context(|| format!("materializing repo {r:?} from the shard store"))?,
+                None if cross_repo_enabled() => store
+                    .export_cross_repo()
+                    .context("materializing all repos + cross-repo bridge")?,
+                None => {
+                    // Federated store queried in isolation: tell the user the
+                    // cross-repo edges exist and how to include them (stderr, so
+                    // it never pollutes machine-read stdout).
+                    let bridge = store.bridge_edge_count();
+                    if bridge > 0 {
+                        eprintln!(
+                            "[synaptic] note: {bridge} cross-repo edge(s) not traversed \
+                             (per-repo isolation); set SYNAPTIC_CROSS_REPO=1 to include them"
+                        );
+                    }
+                    store
+                        .export_graph(&Scope::All)
+                        .context("materializing all repos from the shard store")?
+                }
+            };
+            Ok(kg.to_graph_data())
+        }
+    }
+}
+
+/// Load `GraphData` for a scope, resolving the backend (env override or auto).
+pub(crate) fn load_graph_data(graph_path: &Path, repo: Option<&str>) -> Result<GraphData> {
+    let store_dir = store_dir_for(graph_path);
+    load_graph_data_backend(
+        resolve_backend(graph_path, &store_dir),
+        graph_path,
+        &store_dir,
+        repo,
+    )
+}
+
+/// Build (or incrementally update) the sharded redb store from a graph, then
+/// pre-build its per-shard indexes. Shared by `synaptic migrate` and the
+/// `--store` build flag so the two never drift.
+pub(crate) fn write_store(
+    gd: &GraphData,
+    store_dir: &Path,
+) -> Result<synaptic_store::migrate::MigrateReport> {
+    let mut store = ShardStore::open(store_dir)
+        .with_context(|| format!("opening shard store at {}", store_dir.display()))?;
+    let report = synaptic_store::migrate::migrate_into(&mut store, gd).context("writing shards")?;
+    persist_shard_indexes(&store).context("persisting shard indexes")?;
+    Ok(report)
+}
+
+/// Build + persist each shard's derived indexes (query + reverse-impact) so a
+/// later `serve` deserializes them instead of rebuilding (H1). Runs at migrate
+/// time, where the cost is paid once rather than on every server start.
+pub(crate) fn persist_shard_indexes(store: &ShardStore) -> Result<()> {
+    let tags: Vec<(String, String)> = store
+        .list_shards()
+        .iter()
+        .map(|e| (e.tag.clone(), e.source_hash.clone()))
+        .collect();
+    for (tag, hash) in tags {
+        // Incremental: indexes already persisted for this exact content are reused.
+        if store
+            .get_index_blob(&tag, QUERY_INDEX_BLOB, &hash)?
+            .is_some()
+            && store
+                .get_index_blob(&tag, AFFECTED_INDEX_BLOB, &hash)?
+                .is_some()
+        {
+            continue;
+        }
+        let kg = store.materialize(&tag)?;
+        let qi = QueryIndex::build(&kg)
+            .to_bytes()
+            .context("serializing query index")?;
+        let ai = ReverseImpactIndex::build(&kg, DEFAULT_AFFECTED_RELATIONS)
+            .to_bytes()
+            .context("serializing affected index")?;
+        store.put_index_blob(&tag, QUERY_INDEX_BLOB, &hash, &qi)?;
+        store.put_index_blob(&tag, AFFECTED_INDEX_BLOB, &hash, &ai)?;
+    }
+    Ok(())
+}
+
+/// Construct the MCP server honoring the `SYNAPTIC_STORE` backend. The redb path
+/// loads a single-repo store's persisted indexes (building + persisting any that
+/// are missing), so startup deserializes instead of rebuilding.
+pub(crate) fn build_server(path: &Path) -> Result<Server> {
+    let store_dir = store_dir_for(path);
+    match resolve_backend(path, &store_dir) {
+        StoreBackend::Json => {
+            let gd = load_graph_data_backend(StoreBackend::Json, path, &store_dir, None)?;
+            Ok(Server::from_graph_data(gd, Some(path.to_path_buf())))
+        }
+        StoreBackend::Redb => {
+            let store = ShardStore::open(&store_dir)
+                .with_context(|| format!("opening shard store at {}", store_dir.display()))?;
+            // Federated (multi-shard) store: serve shard-aware. Shards load on
+            // demand behind the LRU and every tool fans out, so the union is
+            // never materialized in RAM.
+            if store.list_shards().len() > 1 {
+                return Ok(Server::from_shard_store(store, Some(path.to_path_buf())));
+            }
+            let gd = load_graph_data_backend(StoreBackend::Redb, path, &store_dir, None)?;
+
+            // Single-repo store: load (or rebuild + persist) that shard's indexes.
+            // Federated (multi-shard) serve materializes the union and rebuilds.
+            let single = match store.list_shards() {
+                [only] => Some((only.tag.clone(), only.source_hash.clone())),
+                _ => None,
+            };
+            let prepared = match &single {
+                Some((tag, hash)) => PreparedIndexes {
+                    query_index: store
+                        .get_index_blob(tag, QUERY_INDEX_BLOB, hash)?
+                        .and_then(|b| QueryIndex::from_bytes(&b).ok()),
+                    affected_index: store
+                        .get_index_blob(tag, AFFECTED_INDEX_BLOB, hash)?
+                        .and_then(|b| ReverseImpactIndex::from_bytes(&b).ok()),
+                },
+                None => PreparedIndexes::default(),
+            };
+            let need_q = prepared.query_index.is_none();
+            let need_a = prepared.affected_index.is_none();
+            let server = Server::from_graph_data_with(gd, Some(path.to_path_buf()), prepared);
+            if let Some((tag, hash)) = single {
+                if need_q {
+                    store.put_index_blob(
+                        &tag,
+                        QUERY_INDEX_BLOB,
+                        &hash,
+                        &server.query_index().to_bytes()?,
+                    )?;
+                }
+                if need_a {
+                    store.put_index_blob(
+                        &tag,
+                        AFFECTED_INDEX_BLOB,
+                        &hash,
+                        &server.affected_index().to_bytes()?,
+                    )?;
+                }
+            }
+            Ok(server)
+        }
+    }
+}
 
 /// Run a single-file writer against `path` and report it.
 pub(crate) fn write_file(
@@ -46,23 +294,19 @@ pub(crate) fn warn_if_over_caps(path: &Path, node_count: usize) {
 }
 
 pub(crate) fn load_graph(path: &Path) -> Result<KnowledgeGraph> {
-    let text = fs::read_to_string(path)
-        .with_context(|| format!("reading {} (run `synaptic extract` first?)", path.display()))?;
-    let gd: GraphData = serde_json::from_str(&text).context("parsing graph.json")?;
-    Ok(KnowledgeGraph::from_graph_data(gd))
+    Ok(KnowledgeGraph::from_graph_data(load_graph_data(
+        path, None,
+    )?))
 }
 
 /// Load a graph, optionally scoped to one federated member (`--repo`). Scoping
-/// drops nodes from other repos + the cross-repo edges that span them.
+/// drops nodes from other repos + the cross-repo edges that span them. Honors
+/// the `SYNAPTIC_STORE` backend: under `redb` a `--repo` scope materializes just
+/// that shard.
 pub(crate) fn load_scoped_graph(path: &Path, repo: Option<&str>) -> Result<KnowledgeGraph> {
-    let kg = load_graph(path)?;
-    match repo {
-        Some(r) => {
-            let scoped = synaptic_workspace::repo_scope::filter_repo(&kg.to_graph_data(), r);
-            Ok(KnowledgeGraph::from_graph_data(scoped))
-        }
-        None => Ok(kg),
-    }
+    Ok(KnowledgeGraph::from_graph_data(load_graph_data(
+        path, repo,
+    )?))
 }
 
 /// Resolve a user-supplied name/id to a single node, or a human-readable error
@@ -109,4 +353,86 @@ pub(crate) fn label_or_id(kg: &KnowledgeGraph, id: &NodeId) -> String {
     kg.node(id)
         .map(|n| n.label.clone())
         .unwrap_or_else(|| id.0.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Map;
+    use synaptic_core::{Confidence, Edge, FileType, Node};
+
+    fn node(id: &str) -> Node {
+        Node {
+            id: NodeId(id.into()),
+            label: id.into(),
+            file_type: FileType::Code,
+            source_file: format!("src/{id}.rs"),
+            source_location: None,
+            community: None,
+            repo: None,
+            extra: Map::new(),
+        }
+    }
+
+    fn write_sample_graph(dir: &Path) -> PathBuf {
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![node("a"), node("b"), node("c")],
+            links: vec![Edge {
+                source: NodeId("a".into()),
+                target: NodeId("b".into()),
+                relation: "calls".into(),
+                confidence: Confidence::Extracted,
+                source_file: "src/a.rs".into(),
+                source_location: None,
+                confidence_score: None,
+                weight: 1.0,
+                context: None,
+                cross_repo: false,
+                extra: Map::new(),
+            }],
+            hyperedges: vec![],
+            built_at_commit: Some("c0ffee".into()),
+        };
+        let kg = KnowledgeGraph::from_graph_data(gd);
+        let path = dir.join("graph.json");
+        synaptic_output::to_json(&kg, &path).unwrap();
+        path
+    }
+
+    #[test]
+    fn json_and_redb_backends_load_equal_graphs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph_path = write_sample_graph(tmp.path());
+        let store_dir = tmp.path().join("store");
+
+        // migrate the graph.json into the shard store
+        let gd: GraphData =
+            serde_json::from_str(&fs::read_to_string(&graph_path).unwrap()).unwrap();
+        let mut store = ShardStore::open(&store_dir).unwrap();
+        synaptic_store::migrate::migrate_into(&mut store, &gd).unwrap();
+
+        let j = load_graph_data_backend(StoreBackend::Json, &graph_path, &store_dir, None).unwrap();
+        let r = load_graph_data_backend(StoreBackend::Redb, &graph_path, &store_dir, None).unwrap();
+
+        // Same materialized graph from either backend.
+        let kj = KnowledgeGraph::from_graph_data(j);
+        let kr = KnowledgeGraph::from_graph_data(r);
+        assert_eq!(kj.node_count(), kr.node_count());
+        assert_eq!(kj.edge_count(), kr.edge_count());
+
+        let dump = |kg: &KnowledgeGraph| {
+            let mut ns: Vec<String> = kg.nodes().map(|n| n.id.0.clone()).collect();
+            ns.sort();
+            let mut es: Vec<(String, String, String)> = kg
+                .edges()
+                .map(|e| (e.source.0.clone(), e.target.0.clone(), e.relation.clone()))
+                .collect();
+            es.sort();
+            (ns, es)
+        };
+        assert_eq!(dump(&kj), dump(&kr));
+    }
 }

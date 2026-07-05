@@ -405,6 +405,19 @@ single `--source-root` already resolves the `tag/...` paths. When source still
 cannot be read, `get_source` names the configured root and says whether the path
 was missing or outside it, rather than a bare "not available".
 
+## The sharded store and scale
+
+`workspace build --store` also writes each member into its own redb shard
+under `synaptic-out/store/` (plus a `bridge` pseudo-shard holding the
+cross-repo edges). A federated `serve` over the store is shard-aware — see
+[MCP Server](MCP-Server#serving-a-federated-store-shard-aware) — which removes
+the federation-aggregate size ceiling: per-shard safety guards
+(`SYNAPTIC_MAX_SHARD_MB` / `SYNAPTIC_MAX_SHARD_NODES`, default 2 GiB / 5M
+nodes per repo) replace the single-file 50 MiB / 100k caps, and serve memory
+is bounded by the shard LRU rather than the sum of all members. `graph.json`
+remains the interchange artifact: `synaptic migrate` builds a store from it
+and the store exports back byte-identically.
+
 ## `merge-graphs`
 
 Composes several existing `graph.json` files into one namespaced graph. Unlike

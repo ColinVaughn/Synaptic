@@ -72,6 +72,11 @@ OpenAI, DeepSeek, Azure OpenAI, Bedrock, Ollama. Set `SYNAPTIC_BACKEND` to force
 | Variable | Purpose |
 |---|---|
 | `HOME` / `USERPROFILE` | Locate the global store `~/.synaptic` (falls back to `.synaptic` in the working directory) |
+| `SYNAPTIC_STORE` | Graph backend: `redb` (per-repo sharded store under `synaptic-out/store/`), `json`, or unset = auto (prefer a store that is at least as fresh as `graph.json`) |
+| `SYNAPTIC_CROSS_REPO` | Opt an unscoped federated query into traversing the cross-repo bridge edges (default: per-repo isolation) |
+| `SYNAPTIC_SHARD_LRU` | Max shards kept materialized in RAM by a federated serve (default 8); bounds the working set |
+| `SYNAPTIC_MAX_SHARD_MB` | Byte cap (MiB) per store shard (default 2048; `0` disables). A DoS guard per repo, not an aggregate cap |
+| `SYNAPTIC_MAX_SHARD_NODES` | Node cap per store shard (default 5000000; `0` disables) |
 | `SYNAPTIC_MAX_GRAPH_MB` | Byte cap (in MiB) on `graph.json`/`export-surface.json` files loaded by the merge driver, federation, the global store, and remote subgraph fetches. Default 50; `0` disables the cap. `extract`/`update` warn when they write a file over the cap |
 | `SYNAPTIC_MAX_NODES` | Node cap on loaded or merged graphs on the same paths. Default 100000; `0` disables the cap |
 | `SYNAPTIC_SKIP_HOOK` | Skip the installed git hook for one invocation (`1`) |

@@ -1,10 +1,10 @@
 //! `serve` command(s) split from main.rs.
 
-use crate::commands::common::default_graph_path;
+use crate::commands::common::{build_server, default_graph_path};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use synaptic_server::{serve_http, Server};
+use synaptic_server::serve_http;
 
 pub(crate) fn run_serve(
     graph: Option<PathBuf>,
@@ -16,7 +16,9 @@ pub(crate) fn run_serve(
     watch: bool,
 ) -> Result<()> {
     let path = default_graph_path(graph);
-    let mut server = Server::load(path.clone())
+    // Honors SYNAPTIC_STORE: json parses graph.json (today); redb materializes
+    // from the shard store and loads persisted indexes. Both serve the same graph.
+    let mut server = build_server(&path)
         .with_context(|| format!("loading {} (run `synaptic extract` first?)", path.display()))?;
     let root = source_root.unwrap_or_else(|| default_source_root(&path));
     server = server

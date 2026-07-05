@@ -52,6 +52,34 @@ pub(crate) fn write_federated(
     Ok(())
 }
 
+/// When `--store` is set, build the sharded redb store from the federated graph
+/// so read commands can use it without a separate `synaptic migrate` step.
+fn maybe_write_store(
+    store: bool,
+    build: &synaptic_workspace::workspace_build::WorkspaceBuild,
+    root: &Path,
+) -> Result<()> {
+    if !store {
+        return Ok(());
+    }
+    let out_dir = root.join("synaptic-out");
+    let report = crate::commands::common::write_store(
+        &build.federated.to_graph_data(),
+        &out_dir.join("store"),
+    )?;
+    println!(
+        "Wrote {}/store ({} shard(s){})",
+        out_dir.display(),
+        report.shard_tags.len(),
+        if report.bridge_edges > 0 {
+            format!(", {} bridge edge(s)", report.bridge_edges)
+        } else {
+            String::new()
+        }
+    );
+    Ok(())
+}
+
 pub(crate) fn print_build_summary(build: &synaptic_workspace::workspace_build::WorkspaceBuild) {
     println!(
         "Federated graph: {} nodes · {} edges · {} communities · {} member(s)",
@@ -197,7 +225,11 @@ pub(crate) fn run_workspace(action: WorkspaceAction) -> Result<()> {
             write_manifest(&root, &manifest).map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(())
         }
-        WorkspaceAction::Build { changed, directed } => {
+        WorkspaceAction::Build {
+            changed,
+            directed,
+            store,
+        } => {
             let opts = WorkspaceBuildOptions {
                 directed,
                 force: false,
@@ -214,6 +246,7 @@ pub(crate) fn run_workspace(action: WorkspaceAction) -> Result<()> {
                     return Ok(());
                 }
                 write_federated(&build, &root)?;
+                maybe_write_store(store, &build, &root)?;
                 // Persist state ONLY after artifacts are durably written.
                 if let Some(state) = &outcome.new_state {
                     synaptic_workspace::state::save_state(&root, state)
@@ -230,6 +263,7 @@ pub(crate) fn run_workspace(action: WorkspaceAction) -> Result<()> {
                     return Ok(());
                 }
                 write_federated(&build, &root)?;
+                maybe_write_store(store, &build, &root)?;
                 synaptic_workspace::state::record_state(&root, &build)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 print_build_summary(&build);
