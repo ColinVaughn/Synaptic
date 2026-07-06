@@ -89,7 +89,7 @@ tree-sitter-fortran = "0.6"
 petgraph = "0.8"
 # Pure-Rust embedded ACID KV (mmap, copy-on-write B-tree, MVCC snapshot reads).
 # Backs the per-repo on-disk shard store; no C/C++ toolchain, clean on Windows.
-redb = "2"
+redb = "4"
 # msgpack codec for shard node/edge/index values. Already used by the AST cache
 # (synaptic-extract `cache-binary`); reused here so we add no new codec.
 rmp-serde = "1"
