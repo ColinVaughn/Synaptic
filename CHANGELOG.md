@@ -8,7 +8,14 @@ All notable changes to Synaptic are documented here. The format is based on
 > **CodeGraph**, and reference the old `codegraph` command and crate names. They
 > are preserved verbatim as historical record.
 
-## [Unreleased]
+## [0.6.1] - 2026-07-05
+
+> **Upgrade note:** `extract` and `workspace build` now write the sharded
+> store (`synaptic-out/store/`) by default — pass `--no-store` for the old
+> graph.json-only behavior. Existing v1 (redb) stores stay readable; the
+> next `extract`/`update` rewrites changed shards in the new 15x-smaller
+> v2 format, after which older synaptic binaries will refuse that store
+> (graph.json workflows are unaffected either way).
 
 ### Changed
 - **Shard files are 15x smaller and read faster (store format v2).** A shard
