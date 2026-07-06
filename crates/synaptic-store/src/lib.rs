@@ -2,8 +2,8 @@
 //!
 //! Replaces the load-everything-into-one-petgraph model with a per-repo shard
 //! store: one flat container file per repository under `synaptic-out/store/`
-//! (deflate-compressed chunks behind a msgpack header; v1 redb shards remain
-//! readable), materialized into the existing
+//! (deflate-compressed chunks behind a msgpack header; legacy v1 redb shards
+//! are rejected with a rebuild hint), materialized into the existing
 //! [`synaptic_graph::KnowledgeGraph`] one shard at a time. See
 //! `docs/superpowers/specs/2026-06-23-sharded-ondisk-graph-store-design.md`.
 
@@ -88,9 +88,11 @@ pub enum StoreError {
     /// A shard tag could not be mapped to a safe on-disk name.
     #[error("invalid shard tag: {0:?}")]
     BadTag(String),
-    /// An error from the underlying redb engine.
-    #[error("redb: {0}")]
-    Redb(String),
+    /// A shard file this build cannot read: the legacy v1 (redb) format or
+    /// not a shard at all. Rebuilding the store rewrites it in the current
+    /// format.
+    #[error("{0}")]
+    UnreadableShard(String),
     /// A filesystem error.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),

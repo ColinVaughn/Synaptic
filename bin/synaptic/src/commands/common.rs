@@ -10,30 +10,30 @@ use synaptic_server::{PreparedIndexes, Server};
 use synaptic_store::{Scope, ShardStore, AFFECTED_INDEX_BLOB, QUERY_INDEX_BLOB};
 
 /// Which on-disk representation read commands load from. `Json` is today's
-/// single `graph.json`; `Redb` is the per-repo sharded store. Selected by the
+/// single `graph.json`; `Sharded` is the per-repo shard store. Selected by the
 /// `SYNAPTIC_STORE` env var (default `json`) so every read command switches
 /// uniformly without a per-command flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StoreBackend {
     Json,
-    Redb,
+    Sharded,
 }
 
 /// Resolve the backend for a given graph + store location.
 ///
 /// `SYNAPTIC_STORE=redb`/`json` forces a backend. Unset is **auto**: prefer the
-/// redb store, but only when it exists and is at least as fresh as `graph.json`
+/// shard store, but only when it exists and is at least as fresh as `graph.json`
 /// (a store older than the graph would serve stale results). Otherwise fall back
 /// to json. So a graph.json-only user is unchanged, a user who ran `synaptic
 /// migrate` gets the store automatically, and a re-extract without re-migrate
 /// safely falls back to json rather than serving a stale store.
 pub(crate) fn resolve_backend(graph_path: &Path, store_dir: &Path) -> StoreBackend {
     match std::env::var("SYNAPTIC_STORE").ok().as_deref() {
-        Some("redb") => StoreBackend::Redb,
+        Some("redb") => StoreBackend::Sharded,
         Some("json") => StoreBackend::Json,
         _ => {
             if store_is_fresh(store_dir, graph_path) {
-                StoreBackend::Redb
+                StoreBackend::Sharded
             } else {
                 StoreBackend::Json
             }
@@ -69,7 +69,7 @@ pub(crate) fn store_dir_for(graph_path: &Path) -> PathBuf {
 
 /// Load `GraphData` for a scope from an explicit backend. The pure core of the
 /// read path: `Json` parses `graph.json` (optionally repo-filtered, exactly as
-/// today); `Redb` materializes the scope from the shard store.
+/// today); `Sharded` materializes the scope from the shard store.
 pub(crate) fn load_graph_data_backend(
     backend: StoreBackend,
     graph_path: &Path,
@@ -90,7 +90,7 @@ pub(crate) fn load_graph_data_backend(
                 None => Ok(gd),
             }
         }
-        StoreBackend::Redb => {
+        StoreBackend::Sharded => {
             let store = ShardStore::open(store_dir)
                 .with_context(|| format!("opening shard store at {}", store_dir.display()))?;
             // An unscoped query grafts the cross-repo bridge by default when the
@@ -141,7 +141,7 @@ pub(crate) fn load_graph_data(graph_path: &Path, repo: Option<&str>) -> Result<G
     )
 }
 
-/// Build (or incrementally update) the sharded redb store from a graph, then
+/// Build (or incrementally update) the sharded on-disk store from a graph, then
 /// pre-build its per-shard indexes. Shared by `synaptic migrate` and the
 /// `--store` build flag so the two never drift.
 pub(crate) fn write_store(
@@ -215,7 +215,7 @@ pub(crate) fn persist_shard_indexes(store: &ShardStore) -> Result<()> {
     Ok(())
 }
 
-/// Construct the MCP server honoring the `SYNAPTIC_STORE` backend. The redb path
+/// Construct the MCP server honoring the `SYNAPTIC_STORE` backend. The sharded path
 /// loads a single-repo store's persisted indexes (building + persisting any that
 /// are missing), so startup deserializes instead of rebuilding.
 pub(crate) fn build_server(path: &Path) -> Result<Server> {
@@ -225,7 +225,7 @@ pub(crate) fn build_server(path: &Path) -> Result<Server> {
             let gd = load_graph_data_backend(StoreBackend::Json, path, &store_dir, None)?;
             Ok(Server::from_graph_data(gd, Some(path.to_path_buf())))
         }
-        StoreBackend::Redb => {
+        StoreBackend::Sharded => {
             let store = ShardStore::open(&store_dir)
                 .with_context(|| format!("opening shard store at {}", store_dir.display()))?;
             // Federated (multi-shard) store: serve shard-aware. Shards load on
@@ -234,7 +234,7 @@ pub(crate) fn build_server(path: &Path) -> Result<Server> {
             if store.list_shards().len() > 1 {
                 return Ok(Server::from_shard_store(store, Some(path.to_path_buf())));
             }
-            let gd = load_graph_data_backend(StoreBackend::Redb, path, &store_dir, None)?;
+            let gd = load_graph_data_backend(StoreBackend::Sharded, path, &store_dir, None)?;
 
             // Single-repo store: load (or rebuild + persist) that shard's indexes.
             // Federated (multi-shard) serve materializes the union and rebuilds.
@@ -428,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn json_and_redb_backends_load_equal_graphs() {
+    fn json_and_sharded_backends_load_equal_graphs() {
         let tmp = tempfile::tempdir().unwrap();
         let graph_path = write_sample_graph(tmp.path());
         let store_dir = tmp.path().join("store");
@@ -440,7 +440,8 @@ mod tests {
         synaptic_store::migrate::migrate_into(&mut store, &gd).unwrap();
 
         let j = load_graph_data_backend(StoreBackend::Json, &graph_path, &store_dir, None).unwrap();
-        let r = load_graph_data_backend(StoreBackend::Redb, &graph_path, &store_dir, None).unwrap();
+        let r =
+            load_graph_data_backend(StoreBackend::Sharded, &graph_path, &store_dir, None).unwrap();
 
         // Same materialized graph from either backend.
         let kj = KnowledgeGraph::from_graph_data(j);

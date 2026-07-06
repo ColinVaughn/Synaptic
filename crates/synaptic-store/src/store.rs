@@ -1,10 +1,11 @@
 //! `ShardStore`: the per-repo shard collection rooted at a directory.
 //!
 //! Each shard is one flat container file named `<tag>.<hash>.shard` (older
-//! stores hold v1 `.redb` files, still readable); the manifest records
+//! stores hold v1 `.redb` files, no longer readable; migration rewrites
+//! them); the manifest records
 //! which file is current. Writing a new version creates a new file and flips the
 //! manifest (RCU), then best-effort deletes the old file. Reads materialize a
-//! shard fully into RAM and drop the redb handle, so no long-lived handle blocks
+//! shard fully into RAM and drop the file handle, so no long-lived handle blocks
 //! a later rewrite (the Windows replace-open-file pitfall).
 
 use std::path::{Path, PathBuf};
@@ -335,6 +336,15 @@ impl ShardStore {
         source_hash: &str,
     ) -> Result<bool, StoreError> {
         shard::has_index_blob(&self.shard_path(tag)?, name, source_hash)
+    }
+
+    /// Whether `tag`'s shard file is in the current flat format. A legacy v1
+    /// (redb) file must be rewritten even when its content hash matches the
+    /// manifest, since this build cannot read it.
+    pub(crate) fn shard_file_is_flat(&self, tag: &str) -> bool {
+        self.shard_path(tag)
+            .map(|p| shard::is_flat(&p))
+            .unwrap_or(false)
     }
 
     fn shard_path(&self, tag: &str) -> Result<PathBuf, StoreError> {

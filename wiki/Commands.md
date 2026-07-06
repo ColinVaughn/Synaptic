@@ -57,9 +57,9 @@ Arguments and flags:
 | `--wiki` | off | Also write a Markdown wiki under `synaptic-out/wiki/`. |
 | `--semantic` | off | Run the LLM semantic pass over documents/papers and enable the LLM dedup tiebreaker. Requires an API key in the environment (for example `OPENAI_API_KEY`). Makes paid API calls. |
 | `--no-columns` | off | Skip SQL column and index nodes. Smaller `graph.json` on column-heavy schemas, at the cost of column-level SQL audit rules. |
-| `--no-store` | off | Skip the sharded redb store (`synaptic-out/store/`); write `graph.json` only. The store is built by default and is what shard-aware serving reads — see [MCP Server](MCP-Server#serving-a-federated-store-shard-aware). |
+| `--no-store` | off | Skip the sharded store (`synaptic-out/store/`); write `graph.json` only. The store is built by default and is what shard-aware serving reads — see [MCP Server](MCP-Server#serving-a-federated-store-shard-aware). |
 
-The default run is fully offline and needs no API key. It always writes `graph.json`, `graph.html`, `GRAPH_REPORT.md`, `graph.graphml`, `graph.cypher`, `graph.dot`, `callflow.html`, `tree.html`, `graph.svg`, and `graph-3d.html` into `synaptic-out/`, plus the sharded redb store under `synaptic-out/store/` (skipped with `--no-store`; the store dir writes its own `.gitignore` so shards never ride into a commit). With `--obsidian` and `--wiki` it adds the `obsidian/` and `wiki/` directories. Markdown heading structure is always extracted; the LLM concept pass runs only with `--semantic`. `synaptic update` keeps both `graph.json` and the store fresh incrementally.
+The default run is fully offline and needs no API key. It always writes `graph.json`, `graph.html`, `GRAPH_REPORT.md`, `graph.graphml`, `graph.cypher`, `graph.dot`, `callflow.html`, `tree.html`, `graph.svg`, and `graph-3d.html` into `synaptic-out/`, plus the sharded store under `synaptic-out/store/` (skipped with `--no-store`; the store dir writes its own `.gitignore` so shards never ride into a commit). With `--obsidian` and `--wiki` it adds the `obsidian/` and `wiki/` directories. Markdown heading structure is always extracted; the LLM concept pass runs only with `--semantic`. `synaptic update` keeps both `graph.json` and the store fresh incrementally.
 
 Example:
 

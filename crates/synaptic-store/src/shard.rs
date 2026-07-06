@@ -9,23 +9,24 @@
 //! read back whole or by blob, so a B-tree bought nothing and cost plenty --
 //! on a real repo half the file was redb page overhead, an empty database
 //! costs ~1.5 MiB, growth steps double the file, and `compact()` *grew* small
-//! files. v1 shards (redb, one raw msgpack record per row) remain readable;
-//! any rewrite produces v2.
+//! files. v1 shards (redb, one raw msgpack record per row) are no longer
+//! readable: redb 3.0 dropped the file format redb 2.x wrote, so no current
+//! redb can open them, and the dependency went with the read path. A v1 file
+//! is recognized by redb's magic and rejected with a rebuild hint -- the store
+//! is derived data that `synaptic extract` regenerates in one pass.
 
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::Path;
 
-use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use synaptic_core::{GraphData, Hyperedge};
 use synaptic_graph::KnowledgeGraph;
 
 use crate::{codec, StoreError};
 
-/// On-disk schema version. v1 = redb, one msgpack record per row. v2 = flat
-/// container with deflate-compressed chunks. Readers dispatch on the file's
-/// magic/meta, so old shards stay readable; writes always produce the current
-/// version.
+/// On-disk schema version. v1 = redb, one msgpack record per row (no longer
+/// readable; detected and rejected with a rebuild hint). v2 = flat container
+/// with deflate-compressed chunks. Writes always produce the current version.
 pub const SCHEMA_VERSION: u32 = 2;
 
 /// Records per v2 chunk. Large enough to amortize per-chunk cost and give
@@ -35,22 +36,8 @@ const CHUNK: usize = 1024;
 /// Leading magic of a v2 flat shard file.
 const MAGIC: &[u8; 8] = b"SYNSHRD2";
 
-/// v1 redb tables (read path only).
-const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
-const NODES: TableDefinition<u64, &[u8]> = TableDefinition::new("nodes");
-const LINKS: TableDefinition<u64, &[u8]> = TableDefinition::new("links");
-const INDEX_BLOBS: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("index_blobs");
-const META_KEY: &str = "meta";
-
-/// Graph-level scalars stored in the v1 meta row.
-#[derive(Debug, Serialize, Deserialize)]
-struct ShardMeta {
-    schema_version: u32,
-    directed: bool,
-    multigraph: bool,
-    built_at_commit: Option<String>,
-    hyperedges: Vec<Hyperedge>,
-}
+/// Leading magic of a v1 redb shard file (redb's own file header).
+const V1_MAGIC: &[u8; 9] = &[b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
 
 /// v2 header: graph scalars plus the container's table of contents. Sections
 /// follow the header in this order: node chunks, link chunks, blobs; each
@@ -75,8 +62,33 @@ struct FlatBlob {
     len: u64,
 }
 
-fn re<E: std::fmt::Display>(e: E) -> StoreError {
-    StoreError::Redb(e.to_string())
+/// Error for a shard file that is not a flat container. A legacy v1 (redb)
+/// file gets a rebuild hint; anything else is called out as unrecognized.
+fn unreadable(path: &Path) -> StoreError {
+    let mut head = [0u8; 9];
+    let is_v1 = std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .map(|()| &head == V1_MAGIC)
+        .unwrap_or(false);
+    if is_v1 {
+        StoreError::UnreadableShard(format!(
+            "shard {} is in the legacy v1 (redb) format this build no longer reads; re-run `synaptic extract` to rebuild the store",
+            path.display()
+        ))
+    } else {
+        StoreError::UnreadableShard(format!("{} is not a recognized shard file", path.display()))
+    }
+}
+
+/// Whether the file at `path` is a v2 flat shard (leading-magic probe only).
+/// Migration uses this to force a rewrite of legacy files whose content hash
+/// still matches the manifest.
+pub(crate) fn is_flat(path: &Path) -> bool {
+    let mut m = [0u8; 8];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut m))
+        .map(|()| &m == MAGIC)
+        .unwrap_or(false)
 }
 
 fn newer_version_err(v: u32) -> StoreError {
@@ -148,7 +160,7 @@ fn write_flat(path: &Path, header: &FlatHeader, body: &[u8]) -> Result<(), Store
 }
 
 /// Read a v2 file's header plus the absolute offset where its body starts.
-/// Returns `None` when the file is not a flat shard (v1 redb).
+/// Returns `None` when the file is not a flat shard (legacy v1 or foreign).
 fn read_flat_header(f: &mut std::fs::File) -> Result<Option<(FlatHeader, u64)>, StoreError> {
     let mut magic = [0u8; 8];
     match f.read_exact(&mut magic) {
@@ -199,45 +211,7 @@ pub fn read_graph_data(path: &Path) -> Result<GraphData, StoreError> {
         });
     }
     drop(f);
-    read_graph_data_v1(path)
-}
-
-/// v1 (redb) read path: one msgpack record per row, iterated in key order.
-fn read_graph_data_v1(path: &Path) -> Result<GraphData, StoreError> {
-    let db = Database::open(path).map_err(re)?;
-    let txn = db.begin_read().map_err(re)?;
-
-    let meta_t = txn.open_table(META).map_err(re)?;
-    let m: ShardMeta = match meta_t.get(META_KEY).map_err(re)? {
-        Some(v) => codec::decode(v.value())?,
-        None => return Err(StoreError::Manifest("shard is missing its meta row".into())),
-    };
-    if m.schema_version > SCHEMA_VERSION {
-        return Err(newer_version_err(m.schema_version));
-    }
-
-    let nodes_t = txn.open_table(NODES).map_err(re)?;
-    let mut nodes = Vec::new();
-    for row in nodes_t.iter().map_err(re)? {
-        let (_seq, v) = row.map_err(re)?;
-        nodes.push(codec::decode(v.value())?);
-    }
-    let links_t = txn.open_table(LINKS).map_err(re)?;
-    let mut links = Vec::new();
-    for row in links_t.iter().map_err(re)? {
-        let (_seq, v) = row.map_err(re)?;
-        links.push(codec::decode(v.value())?);
-    }
-
-    Ok(GraphData {
-        directed: m.directed,
-        multigraph: m.multigraph,
-        graph: serde_json::Map::new(),
-        nodes,
-        links,
-        hyperedges: m.hyperedges,
-        built_at_commit: m.built_at_commit,
-    })
+    Err(unreadable(path))
 }
 
 /// Materialize a shard into the in-memory [`KnowledgeGraph`] used by every
@@ -263,7 +237,7 @@ pub struct ShardStats {
     pub index_blob_bytes: u64,
 }
 
-/// Measure [`ShardStats`] for the shard at `path` (either format).
+/// Measure [`ShardStats`] for the shard at `path`.
 pub fn shard_stats(path: &Path) -> Result<ShardStats, StoreError> {
     let mut s = ShardStats {
         file_bytes: std::fs::metadata(path)?.len(),
@@ -281,38 +255,7 @@ pub fn shard_stats(path: &Path) -> Result<ShardStats, StoreError> {
         return Ok(s);
     }
     drop(f);
-    let db = Database::open(path).map_err(re)?;
-    let txn = db.begin_read().map_err(re)?;
-    if let Some(v) = txn
-        .open_table(META)
-        .map_err(re)?
-        .get(META_KEY)
-        .map_err(re)?
-    {
-        s.meta_value_bytes = v.value().len() as u64;
-    }
-    for row in txn.open_table(NODES).map_err(re)?.iter().map_err(re)? {
-        let (_k, v) = row.map_err(re)?;
-        s.node_rows += 1;
-        s.node_value_bytes += v.value().len() as u64;
-    }
-    for row in txn.open_table(LINKS).map_err(re)?.iter().map_err(re)? {
-        let (_k, v) = row.map_err(re)?;
-        s.link_rows += 1;
-        s.link_value_bytes += v.value().len() as u64;
-    }
-    match txn.open_table(INDEX_BLOBS) {
-        Ok(t) => {
-            for row in t.iter().map_err(re)? {
-                let (_k, v) = row.map_err(re)?;
-                s.index_blob_rows += 1;
-                s.index_blob_bytes += v.value().len() as u64;
-            }
-        }
-        Err(redb::TableError::TableDoesNotExist(_)) => {}
-        Err(e) => return Err(re(e)),
-    }
-    Ok(s)
+    Err(unreadable(path))
 }
 
 /// Store a producer-owned index blob under `(name, source_hash)` in the shard.
@@ -325,10 +268,9 @@ pub fn put_index_blob(
     put_index_blobs(path, source_hash, &[(name, bytes)])
 }
 
-/// Store several index blobs for one `source_hash`. On a v2 file this rewrites
-/// the container once (tmp + rename, so readers never see a torn file) — the
-/// lazy serve-time persistence path, at most once per shard content. On a v1
-/// redb shard the blobs land raw in its blob table, keeping v1 self-coherent.
+/// Store several index blobs for one `source_hash`. Rewrites the container
+/// once (tmp + rename, so readers never see a torn file) — the lazy
+/// serve-time persistence path, at most once per shard content.
 pub fn put_index_blobs(
     path: &Path,
     source_hash: &str,
@@ -372,16 +314,7 @@ pub fn put_index_blobs(
         return Ok(());
     }
     drop(f);
-    let db = Database::open(path).map_err(re)?;
-    let txn = db.begin_write().map_err(re)?;
-    {
-        let mut t = txn.open_table(INDEX_BLOBS).map_err(re)?;
-        for (name, bytes) in entries {
-            t.insert((*name, source_hash), *bytes).map_err(re)?;
-        }
-    }
-    txn.commit().map_err(re)?;
-    Ok(())
+    Err(unreadable(path))
 }
 
 /// Whether the shard holds a blob for `(name, source_hash)` — a table-of-
@@ -396,14 +329,7 @@ pub fn has_index_blob(path: &Path, name: &str, source_hash: &str) -> Result<bool
             .any(|b| b.name == name && b.source_hash == source_hash));
     }
     drop(f);
-    let db = Database::open(path).map_err(re)?;
-    let txn = db.begin_read().map_err(re)?;
-    let t = match txn.open_table(INDEX_BLOBS) {
-        Ok(t) => t,
-        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(false),
-        Err(e) => return Err(re(e)),
-    };
-    Ok(t.get((name, source_hash)).map_err(re)?.is_some())
+    Err(unreadable(path))
 }
 
 /// Fetch the index blob for `(name, source_hash)`. Returns `None` when the shard
@@ -431,55 +357,7 @@ pub fn get_index_blob(
         return Ok(None);
     }
     drop(f);
-    let db = Database::open(path).map_err(re)?;
-    let txn = db.begin_read().map_err(re)?;
-    // The blob table is created lazily on first put; absent == no blobs yet.
-    let t = match txn.open_table(INDEX_BLOBS) {
-        Ok(t) => t,
-        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-        Err(e) => return Err(re(e)),
-    };
-    match t.get((name, source_hash)).map_err(re)? {
-        Some(v) => Ok(Some(v.value().to_vec())),
-        None => Ok(None),
-    }
-}
-
-/// The v1 redb writer (one raw msgpack record per row), kept only so tests can
-/// build old-format fixtures and prove the dual-format reader.
-#[cfg(test)]
-pub(crate) fn write_v1(path: &Path, gd: &GraphData) -> Result<(), StoreError> {
-    if path.exists() {
-        std::fs::remove_file(path)?;
-    }
-    let db = Database::create(path).map_err(re)?;
-    let txn = db.begin_write().map_err(re)?;
-    {
-        let mut meta = txn.open_table(META).map_err(re)?;
-        let m = ShardMeta {
-            schema_version: 1,
-            directed: gd.directed,
-            multigraph: gd.multigraph,
-            built_at_commit: gd.built_at_commit.clone(),
-            hyperedges: gd.hyperedges.clone(),
-        };
-        meta.insert(META_KEY, codec::encode(&m)?.as_slice())
-            .map_err(re)?;
-        let mut nodes = txn.open_table(NODES).map_err(re)?;
-        for (i, n) in gd.nodes.iter().enumerate() {
-            nodes
-                .insert(i as u64, codec::encode(n)?.as_slice())
-                .map_err(re)?;
-        }
-        let mut links = txn.open_table(LINKS).map_err(re)?;
-        for (i, e) in gd.links.iter().enumerate() {
-            links
-                .insert(i as u64, codec::encode(e)?.as_slice())
-                .map_err(re)?;
-        }
-    }
-    txn.commit().map_err(re)?;
-    Ok(())
+    Err(unreadable(path))
 }
 
 #[cfg(test)]
@@ -540,20 +418,31 @@ mod tests {
     }
 
     #[test]
-    fn v1_shards_stay_readable() {
-        let g = gd(50);
+    fn legacy_v1_shard_is_rejected_with_rebuild_hint() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("s.redb");
-        write_v1(&p, &g).unwrap();
-        let back = read_graph_data(&p).unwrap();
-        assert_eq!(back.nodes, g.nodes);
-        assert_eq!(back.links, g.links);
-        // v1 blobs are stored and returned raw through the same API.
-        put_index_blob(&p, "query_index", "h1", b"raw-bytes").unwrap();
-        assert_eq!(
-            get_index_blob(&p, "query_index", "h1").unwrap().unwrap(),
-            b"raw-bytes"
-        );
+        let mut bytes = V1_MAGIC.to_vec();
+        bytes.extend_from_slice(&[0u8; 64]);
+        std::fs::write(&p, &bytes).unwrap();
+        let err = read_graph_data(&p).unwrap_err().to_string();
+        assert!(err.contains("legacy v1"), "{err}");
+        assert!(err.contains("synaptic extract"), "{err}");
+        // Blob probes fail the same way instead of pretending the blob is
+        // merely absent, which would mask the unreadable shard.
+        assert!(get_index_blob(&p, "query_index", "h1").is_err());
+        assert!(has_index_blob(&p, "query_index", "h1").is_err());
+        assert!(put_index_blob(&p, "query_index", "h1", b"x").is_err());
+        assert!(shard_stats(&p).is_err());
+        assert!(!is_flat(&p));
+    }
+
+    #[test]
+    fn foreign_file_is_rejected_as_unrecognized() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("s.shard");
+        std::fs::write(&p, b"definitely not a shard").unwrap();
+        let err = read_graph_data(&p).unwrap_err().to_string();
+        assert!(err.contains("not a recognized shard file"), "{err}");
     }
 
     #[test]
