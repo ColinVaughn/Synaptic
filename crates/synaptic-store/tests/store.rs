@@ -106,6 +106,30 @@ fn remigrate_skips_unchanged_shard_and_rewrites_changed() {
 }
 
 #[test]
+fn legacy_shard_is_rewritten_even_when_hash_matches() {
+    use synaptic_store::migrate;
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = ShardStore::open(dir.path()).unwrap();
+    let g = graph(&["a", "b"]);
+    migrate::migrate_into(&mut store, &g).unwrap();
+
+    // Simulate a legacy v1 shard left by an old synaptic: the manifest hash
+    // still matches, but the file is a redb database this build cannot read.
+    let file = store.manifest().entry("local").unwrap().file.clone();
+    let mut bytes = vec![b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
+    bytes.extend_from_slice(&[0u8; 64]);
+    std::fs::write(dir.path().join(&file), &bytes).unwrap();
+    let err = store.materialize("local").unwrap_err().to_string();
+    assert!(err.contains("synaptic extract"), "{err}");
+
+    // Re-migrating identical content must rewrite the legacy file, not skip it.
+    let mut store = ShardStore::open(dir.path()).unwrap();
+    let rep = migrate::migrate_into(&mut store, &g).unwrap();
+    assert_eq!(rep.skipped, 0, "legacy-format shard must be rewritten");
+    assert_eq!(store.materialize("local").unwrap().node_count(), 2);
+}
+
+#[test]
 fn index_blobs_keyed_by_name_and_hash() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = ShardStore::open(dir.path()).unwrap();

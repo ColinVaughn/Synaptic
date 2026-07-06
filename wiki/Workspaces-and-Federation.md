@@ -407,7 +407,7 @@ was missing or outside it, rather than a bare "not available".
 
 ## The sharded store and scale
 
-`workspace build` also writes each member into its own redb shard by default
+`workspace build` also writes each member into its own shard by default
 under `synaptic-out/store/` (plus a `bridge` pseudo-shard holding the
 cross-repo edges); pass `--no-store` to federate into `graph.json` only. A federated `serve` over the store is shard-aware — see
 [MCP Server](MCP-Server#serving-a-federated-store-shard-aware) — which removes

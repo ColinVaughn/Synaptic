@@ -9,7 +9,6 @@ rust-version.workspace = true
 synaptic-core = { workspace = true }
 synaptic-graph = { workspace = true }
 synaptic-output = { workspace = true }
-redb = { workspace = true }
 rmp-serde = { workspace = true }
 flate2 = { workspace = true }
 serde = { workspace = true }

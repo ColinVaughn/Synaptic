@@ -136,11 +136,14 @@ where
     for (tag, shard) in &split.shards {
         let hash = shard_hash(shard);
         // Incremental: a shard whose content hash already matches the store is
-        // unchanged, so skip rewriting it (and rebuilding its indexes).
+        // unchanged, so skip rewriting it (and rebuilding its indexes). The
+        // file must also be in the current flat format: a legacy v1 (redb)
+        // shard is unreadable now, so a matching hash alone must not keep it.
         let unchanged = store
             .manifest()
             .entry(tag)
-            .is_some_and(|e| e.source_hash == hash);
+            .is_some_and(|e| e.source_hash == hash)
+            && store.shard_file_is_flat(tag);
         if unchanged {
             skipped += 1;
         } else {

@@ -8,6 +8,21 @@ All notable changes to Synaptic are documented here. The format is based on
 > **CodeGraph**, and reference the old `codegraph` command and crate names. They
 > are preserved verbatim as historical record.
 
+## [Unreleased]
+
+### Changed
+
+- **Dropped the `redb` dependency; legacy v1 shards now fail with a rebuild
+  hint.** Dependabot proposed bumping redb 2.6 -> 4.1 (#16), but redb 3.0
+  removed the file format redb 2.x wrote, so no current redb can open the v1
+  shard files the dependency was kept for. The store is derived data, so the
+  dependency is gone instead of pinned: a v1 (redb) shard is detected by its
+  file magic and rejected with a "re-run `synaptic extract`" error, and
+  re-migrating rewrites a legacy file even when its content hash still matches
+  the manifest (the unchanged-skip used to keep it). v2 flat-container stores
+  (0.6.1+) are unaffected; `SYNAPTIC_STORE=redb` keeps working as the
+  historical name for the sharded backend.
+
 ## [0.6.1] - 2026-07-05
 
 > **Upgrade note:** `extract` and `workspace build` now write the sharded

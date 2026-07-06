@@ -39,7 +39,7 @@ pub(crate) enum Cmd {
         /// schemas, at the cost of column-level SQL audit rules.
         #[arg(long)]
         no_columns: bool,
-        /// Build the sharded redb store (synaptic-out/store) alongside
+        /// Build the sharded on-disk store (synaptic-out/store) alongside
         /// graph.json. This is the default; the flag is kept for compatibility.
         #[arg(long, conflicts_with = "no_store")]
         store: bool,
@@ -230,7 +230,7 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         action: HookAction,
     },
-    /// Build a sharded on-disk redb store from an existing graph.json. Once
+    /// Build a sharded on-disk store from an existing graph.json. Once
     /// migrated, set `SYNAPTIC_STORE=redb` for read commands (query/serve/...) to
     /// load per-repo shards from the store instead of parsing graph.json.
     Migrate {
@@ -889,7 +889,7 @@ pub(crate) enum WorkspaceAction {
         /// Produce a directed federated graph.
         #[arg(long)]
         directed: bool,
-        /// Build the sharded redb store (synaptic-out/store) from the federated
+        /// Build the sharded on-disk store (synaptic-out/store) from the federated
         /// graph. This is the default; the flag is kept for compatibility.
         #[arg(long, conflicts_with = "no_store")]
         store: bool,
