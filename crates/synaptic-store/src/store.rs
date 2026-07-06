@@ -1,6 +1,7 @@
 //! `ShardStore`: the per-repo shard collection rooted at a directory.
 //!
-//! Each shard is one redb file named `<tag>.<hash>.redb`; the manifest records
+//! Each shard is one flat container file named `<tag>.<hash>.shard` (older
+//! stores hold v1 `.redb` files, still readable); the manifest records
 //! which file is current. Writing a new version creates a new file and flips the
 //! manifest (RCU), then best-effort deletes the old file. Reads materialize a
 //! shard fully into RAM and drop the redb handle, so no long-lived handle blocks
@@ -17,7 +18,7 @@ use crate::{codec, sanitize_tag, shard, Scope, StoreError};
 /// Manifest tag recorded for the cross-repo bridge entry (stored apart from the
 /// per-repo shards, so it never appears in `list_shards`).
 const BRIDGE_TAG: &str = "__bridge__";
-/// Filename stem for the bridge `.redb` file.
+/// Filename stem for the bridge shard file.
 const BRIDGE_STEM: &str = "bridge";
 
 /// A directory-rooted collection of per-repo shards.
@@ -59,7 +60,7 @@ impl ShardStore {
         if hpart.is_empty() {
             hpart.push('0');
         }
-        format!("{stem}.{hpart}.redb")
+        format!("{stem}.{hpart}.shard")
     }
 
     /// Write `gd` as the shard for `tag` with content hash `source_hash`.
@@ -73,8 +74,20 @@ impl ShardStore {
         gd: &GraphData,
         source_hash: &str,
     ) -> Result<(), StoreError> {
+        self.write_shard_with_blobs(tag, gd, source_hash, &[])
+    }
+
+    /// [`write_shard`](Self::write_shard) plus pre-built index blobs, landing in
+    /// the shard's single write pass (no post-hoc reopen of the new file).
+    pub fn write_shard_with_blobs(
+        &mut self,
+        tag: &str,
+        gd: &GraphData,
+        source_hash: &str,
+        blobs: &[(&str, &[u8])],
+    ) -> Result<(), StoreError> {
         let stem = sanitize_tag(tag)?;
-        let file = self.write_versioned(&stem, source_hash, gd)?;
+        let file = self.write_versioned(&stem, source_hash, gd, blobs)?;
 
         // Flip the manifest to the new file (and remember any old file to GC).
         let old_file = self
@@ -92,6 +105,9 @@ impl ShardStore {
             directed: gd.directed,
         });
         self.manifest.shards.sort_by(|a, b| a.tag.cmp(&b.tag));
+        // A freshly written shard uses the current encoding, so the store now
+        // requires a reader at least this new (older binaries must refuse it).
+        self.manifest.schema_version = shard::SCHEMA_VERSION;
         self.manifest.save(&self.root)?;
 
         // Old version is now unreferenced; remove it best-effort (a reader still
@@ -102,20 +118,22 @@ impl ShardStore {
         Ok(())
     }
 
-    /// Write `gd` to a fresh content-versioned `<stem>.<hash>.redb` and return its
-    /// filename. Temp-write then rename; the final name is content-versioned so it
-    /// is not an in-use file (the RCU swap). Single-writer-per-stem is assumed.
+    /// Write `gd` to a fresh content-versioned `<stem>.<hash>.shard` and return
+    /// its filename. Temp-write then rename; the final name is content-versioned
+    /// so it is not an in-use file (the RCU swap). Single-writer-per-stem is
+    /// assumed.
     fn write_versioned(
         &self,
         stem: &str,
         source_hash: &str,
         gd: &GraphData,
+        blobs: &[(&str, &[u8])],
     ) -> Result<String, StoreError> {
         std::fs::create_dir_all(&self.root)?;
         let file = Self::shard_file(stem, source_hash);
         let final_path = self.root.join(&file);
         let tmp = self.root.join(format!("{stem}.writing.tmp"));
-        shard::write(&tmp, gd)?;
+        shard::write_with_blobs(&tmp, gd, source_hash, blobs)?;
         if final_path.exists() {
             std::fs::remove_file(&final_path)?;
         }
@@ -149,7 +167,7 @@ impl ShardStore {
             links: edges.to_vec(),
             ..GraphData::default()
         };
-        let file = self.write_versioned(BRIDGE_STEM, &hash, &gd)?;
+        let file = self.write_versioned(BRIDGE_STEM, &hash, &gd, &[])?;
         let old = self
             .manifest
             .bridge
@@ -163,6 +181,8 @@ impl ShardStore {
             })
             .map(|e| e.file)
             .filter(|f| f != &file);
+        // The fresh bridge file uses the current encoding (see write_shard).
+        self.manifest.schema_version = shard::SCHEMA_VERSION;
         self.manifest.save(&self.root)?;
         if let Some(o) = old {
             let _ = std::fs::remove_file(self.root.join(o));
@@ -173,6 +193,19 @@ impl ShardStore {
     /// Number of cross-repo bridge edges (0 if none), from the manifest — no I/O.
     pub fn bridge_edge_count(&self) -> u64 {
         self.manifest.bridge.as_ref().map_or(0, |e| e.edge_count)
+    }
+
+    /// Per-shard byte/row breakdown (bridge included, tagged `bridge`), for the
+    /// `store_report` example and size regressions.
+    pub fn stats(&self) -> Result<Vec<(String, shard::ShardStats)>, StoreError> {
+        let mut out = Vec::new();
+        for e in &self.manifest.shards {
+            out.push((e.tag.clone(), shard::shard_stats(&self.root.join(&e.file))?));
+        }
+        if let Some(b) = &self.manifest.bridge {
+            out.push((b.tag.clone(), shard::shard_stats(&self.root.join(&b.file))?));
+        }
+        Ok(out)
     }
 
     /// The cross-repo bridge edges (empty if there is no bridge).
@@ -272,6 +305,18 @@ impl ShardStore {
         shard::put_index_blob(&self.shard_path(tag)?, name, source_hash, bytes)
     }
 
+    /// Store several index blobs for one shard in a single file rewrite
+    /// (the lazy persistence path; blobs built at write time ride along in
+    /// [`write_shard_with_blobs`](Self::write_shard_with_blobs) instead).
+    pub fn put_index_blobs(
+        &self,
+        tag: &str,
+        source_hash: &str,
+        entries: &[(&str, &[u8])],
+    ) -> Result<(), StoreError> {
+        shard::put_index_blobs(&self.shard_path(tag)?, source_hash, entries)
+    }
+
     /// Fetch a persisted index blob, or `None` if absent/stale (hash mismatch).
     pub fn get_index_blob(
         &self,
@@ -280,6 +325,16 @@ impl ShardStore {
         source_hash: &str,
     ) -> Result<Option<Vec<u8>>, StoreError> {
         shard::get_index_blob(&self.shard_path(tag)?, name, source_hash)
+    }
+
+    /// Whether a blob exists for `(name, source_hash)` — no read or inflate.
+    pub fn has_index_blob(
+        &self,
+        tag: &str,
+        name: &str,
+        source_hash: &str,
+    ) -> Result<bool, StoreError> {
+        shard::has_index_blob(&self.shard_path(tag)?, name, source_hash)
     }
 
     fn shard_path(&self, tag: &str) -> Result<PathBuf, StoreError> {

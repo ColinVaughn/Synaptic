@@ -1,9 +1,11 @@
-//! redb-backed, per-repo sharded graph store.
+//! Per-repo sharded graph store.
 //!
 //! Replaces the load-everything-into-one-petgraph model with a per-repo shard
-//! store: one redb database file per repository under `synaptic-out/store/`,
-//! materialized into the existing [`synaptic_graph::KnowledgeGraph`] one shard
-//! at a time. See `docs/superpowers/specs/2026-06-23-sharded-ondisk-graph-store-design.md`.
+//! store: one flat container file per repository under `synaptic-out/store/`
+//! (deflate-compressed chunks behind a msgpack header; v1 redb shards remain
+//! readable), materialized into the existing
+//! [`synaptic_graph::KnowledgeGraph`] one shard at a time. See
+//! `docs/superpowers/specs/2026-06-23-sharded-ondisk-graph-store-design.md`.
 
 pub mod codec;
 pub mod manifest;

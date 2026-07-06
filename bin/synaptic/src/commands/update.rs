@@ -172,6 +172,24 @@ pub(crate) fn run_update(
         reextracted,
         evicted
     );
+    // Keep an existing sharded store fresh so redb-backed reads never answer
+    // from a stale shard (no store dir means the user opted out at extract
+    // time). Unchanged shards are hash-skipped, so this is cheap. On failure
+    // the store's manifest stays older than graph.json and the auto backend
+    // falls back to parsing graph.json, exactly as the warning says.
+    let store_dir = out_dir.join("store");
+    if store_dir.join("manifest.json").exists() {
+        match super::common::write_store(&outcome.kg.to_graph_data(), &store_dir) {
+            Ok(report) => println!(
+                "Refreshed {}/store ({} shard(s))",
+                out_dir.display(),
+                report.shard_tags.len()
+            ),
+            Err(e) => eprintln!(
+                "warning: could not refresh the sharded store ({e}); reads fall back to graph.json"
+            ),
+        }
+    }
     // graph.json was already written by each changed round. An update runs on
     // every save in the watch/hook flows; the visual artifact suite (SVG, 3D
     // HTML, GraphML, ...) dominates that cost and nobody reads it mid-edit, so

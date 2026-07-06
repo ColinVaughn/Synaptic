@@ -39,11 +39,14 @@ pub(crate) enum Cmd {
         /// schemas, at the cost of column-level SQL audit rules.
         #[arg(long)]
         no_columns: bool,
-        /// Also build the sharded redb store (synaptic-out/store) alongside
-        /// graph.json, so read commands can use `SYNAPTIC_STORE=redb` (or the
-        /// auto-default) without a separate `synaptic migrate` step.
-        #[arg(long)]
+        /// Build the sharded redb store (synaptic-out/store) alongside
+        /// graph.json. This is the default; the flag is kept for compatibility.
+        #[arg(long, conflicts_with = "no_store")]
         store: bool,
+        /// Skip the sharded store: write graph.json only. Read commands then
+        /// parse graph.json directly (`SYNAPTIC_STORE=redb` has nothing to load).
+        #[arg(long)]
+        no_store: bool,
     },
     /// Re-emit an output format from an existing graph.json — no re-extraction —
     /// or push the graph live to a database. Formats: json, html, svg, graphml,
@@ -886,10 +889,14 @@ pub(crate) enum WorkspaceAction {
         /// Produce a directed federated graph.
         #[arg(long)]
         directed: bool,
-        /// Also build the sharded redb store (synaptic-out/store) from the
-        /// federated graph, for `SYNAPTIC_STORE=redb` / the auto-default.
-        #[arg(long)]
+        /// Build the sharded redb store (synaptic-out/store) from the federated
+        /// graph. This is the default; the flag is kept for compatibility.
+        #[arg(long, conflicts_with = "no_store")]
         store: bool,
+        /// Skip the sharded store: federate into graph.json only. Serving then
+        /// materializes the whole union in RAM and the single-file caps apply.
+        #[arg(long)]
+        no_store: bool,
     },
     /// Compose from a directory of published <member>/graph.json artifacts.
     Federate { dir: PathBuf },
