@@ -69,8 +69,11 @@ fn run() -> Result<()> {
             wiki,
             semantic,
             no_columns,
-            store,
-        } => run_extract(&path, directed, obsidian, wiki, semantic, no_columns, store),
+            store: _,
+            no_store,
+        } => run_extract(
+            &path, directed, obsidian, wiki, semantic, no_columns, !no_store,
+        ),
         Cmd::Query {
             text,
             graph,

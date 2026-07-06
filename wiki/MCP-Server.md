@@ -158,8 +158,9 @@ exposure.
 
 ## Serving a federated store (shard-aware)
 
-When the graph was built into the per-repo shard store (`workspace build
---store`, or `synaptic migrate` on a federated `graph.json`) and `SYNAPTIC_STORE`
+`extract` and `workspace build` write the per-repo shard store by default
+(`--no-store` opts out; `synaptic migrate` builds one from an existing
+`graph.json`), and `synaptic update` keeps it fresh. When `SYNAPTIC_STORE`
 selects it (`redb`, or unset with a store at least as fresh as `graph.json`),
 `serve` runs **shard-aware**: the union of all members is never materialized.
 Each repo's shard loads on demand behind a bounded LRU (`SYNAPTIC_SHARD_LRU`,

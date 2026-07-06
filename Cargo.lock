@@ -3385,6 +3385,8 @@ name = "synaptic-store"
 version = "0.6.0"
 dependencies = [
  "blake3",
+ "criterion",
+ "flate2",
  "proptest",
  "redb",
  "rmp-serde",

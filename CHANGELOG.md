@@ -8,6 +8,36 @@ All notable changes to Synaptic are documented here. The format is based on
 > **CodeGraph**, and reference the old `codegraph` command and crate names. They
 > are preserved verbatim as historical record.
 
+## [Unreleased]
+
+### Changed
+- **Shard files are 15x smaller and read faster (store format v2).** A shard
+  is now a flat container — msgpack header + deflate-compressed chunks of
+  1024 records, index blobs compressed alongside, written in one fsynced
+  pass — instead of a redb database with one row per node/edge. Measured on
+  this repo's real 9.3 MiB graph (release builds): store 16.57 MiB -> 1.06
+  MiB (payload 5.95 -> 0.54 MiB, index blobs 2.38 -> 0.52 MiB, structural
+  overhead 8.24 MiB -> 0 — half the old file was redb B-tree/page overhead,
+  which `compact()` made worse on small files). Criterion (20k nodes / 30k
+  edges): shard read −28.8% (p < 0.001), materialize 126 -> 100 ms; write
+  unchanged within noise (p = 0.29). CLI via hyperfine: cold build
+  342 ± 27 -> 380 ± 28 ms (the deflate cost, mostly offset by dropping the
+  index round-trip: shards no longer re-read from disk to build their
+  indexes), no-op refresh unchanged (136 ± 2 -> 142 ± 9 ms). v1 redb shards
+  remain readable; any rewrite produces v2. `SYNAPTIC_STORE=redb` keeps its
+  (now historical) value name.
+- **The sharded redb store is built by default.** `synaptic extract` and
+  `synaptic workspace build` now write `synaptic-out/store/` alongside
+  `graph.json` (pass `--no-store` to skip; the old `--store` flag remains a
+  no-op for compatibility), and `synaptic update` refreshes an existing store
+  after each incremental rebuild (unchanged shards are hash-skipped). With the
+  store present, serving and unscoped reads pick it automatically
+  (`SYNAPTIC_STORE` unchanged), so shard-aware serving and its lifted size
+  ceiling no longer need any opt-in. The store directory writes its own
+  `.gitignore` so binary shards never land in a commit alongside a tracked
+  `graph.json`. Measured on this repo (9.3 MiB graph): ~1.6 s first build,
+  ~0.3 s no-op refresh, store ~1.8x graph.json on disk.
+
 ## [0.6.0] - 2026-07-05
 
 > **Upgrade note:** the sharded store is opt-in and non-regressive. Existing

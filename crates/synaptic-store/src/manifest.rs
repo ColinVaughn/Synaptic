@@ -101,9 +101,13 @@ impl ShardManifest {
         max_nodes: u64,
         max_bytes: u64,
     ) -> Result<(), StoreError> {
-        if self.schema_version != SCHEMA_VERSION {
+        // The recorded version is the minimum reader the store needs: shard
+        // files self-describe their encoding (v1 redb rows or v2 flat
+        // containers, both readable), so an older store opens fine; only a
+        // NEWER store than this binary understands is rejected.
+        if self.schema_version > SCHEMA_VERSION || self.schema_version == 0 {
             return Err(StoreError::Manifest(format!(
-                "store schema {} != supported {}; re-run `synaptic migrate`",
+                "store schema {} is newer than this binary supports ({}); upgrade synaptic or re-run `synaptic migrate`",
                 self.schema_version, SCHEMA_VERSION
             )));
         }

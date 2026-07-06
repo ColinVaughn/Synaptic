@@ -114,6 +114,22 @@ pub(crate) fn shard_hash(gd: &GraphData) -> String {
 /// Split `gd` and write every shard into `store`. Cross-repo bridge edges are
 /// reported but stored separately (see the bridge pseudo-shard).
 pub fn migrate_into(store: &mut ShardStore, gd: &GraphData) -> Result<MigrateReport, StoreError> {
+    migrate_into_indexed(store, gd, |_, _| Ok(Vec::new()))
+}
+
+/// Like [`migrate_into`], but `blobs_for` supplies pre-built index blobs
+/// (name, bytes) for each shard being (re)written, landing in that shard's
+/// single write pass. A skipped (unchanged) shard keeps its existing blobs;
+/// the callback never runs for it, so index building is skipped exactly when
+/// the shard write is.
+pub fn migrate_into_indexed<F>(
+    store: &mut ShardStore,
+    gd: &GraphData,
+    mut blobs_for: F,
+) -> Result<MigrateReport, StoreError>
+where
+    F: FnMut(&str, &GraphData) -> Result<Vec<(String, Vec<u8>)>, StoreError>,
+{
     let split = split(gd);
     let mut shard_tags = Vec::new();
     let mut skipped = 0;
@@ -128,7 +144,12 @@ pub fn migrate_into(store: &mut ShardStore, gd: &GraphData) -> Result<MigrateRep
         if unchanged {
             skipped += 1;
         } else {
-            store.write_shard(tag, shard, &hash)?;
+            let blobs = blobs_for(tag, shard)?;
+            let refs: Vec<(&str, &[u8])> = blobs
+                .iter()
+                .map(|(n, b)| (n.as_str(), b.as_slice()))
+                .collect();
+            store.write_shard_with_blobs(tag, shard, &hash, &refs)?;
         }
         shard_tags.push(tag.clone());
     }

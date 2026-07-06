@@ -150,7 +150,34 @@ pub(crate) fn write_store(
 ) -> Result<synaptic_store::migrate::MigrateReport> {
     let mut store = ShardStore::open(store_dir)
         .with_context(|| format!("opening shard store at {}", store_dir.display()))?;
-    let report = synaptic_store::migrate::migrate_into(&mut store, gd).context("writing shards")?;
+    // Binary shard files must never ride into a commit when synaptic-out is
+    // tracked (the merge-driver workflow commits graph.json). Best-effort;
+    // the dir may not exist yet (shard writes create it lazily).
+    let gitignore = store_dir.join(".gitignore");
+    if !gitignore.exists() {
+        let _ = std::fs::create_dir_all(store_dir);
+        let _ = std::fs::write(&gitignore, "*\n");
+    }
+    // Indexes are built from the in-memory shard split and land inside each
+    // shard's single write pass; the old flow re-read every fresh shard from
+    // disk just to index it, then reopened the file twice more for the blobs.
+    let report = synaptic_store::migrate::migrate_into_indexed(&mut store, gd, |_tag, shard_gd| {
+        let kg = synaptic_graph::KnowledgeGraph::from_graph_data(shard_gd.clone());
+        let codec_err = |e: String| synaptic_store::StoreError::Codec(e);
+        let qi = QueryIndex::build(&kg)
+            .to_bytes()
+            .map_err(|e| codec_err(e.to_string()))?;
+        let ai = ReverseImpactIndex::build(&kg, DEFAULT_AFFECTED_RELATIONS)
+            .to_bytes()
+            .map_err(|e| codec_err(e.to_string()))?;
+        Ok(vec![
+            (QUERY_INDEX_BLOB.to_string(), qi),
+            (AFFECTED_INDEX_BLOB.to_string(), ai),
+        ])
+    })
+    .context("writing shards")?;
+    // Safety net for stores written by other tools/versions: fill any missing
+    // blobs (fast no-op when the write above already carried them).
     persist_shard_indexes(&store).context("persisting shard indexes")?;
     Ok(report)
 }
@@ -165,13 +192,10 @@ pub(crate) fn persist_shard_indexes(store: &ShardStore) -> Result<()> {
         .map(|e| (e.tag.clone(), e.source_hash.clone()))
         .collect();
     for (tag, hash) in tags {
-        // Incremental: indexes already persisted for this exact content are reused.
-        if store
-            .get_index_blob(&tag, QUERY_INDEX_BLOB, &hash)?
-            .is_some()
-            && store
-                .get_index_blob(&tag, AFFECTED_INDEX_BLOB, &hash)?
-                .is_some()
+        // Incremental: indexes already persisted for this exact content are
+        // reused. Existence only — fetching would inflate megabytes per no-op.
+        if store.has_index_blob(&tag, QUERY_INDEX_BLOB, &hash)?
+            && store.has_index_blob(&tag, AFFECTED_INDEX_BLOB, &hash)?
         {
             continue;
         }
@@ -182,8 +206,11 @@ pub(crate) fn persist_shard_indexes(store: &ShardStore) -> Result<()> {
         let ai = ReverseImpactIndex::build(&kg, DEFAULT_AFFECTED_RELATIONS)
             .to_bytes()
             .context("serializing affected index")?;
-        store.put_index_blob(&tag, QUERY_INDEX_BLOB, &hash, &qi)?;
-        store.put_index_blob(&tag, AFFECTED_INDEX_BLOB, &hash, &ai)?;
+        store.put_index_blobs(
+            &tag,
+            &hash,
+            &[(QUERY_INDEX_BLOB, &qi), (AFFECTED_INDEX_BLOB, &ai)],
+        )?;
     }
     Ok(())
 }

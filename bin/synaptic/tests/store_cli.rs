@@ -164,6 +164,115 @@ fn cross_repo_affected_default_on_and_opt_out() {
 }
 
 #[test]
+fn extract_writes_store_by_default_and_no_store_skips() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("src/app.py"),
+        "def run():\n    helper()\n\ndef helper():\n    return 1\n",
+    )
+    .unwrap();
+
+    // A plain extract now builds the store alongside graph.json.
+    Command::cargo_bin("synaptic")
+        .unwrap()
+        .arg("extract")
+        .arg(root)
+        .assert()
+        .success();
+    let store = root.join("synaptic-out").join("store");
+    assert!(
+        store.join("manifest.json").exists(),
+        "plain extract must build the sharded store by default"
+    );
+    // Binary shard files must never land in a commit when synaptic-out is
+    // tracked (the merge-driver workflow commits graph.json).
+    assert_eq!(
+        fs::read_to_string(store.join(".gitignore"))
+            .expect("store dir self-ignores")
+            .trim(),
+        "*"
+    );
+
+    // --no-store opts out.
+    let dir2 = tempfile::tempdir().unwrap();
+    let root2 = dir2.path();
+    fs::create_dir_all(root2.join("src")).unwrap();
+    fs::write(root2.join("src/app.py"), "def only():\n    return 2\n").unwrap();
+    Command::cargo_bin("synaptic")
+        .unwrap()
+        .arg("extract")
+        .arg(root2)
+        .arg("--no-store")
+        .assert()
+        .success();
+    assert!(
+        !root2.join("synaptic-out").join("store").exists(),
+        "--no-store must skip the store build"
+    );
+}
+
+#[test]
+fn update_refreshes_an_existing_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("src/app.py"),
+        "def run():\n    helper()\n\ndef helper():\n    return 1\n",
+    )
+    .unwrap();
+    Command::cargo_bin("synaptic")
+        .unwrap()
+        .arg("extract")
+        .arg(root)
+        .assert()
+        .success();
+    let store_dir = root.join("synaptic-out").join("store");
+    let before = synaptic_store::ShardStore::open(&store_dir)
+        .unwrap()
+        .list_shards()[0]
+        .source_hash
+        .clone();
+
+    // A new symbol lands; the incremental update must refresh the store too,
+    // or a redb-pinned query would answer from the stale shard.
+    fs::write(
+        root.join("src/app.py"),
+        "def run():\n    helper()\n\ndef helper():\n    return 1\n\ndef fresh_symbol():\n    return 3\n",
+    )
+    .unwrap();
+    Command::cargo_bin("synaptic")
+        .unwrap()
+        .args(["update", "src/app.py"])
+        .current_dir(root)
+        .assert()
+        .success();
+
+    let after = synaptic_store::ShardStore::open(&store_dir)
+        .unwrap()
+        .list_shards()[0]
+        .source_hash
+        .clone();
+    assert_ne!(before, after, "update must rewrite the changed shard");
+    let q = Command::cargo_bin("synaptic")
+        .unwrap()
+        .args(["query", "fresh_symbol", "--graph"])
+        .arg(root.join("synaptic-out").join("graph.json"))
+        .env("SYNAPTIC_STORE", "redb")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        String::from_utf8_lossy(&q).contains("fresh_symbol"),
+        "redb-pinned query must see the post-update symbol"
+    );
+}
+
+#[test]
 fn extract_store_flag_builds_usable_store() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

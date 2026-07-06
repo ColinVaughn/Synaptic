@@ -17,6 +17,27 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, StoreError> {
     rmp_serde::from_slice(bytes).map_err(|e| StoreError::Codec(e.to_string()))
 }
 
+/// Deflate-compress a chunk/blob (schema v2 rows). Graph payloads are highly
+/// repetitive (field names, path prefixes), so this typically shrinks them
+/// several-fold; miniz_oxide keeps the workspace free of C toolchains.
+pub fn compress(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(6));
+    // Writing to a Vec cannot fail.
+    let _ = enc.write_all(bytes);
+    enc.finish().unwrap_or_default()
+}
+
+/// Inverse of [`compress`].
+pub fn decompress(bytes: &[u8]) -> Result<Vec<u8>, StoreError> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    flate2::read::DeflateDecoder::new(bytes)
+        .read_to_end(&mut out)
+        .map_err(|e| StoreError::Codec(format!("inflate: {e}")))?;
+    Ok(out)
+}
+
 /// Content hash of a shard, independent of node/edge *order*: canonical keys are
 /// sorted before hashing, so two builds that emit the same set of nodes/edges in
 /// a different order hash identically. Lets the incremental path skip a shard
@@ -109,6 +130,20 @@ mod tests {
         let h1 = source_hash(&["b".into(), "a".into()], &["a->b".into()]);
         let h2 = source_hash(&["a".into(), "b".into()], &["a->b".into()]);
         assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn compress_round_trips_and_shrinks_repetitive_payloads() {
+        let nodes: Vec<Node> = (0..500).map(|i| node(&format!("mod::func_{i}"))).collect();
+        let raw = encode(&nodes).unwrap();
+        let packed = compress(&raw);
+        assert!(
+            packed.len() * 2 < raw.len(),
+            "named-field msgpack must deflate to under half: {} vs {}",
+            packed.len(),
+            raw.len()
+        );
+        assert_eq!(decompress(&packed).unwrap(), raw);
     }
 
     #[test]

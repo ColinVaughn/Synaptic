@@ -52,7 +52,7 @@ pub(crate) fn write_federated(
     Ok(())
 }
 
-/// When `--store` is set, build the sharded redb store from the federated graph
+/// Unless `--no-store` opted out, build the sharded redb store from the federated graph
 /// so read commands can use it without a separate `synaptic migrate` step.
 fn maybe_write_store(
     store: bool,
@@ -228,8 +228,10 @@ pub(crate) fn run_workspace(action: WorkspaceAction) -> Result<()> {
         WorkspaceAction::Build {
             changed,
             directed,
-            store,
+            store: _,
+            no_store,
         } => {
+            let store = !no_store;
             let opts = WorkspaceBuildOptions {
                 directed,
                 force: false,

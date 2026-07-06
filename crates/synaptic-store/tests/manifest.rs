@@ -58,6 +58,22 @@ fn validate_rejects_wrong_schema() {
 }
 
 #[test]
+fn validate_accepts_an_older_store_schema() {
+    // v1 stores stay openable: shard files self-describe their encoding, so
+    // the manifest version is a floor (minimum reader), not an equality.
+    let dir = tempfile::tempdir().unwrap();
+    ShardManifest {
+        schema_version: 1,
+        shards: vec![],
+        bridge: None,
+    }
+    .save(dir.path())
+    .unwrap();
+    let loaded = ShardManifest::load(dir.path()).unwrap();
+    loaded.validate(dir.path()).expect("schema 1 must validate");
+}
+
+#[test]
 fn validate_rejects_missing_shard_file() {
     let dir = tempfile::tempdir().unwrap();
     let m = manifest(vec![entry("x", "x.redb")]); // x.redb never created
