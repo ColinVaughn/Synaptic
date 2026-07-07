@@ -6,13 +6,13 @@
 //! pure [`Server::handle_request`] dispatcher, which makes the whole protocol
 //! unit-testable without an async runtime.
 //!
-//! 28 read-only tools by default (29 with `--allow-exec`, which adds the
+//! 30 read-only tools by default (31 with `--allow-exec`, which adds the
 //! command-running `speculate`), over a graph loaded at startup: graph navigation
 //! (`query_graph`, `get_node`, `get_source`, `get_neighbors`, `get_community`,
 //! `god_nodes`, `graph_stats`, `shortest_path`, `find_callers`, `find_callees`),
 //! impact and forecasting (`affected`, `working_changes_impact`, `predict_impact`,
 //! `affected_tests`, `predict_edit`), advanced (`structural_search`, `describe_node`,
-//! `time_travel_diff`, plan-only `plan_rename`), SQL (`audit_sql`, `advise_sql`),
+//! `time_travel_diff`, plan-only `plan_rename`, `readiness_audit`), SQL (`audit_sql`, `advise_sql`),
 //! federation (`list_repos`, `repo_stats`), and PR (`list_prs`, `get_pr_impact`,
 //! `triage_prs`), plus six resources. The `initialize` reply
 //! returns server `instructions` orienting the agent, and each tool documents its
@@ -59,6 +59,10 @@ use synaptic_query::{
     affected_including_members, dependents_caveat, describe_node, explain, is_type_like,
     references_to, shortest_path, type_member_ids, AffectedHit, DynamicCaveat, QueryIndex, Recency,
     RecencyMode, ReverseImpactIndex, TraversalMode, DEFAULT_AFFECTED_RELATIONS,
+};
+use synaptic_readiness::{
+    audit as readiness_audit, AuditOptions as ReadinessOptions, Profile as ReadinessProfile,
+    ReadinessReport, Severity as ReadinessSeverity,
 };
 use synaptic_sandbox::{
     render_markdown as render_speculate_md, speculate, Change, SpeculateOptions,
@@ -1305,7 +1309,7 @@ impl Server {
         let shown = hits.len().min(10);
         let mut lines = String::new();
         for (tag, id) in &hits[..shown] {
-            let (file, degree) = self
+            let (qualified, degree) = self
                 .provider
                 .shard(tag)
                 .ok()
@@ -1313,21 +1317,15 @@ impl Server {
                     (
                         sh.kg
                             .node(id)
-                            .map(|n| n.source_file.clone())
-                            .unwrap_or_default(),
+                            .map(synaptic_query::qualified_ref)
+                            .unwrap_or_else(|| id.0.clone()),
                         sh.kg.degree(id),
                     )
                 })
-                .unwrap_or_default();
-            let file = if file.is_empty() {
-                "-".to_string()
-            } else {
-                sanitize_label(&file)
-            };
+                .unwrap_or_else(|| (id.0.clone(), 0));
             lines.push_str(&format!(
-                "\n  {} [{}] (degree {})",
-                sanitize_label(&id.0),
-                file,
+                "\n  {} (degree {})",
+                sanitize_label(&qualified),
                 degree
             ));
         }
@@ -3387,7 +3385,7 @@ Cross-repo: {} edge(s) span repositories{}",
                 let shown = hits.len().min(10);
                 let mut lines = String::new();
                 for (tag, id) in &hits[..shown] {
-                    let (file, degree) = self
+                    let (qualified, degree) = self
                         .provider
                         .shard(tag)
                         .ok()
@@ -3395,21 +3393,15 @@ Cross-repo: {} edge(s) span repositories{}",
                             (
                                 sh.kg
                                     .node(id)
-                                    .map(|n| n.source_file.clone())
-                                    .unwrap_or_default(),
+                                    .map(synaptic_query::qualified_ref)
+                                    .unwrap_or_else(|| id.0.clone()),
                                 sh.kg.degree(id),
                             )
                         })
-                        .unwrap_or_default();
-                    let file = if file.is_empty() {
-                        "-".to_string()
-                    } else {
-                        sanitize_label(&file)
-                    };
+                        .unwrap_or_else(|| (id.0.clone(), 0));
                     lines.push_str(&format!(
-                        "\n  {} [{}] (degree {})",
-                        sanitize_label(&id.0),
-                        file,
+                        "\n  {} (degree {})",
+                        sanitize_label(&qualified),
                         degree
                     ));
                 }
@@ -3723,21 +3715,21 @@ Cross-repo: {} edge(s) span repositories{}",
         let arr: Vec<Value> = hits[..shown]
             .iter()
             .map(|(tag, id)| {
-                let (file, degree) = self
+                let (file, degree, qualified) = self
                     .provider
                     .shard(tag)
                     .ok()
                     .map(|sh| {
+                        let node = sh.kg.node(id);
                         (
-                            sh.kg
-                                .node(id)
-                                .map(|n| n.source_file.clone())
-                                .unwrap_or_default(),
+                            node.map(|n| n.source_file.clone()).unwrap_or_default(),
                             sh.kg.degree(id),
+                            node.map(synaptic_query::qualified_ref)
+                                .unwrap_or_else(|| id.0.clone()),
                         )
                     })
-                    .unwrap_or_default();
-                json!({ "id": id.0, "file": file, "degree": degree })
+                    .unwrap_or_else(|| (String::new(), 0, id.0.clone()));
+                json!({ "id": id.0, "file": file, "degree": degree, "qualified": qualified })
             })
             .collect();
         Value::Array(arr)
@@ -4243,6 +4235,134 @@ Cross-repo: {} edge(s) span repositories{}",
         out
     }
 
+    /// Static port-readiness findings over graph + source/config metadata.
+    /// In shard mode each member is audited independently and findings are
+    /// merged, so a federated serve never has to materialize a whole union graph.
+    fn readiness_report(
+        &self,
+        profile: Option<&str>,
+        severity: Option<&str>,
+        repo: Option<&str>,
+    ) -> Result<ReadinessReport, String> {
+        let profile = match profile {
+            Some(p) => ReadinessProfile::parse(p)
+                .ok_or_else(|| format!("Unknown readiness profile '{}'.", sanitize_label(p)))?,
+            None => ReadinessProfile::Auto,
+        };
+        let min_severity = match severity {
+            Some(s) => Some(
+                ReadinessSeverity::parse(s)
+                    .ok_or_else(|| format!("Unknown severity '{}'.", sanitize_label(s)))?,
+            ),
+            None => None,
+        };
+
+        let mut findings = Vec::new();
+        let mut skipped = Vec::new();
+        let want_repo = repo.map(str::to_string);
+        self.provider
+            .for_each_shard(&mut |tag, sh| {
+                if let Some(want) = &want_repo {
+                    if self.provider.is_sharded() && tag != want {
+                        return Ok(());
+                    }
+                }
+                let root = self.repo_roots.get(tag).cloned().or_else(|| {
+                    self.source_root.as_ref().map(|r| {
+                        let member = r.join(tag);
+                        if tag != provider::LOCAL && member.is_dir() {
+                            member
+                        } else {
+                            r.clone()
+                        }
+                    })
+                });
+                let r = readiness_audit(
+                    &sh.kg,
+                    &ReadinessOptions {
+                        root,
+                        profile,
+                        min_severity,
+                        repo: if self.provider.is_sharded() {
+                            None
+                        } else {
+                            want_repo.clone()
+                        },
+                    },
+                );
+                findings.extend(r.findings);
+                skipped.extend(r.skipped.into_iter().map(|s| {
+                    if tag == provider::LOCAL {
+                        s
+                    } else {
+                        format!("{tag}: {s}")
+                    }
+                }));
+                Ok(())
+            })
+            .map_err(|e| sanitize_label(&e))?;
+        Ok(ReadinessReport::from_findings(findings, skipped))
+    }
+
+    /// Compact text rendering of a readiness report for the MCP text channel.
+    fn render_readiness_text(&self, r: &ReadinessReport, cap: usize, verbose: bool) -> String {
+        let mut out = sanitize_label(&r.summary);
+        if !r.groups.is_empty() {
+            let groups: Vec<String> = r
+                .groups
+                .iter()
+                .take(8)
+                .map(|g| format!("{}:{}", sanitize_label(&g.subsystem), g.count))
+                .collect();
+            out.push_str(&format!("\nGroups: {}", groups.join(", ")));
+        }
+        for f in r.findings.iter().take(cap) {
+            let loc = f.location.as_deref().unwrap_or("-");
+            if verbose {
+                out.push_str(&format!(
+                    "\n[{}] {} ({}) @ {} conf {:.2} impact {}\n  subsystem: {}\n  {}\n  fix: {}",
+                    f.severity.as_str(),
+                    sanitize_label(&f.title),
+                    sanitize_label(&f.rule_id),
+                    sanitize_label(loc),
+                    f.confidence,
+                    f.impact.score,
+                    sanitize_label(&f.subsystem),
+                    sanitize_label(&f.detail),
+                    sanitize_label(&f.remediation),
+                ));
+            } else {
+                out.push_str(&format!(
+                    "\n[{}] {} @ {} impact {} (conf {:.2}) {}",
+                    f.severity.as_str(),
+                    sanitize_label(&f.rule_id),
+                    sanitize_label(loc),
+                    f.impact.score,
+                    f.confidence,
+                    sanitize_label(&f.title),
+                ));
+            }
+        }
+        if r.findings.len() > cap {
+            out.push_str(&format!(
+                "\n... (+{} more finding(s); pass verbose=true or raise limit for the full list)",
+                r.findings.len() - cap
+            ));
+        } else if !verbose && !r.findings.is_empty() {
+            out.push_str("\n(pass verbose=true for each finding's detail and fix)");
+        }
+        if !r.skipped.is_empty() {
+            out.push_str("\nSkipped:");
+            for s in r.skipped.iter().take(4) {
+                out.push_str(&format!("\n  - {}", sanitize_label(s)));
+            }
+            if r.skipped.len() > 4 {
+                out.push_str(&format!("\n  +{} more", r.skipped.len() - 4));
+            }
+        }
+        out
+    }
+
     /// Prepend the staleness warning to a tool result's text content. Set when
     /// the autofresh cap refused a catch-up: the graph being served no longer
     /// matches the working tree, and the model must learn that from the tool
@@ -4414,6 +4534,39 @@ Cross-repo: {} edge(s) span repositories{}",
                 self.god_nodes_page(u("top_n", cdef(10, 6)) as usize, u("offset", 0) as usize);
             let text = Self::render_god_nodes_text(&rows, start);
             let structured = Self::render_god_nodes_json(&rows);
+            return Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": structured,
+                "isError": false
+            }));
+        }
+
+        // readiness_audit: static port-readiness findings over graph plus the
+        // registered source root, if one is available. Read-only.
+        if name == "readiness_audit" {
+            let report = match self.readiness_report(opt("profile"), opt("severity"), opt("repo")) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Ok(json!({
+                        "content": [{ "type": "text", "text": e }],
+                        "isError": true
+                    }))
+                }
+            };
+            let verbose = b("verbose");
+            let cap = if verbose {
+                usize::MAX
+            } else {
+                (u("limit", cdef(20, 12)) as usize).max(1)
+            };
+            let text = self.render_readiness_text(&report, cap, verbose);
+            let structured = if report.findings.len() > cap {
+                let mut trimmed = report.clone();
+                trimmed.findings.truncate(cap);
+                serde_json::to_value(&trimmed).unwrap_or(Value::Null)
+            } else {
+                serde_json::to_value(&report).unwrap_or(Value::Null)
+            };
             return Ok(json!({
                 "content": [{ "type": "text", "text": text }],
                 "structuredContent": structured,
@@ -4968,7 +5121,8 @@ server with --allow-exec to expose it (it executes commands).\n\
 \n\
 Also: structural_search (SYNQL query or named pattern; matches kind/loc/fan-in-out, not \
 text); search_text (regex/literal content search, each hit attributed to its enclosing \
-symbol); time_travel_diff; plan_rename (plan-only rename); audit_sql / advise_sql (review \
+symbol); readiness_audit (rank port/readiness blockers: sentinel returns, placeholders, \
+generated noise, config metadata); time_travel_diff; plan_rename (plan-only rename); audit_sql / advise_sql (review \
 SQL). Multi-repo: call list_repos, then pass repo to scope a tool. The PR tools (list_prs / \
 get_pr_impact / triage_prs) need the `gh` CLI and skip gracefully without it.\n\
 \n\
@@ -5027,7 +5181,7 @@ fn tools_list(allow_exec: bool) -> Value {
               "dynamic_caveat": { "type": "object", "description": "Present when this symbol has 0 static dependents but a dynamic site could reach it -- 0 is not proof it is unused.", "properties": { "opaque_sites_in_scope": {"type":"integer"}, "kinds": {"type":"array","items":{"type":"string"}}, "dynamically_referenced": {"type":"boolean"}, "message": {"type":"string"} } },
               "ambiguous": {"type":"boolean"}, "query": {"type":"string"},
               "candidates": { "type": "array", "items": { "type": "object", "properties": {
-                  "id": {"type":"string"}, "file": {"type":"string"}, "degree": {"type":"integer"} } }, "description":"Disambiguation candidates when the name is ambiguous (found=false)." }
+                  "id": {"type":"string"}, "file": {"type":"string"}, "degree": {"type":"integer"}, "qualified": {"type":"string", "description":"Copy-ready reference that resolves to this exact node (label@file, or the id when no file)."} } }, "description":"Disambiguation candidates when the name is ambiguous (found=false)." }
           }, "required": ["found"] } },
         { "name": "get_source", "description": "Return the actual source code for a symbol (the lines at its location), so you do not have to open the file. Use after query_graph or get_node to read a function or class body directly. Alternatively pass `file` (with an optional `lines` range) to read an ARBITRARY region that is not a single symbol -- a config block, or the lines around a search_text hit. In a federated graph a leading 'tag/' on `file` selects the member repo.",
           "inputSchema": { "type": "object", "properties": {
@@ -5201,7 +5355,7 @@ fn tools_list(allow_exec: bool) -> Value {
               "query": { "type": "string", "description": "Echo of the input label when found=false." },
               "ambiguous": { "type": "boolean", "description": "true when the name resolved to several nodes (found=false); see candidates." },
               "candidates": { "type": "array", "items": { "type": "object", "properties": {
-                  "id": {"type":"string"}, "file": {"type":"string"}, "degree": {"type":"integer"} } }, "description": "Disambiguation candidates when the name is ambiguous (found=false), matching get_node/affected." }
+                  "id": {"type":"string"}, "file": {"type":"string"}, "degree": {"type":"integer"}, "qualified": {"type":"string", "description":"Copy-ready reference that resolves to this exact node (label@file, or the id when no file)."} } }, "description": "Disambiguation candidates when the name is ambiguous (found=false), matching get_node/affected." }
           }, "required": ["found"] } },
         { "name": "time_travel_diff", "description": "How the code graph changed between two git revisions: added/removed module dependencies, removed APIs, architectural drift, new cycles, and hotspots. Builds each revision in a throwaway git worktree (slow on a cold repo).",
           "inputSchema": { "type": "object", "properties": {
@@ -5256,6 +5410,28 @@ fn tools_list(allow_exec: bool) -> Value {
               "limit": { "type": "integer", "description": "Max entries shown per section (will break / review) before a '+N more' summary (default 20). Each section also prints a by-depth rollup. Ignored when verbose=true." },
               "verbose": { "type": "boolean", "description": "List all instead of the top-N summary (default false)." }
           }, "required": ["symbol", "kind"] } },
+        { "name": "readiness_audit", "description": "Static port-readiness audit: ranks likely blockers from graph + source/config signals such as high-risk framework sentinel returns, placeholders, generated-resource noise, and project metadata. Read-only; if no source root is registered, returns graph-only findings and marks source/config checks as skipped.",
+          "inputSchema": { "type": "object", "properties": {
+              "profile": { "type": "string", "description": "Audit profile. Use generic for a language-neutral scan; auto chooses the best available profile from project metadata (default auto)." },
+              "repo": { "type": "string", "description": "Restrict to one federated member repo (tag from list_repos). In a single graph, filters nodes whose repo/source prefix matches." },
+              "severity": { "type": "string", "enum": ["critical","high","medium","low","info"], "description": "Only return findings at least this severe (default: all)." },
+              "limit": { "type": "integer", "description": "Max findings returned before a '+N more' summary (default 20). Ignored when verbose=true." },
+              "verbose": { "type": "boolean", "description": "Return all findings and each finding's full detail + fix instead of the terse one-line summary (default false)." }
+          } },
+          "outputSchema": { "type": "object", "properties": {
+              "version": {"type":"integer"}, "summary": {"type":"string"},
+              "counts_by_severity": {"type":"object"},
+              "groups": { "type": "array", "items": { "type": "object", "properties": {
+                  "subsystem": {"type":"string"}, "count": {"type":"integer"}, "highest_severity": {"type":"string"} } } },
+              "findings": { "type": "array", "items": { "type": "object", "properties": {
+                  "rule_id": {"type":"string"}, "severity": {"type":"string"}, "category": {"type":"string"},
+                  "subsystem": {"type":"string"}, "title": {"type":"string"}, "detail": {"type":"string"},
+                  "location": {"type":"string"}, "node_ids": {"type":"array","items":{"type":"string"}},
+                  "evidence": {"type":"string"}, "remediation": {"type":"string"}, "confidence": {"type":"number"},
+                  "impact": { "type":"object", "properties": {
+                      "score": {"type":"integer"}, "degree": {"type":"integer"}, "affected_count": {"type":"integer"}, "generated": {"type":"boolean"} } } } } },
+              "skipped": { "type": "array", "items": {"type":"string"} }
+          }, "required": ["version","summary","findings"] } },
         { "name": "audit_sql", "description": "Audit the codebase's SQL for performance and security problems over the SQL-aware graph: RLS gaps, over-broad grants, likely SQL injection, missing indexes on filter/FK columns, SELECT *, non-sargable predicates, missing primary keys. Findings are ranked by severity then confidence; each carries a severity, confidence, location, and fix. To vet a single query you are drafting, use advise_sql.",
           "inputSchema": { "type": "object", "properties": {
               "severity": { "type": "string", "enum": ["critical","high","medium","low","info"], "description": "Only return findings at least this severe (default: all)." },
@@ -5418,6 +5594,71 @@ mod tests {
         let findings = res["structuredContent"]["findings"].as_array().unwrap();
         assert!(
             findings.iter().any(|f| f["rule_id"] == "PERF-SEL-001"),
+            "{res}"
+        );
+    }
+
+    #[test]
+    fn readiness_audit_tool_returns_structured_findings() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("src/app.ts");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &file,
+            "export function loadConfig() {\n  return undefined;\n}\n",
+        )
+        .unwrap();
+        let mut n = node("load", "loadConfig", None);
+        n.source_file = "src/app.ts".into();
+        n.source_location = Some("L1".into());
+        n.set_span(synaptic_core::Span {
+            start_line: 1,
+            start_col: 1,
+            end_line: 3,
+            end_col: 1,
+        });
+        let gd = GraphData {
+            directed: false,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![n],
+            links: vec![],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let srv = Server::from_graph_data(gd, None).with_source_root(dir.path().to_path_buf());
+        let res = srv
+            .dispatch_tool(&serde_json::json!({
+                "name":"readiness_audit",
+                "arguments":{"profile":"generic","verbose":true}
+            }))
+            .unwrap();
+        let findings = res["structuredContent"]["findings"].as_array().unwrap();
+        let f = findings
+            .iter()
+            .find(|f| f["rule_id"] == "READY-SENTINEL-RETURN")
+            .unwrap();
+        assert!(f["impact"]["score"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn readiness_audit_without_source_root_marks_skipped() {
+        let srv = Server::from_graph_data(sql_graph(), None);
+        let res = srv
+            .dispatch_tool(&serde_json::json!({"name":"readiness_audit","arguments":{}}))
+            .unwrap();
+        assert!(
+            res["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("source/config checks skipped"),
+            "{res}"
+        );
+        assert!(
+            !res["structuredContent"]["skipped"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
             "{res}"
         );
     }
@@ -5905,6 +6146,33 @@ mod tests {
                 .unwrap_or(false),
             "candidates listed: {sc}"
         );
+    }
+
+    #[test]
+    fn ambiguity_candidates_carry_copyready_qualified_ref() {
+        // Two `Dup` symbols (filed at <id>.py). Each structured candidate must
+        // carry a paste-ready `label@file` qualifier an agent can copy back
+        // verbatim to disambiguate, not just an id + file column.
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![node("a_dup", "Dup", Some(0)), node("b_dup", "Dup", Some(0))],
+            links: vec![],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        let resp = call_tool_full(&mut s, "get_node", json!({"label": "Dup"}));
+        let sc = &resp["result"]["structuredContent"];
+        let quals: Vec<&str> = sc["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["qualified"].as_str().unwrap_or_default())
+            .collect();
+        assert!(quals.contains(&"Dup@a_dup.py"), "qualified refs: {quals:?}");
+        assert!(quals.contains(&"Dup@b_dup.py"), "qualified refs: {quals:?}");
     }
 
     #[test]
@@ -6794,7 +7062,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 29);
+        assert_eq!(names.len(), 30);
         for expected in [
             "query_graph",
             "get_node",
@@ -6823,6 +7091,7 @@ mod tests {
             "predict_impact",
             "affected_tests",
             "predict_edit",
+            "readiness_audit",
             "audit_sql",
             "advise_sql",
         ] {
@@ -8005,6 +8274,7 @@ mod tests {
             "get_neighbors",
             "list_repos",
             "search_text",
+            "readiness_audit",
         ] {
             let t = tools
                 .as_array()

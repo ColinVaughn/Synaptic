@@ -125,6 +125,13 @@ fn is_code(n: &Node) -> bool {
     n.file_type == FileType::Code
 }
 
+/// Resource file nodes are concrete files keyed by a unique path, not concepts.
+/// Exempt them from entity dedup so sibling resources with near-identical path
+/// labels (and generated-vs-source copies) are never fuzzy-merged.
+fn is_resource(n: &Node) -> bool {
+    n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("resource")
+}
+
 /// Canonical survivor: prefer no chunk suffix, then the shorter id (first on tie).
 fn pick_winner(ids: &[NodeId]) -> NodeId {
     ids.iter()
@@ -211,7 +218,7 @@ pub fn deduplicate_entities(
     // pass 1: exact normalization (within the same source_file only)
     let mut norm_to: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, n) in unique.iter().enumerate() {
-        if is_code(n) {
+        if is_code(n) || is_resource(n) {
             continue;
         }
         let key = norm(&n.label);
@@ -246,7 +253,7 @@ pub fn deduplicate_entities(
     let mut candidates: Vec<usize> = Vec::new();
     let mut seen_norms: HashSet<String> = HashSet::new();
     for (i, n) in unique.iter().enumerate() {
-        if is_code(n) {
+        if is_code(n) || is_resource(n) {
             continue;
         }
         let key = norm(&n.label);
@@ -405,7 +412,7 @@ pub fn ambiguous_concept_pairs(
     let mut norms: Vec<String> = Vec::new();
     let mut seen_norms: HashSet<String> = HashSet::new();
     for n in nodes {
-        if is_code(n) {
+        if is_code(n) || is_resource(n) {
             continue;
         }
         let key = norm(&n.label);
@@ -554,6 +561,24 @@ mod tests {
         ];
         let (out, _) = deduplicate_entities(nodes, vec![], &HashMap::new());
         assert_eq!(out.len(), 2, "code symbols stay distinct");
+    }
+
+    fn res(id: &str, sf: &str) -> Node {
+        let mut node = n(id, sf, FileType::Document, sf);
+        node.extra.insert("_node_type".into(), "resource".into());
+        node
+    }
+
+    #[test]
+    fn resource_nodes_are_never_merged() {
+        // Sibling resource files have long, near-identical path labels; they are
+        // distinct files and must not be fuzzy-merged as duplicate concepts.
+        let nodes = vec![
+            res("a", "src/main/resources/assets/m/models/block/base.json"),
+            res("b", "src/main/resources/assets/m/models/block/x.json"),
+        ];
+        let (out, _) = deduplicate_entities(nodes, vec![], &HashMap::new());
+        assert_eq!(out.len(), 2, "distinct resource files must not merge");
     }
 
     #[test]

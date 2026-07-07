@@ -14,7 +14,7 @@ pub use dynamic::{dependents_caveat, DynamicCaveat, DynamicHazardIndex, SiteRef}
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
-use synaptic_core::{NodeId, NodeKind};
+use synaptic_core::{FileType, Node, NodeId, NodeKind};
 use synaptic_graph::KnowledgeGraph;
 
 pub use describe::{describe_node, NodeDescription};
@@ -288,6 +288,10 @@ pub struct QueryIndex {
     /// Mean undirected degree, used to normalise the hub penalty so it is
     /// graph-relative (a "hub" is a node whose degree dwarfs the average).
     avg_degree: f64,
+    /// Query-independent source-quality prior. Missing entries (including old
+    /// serialized indexes from before this field existed) are neutral `1.0`.
+    #[serde(default)]
+    node_prior: HashMap<NodeId, f64>,
 }
 
 /// Relevance decay applied per expansion hop: a node `k` hops from the seed that
@@ -302,6 +306,30 @@ const DECAY: f64 = 0.5;
 fn hub_penalty(degree: usize, avg_degree: f64) -> f64 {
     let avg = avg_degree.max(1.0);
     1.0 / (1.0 + (1.0 + degree as f64 / avg).ln())
+}
+
+fn node_prior(node: &Node) -> f64 {
+    if node.is_external_stub() {
+        return 0.6;
+    }
+    if node.is_test() {
+        return 0.85;
+    }
+    if node.file_type == FileType::Code {
+        if matches!(
+            node.extra.get("_node_type").and_then(|v| v.as_str()),
+            Some("config_key" | "config_resource")
+        ) {
+            return 0.85;
+        }
+        return 1.0;
+    }
+    match node.file_type {
+        FileType::Rationale | FileType::Document => 0.75,
+        FileType::Concept | FileType::Paper => 0.7,
+        FileType::Image => 0.8,
+        FileType::Code => 1.0,
+    }
 }
 
 impl QueryIndex {
@@ -322,12 +350,14 @@ impl QueryIndex {
     pub fn build(kg: &KnowledgeGraph) -> Self {
         let n = kg.node_count().max(1) as f64;
         let mut node_tokens: HashMap<NodeId, HashSet<String>> = HashMap::new();
+        let mut priors: HashMap<NodeId, f64> = HashMap::new();
         let mut df: HashMap<String, usize> = HashMap::new();
         for node in kg.nodes() {
             let toks: HashSet<String> = tokenize(&node.label).into_iter().collect();
             for t in &toks {
                 *df.entry(t.clone()).or_insert(0) += 1;
             }
+            priors.insert(node.id.clone(), node_prior(node));
             node_tokens.insert(node.id.clone(), toks);
         }
         let adjacency = undirected_adjacency(kg);
@@ -342,6 +372,7 @@ impl QueryIndex {
             df,
             adjacency,
             avg_degree,
+            node_prior: priors,
         }
     }
 
@@ -401,6 +432,7 @@ impl QueryIndex {
             df: HashMap::new(),
             adjacency: HashMap::new(),
             avg_degree: 0.0,
+            node_prior: HashMap::new(),
         }
     }
 
@@ -410,6 +442,9 @@ impl QueryIndex {
     pub fn absorb(&mut self, part: &QueryIndex) {
         for (id, toks) in &part.node_tokens {
             self.node_tokens.insert(id.clone(), toks.clone());
+        }
+        for (id, prior) in &part.node_prior {
+            self.node_prior.insert(id.clone(), *prior);
         }
         for (t, c) in &part.df {
             *self.df.entry(t.clone()).or_insert(0) += c;
@@ -504,6 +539,7 @@ impl QueryIndex {
             }
         };
         let degree = |id: &NodeId| self.adjacency.get(id).map_or(0, |v| v.len());
+        let prior = |id: &NodeId| self.node_prior.get(id).copied().unwrap_or(1.0);
         // Additive recency bonus (0.0 when no recency signal or node unchanged).
         // Added to a node's relevance before the hub penalty, so changed code both
         // ranks higher and is more likely to be pulled into the node budget.
@@ -514,7 +550,7 @@ impl QueryIndex {
         let mut scored: Vec<(NodeId, f64)> = self
             .node_tokens
             .keys()
-            .map(|id| (id.clone(), node_relevance(id)))
+            .map(|id| (id.clone(), node_relevance(id) * prior(id)))
             .filter(|(_, s)| *s > 0.0)
             .collect();
         scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -549,7 +585,7 @@ impl QueryIndex {
         let mut heap: std::collections::BinaryHeap<Frontier> = std::collections::BinaryHeap::new();
         let mut seq: u64 = 0;
         for s in &seeds {
-            let rel = node_relevance(s);
+            let rel = node_relevance(s) * prior(s);
             let key = (rel + recency_bonus(s)) * hub_penalty(degree(s), self.avg_degree);
             heap.push(Frontier {
                 key,
@@ -579,6 +615,7 @@ impl QueryIndex {
                         continue;
                     }
                     let rel = node_relevance(nb).max(cur.rel * DECAY);
+                    let rel = rel * prior(nb);
                     let key = (rel + recency_bonus(nb)) * hub_penalty(degree(nb), self.avg_degree);
                     heap.push(Frontier {
                         key,
@@ -918,26 +955,44 @@ pub fn resolve_detailed(kg: &KnowledgeGraph, query: &str) -> Resolution {
 
 /// A single candidate from an ambiguous resolution, carrying the facts a caller
 /// needs to pick one WITHOUT a follow-up `get_node` round-trip: the node id, its
-/// source file, and its degree (edge count).
+/// source file, its degree (edge count), and a copy-ready `qualified` reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AmbiguityCandidate {
     pub id: NodeId,
     pub file: String,
     pub degree: usize,
+    /// A paste-ready disambiguator that resolves back to this exact node: the
+    /// `label@file` qualifier when the node has a source file, else the node id
+    /// (import stubs have no file, so `label@` cannot disambiguate them). Lets an
+    /// ambiguity response hand the user something to copy rather than an id column
+    /// plus a "qualify as name@file" hint they must assemble themselves.
+    pub qualified: String,
 }
 
-/// Enrich a list of ambiguous candidate ids with each node's file and degree, so
-/// both the MCP server and the CLI can render a self-sufficient candidate list
-/// from one shared place.
+/// The paste-ready `label@file` disambiguator for a node, falling back to the id
+/// when the node has no source file (an import stub, where `label@` resolves
+/// nothing). Shared so every ambiguity surface emits an identical reference.
+pub fn qualified_ref(node: &synaptic_core::Node) -> String {
+    if node.source_file.is_empty() {
+        node.id.0.clone()
+    } else {
+        format!("{}@{}", node.label, node.source_file)
+    }
+}
+
+/// Enrich a list of ambiguous candidate ids with each node's file, degree, and a
+/// copy-ready qualified reference, so both the MCP server and the CLI can render a
+/// self-sufficient candidate list from one shared place.
 pub fn candidate_details(kg: &KnowledgeGraph, ids: &[NodeId]) -> Vec<AmbiguityCandidate> {
     ids.iter()
-        .map(|id| AmbiguityCandidate {
-            id: id.clone(),
-            file: kg
-                .node(id)
-                .map(|n| n.source_file.clone())
-                .unwrap_or_default(),
-            degree: kg.degree(id),
+        .map(|id| {
+            let node = kg.node(id);
+            AmbiguityCandidate {
+                id: id.clone(),
+                file: node.map(|n| n.source_file.clone()).unwrap_or_default(),
+                degree: kg.degree(id),
+                qualified: node.map(qualified_ref).unwrap_or_else(|| id.0.clone()),
+            }
         })
         .collect()
 }
@@ -1649,6 +1704,105 @@ mod tests {
         let b = back.query(&kg, "auth", 10, TraversalMode::Bfs);
         assert_eq!(a.seeds, b.seeds);
         assert_eq!(a.nodes, b.nodes);
+    }
+
+    #[test]
+    fn old_query_index_without_priors_loads_neutrally() {
+        let kg = build(&[("code", "Portal")], &[]);
+        let idx = QueryIndex::build(&kg);
+        let mut v = serde_json::to_value(&idx).unwrap();
+        v.as_object_mut().unwrap().remove("node_prior");
+        let back: QueryIndex = serde_json::from_value(v).unwrap();
+        assert!(back.node_prior.is_empty(), "old index has no priors");
+        let r = back.query(&kg, "portal", 10, TraversalMode::Bfs);
+        assert_eq!(r.nodes.first(), Some(&NodeId("code".into())));
+    }
+
+    #[test]
+    fn code_symbol_outranks_docs_config_and_external_stub_on_tie() {
+        let mut config = Node {
+            id: NodeId("config".into()),
+            label: "Portal".into(),
+            file_type: FileType::Code,
+            source_file: "fabric.mod.json".into(),
+            source_location: Some("L1".into()),
+            community: None,
+            repo: None,
+            extra: Map::new(),
+        };
+        config
+            .extra
+            .insert("_node_type".into(), serde_json::json!("config_resource"));
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![
+                Node {
+                    id: NodeId("doc".into()),
+                    label: "Portal".into(),
+                    file_type: FileType::Document,
+                    source_file: "README.md".into(),
+                    source_location: Some("L1".into()),
+                    community: None,
+                    repo: None,
+                    extra: Map::new(),
+                },
+                Node {
+                    id: NodeId("stub".into()),
+                    label: "Portal".into(),
+                    file_type: FileType::Code,
+                    source_file: String::new(),
+                    source_location: None,
+                    community: None,
+                    repo: None,
+                    extra: Map::new(),
+                },
+                config,
+                Node {
+                    id: NodeId("code".into()),
+                    label: "Portal".into(),
+                    file_type: FileType::Code,
+                    source_file: "src/Portal.java".into(),
+                    source_location: Some("L1".into()),
+                    community: None,
+                    repo: None,
+                    extra: Map::new(),
+                },
+            ],
+            links: vec![],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let kg = KnowledgeGraph::from_graph_data(gd);
+        let r = QueryIndex::build(&kg).query(&kg, "portal", 10, TraversalMode::Bfs);
+        let ids: Vec<_> = r.nodes.iter().map(|n| n.0.as_str()).collect();
+        assert_eq!(ids, vec!["code", "config", "doc", "stub"]);
+    }
+
+    #[test]
+    fn document_only_matches_still_appear() {
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![Node {
+                id: NodeId("doc".into()),
+                label: "Migration Guide".into(),
+                file_type: FileType::Document,
+                source_file: "README.md".into(),
+                source_location: Some("L1".into()),
+                community: None,
+                repo: None,
+                extra: Map::new(),
+            }],
+            links: vec![],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let kg = KnowledgeGraph::from_graph_data(gd);
+        let r = QueryIndex::build(&kg).query(&kg, "migration", 10, TraversalMode::Bfs);
+        assert_eq!(r.nodes, vec![NodeId("doc".into())]);
     }
 
     #[test]
@@ -2426,6 +2580,61 @@ mod tests {
         assert_eq!(details[0].file, "hub.py");
         assert_eq!(details[0].degree, 2);
         assert_eq!(details[1].degree, 1);
+    }
+
+    #[test]
+    fn candidate_details_provide_copyready_qualified_ref_that_resolves() {
+        // Two `announce()` symbols in different files. Each candidate must carry a
+        // copy-ready `label@file` qualifier that resolves back to that exact node,
+        // so an ambiguity response hands the user a paste-ready disambiguator
+        // instead of making them assemble one from a separate file column.
+        let kg = build(
+            &[("hub", "announce()"), ("leaf", "announce()")],
+            &[("hub", "leaf", "calls")],
+        );
+        let ids = vec![NodeId("hub".into()), NodeId("leaf".into())];
+        let details = candidate_details(&kg, &ids);
+        assert_eq!(details[0].qualified, "announce()@hub.py");
+        assert_eq!(details[1].qualified, "announce()@leaf.py");
+        // Each qualifier round-trips through the resolver to its own node, uniquely.
+        for c in &details {
+            assert_eq!(
+                resolve_detailed(&kg, &c.qualified),
+                Resolution::Unique(c.id.clone()),
+                "qualified ref {} must resolve uniquely",
+                c.qualified
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_details_qualified_falls_back_to_id_when_file_unknown() {
+        // Import stubs have no source_file, so `label@` cannot disambiguate them.
+        // The qualifier must fall back to the node id, which is always unique.
+        let stub = |id: &str| Node {
+            id: NodeId(id.into()),
+            label: "react".into(),
+            file_type: FileType::Code,
+            source_file: String::new(),
+            source_location: None,
+            community: None,
+            repo: None,
+            extra: Map::new(),
+        };
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![stub("react@app"), stub("react@lib")],
+            links: vec![],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let kg = KnowledgeGraph::from_graph_data(gd);
+        let ids = vec![NodeId("react@app".into()), NodeId("react@lib".into())];
+        let details = candidate_details(&kg, &ids);
+        assert_eq!(details[0].qualified, "react@app");
+        assert_eq!(details[1].qualified, "react@lib");
     }
 
     #[test]

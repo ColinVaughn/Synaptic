@@ -592,6 +592,9 @@ pub fn rebuild_with_detect(
     // non-code imports (css/json/assets) to classified asset nodes.
     let aliases = synaptic_extract::load_alias_resolver(root, &det.ts_config_files);
     synaptic_extract::resolve_imports(&mut nodes, &mut edges, &aliases);
+    // Bind resource references + emit generated-shadow edges over the full merged
+    // set, matching the full-extract pipeline (parity is asserted in tests).
+    synaptic_extract::resolve_resource_refs(&mut nodes, &mut edges);
 
     let build_opts = BuildOptions {
         directed: opts.directed,

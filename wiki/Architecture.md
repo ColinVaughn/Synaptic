@@ -55,6 +55,7 @@ and [MCP Server](MCP-Server).
 | `synaptic-predict` | Change forecasting: blast radius, at-risk tests, public-API risk, change-risk score, co-change, and the analytic edit forecast (`synaptic predict`) |
 | `synaptic-sandbox` | Speculative execution: apply a change in a throwaway worktree and run the at-risk tests + a build/type-check (`synaptic speculate`) |
 | `synaptic-eval` | Forecast evaluation: the prediction ledger and the replay calibration harness (`synaptic eval replay`) |
+| `synaptic-readiness` | Static port/readiness auditor: ranks graph-linked framework stubs, sentinel returns, placeholders, generated-resource noise, and project metadata for `synaptic audit readiness` / `readiness_audit` |
 | `synaptic-sqlaudit` | SQL performance & security auditor: a rule engine over a SQL-aware graph (columns, indexes, RLS policies, grants, code-to-SQL edges) powering `synaptic sql audit`/`advise` and the `audit_sql` / `advise_sql` MCP tools |
 | `bin/synaptic` | The CLI that wires the crates into commands |
 
@@ -67,8 +68,17 @@ The graph is a node-link structure serialized to `graph.json` (NetworkX-compatib
   `source_location`, `community`, and `repo` (for federated graphs).
 - **Edges** (serialized under `links`) have a `source`, `target`, `relation` (for example
   `calls`, `imports`, `imports_from`, `inherits`, `implements`, `references`, `contains`,
-  `depends_on`, `reads_from`), and a `confidence` of `EXTRACTED`, `INFERRED`, or
+  `depends_on`, `reads_from`, `shadows`), and a `confidence` of `EXTRACTED`, `INFERRED`, or
   `AMBIGUOUS`. Cross-repo edges are flagged with `cross_repo`.
+- **Resource nodes** (`file_type: document`, tagged `_node_type: resource`) index
+  data/resource files (data JSON, `.mcmeta`) one node per file — never one per key.
+  Reference-like strings inside them bind to the file, resource (by path-derived
+  logical id `ns:path`), or code symbol they name via a `references` edge, and a
+  generated resource that duplicates a source one at the same logical path gets a
+  `shadows` edge. This is framework-agnostic (a Minecraft `ResourceLocation` is one
+  instance of the logical-id shape) and on by default (`extract --no-resources` to
+  skip). Because they are ordinary nodes with edges, `affected` and `query_graph`
+  span code and resources.
 
 The exact JSON shape and every export format are documented in [Output Formats](Output-Formats).
 

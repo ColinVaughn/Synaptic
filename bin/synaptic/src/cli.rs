@@ -39,6 +39,11 @@ pub(crate) enum Cmd {
         /// schemas, at the cost of column-level SQL audit rules.
         #[arg(long)]
         no_columns: bool,
+        /// Skip indexing data/resource files (assets/**, data/**, generated JSON,
+        /// .mcmeta) as graph nodes and their references. Resources are indexed by
+        /// default; this restores the smaller code-only graph.
+        #[arg(long)]
+        no_resources: bool,
         /// Build the sharded on-disk store (synaptic-out/store) alongside
         /// graph.json. This is the default; the flag is kept for compatibility.
         #[arg(long, conflicts_with = "no_store")]
@@ -139,6 +144,9 @@ pub(crate) enum Cmd {
         /// ...). Default writes graph.json + the provenance manifest only.
         #[arg(long)]
         artifacts: bool,
+        /// Skip indexing data/resource files as graph nodes (on by default).
+        #[arg(long)]
+        no_resources: bool,
     },
     /// Watch the working tree and incrementally rebuild on change (debounced).
     Watch {
@@ -562,6 +570,11 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         action: SqlAction,
     },
+    /// Static audit reports over the graph and project root.
+    Audit {
+        #[command(subcommand)]
+        action: AuditAction,
+    },
     /// Update the Synaptic binary to the latest GitHub release (opt-in).
     /// Bare: check and, if newer, prompt to download + replace. `--enable` /
     /// `--disable` toggle the background "update available" notice (off by
@@ -580,6 +593,39 @@ pub(crate) enum Cmd {
         /// Skip the confirmation prompt before downloading and replacing.
         #[arg(long, short = 'y')]
         yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum AuditAction {
+    /// Rank port-readiness blockers: sentinel returns, placeholders, generated noise, and config metadata.
+    Readiness {
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        /// Project root for source/config checks (default: .).
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Scope to one federated member (its `repo` tag).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Audit profile (default: auto; use generic for a language-neutral scan).
+        #[arg(long, default_value = "auto")]
+        profile: String,
+        /// Only report findings at least this severe (critical|high|medium|low|info).
+        #[arg(long)]
+        severity: Option<String>,
+        /// Max findings written/rendered before truncation (ignored with --verbose).
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Write/render all findings instead of the capped top-N.
+        #[arg(long)]
+        verbose: bool,
+        /// Emit the report as JSON to stdout.
+        #[arg(long)]
+        json: bool,
+        /// Output directory (default: synaptic-out/readiness).
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 }
 

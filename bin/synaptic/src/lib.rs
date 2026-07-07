@@ -9,6 +9,7 @@ mod commands;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Cmd};
+use commands::audit::run_audit;
 use commands::cache::run_cache;
 use commands::diff::run_diff;
 use commands::eval::run_eval;
@@ -69,10 +70,18 @@ fn run() -> Result<()> {
             wiki,
             semantic,
             no_columns,
+            no_resources,
             store: _,
             no_store,
         } => run_extract(
-            &path, directed, obsidian, wiki, semantic, no_columns, !no_store,
+            &path,
+            directed,
+            obsidian,
+            wiki,
+            semantic,
+            no_columns,
+            !no_store,
+            no_resources,
         ),
         Cmd::Query {
             text,
@@ -97,7 +106,8 @@ fn run() -> Result<()> {
             directed,
             force,
             artifacts,
-        } => run_update(paths, full, directed, force, artifacts),
+            no_resources,
+        } => run_update(paths, full, directed, force, artifacts, no_resources),
         Cmd::Watch {
             directed,
             force,
@@ -311,6 +321,7 @@ fn run() -> Result<()> {
         }),
         Cmd::Eval { action } => run_eval(action),
         Cmd::Sql { action } => commands::sql::run_sql(action),
+        Cmd::Audit { action } => run_audit(action),
         Cmd::SelfUpdate {
             enable,
             disable,

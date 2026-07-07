@@ -19,6 +19,7 @@ synaptic-refactor = { workspace = true }
 synaptic-predict = { workspace = true }
 synaptic-sandbox = { workspace = true }
 synaptic-sqlaudit = { workspace = true }
+synaptic-readiness = { workspace = true }
 synaptic-store = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true, features = ["net", "time"] }

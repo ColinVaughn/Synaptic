@@ -21,6 +21,7 @@ Most read commands operate on `synaptic-out/graph.json` by default; build it fir
 | [`hazards`](#hazards) | List reflection / dynamic-dispatch sites, so a "0 dependents" answer is not mistaken for "safe". |
 | [`diff`](#diff) | Time-travel: diff the graph between two git revisions (dependencies, removed APIs, drift, cycles, hotspots). |
 | [`predict`](#predict) | Forecast a change before applying it: blast radius, public APIs at risk, new cycles, and a verify checklist. |
+| [`audit`](#audit) | Static readiness audits, including port blockers, placeholders/stubs, and project metadata. |
 | [`sql`](#sql) | Audit SQL for performance + security over the SQL-aware graph, or advise on a candidate query before writing it. |
 | [`hook`](#hook) | Manage git hooks and the `graph.json` merge driver. |
 | [`serve`](#serve) | Run the MCP server (stdio or HTTP). |
@@ -44,7 +45,7 @@ Scan a directory, build the knowledge graph, and write the artifact set to `syna
 Syntax:
 
 ```sh
-synaptic extract [PATH] [--directed] [--obsidian] [--wiki] [--semantic] [--no-columns] [--no-store]
+synaptic extract [PATH] [--directed] [--obsidian] [--wiki] [--semantic] [--no-columns] [--no-resources] [--no-store]
 ```
 
 Arguments and flags:
@@ -57,9 +58,10 @@ Arguments and flags:
 | `--wiki` | off | Also write a Markdown wiki under `synaptic-out/wiki/`. |
 | `--semantic` | off | Run the LLM semantic pass over documents/papers and enable the LLM dedup tiebreaker. Requires an API key in the environment (for example `OPENAI_API_KEY`). Makes paid API calls. |
 | `--no-columns` | off | Skip SQL column and index nodes. Smaller `graph.json` on column-heavy schemas, at the cost of column-level SQL audit rules. |
+| `--no-resources` | off | Skip indexing data/resource files (`assets/**`, `data/**`, generated JSON, `.mcmeta`) as graph nodes and their references. Resources are indexed by default; this restores the smaller code-only graph. |
 | `--no-store` | off | Skip the sharded store (`synaptic-out/store/`); write `graph.json` only. The store is built by default and is what shard-aware serving reads — see [MCP Server](MCP-Server#serving-a-federated-store-shard-aware). |
 
-The default run is fully offline and needs no API key. It always writes `graph.json`, `graph.html`, `GRAPH_REPORT.md`, `graph.graphml`, `graph.cypher`, `graph.dot`, `callflow.html`, `tree.html`, `graph.svg`, and `graph-3d.html` into `synaptic-out/`, plus the sharded store under `synaptic-out/store/` (skipped with `--no-store`; the store dir writes its own `.gitignore` so shards never ride into a commit). With `--obsidian` and `--wiki` it adds the `obsidian/` and `wiki/` directories. Markdown heading structure is always extracted; the LLM concept pass runs only with `--semantic`. `synaptic update` keeps both `graph.json` and the store fresh incrementally.
+The default run is fully offline and needs no API key. It always writes `graph.json`, `graph.html`, `GRAPH_REPORT.md`, `graph.graphml`, `graph.cypher`, `graph.dot`, `callflow.html`, `tree.html`, `graph.svg`, and `graph-3d.html` into `synaptic-out/`, plus the sharded store under `synaptic-out/store/` (skipped with `--no-store`; the store dir writes its own `.gitignore` so shards never ride into a commit). With `--obsidian` and `--wiki` it adds the `obsidian/` and `wiki/` directories. Markdown heading structure is always extracted; the LLM concept pass runs only with `--semantic`. Data/resource files (JSON under `assets/`, `data/`, and generated dirs, plus `.mcmeta`) are indexed as graph nodes by default, and reference-like strings in them are bound to the file, resource, or code symbol they name — so queries and `affected` span code and resources; `--no-resources` restores the code-only graph. `synaptic update` keeps both `graph.json` and the store fresh incrementally.
 
 Example:
 
@@ -295,7 +297,7 @@ Incrementally rebuild the graph after files change, or do a full rebuild.
 Syntax:
 
 ```sh
-synaptic update [PATHS...] [--full] [--directed] [--force] [--artifacts]
+synaptic update [PATHS...] [--full] [--directed] [--force] [--artifacts] [--no-resources]
 ```
 
 | Name | Default | Description |
@@ -305,6 +307,7 @@ synaptic update [PATHS...] [--full] [--directed] [--force] [--artifacts]
 | `--directed` | off | Build directed when there is no existing graph to inherit from. |
 | `--force` | off | Bypass the shrink guard. |
 | `--artifacts` | off | Also regenerate the visual/export artifact suite (default writes `graph.json` + the provenance manifest only). |
+| `--no-resources` | off | Skip indexing data/resource files as graph nodes (on by default), so an incremental update stays consistent with a `--no-resources` extract. |
 
 Behavior: when no paths are given on the command line (and not `--full`), changed paths are read from the `SYNAPTIC_CHANGED` environment variable (newline-delimited), which is how the post-commit/post-merge hooks pass them. If that is also empty, a bare `update` diffs the working tree against the provenance manifest and rebuilds exactly what changed since the last build. The command inherits the existing graph and its `directed` flag when present, and serializes concurrent rebuilds with a lock (queuing paths if another rebuild holds it; the holder drains the queue, including paths queued mid-rebuild).
 
@@ -639,6 +642,25 @@ not retune anything.
 
 See [`predict`](#predict), [`speculate`](#speculate), and [`diff`](#diff).
 
+## audit
+
+Static audit reports over an existing graph and project root. The first audit is `readiness`, a port/readiness pass that ranks likely blockers from graph plus source/config signals: framework sentinel returns, placeholders/stubs, generated-resource noise, and project metadata. It does not run a build.
+
+Syntax:
+
+```sh
+synaptic audit readiness [--graph <path>] [--root <dir>] [--repo <tag>] [--profile <profile>] [--severity <level>] [--limit <N>] [--verbose] [--json] [--out <dir>]
+```
+
+Defaults: `--root .`, `--profile auto`, `--limit 20`, and `--out synaptic-out/readiness`. The command writes `readiness.json` and `readiness.md`; `--json` also prints the structured report to stdout.
+
+Examples:
+
+```sh
+synaptic audit readiness
+synaptic audit readiness --profile generic --severity high --json
+```
+
 ## sql
 
 Audit the SQL in the graph for performance and security problems, or critique a
@@ -801,11 +823,11 @@ synaptic serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root
 | `--http` | none (stdio) | Serve over HTTP at this address (for example `127.0.0.1:8765`) instead of stdio. The MCP endpoint is `/mcp`. |
 | `--api-key` | none | Require this API key for HTTP requests (or set `SYNAPTIC_API_KEY`). |
 | `--source-root` | dir above `synaptic-out/` | Trusted root for resolving a node's source file in the `get_source` tool (path-traversal jailed). |
-| `--allow-exec` | off | Expose the command-running `speculate` tool (the 28th tool). This makes the server no longer read-only, so enable it only for trusted clients. See [MCP Server](MCP-Server). |
+| `--allow-exec` | off | Expose the command-running `speculate` tool. This makes the server no longer read-only, so enable it only for trusted clients. See [MCP Server](MCP-Server). |
 | `--concise` | off | Token-lean output: lower the default list/budget sizes so tool results return less to the model (or set `SYNAPTIC_CONCISE`). An explicit per-call argument always wins. |
 | `--watch` | off | Embed a filesystem watcher so the auto-freshen staleness check is event-driven — no walk or debounce window per query (or set `SYNAPTIC_SERVE_WATCH=1`). See [Incremental-Updates](Incremental-Updates). |
 
-Defaults to stdio transport. The MCP server reports protocol `2025-11-25` and exposes 29 read-only tools (30 with `--allow-exec`, which adds the command-running `speculate` tool), prompts, completions, resource templates/subscriptions, and structured tool output. When serving HTTP on a wildcard address with no API key, it prints a warning.
+Defaults to stdio transport. The MCP server reports protocol `2025-11-25` and exposes 30 read-only tools (31 with `--allow-exec`, which adds the command-running `speculate` tool), prompts, completions, resource templates/subscriptions, and structured tool output. When serving HTTP on a wildcard address with no API key, it prints a warning.
 
 Example:
 

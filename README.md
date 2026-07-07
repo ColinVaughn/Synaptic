@@ -91,7 +91,18 @@ grepping or reading files.
   queries to the tables they touch). `synaptic sql advise --query "<sql>"` critiques a candidate
   query before you write it, cross-referenced against the graph's tables/indexes/RLS. See
   [SQL Auditing](https://github.com/ColinVaughn/Synaptic/wiki/SQL-Auditing).
-- **MCP server** (protocol 2025-11-25) exposing 29 read-only tools over stdio or HTTP:
+- **Resource graph** (universal, on by default): data/resource files (data JSON and `.mcmeta`
+  under `assets/`, `data/`, and generated dirs) are indexed as graph nodes, and reference-like
+  strings inside them bind to the file, resource (by path-derived id like `ns:path`), or code
+  symbol they name — so `affected` and `query_graph` span code *and* resources. A generated
+  resource that duplicates a hand-authored one at the same logical path gets a `shadows` edge
+  (surfaced by `readiness_audit`). Framework-agnostic — a Minecraft `ResourceLocation` is just
+  one instance of the logical-id shape; `extract --no-resources` restores the code-only graph.
+- **Port/readiness audit**: `synaptic audit readiness` ranks likely port blockers from graph,
+  source, and config signals: framework sentinel returns, placeholders/stubs,
+  generated-resource noise, and project metadata. The MCP `readiness_audit` tool exposes the
+  same structured report.
+- **MCP server** (protocol 2025-11-25) exposing 30 read-only tools over stdio or HTTP:
   subgraph search, source reading, reverse-impact, find-all-references, dynamic-dispatch hazards,
   PR/working-tree blast radius, change forecasting, predictive test selection, edit-impact prediction,
   structural search, time-travel diff, plan-only rename, and SQL audit/advise, plus prompts, completions,
@@ -329,6 +340,7 @@ A code-only corpus runs fully offline; the optional LLM semantic pass over docs 
 | `refactor <action>` | Plan a safe `rename`/`move`/`extract` for an agent, then `verify` the graph (never edits source) |
 | `predict [paths...]` | Forecast a change before applying it: blast radius, at-risk tests, risk, removed APIs, cycles. Flags: `--base`, `--edit "<kind>:<symbol>"`, `--gate` |
 | `speculate [paths...]` | Run a change for real in a throwaway worktree: at-risk tests + a build/type-check, reporting pass/fail. Flags: `--patch`, `--test-cmd`, `--check-cmd` |
+| `audit readiness` | Static port/readiness audit: ranks framework sentinel returns, placeholders/stubs, generated-resource noise, and project metadata. Flags: `--profile`, `--severity`, `--repo`, `--json` |
 | `sql <action>` | `audit` SQL for performance + security over the SQL-aware graph, or `advise --query "<sql>"` on a candidate query before writing it. Flags: `--severity`, `--explain --db-url` (live EXPLAIN, needs `--features live-explain`) |
 | `eval replay [from]` | Replay history to score forecast quality against git ground truth (CI-gateable). Flag: `--min-test-recall` |
 | `update [paths...]` | Incrementally rebuild after files change (`--full` for a full rebuild) |
@@ -354,12 +366,12 @@ synaptic serve                                                        # stdio MC
 synaptic serve --http 127.0.0.1:8765 --api-key "$SYNAPTIC_API_KEY"   # HTTP server
 ```
 
-The server exposes 29 read-only tools: graph navigation (`query_graph`, `get_node`,
+The server exposes 30 read-only tools: graph navigation (`query_graph`, `get_node`,
 `get_source`, `get_neighbors`, `get_community`, `god_nodes`, `graph_stats`, `shortest_path`),
 impact analysis (`affected`, `find_callers`, `find_callees`, `find_references`, `dynamic_hazards`,
 `predict_impact`, `affected_tests`, `predict_edit`), federation (`list_repos`, `repo_stats`), change/PR review (`working_changes_impact`,
 `list_prs`, `get_pr_impact`, `triage_prs`), the advanced trio (`structural_search`,
-`time_travel_diff`, plan-only `plan_rename`), and SQL auditing (`audit_sql`, `advise_sql`).
+`time_travel_diff`, plan-only `plan_rename`), port/readiness audit (`readiness_audit`), and SQL auditing (`audit_sql`, `advise_sql`).
 It also serves MCP prompts, argument completions, resource templates and
 subscriptions, and a small REST surface (`/api/stats`, `/api/query`, ...) for non-MCP
 clients. Tool output is tuned to stay token-lean (terse defaults, capped lists); add

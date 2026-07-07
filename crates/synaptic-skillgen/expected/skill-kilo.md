@@ -43,6 +43,7 @@ is the fallback. A "--" in a column means that side has no direct equivalent.
 | Graph overview / hubs / clusters | -- | `graph_stats`, `god_nodes`, `get_community` |
 | Architecture diff between two git revs | `synaptic diff <rev1> [rev2]` | `time_travel_diff` |
 | Plan-only rename (never edits source) | `synaptic refactor rename <name> --to <new>` | `plan_rename` |
+| Port/readiness audit | `synaptic audit readiness` | `readiness_audit` |
 | Audit / critique SQL | -- | `audit_sql` / `advise_sql` |
 | Graph-aware PR review (needs `gh`) | -- | `list_prs` / `get_pr_impact` / `triage_prs` |
 

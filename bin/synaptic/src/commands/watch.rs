@@ -42,7 +42,7 @@ pub(crate) fn run_watch(
     // past session dropped): a bare update diffs the manifest and rebuilds
     // exactly what changed. Watching is already live, so an edit landing
     // mid-catch-up queues as a normal event instead of falling in a gap.
-    if let Err(e) = run_update(Vec::new(), false, directed, force, artifacts) {
+    if let Err(e) = run_update(Vec::new(), false, directed, force, artifacts, false) {
         eprintln!("startup catch-up failed: {e}");
     }
 
@@ -96,7 +96,7 @@ pub(crate) fn run_watch(
 
         if rescan {
             println!("\nWatcher lost events → catching up from the manifest…");
-            if let Err(e) = run_update(Vec::new(), false, directed, force, artifacts) {
+            if let Err(e) = run_update(Vec::new(), false, directed, force, artifacts, false) {
                 eprintln!("catch-up rebuild failed: {e}");
             }
             continue;
@@ -109,7 +109,7 @@ pub(crate) fn run_watch(
             "\nDetected {} changed code file(s) → rebuilding…",
             paths.len()
         );
-        if let Err(e) = run_update(paths, false, directed, force, artifacts) {
+        if let Err(e) = run_update(paths, false, directed, force, artifacts, false) {
             eprintln!("rebuild failed: {e}");
         }
     }
