@@ -4,7 +4,7 @@ members = ["crates/*", "bin/*"]
 
 [workspace.package]
 edition = "2021"
-version = "0.6.1"
+version = "0.6.2"
 license = "AGPL-3.0-or-later"
 rust-version = "1.96"
 
@@ -42,6 +42,7 @@ synaptic-predict = { path = "crates/synaptic-predict" }
 synaptic-sandbox = { path = "crates/synaptic-sandbox" }
 synaptic-eval = { path = "crates/synaptic-eval" }
 synaptic-sqlaudit = { path = "crates/synaptic-sqlaudit" }
+synaptic-readiness = { path = "crates/synaptic-readiness" }
 synaptic-upgrade = { path = "crates/synaptic-upgrade" }
 synaptic-store = { path = "crates/synaptic-store" }
 clap = { version = "4", features = ["derive"] }
