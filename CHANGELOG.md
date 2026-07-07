@@ -8,10 +8,49 @@ All notable changes to Synaptic are documented here. The format is based on
 > **CodeGraph**, and reference the old `codegraph` command and crate names. They
 > are preserved verbatim as historical record.
 
-## [Unreleased]
+## [0.6.2] - 2026-07-07
+
+> **Upgrade note:** `extract` and `update` now index structured data/resource
+> files (data JSON and `.mcmeta`) as graph nodes by default, so `affected` /
+> `predict_impact` / `query_graph` traverse code<->resource links. Pass
+> `--no-resources` for the old code-only behavior.
+
+### Added
+
+- **Resource graph (universal, on by default).** Structured data/resource files
+  (data JSON and `.mcmeta`) that the config-only JSON extractor used to drop are
+  now indexed as one graph node each. Their reference-like string values are bound
+  to real targets by a conservative cross-file pass — an existing file path,
+  another resource's path-derived logical id (`ns:path`), or a unique code symbol —
+  and dropped when nothing resolves, so nothing dangles. A generated resource that
+  duplicates a hand-authored one at the same logical path gets a `shadows` edge,
+  surfaced by a new `READY-RESOURCE-SHADOW` readiness rule. Because resources are
+  now nodes with real edges, `affected` / `predict_impact` / `query_graph` traverse
+  code<->resource, so a datapack/resource consumer shows up in a symbol's blast
+  radius. Framework-agnostic: a Minecraft `ResourceLocation` is just one instance
+  of the universal path-derived-id shape — no MC-specific schemas. Opt out with
+  `synaptic extract --no-resources` (also on `update`).
+- **Port/readiness audit.** Added the `synaptic-readiness` crate, the
+  `synaptic audit readiness` CLI command, and the read-only MCP
+  `readiness_audit` tool. The audit ranks graph-linked framework stubs,
+  sentinel returns, placeholders, generated-resource noise, and project metadata
+  into a structured report
+  with severity, subsystem, confidence, remediation, and graph-impact scoring.
+  MCP now advertises 30 read-only tools by default, or 31 with `--allow-exec`.
 
 ### Changed
 
+- **Ambiguous-name responses hand back a copy-ready qualifier.** When a name
+  resolves to several nodes, each candidate is now listed as a paste-ready
+  `label@file` reference (or the node id when it has no source file) that
+  resolves straight back to that exact node, instead of an id + file column the
+  caller had to reassemble into a `name@file` qualifier. Applies to the CLI text,
+  the MCP text output, and the structured `candidates` array (new `qualified`
+  field, alongside the existing `id`/`file`/`degree`).
+- **`query_graph` now applies source-aware node priors.** First-party code stays
+  neutral, while docs/rationale, config/resources, tests, and external stubs are
+  softly down-ranked when token relevance is otherwise similar. Old serialized
+  query indexes load with neutral priors for compatibility.
 - **Dropped the `redb` dependency; legacy v1 shards now fail with a rebuild
   hint.** Dependabot proposed bumping redb 2.6 -> 4.1 (#16), but redb 3.0
   removed the file format redb 2.x wrote, so no current redb can open the v1
@@ -22,6 +61,11 @@ All notable changes to Synaptic are documented here. The format is based on
   the manifest (the unchanged-skip used to keep it). v2 flat-container stores
   (0.6.1+) are unaffected; `SYNAPTIC_STORE=redb` keeps working as the
   historical name for the sharded backend.
+
+### Security
+
+- Bumped the transitive `crossbeam-epoch` dependency to 0.9.20 to clear
+  RUSTSEC-2026-0204 (invalid pointer dereference in a `fmt::Pointer` impl).
 
 ## [0.6.1] - 2026-07-05
 
