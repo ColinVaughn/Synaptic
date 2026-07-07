@@ -1,5 +1,6 @@
 //! CLI command implementations, one module per command group.
 
+pub(crate) mod audit;
 pub(crate) mod cache;
 pub(crate) mod common;
 pub(crate) mod diff;

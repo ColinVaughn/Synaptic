@@ -116,11 +116,11 @@ fn explain_reports_ambiguity_with_candidates() {
         out.contains("is ambiguous") && out.contains("candidates"),
         "expected an ambiguity message with candidates, got: {out}"
     );
-    // Each candidate carries its file + degree inline so the user can pick without
-    // a second lookup.
+    // Each candidate is a copy-ready `label@file` qualifier plus its degree, so the
+    // user can paste one back verbatim without a second lookup.
     assert!(
-        out.contains("a.py") && out.contains("degree"),
-        "candidates should list file + degree inline, got: {out}"
+        out.contains("@a.py") && out.contains("degree"),
+        "candidates should list a copy-ready label@file qualifier + degree, got: {out}"
     );
     assert!(
         !out.contains("Node not found"),

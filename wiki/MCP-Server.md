@@ -189,7 +189,7 @@ size.
 
 ## MCP tools
 
-`tools/list` reports 29 tools by default (30 with `--allow-exec`, which adds
+`tools/list` reports 30 tools by default (31 with `--allow-exec`, which adds
 `speculate`). Every tool documents its parameters in its input schema, and every
 tool carries annotations so a host knows how safe it is to run:
 
@@ -197,7 +197,7 @@ tool carries annotations so a host knows how safe it is to run:
 "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": <bool> }
 ```
 
-All 29 default tools are `readOnlyHint: true`. `openWorldHint` is `true` only for
+All 30 default tools are `readOnlyHint: true`. `openWorldHint` is `true` only for
 the tools that reach outside the graph by shelling out (`list_prs`,
 `get_pr_impact`, `triage_prs`, `working_changes_impact`, `predict_impact`,
 `affected_tests`, and `time_travel_diff`); it is `false` for the rest, including
@@ -211,7 +211,7 @@ annotated honestly as `readOnlyHint: false, openWorldHint: true`. The default
 server never advertises or runs it, preserving the strictly read-only surface.
 
 Each tool returns a text content block (the load-bearing, purpose-formatted
-output). Fourteen tools additionally declare an `outputSchema` and return a typed
+output). Fifteen tools additionally declare an `outputSchema` and return a typed
 `structuredContent` object alongside the text (a 2025-06-18 feature) -- see
 [Structured output](#structured-output).
 
@@ -274,8 +274,10 @@ can pin it to one with a `name@file-substring` qualifier (e.g.
 `get_neighbors`, `get_source`, `find_callers`, `find_callees`, `find_references`,
 `shortest_path`, `affected`, and `predict_edit`. (`plan_rename` instead takes a dedicated `file`
 parameter for the same purpose.) If the name is still ambiguous, the tool returns
-the candidate list with each candidate's id, file, and degree inline, so you can
-pick one without a follow-up `get_node` call.
+the candidate list with each candidate's degree and a copy-ready `qualified`
+reference (the `label@file` qualifier, or the node id when it has no file) that
+resolves back to that exact node, so you can paste one back to disambiguate
+without assembling it or making a follow-up `get_node` call.
 
 ### get_node
 
@@ -826,6 +828,28 @@ lower-confidence ones under `Review (<n>):` — so an agent can apply the rename
 without a second round-trip to the CLI's `plan.md`. Returns an error string if the
 symbol is not found.
 
+### readiness_audit
+
+Static port/readiness audit over the graph plus source and config metadata. It
+ranks likely blockers from framework sentinel returns, placeholders/stubs,
+generated-resource noise, and project metadata. It does not run a build.
+
+Parameters:
+- `profile` (string) -- rule profile. Default `auto`; use `generic` for a
+  language-neutral scan.
+- `repo` (string) -- in a federated store, restrict the audit to one repo tag.
+- `severity` (string) -- only return findings at least this severe
+  (`critical`|`high`|`medium`|`low`|`info`).
+- `limit` (integer, default 20) -- max findings before a `+N more` summary.
+  Ignored when `verbose` is true.
+- `verbose` (boolean, default false) -- list every finding and include detail,
+  remediation, evidence, confidence, and impact.
+
+Returns a summary grouped by severity and subsystem, then ranked findings. The
+`structuredContent` mirror carries the full `ReadinessReport`. When the server
+has no registered source root, source/config checks are skipped explicitly and
+graph-only findings are still returned.
+
 ### audit_sql
 
 Audit the codebase's SQL for performance and security problems over the
@@ -861,7 +885,7 @@ Returns the findings as text + `structuredContent`.
 
 ### Structured output
 
-Fourteen tools declare an `outputSchema` and return a `structuredContent` object
+Fifteen tools declare an `outputSchema` and return a `structuredContent` object
 beside the text content, so a client can parse the result instead of scraping the
 formatted text:
 
@@ -879,6 +903,7 @@ formatted text:
 | `list_repos` | `{ repos: [{ repo, nodes, edges, source_hash? }] }` (empty array for a single-repo graph; `source_hash` present when a `workspace-state.json` sibling exists) |
 | `predict_impact` | the full `ChangeForecast`: `{ summary, changed_files, changed_nodes, public_api_breaks, blast_radius, blast_radius_total, at_risk_tests, verify_checklist, risk }` (not truncated by `limit`, which caps only the text) |
 | `affected_tests` | `{ tests: [{ id, label, file, depth, via_relation }], total }` |
+| `readiness_audit` | `{ version, summary, counts_by_severity, groups, findings: [{ rule_id, severity, category, subsystem, title, detail, location, node_ids, evidence, remediation, confidence, impact }], skipped }` |
 | `audit_sql` / `advise_sql` | `{ version, summary, findings: [{ rule_id, severity, category, title, detail, location, remediation, confidence }] }` |
 
 The other tools return text only. A tool whose structured mirror cannot resolve

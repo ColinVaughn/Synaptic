@@ -1,0 +1,18 @@
+[package]
+name = "synaptic-readiness"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Static port-readiness auditor for Synaptic graphs and project roots."
+
+[dependencies]
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+synaptic-core = { workspace = true }
+synaptic-graph = { workspace = true }
+synaptic-query = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

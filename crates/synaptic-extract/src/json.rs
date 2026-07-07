@@ -57,8 +57,21 @@ const CONFIG_KEYS: &[&str] = &[
     "compilerOptions",
 ];
 
-/// Extract a JSON file already in memory. Returns an empty result for data JSON
-/// (not a recognized config/manifest).
+/// Data JSON (not a recognized config/manifest) becomes a single resource node
+/// when resource indexing is on, else nothing (the historical skip that avoids
+/// orphan-key explosion on fixture data).
+#[cfg(feature = "lang-json")]
+fn resource_fallback(path: &str, source: &[u8]) -> ExtractionResult {
+    if crate::resource::emit_resources() {
+        crate::resource::extract_resource_source(path, source)
+    } else {
+        ExtractionResult::default()
+    }
+}
+
+/// Extract a JSON file already in memory. Recognized config/manifest JSON yields
+/// its structure; other JSON yields a single resource node (or nothing when
+/// resource indexing is disabled).
 #[cfg(feature = "lang-json")]
 pub fn extract_json_source(path: &str, source: &[u8]) -> ExtractionResult {
     let mut parser = Parser::new();
@@ -70,7 +83,7 @@ pub fn extract_json_source(path: &str, source: &[u8]) -> ExtractionResult {
     };
     let root = tree.root_node();
     let Some(top) = children(root).into_iter().find(|c| c.kind() == "object") else {
-        return ExtractionResult::default(); // top-level array/scalar = data JSON
+        return resource_fallback(path, source); // top-level array/scalar = data JSON
     };
 
     let ex = JsonExtractor { src: source };
@@ -86,7 +99,7 @@ pub fn extract_json_source(path: &str, source: &[u8]) -> ExtractionResult {
     let is_config = CONFIG_NAMES.contains(&filename.as_str())
         || top_keys.iter().any(|k| CONFIG_KEYS.contains(&k.as_str()));
     if !is_config {
-        return ExtractionResult::default();
+        return resource_fallback(path, source);
     }
 
     let mut b = Builder::new(path);
@@ -332,13 +345,44 @@ mod tests {
         }
     }
 
+    use crate::resource::RESOURCE_TEST_LOCK;
+
     #[test]
-    fn data_json_is_skipped() {
-        // No config filename, no config keys -> empty.
+    fn data_json_skipped_when_resources_disabled() {
+        let _g = RESOURCE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::resource::set_emit_resources(false);
+        // No config filename, no config keys -> empty (resource indexing off).
         let r = extract_json_source("data/items.json", br#"{"items":[1,2,3],"count":3}"#);
         assert!(r.nodes.is_empty() && r.edges.is_empty());
         // Top-level array -> data.
         let r2 = extract_json_source("arr.json", br#"[1,2,3]"#);
         assert!(r2.nodes.is_empty());
+        crate::resource::set_emit_resources(true);
+    }
+
+    #[test]
+    fn data_json_indexed_as_resource_when_enabled() {
+        let _g = RESOURCE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::resource::set_emit_resources(true);
+        // Data JSON (object, not config) -> exactly one resource node.
+        let r = extract_json_source("data/mymod/loot_tables/x.json", br#"{"items":[1,2,3]}"#);
+        assert_eq!(r.nodes.len(), 1, "one resource node per data file");
+        assert_eq!(
+            r.nodes[0].extra.get("_node_type").and_then(|v| v.as_str()),
+            Some("resource")
+        );
+        // A top-level array is data too -> one resource node.
+        let r2 = extract_json_source("data/mymod/tags/x.json", br#"[1,2,3]"#);
+        assert_eq!(r2.nodes.len(), 1);
+    }
+
+    #[test]
+    fn config_json_unaffected_by_resource_toggle() {
+        let _g = RESOURCE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::resource::set_emit_resources(false);
+        // package.json is config -> still extracted (never reaches the data branch).
+        let r = extract_json_source("package.json", br#"{"dependencies":{"lodash":"^4"}}"#);
+        assert!(r.edges.iter().any(|e| e.relation == "imports"));
+        crate::resource::set_emit_resources(true);
     }
 }

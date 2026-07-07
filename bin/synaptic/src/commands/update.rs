@@ -22,7 +22,13 @@ pub(crate) fn run_update(
     directed_flag: bool,
     force: bool,
     artifacts: bool,
+    no_resources: bool,
 ) -> Result<()> {
+    // Process-wide resource-indexing switch; set before any file is extracted so
+    // an incremental update stays consistent with a full `--no-resources` extract.
+    if no_resources {
+        synaptic_extract::set_emit_resources(false);
+    }
     // The post-commit hook passes the changed files via SYNAPTIC_CHANGED
     // (newline-delimited) instead of argv, so paths containing spaces or
     // shell-glob characters survive intact (no word-splitting/glob-expansion).

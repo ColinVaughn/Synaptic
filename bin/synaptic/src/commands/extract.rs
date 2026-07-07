@@ -35,11 +35,17 @@ pub(crate) fn run_extract(
     semantic: bool,
     no_columns: bool,
     store: bool,
+    no_resources: bool,
 ) -> Result<()> {
     // Process-wide SQL extraction switch; set before any file is extracted.
     if no_columns {
         synaptic_extract::set_emit_sql_columns(false);
         println!("note: --no-columns set; SQL column/index nodes will be skipped");
+    }
+    // Process-wide resource-indexing switch; set before any file is extracted.
+    if no_resources {
+        synaptic_extract::set_emit_resources(false);
+        println!("note: --no-resources set; data/resource files will not be indexed");
     }
     let root = root
         .canonicalize()
@@ -149,6 +155,15 @@ pub(crate) fn run_extract(
         stats.assets,
         stats.asset_nodes,
     );
+    // Bind resource-file references to real nodes (or drop them) and flag any
+    // generated resource that shadows a hand-authored one, over the full corpus.
+    let res_stats = synaptic_extract::resolve_resource_refs(&mut nodes, &mut edges);
+    if res_stats.bound + res_stats.dropped + res_stats.shadows > 0 {
+        println!(
+            "Resources: {} reference(s) bound, {} dropped, {} generated-shadow edge(s)",
+            res_stats.bound, res_stats.dropped, res_stats.shadows
+        );
+    }
 
     // Markdown structure: heading hierarchy -> `document` nodes + `contains`
     // edges. Deterministic + cheap (a line scan), so it runs unconditionally,

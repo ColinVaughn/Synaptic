@@ -94,6 +94,8 @@ pub mod php;
 pub mod powershell;
 #[cfg(feature = "lang-razor")]
 pub mod razor;
+#[cfg(feature = "lang-json")]
+pub mod resource;
 #[cfg(feature = "lang-ruby")]
 pub mod ruby;
 #[cfg(feature = "lang-rust")]
@@ -118,6 +120,11 @@ pub mod zig;
 pub use cache::{cached_extract_source, AST_CACHE_VERSION};
 pub use config::{ImportStyle, LanguageConfig, TypeRefStyle};
 pub use resolve::{resolve_imports, resolve_relative_imports, ResolveStats};
+#[cfg(feature = "lang-json")]
+pub use resource::{
+    emit_resources, extract_resource_source, resolve_resource_refs, set_emit_resources,
+    ResourceResolveStats,
+};
 pub use result::{ExtractionResult, ImportRecord, RawCall};
 #[cfg(feature = "lang-sql")]
 pub use sql_semantic::{emit_sql_columns, set_emit_sql_columns};
@@ -168,6 +175,12 @@ pub fn extract_source(path: &str, source: &[u8]) -> Option<ExtractionResult> {
         "cpp" | "cc" | "cxx" | "hpp" | "hh" => Some(cpp::extract_cpp_source(path, source)),
         #[cfg(feature = "lang-json")]
         "json" => Some(json::extract_json_source(path, source)),
+        // `.mcmeta` is JSON-syntax resource metadata, never config -> resource node
+        // (gated by the resource toggle, like data JSON).
+        #[cfg(feature = "lang-json")]
+        "mcmeta" => {
+            resource::emit_resources().then(|| resource::extract_resource_source(path, source))
+        }
         #[cfg(feature = "lang-yaml")]
         "yaml" | "yml" => Some(yaml::extract_yaml_source(path, source)),
         #[cfg(feature = "lang-hcl")]
@@ -290,5 +303,26 @@ mod tests {
     fn dispatch_ignores_unknown_extension() {
         assert!(extract_source("a/b.zzz", b"x").is_none());
         assert!(extract_source("noext", b"x").is_none());
+    }
+
+    #[cfg(feature = "lang-json")]
+    #[test]
+    fn dispatch_routes_mcmeta_as_resource() {
+        let _g = crate::resource::RESOURCE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::resource::set_emit_resources(true);
+        let r = extract_source("pack.mcmeta", br#"{"pack":{"pack_format":15}}"#)
+            .expect("mcmeta dispatched when resources on");
+        assert!(r
+            .nodes
+            .iter()
+            .any(|n| n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("resource")));
+        crate::resource::set_emit_resources(false);
+        assert!(
+            extract_source("pack.mcmeta", b"{}").is_none(),
+            "mcmeta not dispatched when resources off"
+        );
+        crate::resource::set_emit_resources(true);
     }
 }
