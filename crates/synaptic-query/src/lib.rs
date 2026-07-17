@@ -1496,19 +1496,33 @@ impl ReverseImpactIndex {
         seeds: &[NodeId],
         depth: usize,
     ) -> Vec<AffectedHit> {
-        let seed_set: HashSet<&NodeId> = seeds.iter().filter(|s| kg.contains_node(s)).collect();
-        if seed_set.is_empty() {
+        self.affected_rooted(kg, seeds, seeds, depth)
+    }
+
+    /// Cached equivalent of [`affected_rooted`]: seed from every `root`, but
+    /// omit only `exclude` from the result. This preserves type-folding
+    /// semantics where a member root can itself be reached through a sibling.
+    pub fn affected_rooted(
+        &self,
+        kg: &KnowledgeGraph,
+        roots: &[NodeId],
+        exclude: &[NodeId],
+        depth: usize,
+    ) -> Vec<AffectedHit> {
+        let root_set: Vec<&NodeId> = roots.iter().filter(|root| kg.contains_node(root)).collect();
+        if root_set.is_empty() {
             return Vec::new();
         }
+        let exclude_set: HashSet<&NodeId> = exclude.iter().collect();
 
         // Multi-source BFS. BFS processes a full depth layer before the next, so a
         // node's first visit is its min depth and all its min-depth in-edges are
         // seen during that layer; the explicit (min depth, smallest relation)
         // comparison then makes the result independent of seed/edge order.
         let mut best: HashMap<NodeId, (usize, String)> = HashMap::new();
-        let mut seen: HashSet<NodeId> = seed_set.iter().map(|s| (*s).clone()).collect();
+        let mut seen: HashSet<NodeId> = root_set.iter().map(|root| (*root).clone()).collect();
         let mut queue: VecDeque<(NodeId, usize)> =
-            seed_set.iter().map(|s| ((*s).clone(), 0)).collect();
+            root_set.iter().map(|root| ((*root).clone(), 0)).collect();
         while let Some((cur, d)) = queue.pop_front() {
             if d >= depth {
                 continue;
@@ -1517,6 +1531,9 @@ impl ReverseImpactIndex {
                 continue;
             };
             for (src, rel) in adj {
+                if exclude_set.contains(src) {
+                    continue;
+                }
                 let nd = d + 1;
                 let entry = best
                     .entry(src.clone())
@@ -1530,10 +1547,8 @@ impl ReverseImpactIndex {
             }
         }
 
-        // A seed reached as another seed's dependent must not appear in the result.
         let mut hits: Vec<AffectedHit> = best
             .into_iter()
-            .filter(|(id, _)| !seed_set.contains(id))
             .map(|(node_id, (depth, via_relation))| AffectedHit {
                 node_id,
                 depth,
@@ -2453,6 +2468,39 @@ mod tests {
                 let oneshot = affected_nodes_multi(&kg, &seeds, DEFAULT_AFFECTED_RELATIONS, depth);
                 assert_eq!(cached, oneshot, "seeds={seeds:?} depth={depth}");
             }
+        }
+    }
+
+    #[test]
+    fn prebuilt_index_rooted_matches_oneshot_type_folding() {
+        // Rooted mode differs from affected_multi: only the class is excluded,
+        // while a member root reached through a sibling remains in the output.
+        // The cached adjacency must preserve that distinction at every depth.
+        let kg = build(
+            &[
+                ("C", "C"),
+                ("m1", "m1"),
+                ("m2", "m2"),
+                ("X", "X"),
+                ("R", "R"),
+                ("Z", "Z"),
+            ],
+            &[
+                ("C", "m1", "method"),
+                ("C", "m2", "method"),
+                ("X", "m1", "calls"),
+                ("m1", "m2", "calls"),
+                ("R", "C", "references"),
+                ("Z", "X", "imports"),
+            ],
+        );
+        let roots = vec![NodeId("C".into()), NodeId("m1".into()), NodeId("m2".into())];
+        let exclude = vec![NodeId("C".into())];
+        let index = ReverseImpactIndex::build(&kg, DEFAULT_AFFECTED_RELATIONS);
+        for depth in [1usize, 2, 5] {
+            let cached = index.affected_rooted(&kg, &roots, &exclude, depth);
+            let oneshot = affected_rooted(&kg, &roots, &exclude, DEFAULT_AFFECTED_RELATIONS, depth);
+            assert_eq!(cached, oneshot, "depth={depth}");
         }
     }
 

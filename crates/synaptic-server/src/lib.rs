@@ -41,7 +41,7 @@ pub use session::{SessionStore, DEFAULT_SESSION_IDLE};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -56,9 +56,10 @@ use synaptic_prs::{
     Status, SystemCommands,
 };
 use synaptic_query::{
-    affected_including_members, dependents_caveat, describe_node, explain, is_type_like,
-    references_to, shortest_path, type_member_ids, AffectedHit, DynamicCaveat, QueryIndex, Recency,
-    RecencyMode, ReverseImpactIndex, TraversalMode, DEFAULT_AFFECTED_RELATIONS,
+    affected_including_members, affected_nodes, dependents_caveat, describe_node, explain,
+    is_type_like, references_to, shortest_path, type_member_ids, AffectedHit, DynamicCaveat,
+    QueryIndex, Recency, RecencyMode, ReverseImpactIndex, TraversalMode,
+    DEFAULT_AFFECTED_RELATIONS,
 };
 use synaptic_readiness::{
     audit as readiness_audit, AuditOptions as ReadinessOptions, Profile as ReadinessProfile,
@@ -69,6 +70,8 @@ use synaptic_sandbox::{
 };
 
 const SUPPORTED_PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+const STDIO_WORKERS: usize = 4;
+const STDIO_QUEUE_CAPACITY: usize = 32;
 
 /// `query_graph` recency-boost strength: a max-churn changed-file node gains an
 /// additive `RECENCY_BOOST` on its relevance (IDF scores run ~2-6), so changed
@@ -103,6 +106,167 @@ struct GodNodeRow {
     /// True when an evidence-link resolved a dynamic site to this hub: a high-degree
     /// node reachable via reflection is extra dangerous to change.
     dynamically_referenced: bool,
+}
+
+/// One resolved `affected` computation, or its resolution failure. The MCP text
+/// and structured channels render this same value so a request never resolves or
+/// walks the reverse graph twice.
+enum AffectedReport {
+    Resolved {
+        id: NodeId,
+        hits: Vec<AffectedHit>,
+        member_count: usize,
+        depth: usize,
+        dynamic_caveat: Option<DynamicCaveat>,
+    },
+    Ambiguous {
+        query: String,
+        hits: Vec<(String, NodeId)>,
+    },
+    NotFound {
+        query: String,
+    },
+}
+
+/// A limited, resolved structural-search result shared by both MCP response
+/// renderers. `total` preserves the full match count while `rows`/`groups` hold
+/// only the configured response prefix.
+enum StructuralSearchReport {
+    Nodes {
+        columns: Vec<String>,
+        total: usize,
+        rows: Vec<Vec<synaptic_synql::NodeView>>,
+    },
+    Aggregates {
+        columns: Vec<String>,
+        total: usize,
+        groups: Vec<Vec<String>>,
+    },
+}
+
+struct GraphStatsReport {
+    stats: GraphStats,
+    dynamic_total: usize,
+    dynamic_opaque: usize,
+    dynamic_linked: usize,
+}
+
+struct RepoRow {
+    repo: String,
+    nodes: usize,
+    edges: usize,
+    source_hash: Option<String>,
+}
+
+struct ReposReport {
+    rows: Vec<RepoRow>,
+}
+
+struct NeighborReportRow {
+    label: String,
+    relation: String,
+    context: Option<String>,
+    cross_repo: bool,
+    direction: &'static str,
+    sites: Vec<(String, Option<String>)>,
+}
+
+enum NeighborReport {
+    Resolved {
+        seed: String,
+        rows: Vec<NeighborReportRow>,
+        by_relation: BTreeMap<String, usize>,
+        total: usize,
+    },
+    Unresolved {
+        text: String,
+    },
+}
+
+struct CompletionAlias {
+    normalized: String,
+    value_index: usize,
+}
+
+/// Graph-version label autocomplete index. Values are sanitized, sorted, and
+/// deduplicated once; aliases retain both the full lower-cased label and the
+/// bare form after leading punctuation (for method labels such as `.name()`).
+struct CompletionIndex {
+    values: Vec<String>,
+    aliases: Vec<CompletionAlias>,
+}
+
+impl CompletionIndex {
+    fn build(provider: &provider::GraphProvider) -> Self {
+        let mut labels = Vec::new();
+        provider.for_each_node(&mut |node| {
+            labels.push((node.label.clone(), sanitize_label(&node.label)))
+        });
+
+        let mut values: Vec<String> = labels.iter().map(|(_, value)| value.clone()).collect();
+        values.sort();
+        values.dedup();
+        let value_indexes: HashMap<&str, usize> = values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (value.as_str(), index))
+            .collect();
+
+        let mut aliases = Vec::with_capacity(labels.len().saturating_mul(2));
+        for (raw, value) in labels {
+            let Some(&value_index) = value_indexes.get(value.as_str()) else {
+                continue;
+            };
+            let normalized = raw.to_lowercase();
+            let bare = normalized
+                .trim_start_matches(|c: char| !c.is_alphanumeric())
+                .to_string();
+            aliases.push(CompletionAlias {
+                normalized: normalized.clone(),
+                value_index,
+            });
+            if bare != normalized {
+                aliases.push(CompletionAlias {
+                    normalized: bare,
+                    value_index,
+                });
+            }
+        }
+        aliases.sort_by(|a, b| {
+            a.normalized
+                .cmp(&b.normalized)
+                .then(a.value_index.cmp(&b.value_index))
+        });
+        aliases.dedup_by(|a, b| a.normalized == b.normalized && a.value_index == b.value_index);
+        Self { values, aliases }
+    }
+
+    /// Prefix-range lookup over pre-normalized aliases. Returned value indexes
+    /// are sorted to preserve the historical lexicographic output order.
+    fn lookup(&self, prefix: &str) -> (Vec<String>, usize, usize) {
+        let normalized = prefix.to_lowercase();
+        let start = self
+            .aliases
+            .partition_point(|alias| alias.normalized.as_str() < normalized.as_str());
+        let mut value_indexes = Vec::new();
+        let mut examined = 0usize;
+        for alias in &self.aliases[start..] {
+            if !alias.normalized.starts_with(&normalized) {
+                break;
+            }
+            examined += 1;
+            value_indexes.push(alias.value_index);
+        }
+        value_indexes.sort_unstable();
+        value_indexes.dedup();
+        let total = value_indexes.len();
+        let values = value_indexes
+            .into_iter()
+            .take(100)
+            .map(|index| self.values[index].clone())
+            .collect();
+        (values, total, examined)
+    }
 }
 
 /// Echo the client's requested protocol when we support it, else our latest.
@@ -156,6 +320,9 @@ pub struct Server {
     /// opt-in (`serve --allow-exec`). When off, `speculate` is neither advertised
     /// in tools/list nor runnable.
     allow_exec: bool,
+    /// Whether this transport can retain resource subscription state and push
+    /// updates. Enabled by stateful HTTP; disabled for stdio.
+    resource_subscriptions: bool,
     /// Token-lean output mode. When on (env `SYNAPTIC_CONCISE` or `serve
     /// --concise`), tools that take a size/limit knob fall back to lower defaults
     /// so a default call returns less to the model; an explicit per-call argument
@@ -175,6 +342,193 @@ pub struct Server {
     /// watcher. When present it replaces the debounced walk-per-query gate: a
     /// clean flag means no staleness walk at all; the catch-up consumes it.
     watch_dirty: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Graph-version aggregates computed lazily on first use. A reload replaces
+    /// these OnceLocks together with the provider snapshot.
+    repo_counts_cache: OnceLock<BTreeMap<String, (usize, usize)>>,
+    dynamic_stats_cache: OnceLock<(usize, usize, usize)>,
+    completion_index: OnceLock<CompletionIndex>,
+    /// Unit-test instrumentation: count reverse-impact computations at the server
+    /// boundary so a full MCP response can guard the compute-once contract.
+    #[cfg(test)]
+    affected_walks: std::sync::atomic::AtomicUsize,
+    /// Unit-test instrumentation for the response-limit contract: projection
+    /// must resolve only cells in rows that can actually be returned.
+    #[cfg(test)]
+    structural_view_lookups: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    structural_search_runs: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    repo_count_scans: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    dynamic_stat_scans: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    neighbor_explanations: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    completion_index_builds: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    completion_aliases_examined: std::sync::atomic::AtomicUsize,
+}
+
+/// A JSON-RPC request that has passed the transport-independent envelope
+/// checks. Notifications are represented by `id: None`.
+#[derive(Clone, Debug)]
+pub(crate) struct ValidatedRequest {
+    pub(crate) id: Option<Value>,
+    pub(crate) method: String,
+    pub(crate) params: Value,
+}
+
+pub(crate) fn jsonrpc_error_response(id: Value, code: i64, message: impl Into<String>) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message.into() }
+    })
+}
+
+pub(crate) fn jsonrpc_parse_error() -> Value {
+    jsonrpc_error_response(Value::Null, -32700, "Parse error")
+}
+
+/// Validate the JSON-RPC 2.0 envelope before method dispatch. Method-specific
+/// argument validation remains in each method/tool boundary.
+pub(crate) fn validate_jsonrpc_request(req: &Value) -> Result<ValidatedRequest, Value> {
+    let invalid = |message: &str| Err(jsonrpc_error_response(Value::Null, -32600, message));
+    let Some(object) = req.as_object() else {
+        return invalid("Invalid Request: envelope must be an object");
+    };
+    if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return invalid("Invalid Request: jsonrpc must be exactly '2.0'");
+    }
+    let Some(method) = object.get("method").and_then(Value::as_str) else {
+        return invalid("Invalid Request: method must be a string");
+    };
+    if let Some(params) = object.get("params") {
+        if !params.is_object() && !params.is_array() {
+            return invalid("Invalid Request: params must be an object or array");
+        }
+    }
+    if let Some(id) = object.get("id") {
+        if !id.is_null() && !id.is_string() && !id.is_number() {
+            return invalid("Invalid Request: id must be a string, number, or null");
+        }
+    }
+    Ok(ValidatedRequest {
+        id: object.get("id").cloned(),
+        method: method.to_string(),
+        params: object.get("params").cloned().unwrap_or(Value::Null),
+    })
+}
+
+/// Client state negotiated by `initialize`, retained per stdio connection or
+/// Streamable-HTTP session until that connection/session closes.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct NegotiatedClient {
+    pub(crate) protocol_version: String,
+    pub(crate) capabilities: Value,
+    pub(crate) name: String,
+    pub(crate) version: String,
+}
+
+/// Validate the required MCP initialize shape and select the protocol version
+/// returned by this server. An unsupported requested version negotiates to the
+/// latest supported version, preserving the existing MCP version-negotiation
+/// behavior; the client can then decide whether to continue.
+pub(crate) fn validate_initialize_params(
+    params: &Value,
+) -> Result<NegotiatedClient, (i64, String)> {
+    let Some(params) = params.as_object() else {
+        return Err((-32602, "initialize params must be an object".to_string()));
+    };
+    let Some(requested) = params.get("protocolVersion").and_then(Value::as_str) else {
+        return Err((
+            -32602,
+            "initialize requires string 'protocolVersion'".to_string(),
+        ));
+    };
+    let Some(capabilities) = params.get("capabilities").filter(|v| v.is_object()) else {
+        return Err((
+            -32602,
+            "initialize requires object 'capabilities'".to_string(),
+        ));
+    };
+    let Some(client_info) = params.get("clientInfo").and_then(Value::as_object) else {
+        return Err((
+            -32602,
+            "initialize requires object 'clientInfo'".to_string(),
+        ));
+    };
+    let Some(name) = client_info.get("name").and_then(Value::as_str) else {
+        return Err((
+            -32602,
+            "initialize clientInfo requires string 'name'".to_string(),
+        ));
+    };
+    let Some(version) = client_info.get("version").and_then(Value::as_str) else {
+        return Err((
+            -32602,
+            "initialize clientInfo requires string 'version'".to_string(),
+        ));
+    };
+    Ok(NegotiatedClient {
+        protocol_version: negotiate_protocol(Some(requested)).to_string(),
+        capabilities: capabilities.clone(),
+        name: name.to_string(),
+        version: version.to_string(),
+    })
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+enum ConnectionLifecycle {
+    #[default]
+    New,
+    AwaitingInitialized(NegotiatedClient),
+    Ready(NegotiatedClient),
+    Closed,
+}
+
+impl ConnectionLifecycle {
+    /// Gate one already-validated request. `Ok(true)` means dispatch it;
+    /// `Ok(false)` means a lifecycle notification was consumed with no response.
+    fn authorize(&mut self, req: &ValidatedRequest) -> Result<bool, (i64, String)> {
+        let is_request = req.id.is_some();
+        match self {
+            ConnectionLifecycle::New => match req.method.as_str() {
+                "initialize" if is_request => {
+                    let negotiated = validate_initialize_params(&req.params)?;
+                    *self = ConnectionLifecycle::AwaitingInitialized(negotiated);
+                    Ok(true)
+                }
+                "initialize" => Ok(false),
+                "ping" if is_request => Ok(true),
+                _ if !is_request => Ok(false),
+                _ => Err((-32002, "Server is not initialized".to_string())),
+            },
+            ConnectionLifecycle::AwaitingInitialized(negotiated) => match req.method.as_str() {
+                "notifications/initialized" if !is_request => {
+                    *self = ConnectionLifecycle::Ready(negotiated.clone());
+                    Ok(false)
+                }
+                "initialize" if is_request => {
+                    Err((-32600, "Initialize has already been requested".to_string()))
+                }
+                "ping" if is_request => Ok(true),
+                _ if !is_request => Ok(false),
+                _ => Err((
+                    -32002,
+                    "Server is waiting for notifications/initialized".to_string(),
+                )),
+            },
+            ConnectionLifecycle::Ready(_) => match req.method.as_str() {
+                "initialize" if is_request => {
+                    Err((-32600, "Server is already initialized".to_string()))
+                }
+                "notifications/initialized" => Ok(false),
+                _ => Ok(true),
+            },
+            ConnectionLifecycle::Closed => Err((-32002, "MCP connection is closed".to_string())),
+        }
+    }
 }
 
 /// Configuration for the serve catch-up path: detect files an agent
@@ -577,11 +931,31 @@ impl Server {
             repo_roots: HashMap::new(),
             repo_hashes,
             allow_exec: false,
+            resource_subscriptions: false,
             concise: concise_from_env(),
             freshen: None,
             last_fresh_check: Mutex::new(None),
             stale_files: std::sync::atomic::AtomicUsize::new(0),
             watch_dirty: None,
+            repo_counts_cache: OnceLock::new(),
+            dynamic_stats_cache: OnceLock::new(),
+            completion_index: OnceLock::new(),
+            #[cfg(test)]
+            affected_walks: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            structural_view_lookups: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            structural_search_runs: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            repo_count_scans: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            dynamic_stat_scans: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            neighbor_explanations: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            completion_index_builds: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            completion_aliases_examined: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -618,6 +992,44 @@ impl Server {
         self.provider.god_nodes_all()
     }
 
+    /// Repository counts are invariant for a loaded graph snapshot. Computing
+    /// them walks every node and edge, so retain the result until hot reload
+    /// swaps in a new provider.
+    fn repo_counts(&self) -> &BTreeMap<String, (usize, usize)> {
+        self.repo_counts_cache.get_or_init(|| {
+            #[cfg(test)]
+            self.repo_count_scans
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.provider.repo_counts()
+        })
+    }
+
+    /// Drop graph-version report caches after the provider snapshot changes.
+    fn reset_graph_report_caches(&mut self) {
+        self.repo_counts_cache = OnceLock::new();
+        self.dynamic_stats_cache = OnceLock::new();
+        self.completion_index = OnceLock::new();
+    }
+
+    fn completion_index(&self) -> &CompletionIndex {
+        self.completion_index.get_or_init(|| {
+            #[cfg(test)]
+            self.completion_index_builds
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            CompletionIndex::build(&self.provider)
+        })
+    }
+
+    fn complete_labels(&self, prefix: &str) -> (Vec<String>, usize) {
+        let (values, total, examined) = self.completion_index().lookup(prefix);
+        #[cfg(test)]
+        self.completion_aliases_examined
+            .fetch_add(examined, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(test))]
+        let _ = examined;
+        (values, total)
+    }
+
     /// Override the gh/git command runner (tests inject a mock).
     pub fn with_runner(mut self, runner: Box<dyn CommandRunner>) -> Server {
         self.runner = runner;
@@ -636,7 +1048,7 @@ impl Server {
         // files next to it: a leftover workspace-state.json from an old
         // `workspace` run must not silently disable autofresh for a graph
         // that has since been re-extracted as single-repo.
-        if self.freshen.is_some() && !self.provider.repo_counts().is_empty() {
+        if self.freshen.is_some() && !self.repo_counts().is_empty() {
             eprintln!(
                 "[synaptic] auto-freshen disabled: federated graph (refresh members individually)"
             );
@@ -652,6 +1064,11 @@ impl Server {
     /// that is acceptable for this deployment.
     pub fn with_allow_exec(mut self, allow: bool) -> Server {
         self.allow_exec = allow;
+        self
+    }
+
+    pub(crate) fn with_resource_subscriptions(mut self, enabled: bool) -> Server {
+        self.resource_subscriptions = enabled;
         self
     }
 
@@ -823,6 +1240,7 @@ impl Server {
                 if let Ok(store) = synaptic_store::ShardStore::open(dir) {
                     self.provider = provider::GraphProvider::from_store(store);
                     self.repo_hashes = read_repo_hashes(self.graph_path.as_deref());
+                    self.reset_graph_report_caches();
                     self.reload_key = Some(key);
                 }
             }
@@ -842,6 +1260,7 @@ impl Server {
     fn reindex_from(&mut self, kg: KnowledgeGraph) {
         self.provider = provider::GraphProvider::single_from_kg(kg, provider::Prepared::default());
         self.repo_hashes = read_repo_hashes(self.graph_path.as_deref());
+        self.reset_graph_report_caches();
     }
 
     /// Cheap, read-lock-safe staleness gate for the catch-up path: debounced so a
@@ -1042,10 +1461,32 @@ impl Server {
     /// `affected` command so both surfaces give a class the same non-empty blast
     /// radius). Returns the hits and the member count (0 for a non-type node).
     fn affected_for(&self, id: &NodeId, rels: &[&str], depth: usize) -> (Vec<AffectedHit>, usize) {
+        #[cfg(test)]
+        self.affected_walks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let Some(sh) = self.provider.owner_shard(id) else {
             return (Vec::new(), 0);
         };
-        let (mut hits, member_count) = affected_including_members(&sh.kg, id, rels, depth);
+        // The provider already builds the default reverse-impact index when a
+        // shard is materialized. Reuse it for the common path; custom relation
+        // sets intentionally fall back to a one-shot adjacency because they do
+        // not match the persisted index's relation set.
+        let (mut hits, member_count) = if rels == DEFAULT_AFFECTED_RELATIONS {
+            let members = match sh.kg.node(id).and_then(|n| n.kind()) {
+                Some(k) if is_type_like(k) => type_member_ids(&sh.kg, id),
+                _ => Vec::new(),
+            };
+            let mut roots = Vec::with_capacity(members.len() + 1);
+            roots.push(id.clone());
+            roots.extend(members.iter().cloned());
+            (
+                sh.affected_index
+                    .affected_rooted(&sh.kg, &roots, std::slice::from_ref(id), depth),
+                members.len(),
+            )
+        } else {
+            affected_including_members(&sh.kg, id, rels, depth)
+        };
         // Cross-repo opt-in: a bridge edge INTO the seed (or a member, or any
         // in-shard hit) means its source repo depends on it; count that source
         // and continue the walk in ITS shard. One bridge crossing per walk (a
@@ -1081,11 +1522,16 @@ impl Server {
                     }
                     if cross_depth < depth {
                         if let Some(osh) = self.provider.owner_shard(&src) {
-                            for h2 in osh.affected_index.affected_multi(
-                                &osh.kg,
-                                std::slice::from_ref(&src),
-                                depth - cross_depth,
-                            ) {
+                            let continued = if rels == DEFAULT_AFFECTED_RELATIONS {
+                                osh.affected_index.affected_multi(
+                                    &osh.kg,
+                                    std::slice::from_ref(&src),
+                                    depth - cross_depth,
+                                )
+                            } else {
+                                affected_nodes(&osh.kg, &src, rels, depth - cross_depth)
+                            };
+                            for h2 in continued {
                                 if seen.insert(h2.node_id.clone()) {
                                     hits.push(AffectedHit {
                                         node_id: h2.node_id,
@@ -1911,20 +2357,13 @@ impl Server {
         repo: Option<&str>,
         path_glob: Option<&str>,
         max_results: usize,
-    ) -> (String, Value) {
-        let empty = |msg: String| {
-            (
-                msg,
-                json!({ "pattern": pattern, "total": 0, "truncated": false,
-                        "files_scanned": 0, "hits": [] }),
-            )
-        };
+    ) -> Result<(String, Value), String> {
         if pattern.is_empty() {
-            return empty("search_text needs a non-empty `pattern`.".to_string());
+            return Err("search_text needs a non-empty `pattern`.".to_string());
         }
         let roots = self.search_roots(repo);
         if roots.is_empty() {
-            return empty(match repo {
+            return Err(match repo {
                 Some(r) => format!(
                     "No source root is registered for repo '{}'; serve the federated/global graph so its members' roots are known, or check the tag with list_repos.",
                     sanitize_label(r)
@@ -1942,7 +2381,7 @@ impl Server {
         };
         let outcome = match search::run(&roots, &q) {
             Ok(o) => o,
-            Err(e) => return empty(format!("search_text: {}", sanitize_label(&e))),
+            Err(e) => return Err(format!("search_text: {}", sanitize_label(&e))),
         };
 
         // Bucket nodes by the files that actually matched, so attribution is one
@@ -2064,7 +2503,7 @@ impl Server {
             "files_scanned": outcome.files_scanned,
             "hits": hits_json,
         });
-        (text, structured)
+        Ok((text, structured))
     }
 
     /// `dynamic_hazards` — list reflection / dynamic-dispatch sites recorded on
@@ -2211,152 +2650,167 @@ impl Server {
         limit: usize,
         verbose: bool,
     ) -> String {
+        let report = self.neighbor_report(label, relation_filter, show_sites, limit, verbose);
+        self.render_neighbor_text(&report, relation_filter)
+    }
+
+    /// Resolve and explain a node once, then retain the bounded rows needed by
+    /// both MCP response channels. Explanation can walk a high-degree adjacency
+    /// list and federated bridges, so duplicating it for text and JSON is costly.
+    fn neighbor_report(
+        &self,
+        label: &str,
+        relation_filter: Option<&str>,
+        show_sites: bool,
+        limit: usize,
+        verbose: bool,
+    ) -> NeighborReport {
         let id = match self.resolve_or_msg(label) {
             Ok(id) => id,
-            Err(msg) => return msg,
+            Err(text) => return NeighborReport::Unresolved { text },
         };
+        #[cfg(test)]
+        self.neighbor_explanations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let Some(ex) = self.explain_seed(&id) else {
-            return format!("No node matches '{}'.", sanitize_label(label));
+            return NeighborReport::Unresolved {
+                text: format!("No node matches '{}'.", sanitize_label(label)),
+            };
         };
-        let seed = sanitize_label(&ex.label);
         let rel_filter = relation_filter.map(str::to_lowercase);
-        let sites: SiteMap = if show_sites {
-            let mut m = SiteMap::new();
-            self.edge_sites(&id, &mut m);
-            m
+        let cap = if verbose { usize::MAX } else { limit.max(1) };
+        let mut by_relation = BTreeMap::new();
+        let mut rows = Vec::new();
+        let mut total = 0usize;
+        let sites = if show_sites {
+            let mut sites = SiteMap::new();
+            self.edge_sites(&id, &mut sites);
+            sites
         } else {
             SiteMap::new()
         };
-        // A hub can have hundreds of neighbors; cap the rendered list (default,
-        // verbose=false) with a '+N more' summary so the output stays bounded,
-        // mirroring find_callers/affected. verbose lists every neighbor.
-        let cap = if verbose { usize::MAX } else { limit.max(1) };
-        // Tally every relation on the node so a filter that excludes everything can
-        // still report what the node DOES have. Only needed on the filtered path:
-        // with no filter, an empty result means the node simply has no neighbors.
-        let mut by_rel: BTreeMap<&str, usize> = BTreeMap::new();
-        let mut body = String::new();
-        let mut matched = 0usize;
-        let mut rendered = 0usize;
         for nb in &ex.neighbors {
-            if rel_filter.is_some() {
-                *by_rel.entry(nb.relation.as_str()).or_default() += 1;
-            }
+            *by_relation.entry(nb.relation.clone()).or_default() += 1;
             if let Some(f) = &rel_filter {
-                // Case-insensitive substring (lowercase both sides).
                 if !nb.relation.to_lowercase().contains(f.as_str()) {
                     continue;
                 }
             }
-            matched += 1;
-            // Count the rest for the '+N more' line, but stop rendering past the cap.
-            if rendered >= cap {
+            total += 1;
+            if rows.len() >= cap {
                 continue;
             }
-            rendered += 1;
-            let arrow = if nb.direction == "out" { "-->" } else { "<--" };
-            body.push_str(&format!(
-                "\n  {} {} [{}]",
-                arrow,
-                sanitize_label(&nb.label),
-                sanitize_label(&nb.relation)
-            ));
-            // Boundary detail: how the edge couples (HTTP method + host, queue,
-            // ipc) and whether it spans repos (2026-07 audit: was invisible).
-            if let Some(ctx) = &nb.context {
-                body.push_str(&format!(" ({})", sanitize_label(ctx)));
-            }
-            if nb.cross_repo {
-                body.push_str(" [cross-repo]");
-            }
-            if show_sites {
-                if let Some(site_list) =
-                    sites.get(&(nb.id.clone(), nb.relation.clone(), nb.direction))
-                {
-                    body.push_str(&self.render_sites(site_list, "        ", 3));
-                }
-            }
+            rows.push(NeighborReportRow {
+                label: nb.label.clone(),
+                relation: nb.relation.clone(),
+                context: nb.context.clone(),
+                cross_repo: nb.cross_repo,
+                direction: nb.direction,
+                sites: sites
+                    .get(&(nb.id.clone(), nb.relation.clone(), nb.direction))
+                    .cloned()
+                    .unwrap_or_default(),
+            });
         }
-        if matched == 0 {
-            // Distinguish "node exists but no edge matched the filter" from "no
-            // such node". When a filter hid everything, name the relations the node
-            // actually has so the empty list is not misread as a missing node.
-            return match (relation_filter, by_rel.is_empty()) {
-                (Some(f), false) => {
-                    let avail = by_rel
+        NeighborReport::Resolved {
+            seed: ex.label,
+            rows,
+            by_relation,
+            total,
+        }
+    }
+
+    fn render_neighbor_text(
+        &self,
+        report: &NeighborReport,
+        relation_filter: Option<&str>,
+    ) -> String {
+        let NeighborReport::Resolved {
+            seed,
+            rows,
+            by_relation,
+            total,
+        } = report
+        else {
+            let NeighborReport::Unresolved { text } = report else {
+                unreachable!()
+            };
+            return text.clone();
+        };
+        let seed = sanitize_label(seed);
+        if *total == 0 {
+            return match (relation_filter, by_relation.is_empty()) {
+                (Some(filter), false) => {
+                    let available = by_relation
                         .iter()
-                        .map(|(r, c)| format!("{}({c})", sanitize_label(r)))
+                        .map(|(relation, count)| format!("{}({count})", sanitize_label(relation)))
                         .collect::<Vec<_>>()
                         .join(", ");
                     format!(
-                        "Neighbors of {seed}:\n  (none with relation '{}'; this node has: {avail})",
-                        sanitize_label(f)
+                        "Neighbors of {seed}:\n  (none with relation '{}'; this node has: {available})",
+                        sanitize_label(filter)
                     )
                 }
                 _ => format!("Neighbors of {seed}:\n  (none)"),
             };
         }
-        if matched > rendered {
+        let mut body = String::new();
+        for row in rows {
+            let arrow = if row.direction == "out" { "-->" } else { "<--" };
+            body.push_str(&format!(
+                "\n  {} {} [{}]",
+                arrow,
+                sanitize_label(&row.label),
+                sanitize_label(&row.relation)
+            ));
+            if let Some(context) = &row.context {
+                body.push_str(&format!(" ({})", sanitize_label(context)));
+            }
+            if row.cross_repo {
+                body.push_str(" [cross-repo]");
+            }
+            if !row.sites.is_empty() {
+                body.push_str(&self.render_sites(&row.sites, "        ", 3));
+            }
+        }
+        if *total > rows.len() {
             body.push_str(&format!(
                 "\n  ... +{} more (pass verbose=true to list all, or relation_filter to narrow)",
-                matched - rendered
+                total - rows.len()
             ));
         }
-        format!("Neighbors of {seed} ({matched}):{body}")
+        format!("Neighbors of {seed} ({total}):{body}")
     }
 
-    /// Structured mirror of `get_neighbors`: the seed plus each in/out neighbor
-    /// and a per-relation tally. Honors the same case-insensitive relation filter
-    /// as the text path. `null` when the node does not resolve.
-    fn get_neighbors_json(
-        &self,
-        label: &str,
-        relation_filter: Option<&str>,
-        limit: usize,
-        verbose: bool,
-    ) -> Value {
-        let Ok(id) = self.resolve_or_msg(label) else {
+    /// Structured mirror rendered from the same explanation as the text path.
+    fn render_neighbor_json(report: &NeighborReport) -> Value {
+        let NeighborReport::Resolved {
+            seed,
+            rows,
+            by_relation,
+            total,
+        } = report
+        else {
             return Value::Null;
         };
-        let Some(ex) = self.explain_seed(&id) else {
-            return Value::Null;
-        };
-        let rel_filter = relation_filter.map(str::to_lowercase);
-        // Mirror the text path's cap so the structured channel cannot blow past
-        // the budget on a hub; `total` carries the true matched count.
-        let cap = if verbose { usize::MAX } else { limit.max(1) };
-        let mut by_relation: BTreeMap<&str, usize> = BTreeMap::new();
-        let mut neighbors = Vec::new();
-        let mut matched = 0usize;
-        for nb in &ex.neighbors {
-            *by_relation.entry(nb.relation.as_str()).or_default() += 1;
-            if let Some(f) = &rel_filter {
-                if !nb.relation.to_lowercase().contains(f.as_str()) {
-                    continue;
-                }
-            }
-            matched += 1;
-            if neighbors.len() >= cap {
-                continue;
-            }
-            neighbors.push(json!({
-                "label": nb.label,
-                "relation": nb.relation,
-                "context": nb.context,
-                "cross_repo": nb.cross_repo,
-                "direction": nb.direction,
-            }));
-        }
-        let by_relation: serde_json::Map<String, Value> = by_relation
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), Value::from(v)))
+        let neighbors: Vec<Value> = rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "label": row.label,
+                    "relation": row.relation,
+                    "context": row.context,
+                    "cross_repo": row.cross_repo,
+                    "direction": row.direction,
+                })
+            })
             .collect();
         json!({
-            "seed": ex.label,
+            "seed": seed,
             "neighbors": neighbors,
             "by_relation": by_relation,
-            "total": matched,
-            "truncated": matched > neighbors.len(),
+            "total": total,
+            "truncated": *total > rows.len(),
         })
     }
 
@@ -2492,7 +2946,22 @@ impl Server {
     /// `graph_stats` — counts + confidence breakdown (+ cross-repo coupling on a
     /// federated graph).
     pub fn tool_graph_stats(&self) -> String {
-        let s = self.stats();
+        let report = self.graph_stats_report();
+        self.render_graph_stats_text(&report)
+    }
+
+    fn graph_stats_report(&self) -> GraphStatsReport {
+        let (dynamic_total, dynamic_opaque, dynamic_linked) = self.dynamic_stats();
+        GraphStatsReport {
+            stats: self.stats().clone(),
+            dynamic_total,
+            dynamic_opaque,
+            dynamic_linked,
+        }
+    }
+
+    fn render_graph_stats_text(&self, report: &GraphStatsReport) -> String {
+        let s = &report.stats;
         let mut out = format!(
             "Graph: {} nodes, {} edges, {} communities\nEdges: {} EXTRACTED, {} INFERRED, {} AMBIGUOUS",
             s.nodes, s.edges, s.communities, s.extracted, s.inferred, s.ambiguous
@@ -2522,10 +2991,10 @@ Cross-repo: {} edge(s) span repositories{}",
                 s.cross_repo, traversal
             ));
         }
-        let (total, opaque, linked) = self.dynamic_stats();
-        if total > 0 {
+        if report.dynamic_total > 0 {
             out.push_str(&format!(
-                "\nDynamic-dispatch sites: {total} ({opaque} opaque, {linked} evidence-linked) -- see dynamic_hazards; 0 dependents on a dynamically-dispatched symbol is not proof it is unused"
+                "\nDynamic-dispatch sites: {} ({} opaque, {} evidence-linked) -- see dynamic_hazards; 0 dependents on a dynamically-dispatched symbol is not proof it is unused",
+                report.dynamic_total, report.dynamic_opaque, report.dynamic_linked
             ));
         }
         out
@@ -2534,34 +3003,59 @@ Cross-repo: {} edge(s) span repositories{}",
     /// `(total dynamic-dispatch sites, opaque sites, evidence-linked dynamic_ref
     /// edges)` across the graph, for the stats surfaces.
     fn dynamic_stats(&self) -> (usize, usize, usize) {
-        let mut total = 0usize;
-        self.provider
-            .for_each_node(&mut |n| total += n.dynamic_sites().len());
-        let opaque = self.provider.opaque_hazards_total();
-        let mut linked = 0usize;
-        self.provider
-            .for_each_edge(&mut |e| linked += usize::from(e.relation == "dynamic_ref"));
-        (total, opaque, linked)
+        *self.dynamic_stats_cache.get_or_init(|| {
+            #[cfg(test)]
+            self.dynamic_stat_scans
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut total = 0usize;
+            self.provider
+                .for_each_node(&mut |n| total += n.dynamic_sites().len());
+            let opaque = self.provider.opaque_hazards_total();
+            let mut linked = 0usize;
+            self.provider
+                .for_each_edge(&mut |e| linked += usize::from(e.relation == "dynamic_ref"));
+            (total, opaque, linked)
+        })
     }
 
     /// `list_repos` — federated members with node/edge counts.
     /// Edges are counted under their source node's repo. Empty for a single-repo
     /// graph (no `repo` tags).
     pub fn tool_list_repos(&self) -> String {
-        let counts = self.provider.repo_counts();
-        if counts.is_empty() {
+        let report = self.repos_report();
+        self.render_repos_text(&report)
+    }
+
+    fn repos_report(&self) -> ReposReport {
+        let rows = self
+            .repo_counts()
+            .iter()
+            .map(|(repo, (nodes, edges))| RepoRow {
+                repo: repo.clone(),
+                nodes: *nodes,
+                edges: *edges,
+                source_hash: self.repo_hashes.get(repo).cloned(),
+            })
+            .collect();
+        ReposReport { rows }
+    }
+
+    fn render_repos_text(&self, report: &ReposReport) -> String {
+        if report.rows.is_empty() {
             return "No federated repos (single-repo graph).".to_string();
         }
-        let mut out = format!("Repos ({}):", counts.len());
-        for (repo, (n, ed)) in &counts {
-            let fresh = self
-                .repo_hashes
-                .get(repo.as_str())
+        let mut out = format!("Repos ({}):", report.rows.len());
+        for row in &report.rows {
+            let fresh = row
+                .source_hash
+                .as_deref()
                 .map(|h| format!(", src {h}"))
                 .unwrap_or_default();
             out.push_str(&format!(
-                "\n  {} - {n} nodes, {ed} edges{fresh}",
-                sanitize_label(repo)
+                "\n  {} - {} nodes, {} edges{fresh}",
+                sanitize_label(&row.repo),
+                row.nodes,
+                row.edges
             ));
         }
         if !self.repo_hashes.is_empty() {
@@ -2572,17 +3066,16 @@ Cross-repo: {} edge(s) span repositories{}",
 
     /// Structured mirror of `list_repos`: `{ repos: [{ repo, nodes, edges }] }`,
     /// an empty array for a single-repo graph.
-    fn list_repos_json(&self) -> Value {
-        let repos: Vec<Value> = self
-            .provider
-            .repo_counts()
-            .into_iter()
-            .map(|(repo, (nodes, edges))| {
+    fn render_repos_json(report: &ReposReport) -> Value {
+        let repos: Vec<Value> = report
+            .rows
+            .iter()
+            .map(|row| {
                 let mut obj = serde_json::Map::new();
-                obj.insert("repo".into(), json!(repo));
-                obj.insert("nodes".into(), json!(nodes));
-                obj.insert("edges".into(), json!(edges));
-                if let Some(h) = self.repo_hashes.get(&repo) {
+                obj.insert("repo".into(), json!(row.repo));
+                obj.insert("nodes".into(), json!(row.nodes));
+                obj.insert("edges".into(), json!(row.edges));
+                if let Some(h) = &row.source_hash {
                     obj.insert("source_hash".into(), json!(h));
                 }
                 Value::Object(obj)
@@ -2593,7 +3086,7 @@ Cross-repo: {} edge(s) span repositories{}",
 
     /// `repo_stats` — node/edge counts for one federated member.
     pub fn tool_repo_stats(&self, repo: &str) -> String {
-        match self.provider.repo_counts().get(repo) {
+        match self.repo_counts().get(repo) {
             Some((nodes, edges)) => format!(
                 "Repo {}: {nodes} nodes, {edges} edges",
                 sanitize_label(repo)
@@ -3027,9 +3520,26 @@ Cross-repo: {} edge(s) span repositories{}",
         limit: usize,
         verbose: bool,
     ) -> String {
-        let id = match self.resolve_or_msg(label) {
-            Ok(id) => id,
-            Err(msg) => return msg,
+        let report = self.affected_report(label, depth, relations);
+        self.render_affected_text(&report, limit, verbose)
+    }
+
+    /// Resolve and compute `affected` once. Both response channels render this
+    /// report, avoiding a second resolution and reverse traversal.
+    fn affected_report(&self, label: &str, depth: usize, relations: &[String]) -> AffectedReport {
+        let id = match self.provider.resolve(label) {
+            provider::ScopedResolution::Unique(_, id) => id,
+            provider::ScopedResolution::Ambiguous(hits) => {
+                return AffectedReport::Ambiguous {
+                    query: label.to_string(),
+                    hits,
+                }
+            }
+            provider::ScopedResolution::NotFound => {
+                return AffectedReport::NotFound {
+                    query: label.to_string(),
+                }
+            }
         };
         let rels: Vec<&str> = if relations.is_empty() {
             DEFAULT_AFFECTED_RELATIONS.to_vec()
@@ -3038,11 +3548,42 @@ Cross-repo: {} edge(s) span repositories{}",
         };
         let depth = depth.clamp(1, 16);
         let (hits, member_count) = self.affected_for(&id, &rels, depth);
-        let seed = sanitize_label(&self.label_of(&id));
-        let note = self.class_fold_note(&id, &seed, member_count);
+        let dynamic_caveat = if hits.is_empty() {
+            self.dynamic_caveat_for(&id)
+        } else {
+            None
+        };
+        AffectedReport::Resolved {
+            id,
+            hits,
+            member_count,
+            depth,
+            dynamic_caveat,
+        }
+    }
+
+    fn render_affected_text(&self, report: &AffectedReport, limit: usize, verbose: bool) -> String {
+        let AffectedReport::Resolved {
+            id,
+            hits,
+            member_count,
+            depth,
+            dynamic_caveat,
+        } = report
+        else {
+            return match report {
+                AffectedReport::Ambiguous { query, hits } => self.ambiguity_msg(query, hits),
+                AffectedReport::NotFound { query } => {
+                    format!("No node matches '{}'", sanitize_label(query))
+                }
+                AffectedReport::Resolved { .. } => unreachable!(),
+            };
+        };
+        let seed = sanitize_label(&self.label_of(id));
+        let note = self.class_fold_note(id, &seed, *member_count);
         if hits.is_empty() {
             let mut msg = format!("{note}Nothing depends on {seed} within {depth} hops.");
-            if let Some(c) = self.dynamic_caveat_for(&id) {
+            if let Some(c) = dynamic_caveat {
                 msg.push_str(&format!("\n  note: {}", c.message));
             }
             return msg;
@@ -3050,7 +3591,7 @@ Cross-repo: {} edge(s) span repositories{}",
         // Per-depth breakdown so a hub's blast radius is summarized even when the
         // entry list is truncated.
         let mut by_depth: BTreeMap<usize, usize> = BTreeMap::new();
-        for h in &hits {
+        for h in hits {
             *by_depth.entry(h.depth).or_default() += 1;
         }
         let breakdown = by_depth
@@ -3469,11 +4010,23 @@ Cross-repo: {} edge(s) span repositories{}",
         limit: usize,
         verbose: bool,
     ) -> String {
+        self.predict_edit_result(symbol, kind, depth, limit, verbose)
+            .unwrap_or_else(|error| error)
+    }
+
+    fn predict_edit_result(
+        &self,
+        symbol: &str,
+        kind: &str,
+        depth: usize,
+        limit: usize,
+        verbose: bool,
+    ) -> Result<String, String> {
         let Some(kind_enum) = EditKind::parse(kind) else {
-            return format!(
+            return Err(format!(
                 "Unknown edit kind '{}'. Use: delete, signature, visibility.",
                 sanitize_label(kind)
-            );
+            ));
         };
         // Resolve first so the assessment runs in the symbol's owning shard;
         // ambiguity surfaces candidates with file + degree inline, consistent
@@ -3481,7 +4034,7 @@ Cross-repo: {} edge(s) span repositories{}",
         let sh = match self.provider.resolve(symbol) {
             provider::ScopedResolution::Unique(tag, _) => match self.provider.shard(&tag) {
                 Ok(sh) => sh,
-                Err(e) => return format!("shard {}: {e}", sanitize_label(&tag)),
+                Err(e) => return Err(format!("shard {}: {e}", sanitize_label(&tag))),
             },
             provider::ScopedResolution::Ambiguous(hits) => {
                 let shown = hits.len().min(10);
@@ -3512,26 +4065,26 @@ Cross-repo: {} edge(s) span repositories{}",
                 } else {
                     String::new()
                 };
-                return format!(
+                return Err(format!(
                     "'{}' is ambiguous - {} candidates:{}{}\nQualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts'), or pass a node id.",
                     sanitize_label(symbol),
                     hits.len(),
                     lines,
                     more
-                );
+                ));
             }
             provider::ScopedResolution::NotFound => {
-                return format!(
+                return Err(format!(
                     "No node matches '{}'. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts'), or pass a node id.",
                     sanitize_label(symbol)
-                );
+                ));
             }
         };
         let Some(impact) = assess_edit(&sh.kg, symbol, kind_enum, depth.clamp(1, 16)) else {
-            return format!(
+            return Err(format!(
                 "No node matches '{}'. If the name is shared by several files, qualify it as 'name@file-substring' (e.g. 'announce@core/foo.ts'), or pass a node id.",
                 sanitize_label(symbol)
-            );
+            ));
         };
         let line = |d: &synaptic_predict::EditDependent| {
             format!(
@@ -3587,15 +4140,20 @@ Cross-repo: {} edge(s) span repositories{}",
         if impact.breaks.is_empty() && impact.review.is_empty() {
             out.push_str("\nNo dependents affected.");
         }
-        out
+        Ok(out)
     }
 
     /// `list_prs` — open PRs targeting the base, as text.
     pub fn tool_list_prs(&self, base: Option<&str>, repo: Option<&str>) -> String {
+        self.list_prs_result(base, repo)
+            .unwrap_or_else(|error| error)
+    }
+
+    fn list_prs_result(&self, base: Option<&str>, repo: Option<&str>) -> Result<String, String> {
         let resolved = self.resolve_base(base, repo);
         match fetch_prs(&*self.runner, repo, Some(&resolved), 50) {
-            Ok(prs) => format_prs_text(&prs, &resolved, today_epoch_days()),
-            Err(e) => format!("Error: {e}"),
+            Ok(prs) => Ok(format_prs_text(&prs, &resolved, today_epoch_days())),
+            Err(e) => Err(format!("Error: {e}")),
         }
     }
 
@@ -3711,65 +4269,52 @@ Cross-repo: {} edge(s) span repositories{}",
 
     // structured (typed) tool output, mirroring the text for outputSchema tools
 
-    fn stats_json(&self) -> Value {
-        let s = self.stats();
-        let (total, opaque, linked) = self.dynamic_stats();
+    fn render_stats_json(report: &GraphStatsReport) -> Value {
+        let s = &report.stats;
         json!({
             "nodes": s.nodes, "edges": s.edges, "communities": s.communities,
             "extracted": s.extracted, "inferred": s.inferred, "ambiguous": s.ambiguous,
             "cross_repo": s.cross_repo, "cross_language": s.cross_language,
-            "dynamic_sites": total, "dynamic_sites_opaque": opaque, "dynamic_refs_linked": linked
+            "dynamic_sites": report.dynamic_total,
+            "dynamic_sites_opaque": report.dynamic_opaque,
+            "dynamic_refs_linked": report.dynamic_linked
         })
     }
 
-    fn affected_json(
-        &self,
-        label: &str,
-        depth: usize,
-        relations: &[String],
-        limit: usize,
-        verbose: bool,
-    ) -> Value {
-        // Resolve through the SAME unified resolver as the text path, so the
-        // structured channel never silently picks one of several candidates and
-        // returns a misleading empty/total:0 (which reads as "nothing depends on
-        // it"). Ambiguity / not-found are reported explicitly instead.
-        let id = match self.provider.resolve(label) {
-            provider::ScopedResolution::Unique(_, id) => id,
-            provider::ScopedResolution::Ambiguous(hits) => {
-                return json!({
-                    "seed": sanitize_label(label),
+    fn render_affected_json(&self, report: &AffectedReport, limit: usize, verbose: bool) -> Value {
+        let AffectedReport::Resolved {
+            id,
+            hits,
+            member_count,
+            dynamic_caveat,
+            ..
+        } = report
+        else {
+            return match report {
+                AffectedReport::Ambiguous { query, hits } => json!({
+                    "seed": sanitize_label(query),
                     "resolved": false,
                     "ambiguous": true,
-                    "candidates": self.candidates_json(&hits),
+                    "candidates": self.candidates_json(hits),
                     "affected": [],
                     "total": 0,
                     "truncated": false
-                });
-            }
-            provider::ScopedResolution::NotFound => {
-                return json!({
-                    "seed": sanitize_label(label),
+                }),
+                AffectedReport::NotFound { query } => json!({
+                    "seed": sanitize_label(query),
                     "resolved": false,
                     "found": false,
                     "affected": [],
                     "total": 0,
                     "truncated": false
-                });
-            }
+                }),
+                AffectedReport::Resolved { .. } => unreachable!(),
+            };
         };
-        let rels: Vec<&str> = if relations.is_empty() {
-            DEFAULT_AFFECTED_RELATIONS.to_vec()
-        } else {
-            relations.iter().map(String::as_str).collect()
-        };
-        // Fold a type's members in (mirrors the text path) so the structured blast
-        // radius for a class is not a misleading zero.
-        let (hits, member_count) = self.affected_for(&id, &rels, depth.clamp(1, 16));
         let total = hits.len();
         let cap = if verbose { usize::MAX } else { limit.max(1) };
         let mut by_depth: serde_json::Map<String, Value> = serde_json::Map::new();
-        for h in &hits {
+        for h in hits {
             let k = h.depth.to_string();
             let n = by_depth.get(&k).and_then(Value::as_u64).unwrap_or(0) + 1;
             by_depth.insert(k, json!(n));
@@ -3786,23 +4331,23 @@ Cross-repo: {} edge(s) span repositories{}",
             })
             .collect();
         let mut obj = serde_json::Map::new();
-        obj.insert("seed".into(), json!(sanitize_label(&self.label_of(&id))));
+        obj.insert("seed".into(), json!(sanitize_label(&self.label_of(id))));
         obj.insert("resolved".into(), json!(true));
         obj.insert("affected".into(), Value::Array(arr));
         obj.insert("total".into(), json!(total));
         obj.insert("truncated".into(), json!(total > cap));
         obj.insert("by_depth".into(), Value::Object(by_depth));
-        if member_count > 0 {
+        if *member_count > 0 {
             obj.insert("aggregated_over_members".into(), json!(member_count));
         }
         // When nothing statically depends on the seed, attach the honest
         // dynamic-dispatch caveat (if any) so a structured-only reader does not
         // treat total:0 as proof the symbol is unused.
         if total == 0 {
-            if let Some(c) = self.dynamic_caveat_for(&id) {
+            if let Some(c) = dynamic_caveat {
                 obj.insert(
                     "dynamic_caveat".into(),
-                    serde_json::to_value(&c).unwrap_or(Value::Null),
+                    serde_json::to_value(c).unwrap_or(Value::Null),
                 );
             }
         }
@@ -3837,37 +4382,26 @@ Cross-repo: {} edge(s) span repositories{}",
         Value::Array(arr)
     }
 
-    /// Typed mirror of [`tool_structural_search`](Server::tool_structural_search):
-    /// runs the same SYNQL query / pattern and returns structured rows of resolved
-    /// node views (label, kind, visibility, file, and the captured signature) so
-    /// an agent can route on a function's shape without reading source. Aggregate
-    /// queries return `groups` of scalar cells instead.
-    fn structural_search_json(
-        &self,
-        query: Option<&str>,
-        pattern: Option<&str>,
-        file: Option<&str>,
-        limit: usize,
-    ) -> Value {
-        let r = match self.structural_search_result(query, pattern, file) {
-            Ok(r) => r,
-            Err(e) => return json!({ "error": e, "results": [] }),
-        };
-        if let Some(agg) = &r.aggregates {
-            let groups: Vec<Value> = agg
-                .iter()
-                .take(limit)
-                .map(|row| Value::Array(row.iter().map(|c| json!(sanitize_label(c))).collect()))
-                .collect();
-            return json!({ "columns": r.columns, "groups": groups });
+    /// Typed renderer for the same limited report used by the text channel.
+    fn render_structural_search_json(&self, report: &StructuralSearchReport) -> Value {
+        match report {
+            StructuralSearchReport::Aggregates {
+                columns, groups, ..
+            } => {
+                let groups: Vec<Value> = groups
+                    .iter()
+                    .map(|row| Value::Array(row.iter().map(|c| json!(sanitize_label(c))).collect()))
+                    .collect();
+                json!({ "columns": columns, "groups": groups })
+            }
+            StructuralSearchReport::Nodes { columns, rows, .. } => {
+                let results: Vec<Value> = rows
+                    .iter()
+                    .map(|row| Value::Array(row.iter().map(node_view_to_json).collect()))
+                    .collect();
+                json!({ "columns": columns, "results": results })
+            }
         }
-        let results: Vec<Value> = r
-            .node_views_by(|id| self.provider.node_cloned(id))
-            .iter()
-            .take(limit)
-            .map(|row| Value::Array(row.iter().map(node_view_to_json).collect()))
-            .collect();
-        json!({ "columns": r.columns, "results": results })
     }
 
     /// Typed mirror of [`render_query_text`](Server::render_query_text) over the
@@ -4001,14 +4535,44 @@ Cross-repo: {} edge(s) span repositories{}",
     /// reloads under a write lock only when [`is_stale`](Server::is_stale), so
     /// read requests run concurrently via [`dispatch_request`](Server::dispatch_request).
     pub fn handle_request(&mut self, req: &Value) -> Option<Value> {
-        let method = req.get("method").and_then(Value::as_str).unwrap_or("");
-        if request_needs_reload(method) {
+        let req = match validate_jsonrpc_request(req) {
+            Ok(req) => req,
+            Err(error) => return Some(error),
+        };
+        self.handle_validated_with_reload(&req)
+    }
+
+    fn handle_validated_with_reload(&mut self, req: &ValidatedRequest) -> Option<Value> {
+        if request_needs_reload(&req.method) {
             self.maybe_reload();
             if let Some(report) = self.needs_freshen() {
                 self.apply_freshen(report);
             }
         }
-        self.dispatch_request(req)
+        self.dispatch_validated_request(req)
+    }
+
+    /// Stateful connection wrapper used by the real stdio transport. The public
+    /// in-process dispatcher remains useful for embedding and benchmarks; wire
+    /// transports must pass through a lifecycle owned by that connection/session.
+    #[cfg(test)]
+    fn handle_connection_request(
+        &mut self,
+        raw: &Value,
+        lifecycle: &mut ConnectionLifecycle,
+    ) -> Option<Value> {
+        let req = match validate_jsonrpc_request(raw) {
+            Ok(req) => req,
+            Err(error) => return Some(error),
+        };
+        match lifecycle.authorize(&req) {
+            Ok(true) => self.handle_validated_with_reload(&req),
+            Ok(false) => None,
+            Err((code, message)) => req
+                .id
+                .clone()
+                .map(|id| jsonrpc_error_response(id, code, message)),
+        }
     }
 
     /// Dispatch one JSON-RPC request **without** reloading — read-only (`&self`),
@@ -4016,30 +4580,38 @@ Cross-repo: {} edge(s) span repositories{}",
     /// first (see [`is_stale`](Server::is_stale)). Returns the response value, or
     /// `None` for a notification (no `id`) that takes no reply.
     pub fn dispatch_request(&self, req: &Value) -> Option<Value> {
+        match validate_jsonrpc_request(req) {
+            Ok(req) => self.dispatch_validated_request(&req),
+            Err(error) => Some(error),
+        }
+    }
+
+    pub(crate) fn dispatch_validated_request(&self, req: &ValidatedRequest) -> Option<Value> {
         // Notifications carry no `id` and get no response.
-        let id = req.get("id").cloned()?;
-        let method = req.get("method").and_then(Value::as_str).unwrap_or("");
-        let params = req.get("params").cloned().unwrap_or(Value::Null);
+        let id = req.id.clone()?;
+        let method = req.method.as_str();
+        let params = req.params.clone();
 
         let result = match method {
             "initialize" => {
-                let requested = params.get("protocolVersion").and_then(Value::as_str);
-                Ok(json!({
-                    "protocolVersion": negotiate_protocol(requested),
-                    "capabilities": {
-                        "tools": {},
-                        "resources": { "subscribe": true },
-                        "prompts": {},
-                        "completions": {},
-                        "logging": {}
-                    },
-                    "serverInfo": {
-                        "name": "synaptic",
-                        "version": env!("CARGO_PKG_VERSION"),
-                        "description": "Read-only code knowledge graph: query, impact, and structural search."
-                    },
-                    "instructions": SERVER_INSTRUCTIONS,
-                }))
+                validate_initialize_params(&params).map(|negotiated| {
+                    json!({
+                        "protocolVersion": negotiated.protocol_version,
+                        "capabilities": {
+                            "tools": {},
+                            "resources": resource_capabilities(self.resource_subscriptions),
+                            "prompts": {},
+                            "completions": {},
+                            "logging": {}
+                        },
+                        "serverInfo": {
+                            "name": "synaptic",
+                            "version": env!("CARGO_PKG_VERSION"),
+                            "description": "Read-only code knowledge graph: query, impact, and structural search."
+                        },
+                        "instructions": SERVER_INSTRUCTIONS,
+                    })
+                })
             }
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": tools_list(self.allow_exec) })),
@@ -4048,15 +4620,23 @@ Cross-repo: {} edge(s) span repositories{}",
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let pargs = params.get("arguments").cloned().unwrap_or(Value::Null);
                 match prompts::prompts_get(name, &pargs) {
-                    Some(v) => Ok(v),
-                    None => Err((-32602, format!("Unknown prompt: {name}"))),
+                    Ok(Some(v)) => Ok(v),
+                    Ok(None) => Err((-32602, format!("Unknown prompt: {name}"))),
+                    Err(message) => Err((-32602, message)),
                 }
             }
             "resources/list" => Ok(json!({ "resources": resources_list() })),
             "resources/templates/list" => Ok(json!({ "resourceTemplates": resource_templates() })),
-            // Subscriptions are acknowledged here; the HTTP transport does the
-            // actual push over SSE when the graph reloads (see http::handle_sse).
-            "resources/subscribe" | "resources/unsubscribe" => Ok(json!({})),
+            "resources/subscribe" | "resources/unsubscribe" => {
+                if !self.resource_subscriptions {
+                    Err((
+                        -32601,
+                        "Resource subscriptions are not supported by this transport".to_string(),
+                    ))
+                } else {
+                    self.validate_subscription_uri(&params).map(|_| json!({}))
+                }
+            }
             // Accept the client's minimum log level; we advertise `logging` so a
             // host can set it, and never emit below it.
             "logging/setLevel" => Ok(json!({})),
@@ -4070,9 +4650,7 @@ Cross-repo: {} edge(s) span repositories{}",
 
         Some(match result {
             Ok(value) => json!({ "jsonrpc": "2.0", "id": id, "result": value }),
-            Err((code, message)) => {
-                json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
-            }
+            Err((code, message)) => jsonrpc_error_response(id, code, message),
         })
     }
 
@@ -4109,6 +4687,9 @@ Cross-repo: {} edge(s) span repositories{}",
         pattern: Option<&str>,
         file: Option<&str>,
     ) -> Result<synaptic_synql::QueryResult, String> {
+        #[cfg(test)]
+        self.structural_search_runs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.provider.structural_search(query, pattern, file)
     }
 
@@ -4119,40 +4700,121 @@ Cross-repo: {} edge(s) span repositories{}",
         file: Option<&str>,
         limit: usize,
     ) -> String {
-        let r = match self.structural_search_result(query, pattern, file) {
-            Ok(r) => r,
-            Err(e) => return e,
-        };
-        if let Some(agg) = &r.aggregates {
-            let mut out = format!("{} group(s) [{}]", agg.len(), r.columns.join(", "));
-            for row in agg.iter().take(limit) {
-                out.push_str(&format!("\n  {}", row.join("  |  ")));
+        self.structural_search_text_result(query, pattern, file, limit)
+            .unwrap_or_else(|error| error)
+    }
+
+    /// Run SynQL once, preserve the full count, and project only the rows that
+    /// can reach the response. Resolving views here lets both renderers reuse the
+    /// same node metadata rather than cloning it independently.
+    fn structural_search_report(
+        &self,
+        query: Option<&str>,
+        pattern: Option<&str>,
+        file: Option<&str>,
+        limit: usize,
+    ) -> Result<StructuralSearchReport, String> {
+        let r = self.structural_search_result(query, pattern, file)?;
+        let synaptic_synql::QueryResult {
+            columns,
+            rows,
+            aggregates,
+        } = r;
+        if let Some(groups) = aggregates {
+            let total = groups.len();
+            return Ok(StructuralSearchReport::Aggregates {
+                columns,
+                total,
+                groups: groups.into_iter().take(limit).collect(),
+            });
+        }
+        let total = rows.len();
+        let rows = rows
+            .iter()
+            .take(limit)
+            .map(|row| {
+                row.iter()
+                    .map(|id| {
+                        #[cfg(test)]
+                        self.structural_view_lookups
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        synaptic_synql::NodeView::from_found(
+                            id,
+                            self.provider.node_cloned(id).as_ref(),
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        Ok(StructuralSearchReport::Nodes {
+            columns,
+            total,
+            rows,
+        })
+    }
+
+    fn structural_search_text_result(
+        &self,
+        query: Option<&str>,
+        pattern: Option<&str>,
+        file: Option<&str>,
+        limit: usize,
+    ) -> Result<String, String> {
+        let report = self.structural_search_report(query, pattern, file, limit)?;
+        Ok(self.render_structural_search_text(&report))
+    }
+
+    fn render_structural_search_text(&self, report: &StructuralSearchReport) -> String {
+        match report {
+            StructuralSearchReport::Aggregates {
+                columns,
+                total,
+                groups,
+            } => {
+                let mut out = format!("{total} group(s) [{}]", columns.join(", "));
+                for row in groups {
+                    out.push_str(&format!("\n  {}", row.join("  |  ")));
+                }
+                out
             }
-            return out;
+            StructuralSearchReport::Nodes {
+                columns,
+                total,
+                rows,
+            } => {
+                if *total == 0 {
+                    return "0 results.".to_string();
+                }
+                let mut out = format!("{total} result(s) [{}]", columns.join(", "));
+                for row in rows {
+                    let cells: Vec<String> =
+                        row.iter().map(|view| sanitize_label(&view.label)).collect();
+                    out.push_str(&format!("\n  {}", cells.join("  |  ")));
+                }
+                out
+            }
         }
-        if r.rows.is_empty() {
-            return "0 results.".to_string();
-        }
-        let mut out = format!("{} result(s) [{}]", r.rows.len(), r.columns.join(", "));
-        for row in r.rows.iter().take(limit) {
-            let cells: Vec<String> = row
-                .iter()
-                .map(|id| sanitize_label(&self.label_of(id)))
-                .collect();
-            out.push_str(&format!("\n  {}", cells.join("  |  ")));
-        }
-        out
     }
 
     /// Time-travel diff between two git revisions (builds each in a worktree).
     pub fn tool_time_travel_diff(&self, rev1: &str, rev2: Option<&str>, top: usize) -> String {
+        self.time_travel_diff_result(rev1, rev2, top)
+            .unwrap_or_else(|error| error)
+    }
+
+    fn time_travel_diff_result(
+        &self,
+        rev1: &str,
+        rev2: Option<&str>,
+        top: usize,
+    ) -> Result<String, String> {
         let opts = synaptic_history::DiffOptions {
             top,
             ..Default::default()
         };
         let r = match synaptic_history::diff(&self.repo_root(), rev1, rev2, &opts) {
             Ok(r) => r,
-            Err(e) => return format!("diff error: {e}"),
+            Err(e) => return Err(format!("diff error: {e}")),
         };
         let mut o = format!("Diff {} -> {}\n{}\n", r.rev1, r.rev2, r.summary);
         o.push_str(&format!(
@@ -4178,7 +4840,7 @@ Cross-repo: {} edge(s) span repositories{}",
                 h.file, h.lines_added, h.lines_removed, h.nodes_added, h.nodes_removed
             ));
         }
-        o
+        Ok(o)
     }
 
     /// Plan a rename (plan-only; never edits). Returns a human-readable summary.
@@ -4191,6 +4853,19 @@ Cross-repo: {} edge(s) span repositories{}",
         limit: usize,
         verbose: bool,
     ) -> String {
+        self.plan_rename_result(name, to, id, file, limit, verbose)
+            .unwrap_or_else(|error| error)
+    }
+
+    fn plan_rename_result(
+        &self,
+        name: &str,
+        to: &str,
+        id: Option<&str>,
+        file: Option<&str>,
+        limit: usize,
+        verbose: bool,
+    ) -> Result<String, String> {
         // Resolve the owning shard: raw-id first, then name resolution (a
         // single graph is the one-shard case, so its behavior is unchanged).
         let raw = synaptic_core::NodeId(id.unwrap_or(name).to_string());
@@ -4202,7 +4877,7 @@ Cross-repo: {} edge(s) span repositories{}",
                 _ => None,
             });
         let Some(sh) = sh else {
-            return format!("No node matches '{}'.", sanitize_label(name));
+            return Err(format!("No node matches '{}'.", sanitize_label(name)));
         };
         // `name` may be a node id; pin it only when --id is not given.
         let (old, opt_id) = match (id, sh.kg.node(&synaptic_core::NodeId(name.to_string()))) {
@@ -4220,7 +4895,7 @@ Cross-repo: {} edge(s) span repositories{}",
         let plan = match synaptic_refactor::plan_rename(&sh.kg, &old, to, &self.repo_root(), &opts)
         {
             Ok(p) => p,
-            Err(e) => return format!("rename error: {e}"),
+            Err(e) => return Err(format!("rename error: {e}")),
         };
         let mut o = format!(
             "Rename {} -> {} [{:?}], {} edit(s) across {} file(s), {} to review, {} affected",
@@ -4253,7 +4928,7 @@ Cross-repo: {} edge(s) span repositories{}",
         append_capped_sites(&mut o, "Edits", &plan.edits, cap);
         append_capped_sites(&mut o, "Review", &plan.review, cap);
         o.push_str("\n  (plan-only; Synaptic did not edit source)");
-        o
+        Ok(o)
     }
 
     /// Audit the loaded graph's SQL for perf + security findings (read-only).
@@ -4491,8 +5166,45 @@ Cross-repo: {} edge(s) span repositories{}",
     }
 
     fn dispatch_tool(&self, params: &Value) -> Result<Value, (i64, String)> {
-        let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-        let args = params.get("arguments").cloned().unwrap_or(Value::Null);
+        let Some(params) = params.as_object() else {
+            return Err((-32602, "tools/call params must be an object".to_string()));
+        };
+        let Some(name) = params.get("name").and_then(Value::as_str) else {
+            return Err((
+                -32602,
+                "tools/call requires a non-empty string 'name'".to_string(),
+            ));
+        };
+        if name.is_empty() {
+            return Err((
+                -32602,
+                "tools/call requires a non-empty string 'name'".to_string(),
+            ));
+        }
+
+        // Preserve the explicit opt-in refusal for the command-running tool,
+        // even though it is deliberately absent from the default registry.
+        if name == "speculate" && !self.allow_exec {
+            return Ok(tool_error_result(
+                "Speculative execution is disabled. Restart the server with --allow-exec to enable the speculate tool.",
+            ));
+        }
+
+        let Some(tool) = registered_tool(self.allow_exec, name) else {
+            return Err((-32602, format!("Unknown tool: {name}")));
+        };
+        let args = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        if !args.is_object() {
+            return Ok(tool_error_result("Tool arguments must be an object"));
+        }
+        if let Err(message) = validate_json_schema(&args, &tool["inputSchema"], "arguments") {
+            return Ok(tool_error_result(format!(
+                "Invalid arguments for {name}: {message}"
+            )));
+        }
         let s = |k: &str| {
             args.get(k)
                 .and_then(Value::as_str)
@@ -4565,19 +5277,17 @@ Cross-repo: {} edge(s) span repositories{}",
         // search_text renders text + structuredContent from a SINGLE content
         // walk (the walk is the cost), so both shapes share one search.
         if name == "search_text" {
-            let (text, structured) = self.search_text_dual(
-                &s("pattern"),
-                b("literal"),
-                args.get("case_sensitive").and_then(Value::as_bool),
-                opt("repo"),
-                opt("path_glob"),
-                u("max_results", cdef(100, 40)) as usize,
-            );
-            return Ok(json!({
-                "content": [{ "type": "text", "text": text }],
-                "structuredContent": structured,
-                "isError": false
-            }));
+            let outcome = self
+                .search_text_dual(
+                    &s("pattern"),
+                    b("literal"),
+                    args.get("case_sensitive").and_then(Value::as_bool),
+                    opt("repo"),
+                    opt("path_glob"),
+                    u("max_results", cdef(100, 40)) as usize,
+                )
+                .map(|(text, structured)| (text, Some(structured)));
+            return Ok(tool_execution_result(outcome));
         }
 
         if name == "dynamic_hazards" {
@@ -4598,12 +5308,6 @@ Cross-repo: {} edge(s) span repositories{}",
         // The only command-running tool. Gated: it is advertised in tools/list and
         // runnable ONLY when the operator started the server with --allow-exec.
         if name == "speculate" {
-            if !self.allow_exec {
-                return Ok(json!({
-                    "content": [{ "type": "text", "text": "Speculative execution is disabled. Restart the server with --allow-exec to enable the speculate tool." }],
-                    "isError": true
-                }));
-            }
             let files: Vec<String> = args
                 .get("files")
                 .and_then(Value::as_array)
@@ -4758,6 +5462,125 @@ Cross-repo: {} edge(s) span repositories{}",
             }));
         }
 
+        // `affected` resolves and traverses once, then renders that report to the
+        // text and structured channels. On the old generic mirror path the full
+        // MCP request rebuilt reverse adjacency twice.
+        if name == "affected" {
+            let rels: Vec<String> = args
+                .get("relations")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let report = self.affected_report(&s("label"), u("depth", 3) as usize, &rels);
+            let limit = u("limit", cdef(50, 20)) as usize;
+            let verbose = b("verbose");
+            let text = self.render_affected_text(&report, limit, verbose);
+            let structured = self.render_affected_json(&report, limit, verbose);
+            return Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": structured,
+                "isError": false
+            }));
+        }
+
+        // These graph-summary tools previously ran their graph walk/explanation
+        // once for text and again for structuredContent. Build one immutable
+        // report per call and render both response channels from it.
+        if name == "graph_stats" {
+            let report = self.graph_stats_report();
+            let text = self.render_graph_stats_text(&report);
+            let structured = Self::render_stats_json(&report);
+            return Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": structured,
+                "isError": false
+            }));
+        }
+
+        if name == "list_repos" {
+            let report = self.repos_report();
+            let text = self.render_repos_text(&report);
+            let structured = Self::render_repos_json(&report);
+            return Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": structured,
+                "isError": false
+            }));
+        }
+
+        if name == "get_neighbors" {
+            let relation_filter = args.get("relation_filter").and_then(Value::as_str);
+            let report = self.neighbor_report(
+                &s("label"),
+                relation_filter,
+                b("show_sites"),
+                u("limit", cdef(50, 20)) as usize,
+                b("verbose"),
+            );
+            let text = self.render_neighbor_text(&report, relation_filter);
+            let structured = Self::render_neighbor_json(&report);
+            let mut result =
+                json!({ "content": [{ "type": "text", "text": text }], "isError": false });
+            if !structured.is_null() {
+                result["structuredContent"] = structured;
+            }
+            return Ok(result);
+        }
+
+        // These handlers have genuine operational failure modes. Preserve that
+        // state until the MCP boundary instead of collapsing it into error-like
+        // text that the shared success wrapper would mislabel.
+        let fallible: Option<Result<(String, Option<Value>), String>> = match name {
+            "list_prs" => Some(
+                self.list_prs_result(opt("base"), opt("repo"))
+                    .map(|text| (text, None)),
+            ),
+            "predict_edit" => Some(
+                self.predict_edit_result(
+                    &s("symbol"),
+                    &s("kind"),
+                    u("depth", 3) as usize,
+                    u("limit", cdef(20, 12)) as usize,
+                    b("verbose"),
+                )
+                .map(|text| (text, None)),
+            ),
+            "structural_search" => {
+                let limit = u("limit", cdef(25, 15)) as usize;
+                Some(
+                    self.structural_search_report(opt("query"), opt("pattern"), opt("file"), limit)
+                        .map(|report| {
+                            let text = self.render_structural_search_text(&report);
+                            let structured = self.render_structural_search_json(&report);
+                            (text, Some(structured))
+                        }),
+                )
+            }
+            "time_travel_diff" => Some(
+                self.time_travel_diff_result(&s("rev1"), opt("rev2"), u("top", 20) as usize)
+                    .map(|text| (text, None)),
+            ),
+            "plan_rename" => Some(
+                self.plan_rename_result(
+                    &s("name"),
+                    &s("to"),
+                    opt("id"),
+                    opt("file"),
+                    u("limit", cdef(50, 20)) as usize,
+                    b("verbose"),
+                )
+                .map(|text| (text, None)),
+            ),
+            _ => None,
+        };
+        if let Some(outcome) = fallible {
+            return Ok(tool_execution_result(outcome));
+        }
+
         let text = match name {
             "get_node" => self.tool_get_node(&s("label")),
             "get_source" => self.tool_get_source(
@@ -4766,44 +5589,14 @@ Cross-repo: {} edge(s) span repositories{}",
                 opt("lines"),
                 u("context_lines", cdef(40, 25)) as usize,
             ),
-            "get_neighbors" => {
-                let rf = args.get("relation_filter").and_then(Value::as_str);
-                self.tool_get_neighbors(
-                    &s("label"),
-                    rf,
-                    b("show_sites"),
-                    u("limit", cdef(50, 20)) as usize,
-                    b("verbose"),
-                )
-            }
             "get_community" => self.tool_get_community(
                 u("community_id", 0) as u32,
                 u("offset", 0) as usize,
                 u("limit", cdef(100, 40)) as usize,
             ),
-            "graph_stats" => self.tool_graph_stats(),
-            "list_repos" => self.tool_list_repos(),
             "repo_stats" => self.tool_repo_stats(&s("repo")),
             "shortest_path" => {
                 self.tool_shortest_path(&s("source"), &s("target"), u("max_hops", 8) as usize)
-            }
-            "affected" => {
-                let rels: Vec<String> = args
-                    .get("relations")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                self.tool_affected(
-                    &s("label"),
-                    u("depth", 3) as usize,
-                    &rels,
-                    u("limit", cdef(50, 20)) as usize,
-                    b("verbose"),
-                )
             }
             "find_callers" => self.tool_find_callers(
                 &s("label"),
@@ -4823,7 +5616,6 @@ Cross-repo: {} edge(s) span repositories{}",
                 b("verbose"),
                 b("show_sites"),
             ),
-            "list_prs" => self.tool_list_prs(opt("base"), opt("repo")),
             "get_pr_impact" => self.tool_get_pr_impact(u("pr_number", 0), opt("repo")),
             "triage_prs" => self.tool_triage_prs(opt("base"), opt("repo")),
             "working_changes_impact" => self.tool_working_changes_impact(
@@ -4833,77 +5625,19 @@ Cross-repo: {} edge(s) span repositories{}",
                 b("code_only"),
             ),
             // predict_impact / affected_tests handled above (compute-once dual render).
-            "predict_edit" => self.tool_predict_edit(
-                &s("symbol"),
-                &s("kind"),
-                u("depth", 3) as usize,
-                u("limit", cdef(20, 12)) as usize,
-                b("verbose"),
-            ),
-            "structural_search" => self.tool_structural_search(
-                opt("query"),
-                opt("pattern"),
-                opt("file"),
-                u("limit", cdef(25, 15)) as usize,
-            ),
             "describe_node" => self.tool_describe_node(&s("label")),
-            "time_travel_diff" => {
-                self.tool_time_travel_diff(&s("rev1"), opt("rev2"), u("top", 20) as usize)
-            }
-            "plan_rename" => self.tool_plan_rename(
-                &s("name"),
-                &s("to"),
-                opt("id"),
-                opt("file"),
-                u("limit", cdef(50, 20)) as usize,
-                b("verbose"),
-            ),
-            // An unknown tool is a tool-result with isError, NOT a JSON-RPC
-            // protocol error (return text content).
             other => {
-                return Ok(json!({
-                    "content": [{ "type": "text", "text": format!("Unknown tool: {other}") }],
-                    "isError": true
-                }))
+                return Err((
+                    -32603,
+                    format!("Advertised tool has no implementation: {other}"),
+                ))
             }
         };
 
         // Typed mirror of the text, for the tools that declare an outputSchema.
         let structured: Option<Value> = match name {
-            "graph_stats" => Some(self.stats_json()),
-            "affected" => {
-                let rels: Vec<String> = args
-                    .get("relations")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                Some(self.affected_json(
-                    &s("label"),
-                    u("depth", 3) as usize,
-                    &rels,
-                    u("limit", cdef(50, 20)) as usize,
-                    b("verbose"),
-                ))
-            }
-            "structural_search" => Some(self.structural_search_json(
-                opt("query"),
-                opt("pattern"),
-                opt("file"),
-                u("limit", cdef(25, 15)) as usize,
-            )),
             "describe_node" => Some(self.describe_node_json(&s("label"))),
             "get_node" => Some(self.get_node_json(&s("label"))),
-            "get_neighbors" => Some(self.get_neighbors_json(
-                &s("label"),
-                args.get("relation_filter").and_then(Value::as_str),
-                u("limit", cdef(50, 20)) as usize,
-                b("verbose"),
-            )),
-            "list_repos" => Some(self.list_repos_json()),
             _ => None,
         };
 
@@ -4917,114 +5651,333 @@ Cross-repo: {} edge(s) span repositories{}",
         Ok(result)
     }
 
+    fn ensure_resource_exists(
+        &self,
+        address: &ResourceAddress,
+        uri: &str,
+    ) -> Result<(), (i64, String)> {
+        let exists = match address {
+            ResourceAddress::Static => true,
+            ResourceAddress::Node(label) => !matches!(
+                self.provider.resolve(label),
+                provider::ScopedResolution::NotFound
+            ),
+            ResourceAddress::Community(id) => self.communities().contains_key(id),
+        };
+        if exists {
+            Ok(())
+        } else {
+            Err((-32002, format!("Resource not found: {uri}")))
+        }
+    }
+
+    pub(crate) fn validate_subscription_uri<'a>(
+        &self,
+        params: &'a Value,
+    ) -> Result<&'a str, (i64, String)> {
+        let Some(uri) = params.get("uri").and_then(Value::as_str) else {
+            return Err((
+                -32602,
+                "resource subscription requires a string 'uri'".to_string(),
+            ));
+        };
+        let address = parse_resource_uri(uri)?;
+        self.ensure_resource_exists(&address, uri)?;
+        Ok(uri)
+    }
+
     fn dispatch_resource(&self, params: &Value) -> Result<Value, (i64, String)> {
-        let uri = params.get("uri").and_then(Value::as_str).unwrap_or("");
-        // Templated resources (resources/templates/list): any node or community
-        // is addressable by URI. Checked before the static table; the static
-        // URIs (synaptic://god-nodes etc.) do not share these prefixes.
-        if let Some(label) = uri.strip_prefix("synaptic://node/") {
-            let text = self.tool_get_node(label);
-            return Ok(
-                json!({ "contents": [{ "uri": uri, "mimeType": "text/plain", "text": text }] }),
-            );
-        }
-        if let Some(id) = uri.strip_prefix("synaptic://community/") {
-            let cid: u32 = id.parse().unwrap_or(u32::MAX);
-            let text = self.tool_get_community(cid, 0, 1000);
-            return Ok(
-                json!({ "contents": [{ "uri": uri, "mimeType": "text/plain", "text": text }] }),
-            );
-        }
-        let (mime, text) = match uri {
-            "synaptic://report" => ("text/markdown", self.resource_report()),
-            "synaptic://stats" => ("text/plain", self.tool_graph_stats()),
-            "synaptic://god-nodes" => ("text/plain", self.tool_god_nodes(10, 0)),
-            "synaptic://surprises" => ("text/plain", self.resource_surprises()),
-            "synaptic://audit" => ("text/plain", self.resource_audit()),
-            "synaptic://questions" => ("text/plain", self.resource_questions()),
-            other => return Err((-32602, format!("Unknown resource: {other}"))),
+        let Some(uri) = params.get("uri").and_then(Value::as_str) else {
+            return Err((-32602, "resources/read requires a string 'uri'".to_string()));
+        };
+        let address = parse_resource_uri(uri)?;
+        self.ensure_resource_exists(&address, uri)?;
+        let (mime, text) = match address {
+            ResourceAddress::Node(label) => ("text/plain", self.tool_get_node(&label)),
+            ResourceAddress::Community(id) => ("text/plain", self.tool_get_community(id, 0, 1000)),
+            ResourceAddress::Static => match uri {
+                "synaptic://report" => ("text/markdown", self.resource_report()),
+                "synaptic://stats" => ("text/plain", self.tool_graph_stats()),
+                "synaptic://god-nodes" => ("text/plain", self.tool_god_nodes(10, 0)),
+                "synaptic://surprises" => ("text/plain", self.resource_surprises()),
+                "synaptic://audit" => ("text/plain", self.resource_audit()),
+                "synaptic://questions" => ("text/plain", self.resource_questions()),
+                _ => unreachable!("static resources are validated by parse_resource_uri"),
+            },
         };
         Ok(json!({ "contents": [{ "uri": uri, "mimeType": mime, "text": text }] }))
     }
 
-    /// `completion/complete` — argument autocomplete for the common tool/prompt
-    /// arguments: node labels (label/source/target), repo tags, and community
-    /// ids. Prefix match, sorted, capped at the protocol's 100 values.
+    /// `completion/complete` — reference-aware argument autocomplete for the
+    /// advertised prompts and resource templates. Prefix match, sorted, capped
+    /// at the protocol's 100 values.
     fn dispatch_completion(&self, params: &Value) -> Result<Value, (i64, String)> {
-        let arg = params.get("argument");
-        let arg_name = arg
-            .and_then(|a| a.get("name"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let prefix = arg
-            .and_then(|a| a.get("value"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let plow = prefix.to_lowercase();
-        let mut values: Vec<String> = match arg_name {
-            "label" | "source" | "target" => {
-                let mut v = Vec::new();
-                // Match the bare name too: method nodes are labeled ".name()", so
-                // a prefix like "tool_get" must see past the leading punctuation.
-                self.provider.for_each_node(&mut |n| {
-                    let l = n.label.to_lowercase();
-                    if l.starts_with(&plow)
-                        || l.trim_start_matches(|c: char| !c.is_alphanumeric())
-                            .starts_with(&plow)
-                    {
-                        v.push(sanitize_label(&n.label));
-                    }
-                });
-                v
-            }
-            "repo" => self
-                .provider
-                .repo_counts()
-                .into_keys()
-                .filter(|r| r.to_lowercase().starts_with(&plow))
-                .map(|r| sanitize_label(&r))
-                .collect(),
-            "community_id" => self
-                .communities()
-                .keys()
-                .map(|c| c.to_string())
-                .filter(|c| c.starts_with(prefix))
-                .collect(),
-            _ => Vec::new(),
+        enum CompletionValues {
+            Labels,
+            Communities,
+            Empty,
+        }
+
+        let Some(params) = params.as_object() else {
+            return Err((-32602, "completion params must be an object".to_string()));
         };
-        values.sort();
-        values.dedup();
-        let total = values.len();
-        values.truncate(100);
+        let Some(reference) = params.get("ref").and_then(Value::as_object) else {
+            return Err((
+                -32602,
+                "completion requires a valid 'ref' object".to_string(),
+            ));
+        };
+        let Some(argument) = params.get("argument").and_then(Value::as_object) else {
+            return Err((
+                -32602,
+                "completion requires an 'argument' object".to_string(),
+            ));
+        };
+        let Some(arg_name) = argument.get("name").and_then(Value::as_str) else {
+            return Err((
+                -32602,
+                "completion argument name must be a string".to_string(),
+            ));
+        };
+        let Some(prefix) = argument.get("value").and_then(Value::as_str) else {
+            return Err((
+                -32602,
+                "completion argument value must be a string".to_string(),
+            ));
+        };
+
+        let source = match reference.get("type").and_then(Value::as_str) {
+            Some("ref/resource") => {
+                match (reference.get("uri").and_then(Value::as_str), arg_name) {
+                    (Some("synaptic://node/{label}"), "label") => CompletionValues::Labels,
+                    (Some("synaptic://community/{id}"), "id") => CompletionValues::Communities,
+                    (Some(uri), _)
+                        if resource_templates().as_array().is_some_and(|templates| {
+                            templates
+                                .iter()
+                                .any(|template| template["uriTemplate"].as_str() == Some(uri))
+                        }) =>
+                    {
+                        return Err((
+                            -32602,
+                            format!("Resource template has no argument named '{arg_name}'"),
+                        ))
+                    }
+                    (Some(uri), _) => {
+                        return Err((-32602, format!("Unknown resource reference: {uri}")))
+                    }
+                    (None, _) => {
+                        return Err((-32602, "resource ref requires a string 'uri'".to_string()))
+                    }
+                }
+            }
+            Some("ref/prompt") => match (reference.get("name").and_then(Value::as_str), arg_name) {
+                (Some("explain_subsystem"), "topic") | (Some("trace_flow"), "from" | "to") => {
+                    CompletionValues::Labels
+                }
+                (Some("assess_pr"), "pr_number") => CompletionValues::Empty,
+                (
+                    Some(name @ ("onboard" | "explain_subsystem" | "assess_pr" | "trace_flow")),
+                    _,
+                ) => {
+                    return Err((
+                        -32602,
+                        format!("Prompt '{name}' has no argument named '{arg_name}'"),
+                    ))
+                }
+                (Some(name), _) => {
+                    return Err((-32602, format!("Unknown prompt reference: {name}")))
+                }
+                (None, _) => {
+                    return Err((-32602, "prompt ref requires a string 'name'".to_string()))
+                }
+            },
+            Some(kind) => return Err((-32602, format!("Unknown completion ref type: {kind}"))),
+            None => {
+                return Err((
+                    -32602,
+                    "completion ref requires a string 'type'".to_string(),
+                ))
+            }
+        };
+
+        let (values, total) = match source {
+            CompletionValues::Labels => self.complete_labels(prefix),
+            CompletionValues::Communities => {
+                let mut values: Vec<String> = self
+                    .communities()
+                    .keys()
+                    .map(|community| community.to_string())
+                    .filter(|community| community.starts_with(prefix))
+                    .collect();
+                values.sort();
+                values.dedup();
+                let total = values.len();
+                values.truncate(100);
+                (values, total)
+            }
+            CompletionValues::Empty => (Vec::new(), 0),
+        };
         Ok(json!({
             "completion": { "values": values, "total": total, "hasMore": total > 100 }
         }))
     }
 
-    /// Serve over stdio: newline-delimited JSON-RPC on stdin/stdout.
-    pub fn serve_stdio(&mut self) -> std::io::Result<()> {
+    /// Serve over stdio: newline-delimited JSON-RPC on stdin/stdout. Input stays
+    /// on the connection thread; ordinary requests execute on a bounded worker
+    /// pool, and one writer serializes complete JSON lines. Ping/lifecycle/
+    /// cancellation messages never wait behind the work queue.
+    pub fn serve_stdio(self) -> std::io::Result<()> {
         let stdin = std::io::stdin();
-        let mut stdout = std::io::stdout();
-        for line in stdin.lock().lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
+        self.serve_stdio_io(stdin.lock(), std::io::stdout())
+    }
+
+    fn serve_stdio_io<R, W>(self, input: R, output: W) -> std::io::Result<()>
+    where
+        R: BufRead,
+        W: Write + Send,
+    {
+        use std::sync::mpsc::{self, TrySendError};
+
+        let server = Arc::new(RwLock::new(self));
+        let (jobs_tx, jobs_rx) = mpsc::sync_channel::<ValidatedRequest>(STDIO_QUEUE_CAPACITY);
+        let jobs_rx = Arc::new(Mutex::new(jobs_rx));
+        let (responses_tx, responses_rx) = mpsc::channel::<Value>();
+
+        std::thread::scope(|scope| -> std::io::Result<()> {
+            let writer = scope.spawn(move || -> std::io::Result<()> {
+                let mut output = output;
+                for response in responses_rx {
+                    writeln!(output, "{response}")?;
+                    output.flush()?;
+                }
+                Ok(())
+            });
+
+            for _ in 0..STDIO_WORKERS {
+                let server = server.clone();
+                let jobs = jobs_rx.clone();
+                let responses = responses_tx.clone();
+                scope.spawn(move || loop {
+                    let request = {
+                        let receiver = jobs.lock().unwrap_or_else(|error| error.into_inner());
+                        receiver.recv()
+                    };
+                    let Ok(request) = request else {
+                        break;
+                    };
+                    let request_id = request.id.clone();
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        dispatch_shared_request(&server, &request)
+                    }));
+                    let response = match outcome {
+                        Ok(response) => response,
+                        Err(_) => request_id.map(|id| {
+                            jsonrpc_error_response(id, -32603, "Internal request worker failure")
+                        }),
+                    };
+                    if let Some(response) = response {
+                        let _ = responses.send(response);
+                    }
+                });
             }
-            let Ok(req) = serde_json::from_str::<Value>(&line) else {
-                continue; // ignore unparseable lines (client quirk tolerance)
-            };
-            if let Some(resp) = self.handle_request(&req) {
-                writeln!(stdout, "{resp}")?;
-                stdout.flush()?;
+
+            let mut lifecycle = ConnectionLifecycle::New;
+            for line in input.lines() {
+                let line = line?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let raw = match serde_json::from_str::<Value>(&line) {
+                    Ok(request) => request,
+                    Err(_) => {
+                        let _ = responses_tx.send(jsonrpc_parse_error());
+                        continue;
+                    }
+                };
+                let request = match validate_jsonrpc_request(&raw) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        let _ = responses_tx.send(error);
+                        continue;
+                    }
+                };
+                match lifecycle.authorize(&request) {
+                    Ok(false) => continue,
+                    Err((code, message)) => {
+                        if let Some(id) = request.id.clone() {
+                            let _ = responses_tx.send(jsonrpc_error_response(id, code, message));
+                        }
+                        continue;
+                    }
+                    Ok(true) => {}
+                }
+
+                // Control messages stay on the reader path. Notifications have no
+                // response; ping and initialize are cheap and preserve handshake
+                // ordering without consuming a worker slot.
+                if request.id.is_none() {
+                    continue;
+                }
+                if matches!(request.method.as_str(), "initialize" | "ping") {
+                    if let Some(response) = dispatch_shared_request(&server, &request) {
+                        let _ = responses_tx.send(response);
+                    }
+                    continue;
+                }
+
+                match jobs_tx.try_send(request) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(request)) => {
+                        if let Some(id) = request.id {
+                            let _ = responses_tx.send(jsonrpc_error_response(
+                                id,
+                                -32000,
+                                "Server is busy; retry the request",
+                            ));
+                        }
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "stdio request workers stopped",
+                        ));
+                    }
+                }
             }
-        }
-        Ok(())
+
+            lifecycle = ConnectionLifecycle::Closed;
+            debug_assert!(matches!(lifecycle, ConnectionLifecycle::Closed));
+            drop(jobs_tx);
+            drop(responses_tx);
+            writer
+                .join()
+                .map_err(|_| std::io::Error::other("stdio response writer panicked"))?
+        })
     }
 }
 
+/// Dispatch a request against a shared server snapshot, using the same
+/// reload/freshen/read-lock policy as Streamable HTTP.
+fn dispatch_shared_request(server: &RwLock<Server>, request: &ValidatedRequest) -> Option<Value> {
+    if request_needs_reload(&request.method) {
+        return http::with_fresh_server(server, |server| {
+            server.dispatch_validated_request(request)
+        })
+        .1;
+    }
+    server
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .dispatch_validated_request(request)
+}
+
 /// Data requests that should pick up a rebuilt graph.json before answering.
-fn request_needs_reload(method: &str) -> bool {
-    matches!(method, "tools/call" | "resources/read")
+pub(crate) fn request_needs_reload(method: &str) -> bool {
+    matches!(
+        method,
+        "tools/call" | "resources/read" | "completion/complete"
+    )
 }
 
 /// Fetch each PR's changed-file list concurrently, bounded to `MAX_CONCURRENT`
@@ -5244,7 +6197,7 @@ a relationship is EXTRACTED, INFERRED, or AMBIGUOUS.";
 /// The MCP `tools/list` payload. Descriptions and per-parameter docs make the
 /// implicit domain knowledge explicit so an agent uses each tool correctly
 /// (graph jargon, the lenient label resolution, the relation vocabulary).
-fn tools_list(allow_exec: bool) -> Value {
+fn build_tools_list(allow_exec: bool) -> Value {
     let mut tools = json!([
         {
             "name": "query_graph",
@@ -5626,8 +6579,267 @@ fn tools_list(allow_exec: bool) -> Value {
                 "openWorldHint": open_world.contains(&name.as_str()),
             });
         }
+        // Discovery is injected into model context by many MCP hosts. Keep the
+        // complete validation schemas, enums, required fields, and annotations,
+        // while bounding prose that otherwise repeats long usage guidance in
+        // every schema position. Detailed workflow guidance remains in the
+        // initialize instructions and wiki.
+        if let Some(description) = t.get_mut("description") {
+            compact_description_value(description, 140);
+        }
+        if let Some(schema) = t.get_mut("inputSchema") {
+            compact_schema_descriptions(schema);
+        }
+        if let Some(schema) = t.get_mut("outputSchema") {
+            compact_schema_descriptions(schema);
+        }
     }
     tools
+}
+
+/// Collapse whitespace and bound discovery prose at a word boundary. This is
+/// presentation-only: schema types/constraints and runtime validation are not
+/// changed. ASCII `...` keeps the existing plain-ASCII tool-surface contract.
+fn compact_description_value(value: &mut Value, max_chars: usize) {
+    let Some(text) = value.as_str() else {
+        return;
+    };
+    if max_chars <= 70 && text.contains("@file") {
+        *value = Value::String(
+            "Symbol label, id, or bare name; use name@file when ambiguous.".to_string(),
+        );
+        return;
+    }
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= max_chars {
+        *value = Value::String(normalized);
+        return;
+    }
+    let mut byte_end = normalized
+        .char_indices()
+        .nth(max_chars)
+        .map(|(index, _)| index)
+        .unwrap_or(normalized.len());
+    if let Some(space) = normalized[..byte_end].rfind(' ') {
+        byte_end = space;
+    }
+    *value = Value::String(format!("{}...", normalized[..byte_end].trim_end()));
+}
+
+fn compact_schema_descriptions(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            if let Some(description) = object.get_mut("description") {
+                compact_description_value(description, 70);
+            }
+            for child in object.values_mut() {
+                compact_schema_descriptions(child);
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                compact_schema_descriptions(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Build the advertised tool registry once per execution-policy variant. Tool
+/// calls validate against this exact registry, keeping runtime behavior aligned
+/// with `tools/list` without rebuilding its large schema payload per request.
+fn tool_registry(allow_exec: bool) -> &'static Value {
+    static READ_ONLY: OnceLock<Value> = OnceLock::new();
+    static WITH_EXEC: OnceLock<Value> = OnceLock::new();
+    if allow_exec {
+        WITH_EXEC.get_or_init(|| build_tools_list(true))
+    } else {
+        READ_ONLY.get_or_init(|| build_tools_list(false))
+    }
+}
+
+fn tools_list(allow_exec: bool) -> Value {
+    tool_registry(allow_exec).clone()
+}
+
+fn registered_tool(allow_exec: bool, name: &str) -> Option<&'static Value> {
+    tool_registry(allow_exec)
+        .as_array()?
+        .iter()
+        .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+}
+
+fn tool_error_result(message: impl Into<String>) -> Value {
+    json!({
+        "content": [{ "type": "text", "text": message.into() }],
+        "isError": true
+    })
+}
+
+/// Convert one fallible tool execution into the MCP tool-result shape. Protocol
+/// validation has already succeeded at this point, so execution failures stay
+/// in the result channel and are marked with `isError`.
+fn tool_execution_result(outcome: Result<(String, Option<Value>), String>) -> Value {
+    match outcome {
+        Ok((text, structured)) => {
+            let mut result = json!({
+                "content": [{ "type": "text", "text": text }],
+                "isError": false
+            });
+            if let Some(structured) = structured {
+                result["structuredContent"] = structured;
+            }
+            result
+        }
+        Err(message) => tool_error_result(message),
+    }
+}
+
+/// Validate the JSON Schema subset used by the MCP tool registry. Keeping this
+/// deliberately small makes the advertised schema the single contract while
+/// covering every keyword currently emitted by `build_tools_list`.
+fn validate_json_schema(value: &Value, schema: &Value, path: &str) -> Result<(), String> {
+    if let Some(expected) = schema.get("type").and_then(Value::as_str) {
+        let matches = match expected {
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "string" => value.is_string(),
+            "boolean" => value.is_boolean(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "number" => value.is_number(),
+            "null" => value.is_null(),
+            _ => false,
+        };
+        if !matches {
+            return Err(format!("{path} must be of type {expected}"));
+        }
+    }
+
+    if let Some(allowed) = schema.get("enum").and_then(Value::as_array) {
+        if !allowed.iter().any(|candidate| candidate == value) {
+            let choices = allowed
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!("{path} must be one of [{choices}]"));
+        }
+    }
+
+    if let Some(object) = value.as_object() {
+        if let Some(required) = schema.get("required").and_then(Value::as_array) {
+            for key in required.iter().filter_map(Value::as_str) {
+                if !object.contains_key(key) {
+                    return Err(format!("{path}.{key} is required"));
+                }
+            }
+        }
+        if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+            for (key, child) in object {
+                if let Some(child_schema) = properties.get(key) {
+                    validate_json_schema(child, child_schema, &format!("{path}.{key}"))?;
+                }
+            }
+        }
+    }
+
+    if let (Some(items), Some(values)) = (schema.get("items"), value.as_array()) {
+        for (index, item) in values.iter().enumerate() {
+            validate_json_schema(item, items, &format!("{path}[{index}]"))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn resource_capabilities(subscriptions: bool) -> Value {
+    if subscriptions {
+        json!({ "subscribe": true })
+    } else {
+        json!({})
+    }
+}
+
+#[derive(Debug)]
+enum ResourceAddress {
+    Static,
+    Node(String),
+    Community(u32),
+}
+
+fn decode_uri_segment(segment: &str) -> Result<String, (i64, String)> {
+    if segment.is_empty() {
+        return Err((
+            -32602,
+            "Resource template value cannot be empty".to_string(),
+        ));
+    }
+    let bytes = segment.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' => {
+                if index + 2 >= bytes.len() {
+                    return Err((
+                        -32602,
+                        "Malformed percent escape in resource URI".to_string(),
+                    ));
+                }
+                let hex = |byte: u8| match byte {
+                    b'0'..=b'9' => Some(byte - b'0'),
+                    b'a'..=b'f' => Some(byte - b'a' + 10),
+                    b'A'..=b'F' => Some(byte - b'A' + 10),
+                    _ => None,
+                };
+                let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2])) else {
+                    return Err((
+                        -32602,
+                        "Malformed percent escape in resource URI".to_string(),
+                    ));
+                };
+                decoded.push((high << 4) | low);
+                index += 3;
+            }
+            byte if byte > 0x7f || byte <= 0x20 || matches!(byte, b'/' | b'?' | b'#') => {
+                return Err((
+                    -32602,
+                    "Resource template values must be URI percent-encoded".to_string(),
+                ));
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded)
+        .map_err(|_| (-32602, "Resource URI contains invalid UTF-8".to_string()))
+}
+
+fn parse_resource_uri(uri: &str) -> Result<ResourceAddress, (i64, String)> {
+    if matches!(
+        uri,
+        "synaptic://report"
+            | "synaptic://stats"
+            | "synaptic://god-nodes"
+            | "synaptic://surprises"
+            | "synaptic://audit"
+            | "synaptic://questions"
+    ) {
+        return Ok(ResourceAddress::Static);
+    }
+    if let Some(segment) = uri.strip_prefix("synaptic://node/") {
+        return decode_uri_segment(segment).map(ResourceAddress::Node);
+    }
+    if let Some(segment) = uri.strip_prefix("synaptic://community/") {
+        let decoded = decode_uri_segment(segment)?;
+        let id = decoded
+            .parse::<u32>()
+            .map_err(|_| (-32602, format!("Invalid community id: {decoded}")))?;
+        return Ok(ResourceAddress::Community(id));
+    }
+    Err((-32002, format!("Resource not found: {uri}")))
 }
 
 /// The MCP `resources/list` payload.
@@ -5794,6 +7006,14 @@ mod tests {
         }
     }
 
+    fn init_params(protocol_version: &str) -> Value {
+        json!({
+            "protocolVersion": protocol_version,
+            "capabilities": {},
+            "clientInfo": { "name": "synaptic-test", "version": "1.0" }
+        })
+    }
+
     fn server() -> Server {
         let gd = GraphData {
             directed: false,
@@ -5914,6 +7134,83 @@ mod tests {
     }
 
     #[test]
+    fn graph_stats_and_list_repos_scan_graph_once_per_snapshot() {
+        let mut s = server();
+
+        let stats = call_tool_full(&mut s, "graph_stats", json!({}));
+        assert!(stats["result"]["structuredContent"].is_object());
+        assert_eq!(
+            s.dynamic_stat_scans
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "text and structured graph_stats must share one dynamic-site scan"
+        );
+        let _ = call_tool_full(&mut s, "graph_stats", json!({}));
+        assert_eq!(
+            s.dynamic_stat_scans
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the aggregate is stable for the loaded graph snapshot"
+        );
+
+        let repos = call_tool_full(&mut s, "list_repos", json!({}));
+        assert!(repos["result"]["structuredContent"]["repos"].is_array());
+        assert_eq!(
+            s.repo_count_scans
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "text and structured list_repos must share one node/edge scan"
+        );
+        let _ = call_tool(&mut s, "repo_stats", json!({"repo": "missing"}));
+        assert_eq!(
+            s.repo_count_scans
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "repo_stats must reuse the graph-version repository aggregate"
+        );
+    }
+
+    #[test]
+    fn graph_report_caches_reset_when_provider_changes() {
+        let mut s = server();
+        let _ = s.tool_graph_stats();
+        let _ = s.tool_list_repos();
+        assert_eq!(
+            s.dynamic_stat_scans
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            s.repo_count_scans
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+
+        let replacement = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![node("new", "New", Some(0))],
+            links: vec![],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        s.reindex_from(KnowledgeGraph::from_graph_data(replacement));
+        let _ = s.tool_graph_stats();
+        let _ = s.tool_list_repos();
+        assert_eq!(
+            s.dynamic_stat_scans
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            s.repo_count_scans
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+    }
+
+    #[test]
     fn god_nodes_annotates_dynamically_referenced_hub() {
         let mut s = dynamic_ref_server();
         let full = call_tool_full(&mut s, "god_nodes", json!({"top_n": 10}));
@@ -5996,6 +7293,23 @@ mod tests {
         assert_eq!(sc["neighbors"].as_array().unwrap().len(), 5, "{sc}");
         assert_eq!(sc["total"], json!(25));
         assert_eq!(sc["truncated"], json!(true));
+    }
+
+    #[test]
+    fn get_neighbors_full_response_explains_seed_once() {
+        let mut s = hub_server();
+        let full = call_tool_full(&mut s, "get_neighbors", json!({"label":"hub","limit":5}));
+        assert!(full["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Neighbors of Hub (25)"));
+        assert_eq!(full["result"]["structuredContent"]["total"], json!(25));
+        assert_eq!(
+            s.neighbor_explanations
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "text and structuredContent must render one shared explanation"
+        );
     }
 
     #[test]
@@ -6112,12 +7426,52 @@ mod tests {
     fn affected_structured_on_a_class_is_not_a_misleading_zero() {
         let mut s = class_server();
         let resp = call_tool_full(&mut s, "affected", json!({"label": "MyClass", "depth": 5}));
+        assert_eq!(
+            s.affected_walks.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a full text + structured MCP response must traverse once"
+        );
         let sc = &resp["result"]["structuredContent"];
         assert!(
             sc["total"].as_u64().unwrap() >= 2,
             "class total must reflect folded members, got {sc}"
         );
         assert_eq!(sc["aggregated_over_members"], json!(2), "{sc}");
+    }
+
+    #[test]
+    fn affected_custom_relations_preserve_results_and_compute_once() {
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![
+                node("seed", "Seed", Some(0)),
+                node("dep", "Dependent", Some(0)),
+            ],
+            links: vec![edge("dep", "seed", "depends_on")],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        let resp = call_tool_full(
+            &mut s,
+            "affected",
+            json!({"label": "Seed", "relations": ["depends_on"]}),
+        );
+        assert_eq!(
+            s.affected_walks.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "custom-relation fallback must still compute once"
+        );
+        assert!(
+            resp["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Dependent"),
+            "custom relation text: {resp}"
+        );
+        assert_eq!(resp["result"]["structuredContent"]["total"], json!(1));
     }
 
     #[test]
@@ -6722,6 +8076,29 @@ mod tests {
     }
 
     #[test]
+    fn tool_discovery_payload_stays_within_prose_budget() {
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "tools": tools_list(false) }
+        });
+        let encoded = serde_json::to_string(&response).unwrap();
+        let tokens = bpe()
+            .expect("cl100k tokenizer")
+            .encode_with_special_tokens(&encoded)
+            .len();
+        assert!(
+            encoded.len() <= 34_000,
+            "tools/list prose grew beyond the measured character budget: {}",
+            encoded.len()
+        );
+        assert!(
+            tokens <= 7_500,
+            "tools/list prose grew beyond the measured token budget: {tokens}"
+        );
+    }
+
+    #[test]
     fn tool_surface_is_plain_ascii() {
         // The instructions + tool descriptions are agent-facing output; keep them
         // free of em-dashes / smart quotes / arrows (AI tells).
@@ -6814,6 +8191,51 @@ mod tests {
         assert_eq!(cell["signature"]["return_type"], "str");
         assert_eq!(cell["signature"]["params"][0]["name"], "name");
         assert_eq!(cell["signature"]["params"][0]["type_ref"], "str");
+    }
+
+    #[test]
+    fn structural_search_full_dispatch_queries_once_and_projects_only_limit() {
+        let gd = GraphData {
+            directed: false,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: (0..100)
+                .map(|i| node(&format!("n{i:03}"), &format!("Node{i:03}"), None))
+                .collect(),
+            links: vec![],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        let resp = call_tool_full(
+            &mut s,
+            "structural_search",
+            json!({"query": "MATCH (n) RETURN n", "limit": 7}),
+        );
+        assert_eq!(
+            s.structural_search_runs
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "text + structured output must share one SynQL execution"
+        );
+        assert_eq!(
+            s.structural_view_lookups
+                .load(std::sync::atomic::Ordering::Relaxed),
+            7,
+            "node projection must stop at the response limit"
+        );
+        let result = &resp["result"];
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let rows = result["structuredContent"]["results"].as_array().unwrap();
+        assert!(text.starts_with("100 result(s) [n]"), "{text}");
+        assert_eq!(rows.len(), 7, "{rows:?}");
+        for row in rows {
+            let label = row[0]["label"].as_str().unwrap();
+            assert!(
+                text.contains(label),
+                "text/structured mismatch for {label}: {text}"
+            );
+        }
     }
 
     #[test]
@@ -6958,7 +8380,7 @@ mod tests {
         // Finding #2: the MCP initialize result should carry server `instructions`
         // that orient the agent to the whole toolset.
         let mut s = server();
-        let req = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}});
+        let req = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":init_params(LATEST_PROTOCOL)});
         let resp = s.handle_request(&req).unwrap();
         let instr = resp["result"]["instructions"].as_str().unwrap_or("");
         assert!(instr.len() > 100, "instructions should orient: {instr}");
@@ -6973,6 +8395,186 @@ mod tests {
             instr.contains("--allow-exec") && instr.contains("speculate"),
             "instructions should explain how to enable speculate: {instr}"
         );
+    }
+
+    #[test]
+    fn stdio_lifecycle_validates_and_gates_the_initialize_handshake() {
+        let mut s = server();
+        let mut lifecycle = ConnectionLifecycle::New;
+        let tool = json!({
+            "jsonrpc":"2.0","id":10,"method":"tools/call",
+            "params":{"name":"graph_stats","arguments":{}}
+        });
+        let before = s.handle_connection_request(&tool, &mut lifecycle).unwrap();
+        assert_eq!(before["error"]["code"], -32002, "{before}");
+
+        let malformed = s
+            .handle_connection_request(
+                &json!({"jsonrpc":"2.0","id":11,"method":"initialize","params":{}}),
+                &mut lifecycle,
+            )
+            .unwrap();
+        assert_eq!(malformed["error"]["code"], -32602, "{malformed}");
+        assert!(matches!(lifecycle, ConnectionLifecycle::New));
+
+        let params = json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": {"roots": {"listChanged": true}},
+            "clientInfo": {"name": "lifecycle-test", "version": "2.3"}
+        });
+        let initialized = s
+            .handle_connection_request(
+                &json!({"jsonrpc":"2.0","id":12,"method":"initialize","params":params.clone()}),
+                &mut lifecycle,
+            )
+            .unwrap();
+        assert_eq!(initialized["result"]["protocolVersion"], "2025-06-18");
+        let ConnectionLifecycle::AwaitingInitialized(negotiated) = &lifecycle else {
+            panic!("expected AwaitingInitialized, got {lifecycle:?}");
+        };
+        assert_eq!(negotiated.name, "lifecycle-test");
+        assert_eq!(negotiated.version, "2.3");
+        assert_eq!(negotiated.capabilities["roots"]["listChanged"], true);
+
+        let waiting = s.handle_connection_request(&tool, &mut lifecycle).unwrap();
+        assert_eq!(waiting["error"]["code"], -32002, "{waiting}");
+        let duplicate = s
+            .handle_connection_request(
+                &json!({"jsonrpc":"2.0","id":13,"method":"initialize","params":params}),
+                &mut lifecycle,
+            )
+            .unwrap();
+        assert_eq!(duplicate["error"]["code"], -32600, "{duplicate}");
+
+        assert!(s
+            .handle_connection_request(
+                &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+                &mut lifecycle,
+            )
+            .is_none());
+        assert!(matches!(lifecycle, ConnectionLifecycle::Ready(_)));
+        let ready = s.handle_connection_request(&tool, &mut lifecycle).unwrap();
+        assert!(ready["result"]["content"].is_array(), "{ready}");
+        let duplicate = s
+            .handle_connection_request(
+                &json!({"jsonrpc":"2.0","id":14,"method":"initialize","params":init_params(LATEST_PROTOCOL)}),
+                &mut lifecycle,
+            )
+            .unwrap();
+        assert_eq!(duplicate["error"]["code"], -32600, "{duplicate}");
+    }
+
+    #[test]
+    fn stdio_reads_ping_and_cancellation_while_slow_request_runs() {
+        use std::sync::{mpsc, Condvar, Mutex as StdMutex};
+
+        struct GateRunner {
+            started: StdMutex<Option<mpsc::Sender<()>>>,
+            release: Arc<(StdMutex<bool>, Condvar)>,
+        }
+        impl CommandRunner for GateRunner {
+            fn run(&self, _program: &str, _args: &[&str]) -> Option<String> {
+                if let Some(started) = self.started.lock().unwrap().take() {
+                    let _ = started.send(());
+                }
+                let (lock, ready) = &*self.release;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = ready.wait(released).unwrap();
+                }
+                Some("[]".to_string())
+            }
+        }
+
+        struct LineWriter {
+            tx: mpsc::Sender<String>,
+            pending: Vec<u8>,
+        }
+        impl Write for LineWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.pending.extend_from_slice(bytes);
+                while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
+                    let line: Vec<u8> = self.pending.drain(..=end).collect();
+                    let line = String::from_utf8_lossy(&line[..line.len() - 1]).to_string();
+                    let _ = self.tx.send(line);
+                }
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        struct ReleaseOnDrop(Arc<(StdMutex<bool>, Condvar)>);
+        impl ReleaseOnDrop {
+            fn release(&self) {
+                let (lock, ready) = &*self.0;
+                *lock.lock().unwrap() = true;
+                ready.notify_all();
+            }
+        }
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                self.release();
+            }
+        }
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let release = Arc::new((StdMutex::new(false), Condvar::new()));
+        let release_guard = ReleaseOnDrop(release.clone());
+        let server = server().with_runner(Box::new(GateRunner {
+            started: StdMutex::new(Some(started_tx)),
+            release,
+        }));
+        let lines = [
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":init_params(LATEST_PROTOCOL)}),
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            json!({"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"list_prs","arguments":{"base":"main"}}}),
+            json!({"jsonrpc":"2.0","id":21,"method":"ping"}),
+            json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":20,"reason":"test"}}),
+            json!({"jsonrpc":"2.0","id":22,"method":"ping"}),
+        ];
+        let input = lines
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let (output_tx, output_rx) = mpsc::channel();
+        let serve = std::thread::spawn(move || {
+            server.serve_stdio_io(
+                std::io::Cursor::new(input),
+                LineWriter {
+                    tx: output_tx,
+                    pending: Vec::new(),
+                },
+            )
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("slow request never reached its runner");
+        let mut early_ids = Vec::new();
+        for _ in 0..3 {
+            let line = output_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("control response blocked behind the slow request");
+            let response: Value = serde_json::from_str(&line).unwrap();
+            early_ids.push(response["id"].as_i64().unwrap());
+        }
+        early_ids.sort_unstable();
+        assert_eq!(early_ids, vec![1, 21, 22]);
+
+        release_guard.release();
+        let slow: Value = serde_json::from_str(
+            &output_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("slow response missing after release"),
+        )
+        .unwrap();
+        assert_eq!(slow["id"], 20, "{slow}");
+        serve.join().unwrap().unwrap();
     }
 
     #[test]
@@ -7070,13 +8672,14 @@ mod tests {
             "delete breaks dependents: {del}"
         );
         assert!(del.contains("AuthService"), "the caller is named: {del}");
-        // An unknown kind is reported, not silently accepted.
+        // An unknown kind is rejected against the advertised enum before the
+        // handler can silently reinterpret it.
         let bad = call_tool(
             &mut s,
             "predict_edit",
             json!({"symbol": "login_user", "kind": "frobnicate"}),
         );
-        assert!(bad.contains("Unknown edit kind"), "{bad}");
+        assert!(bad.contains("must be one of"), "{bad}");
         // An unknown symbol is reported.
         let miss = call_tool(
             &mut s,
@@ -7146,7 +8749,7 @@ mod tests {
     fn initialize_and_tools_list() {
         let mut s = server();
         let init = s
-            .handle_request(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
+            .handle_request(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":init_params(LATEST_PROTOCOL)}))
             .unwrap();
         assert_eq!(init["result"]["serverInfo"]["name"], "synaptic");
         assert_eq!(
@@ -7231,6 +8834,31 @@ mod tests {
         let mut s = server();
         let n = s.handle_request(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
         assert!(n.is_none(), "a notification (no id) must not get a reply");
+    }
+
+    #[test]
+    fn jsonrpc_envelope_validation_rejects_invalid_requests() {
+        let mut s = server();
+        for request in [
+            json!([]),
+            json!({"jsonrpc":"1.0","id":1,"method":"ping"}),
+            json!({"id":2,"method":"ping"}),
+            json!({"jsonrpc":"2.0","id":3,"method":7}),
+            json!({"jsonrpc":"2.0","id":4,"method":"ping","params":"wrong-shape"}),
+            json!({"jsonrpc":"2.0","id":{},"method":"ping"}),
+        ] {
+            let response = s.handle_request(&request).unwrap();
+            assert_eq!(response["error"]["code"], -32600, "{response}");
+            assert_eq!(response["id"], Value::Null, "{response}");
+        }
+
+        let valid = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":"ping-1","method":"ping","params":[]
+            }))
+            .unwrap();
+        assert_eq!(valid["id"], "ping-1");
+        assert_eq!(valid["result"], json!({}));
     }
 
     #[test]
@@ -8108,7 +9736,7 @@ mod tests {
 
         // The capability is advertised so a host knows it can set a level.
         let init = s
-            .handle_request(&json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}))
+            .handle_request(&json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":init_params(LATEST_PROTOCOL)}))
             .unwrap();
         assert!(init["result"]["capabilities"]["logging"].is_object());
     }
@@ -8145,7 +9773,8 @@ mod tests {
         let r = s
             .handle_request(&json!({
                 "jsonrpc":"2.0","id":1,"method":"completion/complete",
-                "params":{"argument":{"name":"label","value":"tool_get"}}
+                "params":{ "ref": {"type":"ref/resource","uri":"synaptic://node/{label}"},
+                           "argument":{"name":"label","value":"tool_get"} }
             }))
             .unwrap();
         let values: Vec<&str> = r["result"]["completion"]["values"]
@@ -8158,15 +9787,121 @@ mod tests {
     }
 
     #[test]
-    fn subscribe_acked_and_capability_advertised() {
+    fn completion_index_deduplicates_before_prefix_lookup() {
+        let nodes = (0..5_000)
+            .map(|i| node(&format!("n{i}"), &format!("Service_{:02}", i % 64), Some(0)))
+            .collect();
+        let mut s = Server::from_graph_data(
+            GraphData {
+                nodes,
+                ..Default::default()
+            },
+            None,
+        );
+        let request = json!({
+            "jsonrpc":"2.0","id":1,"method":"completion/complete",
+            "params":{ "ref": {"type":"ref/resource","uri":"synaptic://node/{label}"},
+                       "argument": {"name":"label","value":"Serv"} }
+        });
+        let response = s.handle_request(&request).unwrap();
+        let completion = &response["result"]["completion"];
+        let values = completion["values"].as_array().unwrap();
+        assert_eq!(completion["total"], json!(64));
+        assert_eq!(values.len(), 64);
+        assert!(values
+            .windows(2)
+            .all(|pair| { pair[0].as_str().unwrap() < pair[1].as_str().unwrap() }));
+        assert_eq!(
+            s.completion_index_builds
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            s.completion_aliases_examined
+                .load(std::sync::atomic::Ordering::Relaxed),
+            64,
+            "lookup work follows unique matching aliases, not all 5,000 nodes"
+        );
+
+        let _ = s.handle_request(&request).unwrap();
+        assert_eq!(
+            s.completion_index_builds
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the graph-version index must be reused"
+        );
+    }
+
+    #[test]
+    fn completion_index_preserves_exact_total_cap_and_reloads() {
+        let nodes = (0..150)
+            .map(|i| node(&format!("n{i}"), &format!("Service_{i:03}"), Some(0)))
+            .collect();
+        let mut s = Server::from_graph_data(
+            GraphData {
+                nodes,
+                ..Default::default()
+            },
+            None,
+        );
+        let request = |prefix: &str| {
+            json!({
+                "jsonrpc":"2.0","id":1,"method":"completion/complete",
+                "params":{ "ref": {"type":"ref/resource","uri":"synaptic://node/{label}"},
+                           "argument": {"name":"label","value":prefix} }
+            })
+        };
+        let response = s.handle_request(&request("Serv")).unwrap();
+        let completion = &response["result"]["completion"];
+        assert_eq!(completion["values"].as_array().unwrap().len(), 100);
+        assert_eq!(completion["total"], json!(150));
+        assert_eq!(completion["hasMore"], json!(true));
+
+        s.reindex_from(KnowledgeGraph::from_graph_data(GraphData {
+            nodes: vec![node("fresh", "FreshLabel", Some(0))],
+            ..Default::default()
+        }));
+        let refreshed = s.handle_request(&request("Fresh")).unwrap();
+        assert_eq!(
+            refreshed["result"]["completion"]["values"],
+            json!(["FreshLabel"])
+        );
+        assert_eq!(
+            s.completion_index_builds
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "provider replacement must rebuild the completion index"
+        );
+    }
+
+    #[test]
+    fn completion_rejects_unknown_or_mismatched_references() {
+        let mut s = server();
+        for params in [
+            json!({"argument":{"name":"label","value":"Auth"}}),
+            json!({"ref":{"type":"ref/prompt","name":"nope"},
+                   "argument":{"name":"label","value":"Auth"}}),
+            json!({"ref":{"type":"ref/resource","uri":"synaptic://community/{id}"},
+                   "argument":{"name":"label","value":"Auth"}}),
+        ] {
+            let r = s
+                .handle_request(&json!({
+                    "jsonrpc":"2.0","id":1,"method":"completion/complete","params":params
+                }))
+                .unwrap();
+            assert_eq!(r["error"]["code"], -32602, "{r}");
+        }
+    }
+
+    #[test]
+    fn stdio_does_not_advertise_or_accept_resource_subscriptions() {
         let mut s = server();
         let init = s
-            .handle_request(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}))
+            .handle_request(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":init_params(LATEST_PROTOCOL)}))
             .unwrap();
-        assert_eq!(
-            init["result"]["capabilities"]["resources"]["subscribe"],
-            true
-        );
+        assert!(init["result"]["capabilities"]["resources"]
+            .get("subscribe")
+            .is_none());
 
         let ack = s
             .handle_request(&json!({
@@ -8174,8 +9909,7 @@ mod tests {
                 "params":{"uri":"synaptic://stats"}
             }))
             .unwrap();
-        assert!(ack.get("error").is_none(), "subscribe should ack: {ack}");
-        assert_eq!(ack["result"], json!({}));
+        assert_eq!(ack["error"]["code"], -32601, "{ack}");
     }
 
     #[test]
@@ -8214,6 +9948,74 @@ mod tests {
     }
 
     #[test]
+    fn resource_template_values_are_strictly_decoded_and_missing_is_an_error() {
+        let gd = GraphData {
+            nodes: vec![
+                node("space", "Accuracy corpus", Some(7)),
+                node("percent", "Rate%value", Some(7)),
+                node("slash", "path/to", Some(7)),
+                node("unicode", "café", Some(7)),
+            ],
+            ..Default::default()
+        };
+        let mut s = Server::from_graph_data(gd, None);
+
+        for (uri, label) in [
+            ("synaptic://node/Accuracy%20corpus", "Accuracy corpus"),
+            ("synaptic://node/Rate%25value", "Rate%value"),
+            ("synaptic://node/path%2Fto", "path/to"),
+            ("synaptic://node/caf%C3%A9", "café"),
+        ] {
+            let response = s
+                .handle_request(&json!({
+                    "jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":uri}
+                }))
+                .unwrap();
+            assert!(response.get("error").is_none(), "{uri}: {response}");
+            assert!(response["result"]["contents"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(label));
+        }
+
+        let community = s
+            .handle_request(&json!({
+                "jsonrpc":"2.0","id":2,"method":"resources/read",
+                "params":{"uri":"synaptic://community/7"}
+            }))
+            .unwrap();
+        assert!(community.get("error").is_none(), "{community}");
+
+        for uri in [
+            "synaptic://node/Accuracy corpus",
+            "synaptic://node/path/to",
+            "synaptic://node/bad%2",
+            "synaptic://node/bad%GG",
+            "synaptic://community/not-a-number",
+        ] {
+            let response = s
+                .handle_request(&json!({
+                    "jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":uri}
+                }))
+                .unwrap();
+            assert_eq!(response["error"]["code"], -32602, "{uri}: {response}");
+        }
+
+        for uri in [
+            "synaptic://node/__missing_node__",
+            "synaptic://community/999",
+            "synaptic://does-not-exist",
+        ] {
+            let response = s
+                .handle_request(&json!({
+                    "jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":uri}
+                }))
+                .unwrap();
+            assert_eq!(response["error"]["code"], -32002, "{uri}: {response}");
+        }
+    }
+
+    #[test]
     fn prompts_list_and_get() {
         let mut s = server();
         let list = s
@@ -8246,6 +10048,16 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(err["error"]["code"], -32602);
+
+        for (id, arguments) in [(4, json!({})), (5, json!({"topic": 42}))] {
+            let invalid = s
+                .handle_request(&json!({
+                    "jsonrpc":"2.0","id":id,"method":"prompts/get",
+                    "params":{"name":"explain_subsystem","arguments":arguments}
+                }))
+                .unwrap();
+            assert_eq!(invalid["error"]["code"], -32602, "{invalid}");
+        }
     }
 
     #[test]
@@ -8392,6 +10204,43 @@ mod tests {
     }
 
     #[test]
+    fn mcp_wiki_structured_registry_and_defaults_match_runtime() {
+        let tools = tools_list(false);
+        let structured: Vec<&str> = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|tool| tool.get("outputSchema").is_some())
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert_eq!(
+            structured.len(),
+            16,
+            "runtime structured-tool count changed"
+        );
+
+        let wiki = include_str!("../../../wiki/MCP-Server.md");
+        assert!(wiki.contains("Sixteen tools declare an `outputSchema`"));
+        let table = wiki
+            .split("### Structured output")
+            .nth(1)
+            .and_then(|section| section.split("The other tools return text only.").next())
+            .expect("structured-output table in MCP wiki");
+        for name in structured {
+            assert!(
+                table.contains(&format!("`{name}`")),
+                "MCP wiki structured-output table is missing {name}"
+            );
+        }
+        assert!(
+            wiki.contains("`query_graph` `token_budget` 800"),
+            "concise query budget must match cdef(1200, 800)"
+        );
+        assert!(wiki.contains("`serve --watch`"));
+        assert!(wiki.contains("unknown tool name is invalid `tools/call` parameters"));
+    }
+
+    #[test]
     fn get_neighbors_and_list_repos_emit_structured_content() {
         let mut s = server();
         let resp = s
@@ -8464,29 +10313,22 @@ mod tests {
     #[test]
     fn initialize_echoes_supported_protocol_else_latest() {
         let mut s = server();
-        // Client asks for a still-supported legacy version -> echoed back.
-        let r = s
-            .handle_request(&json!({
-                "jsonrpc":"2.0","id":1,"method":"initialize",
-                "params":{"protocolVersion":"2025-06-18"}
-            }))
-            .unwrap();
-        assert_eq!(r["result"]["protocolVersion"], "2025-06-18");
-
-        // Client asks for the new revision -> echoed back.
-        let r = s
-            .handle_request(&json!({
-                "jsonrpc":"2.0","id":2,"method":"initialize",
-                "params":{"protocolVersion":"2025-11-25"}
-            }))
-            .unwrap();
-        assert_eq!(r["result"]["protocolVersion"], "2025-11-25");
+        // Every supported client version is negotiated exactly.
+        for (index, version) in SUPPORTED_PROTOCOLS.iter().enumerate() {
+            let r = s
+                .handle_request(&json!({
+                    "jsonrpc":"2.0","id":index + 1,"method":"initialize",
+                    "params":init_params(version)
+                }))
+                .unwrap();
+            assert_eq!(r["result"]["protocolVersion"], *version);
+        }
 
         // Unknown version -> server returns its latest supported.
         let r = s
             .handle_request(&json!({
-                "jsonrpc":"2.0","id":3,"method":"initialize",
-                "params":{"protocolVersion":"1999-01-01"}
+                "jsonrpc":"2.0","id":99,"method":"initialize",
+                "params":init_params("1999-01-01")
             }))
             .unwrap();
         assert_eq!(r["result"]["protocolVersion"], "2025-11-25");
@@ -9120,7 +10962,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_tool_is_a_tool_result_not_a_protocol_error() {
+    fn unknown_tool_is_an_invalid_params_protocol_error() {
         let mut s = server();
         let r = s
             .handle_request(&json!({
@@ -9128,16 +10970,105 @@ mod tests {
                 "params":{"name":"no_such_tool","arguments":{}}
             }))
             .unwrap();
-        // Not a JSON-RPC error envelope; a tool result flagged isError.
-        assert!(
-            r.get("error").is_none(),
-            "must not be a protocol error: {r}"
-        );
-        assert_eq!(r["result"]["isError"], json!(true));
-        assert!(r["result"]["content"][0]["text"]
+        assert_eq!(r["error"]["code"], -32602, "{r}");
+        assert!(r["error"]["message"]
             .as_str()
             .unwrap()
             .contains("Unknown tool: no_such_tool"));
+    }
+
+    #[test]
+    fn advertised_tool_schemas_reject_invalid_arguments_before_dispatch() {
+        let mut s = server();
+
+        // Every required field in the advertised registry is enforced.
+        for tool in tools_list(false).as_array().unwrap() {
+            let Some(required) = tool["inputSchema"]["required"].as_array() else {
+                continue;
+            };
+            if required.is_empty() {
+                continue;
+            }
+            let name = tool["name"].as_str().unwrap();
+            let r = s
+                .handle_request(&json!({
+                    "jsonrpc":"2.0","id":1,"method":"tools/call",
+                    "params":{"name":name,"arguments":{}}
+                }))
+                .unwrap();
+            assert_eq!(r["result"]["isError"], true, "{name}: {r}");
+            assert!(
+                r["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("is required"),
+                "{name}: {r}"
+            );
+        }
+
+        for arguments in [
+            json!({"question": 42}),
+            json!({"question": "auth", "mode": "sideways"}),
+            json!({"question": "auth", "context_filter": [42]}),
+        ] {
+            let r = call_tool_full(&mut s, "query_graph", arguments);
+            assert_eq!(r["result"]["isError"], true, "{r}");
+            assert!(r["result"].get("structuredContent").is_none(), "{r}");
+        }
+    }
+
+    #[test]
+    fn operational_tool_failures_set_is_error_but_empty_results_do_not() {
+        struct MissingDependency;
+        impl CommandRunner for MissingDependency {
+            fn run(&self, _program: &str, _args: &[&str]) -> Option<String> {
+                None
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("sample.rs"), "fn present() {}\n").unwrap();
+        let mut s = server().with_source_root(dir.path().to_path_buf());
+
+        let failures = [
+            ("search_text", json!({"pattern": "["})),
+            ("structural_search", json!({"query": "NOT VALID SYNQL"})),
+            (
+                "predict_edit",
+                json!({"symbol": "__missing_symbol__", "kind": "delete"}),
+            ),
+            (
+                "plan_rename",
+                json!({"name": "__missing_symbol__", "to": "renamed"}),
+            ),
+            ("time_travel_diff", json!({"rev1": "__invalid_revision__"})),
+        ];
+        for (name, arguments) in failures {
+            let result = call_tool_full(&mut s, name, arguments);
+            assert_eq!(result["result"]["isError"], true, "{name}: {result}");
+            assert!(
+                result["result"]["content"][0]["text"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty()),
+                "{name}: {result}"
+            );
+        }
+
+        let empty = call_tool_full(&mut s, "search_text", json!({"pattern": "not_present"}));
+        assert_eq!(empty["result"]["isError"], false, "{empty}");
+        assert!(empty["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("no matches"));
+
+        let mut missing = server().with_runner(Box::new(MissingDependency));
+        let dependency = call_tool_full(&mut missing, "list_prs", json!({}));
+        assert_eq!(dependency["result"]["isError"], true, "{dependency}");
+        let dependency_text = dependency["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            dependency_text.contains("Error") || dependency_text.contains("gh"),
+            "{dependency}"
+        );
     }
 
     #[test]

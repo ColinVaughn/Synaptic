@@ -70,29 +70,55 @@ fn mcp_stdio_conformance_over_the_real_binary() {
     let mut stdin = child.stdin.take().unwrap();
     let mut out = BufReader::new(child.stdout.take().unwrap());
 
-    // initialize: with no requested version the server returns its latest, and
-    // advertises the full 2025-11-25 capability set.
+    // Lifecycle gate: normal operations and malformed initialize requests are
+    // rejected before a valid handshake.
     send(
         &mut stdin,
-        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        &json!({"jsonrpc":"2.0","id":90,"method":"tools/list"}),
+    );
+    assert_eq!(recv(&mut out)["error"]["code"], -32002);
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":91,"method":"initialize","params":{}}),
+    );
+    assert_eq!(recv(&mut out)["error"]["code"], -32602);
+
+    let init_params = json!({
+        "protocolVersion": "2025-11-25",
+        "capabilities": {},
+        "clientInfo": {"name": "mcp-e2e", "version": "1.0"}
+    });
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":init_params.clone()}),
     );
     let init = recv(&mut out);
     assert_eq!(init["result"]["protocolVersion"], "2025-11-25", "{init}");
     let caps = &init["result"]["capabilities"];
-    assert_eq!(
-        caps["resources"]["subscribe"], true,
-        "subscribe cap: {caps}"
+    assert!(
+        caps["resources"].get("subscribe").is_none(),
+        "stdio has no asynchronous resource-update channel: {caps}"
     );
     assert!(caps["prompts"].is_object(), "prompts cap: {caps}");
     assert!(caps["completions"].is_object(), "completions cap: {caps}");
     assert!(caps["logging"].is_object(), "logging cap: {caps}");
 
-    // Back-compat: an explicit legacy version request is still echoed.
+    // The initialize response alone is not Ready; a duplicate initialize is
+    // rejected and normal operations wait for notifications/initialized.
     send(
         &mut stdin,
-        &json!({"jsonrpc":"2.0","id":99,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}),
+        &json!({"jsonrpc":"2.0","id":92,"method":"tools/list"}),
     );
-    assert_eq!(recv(&mut out)["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(recv(&mut out)["error"]["code"], -32002);
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":93,"method":"initialize","params":init_params}),
+    );
+    assert_eq!(recv(&mut out)["error"]["code"], -32600);
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    );
 
     // tools/list: every tool annotated read-only.
     send(
@@ -176,7 +202,8 @@ fn mcp_stdio_conformance_over_the_real_binary() {
     send(
         &mut stdin,
         &json!({"jsonrpc":"2.0","id":8,"method":"completion/complete",
-                "params":{"argument":{"name":"label","value":"run"}}}),
+                "params":{"ref":{"type":"ref/resource","uri":"synaptic://node/{label}"},
+                          "argument":{"name":"label","value":"run"}}}),
     );
     let comp = recv(&mut out);
     let values: Vec<String> = comp["result"]["completion"]["values"]

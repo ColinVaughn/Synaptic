@@ -46,7 +46,10 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 use crate::session::{SessionStore, DEFAULT_SESSION_IDLE};
-use crate::Server;
+use crate::{
+    jsonrpc_error_response, jsonrpc_parse_error, request_needs_reload, validate_initialize_params,
+    validate_jsonrpc_request, NegotiatedClient, Server,
+};
 
 /// Acquire the engine read lock, recovering from poisoning. A poisoned lock left
 /// valid data behind (the writer panicked); one panic must not wedge every later
@@ -58,6 +61,25 @@ fn read_server(s: &RwLock<Server>) -> RwLockReadGuard<'_, Server> {
 /// Acquire the engine write lock, recovering from poisoning (see [`read_server`]).
 fn write_server(s: &RwLock<Server>) -> RwLockWriteGuard<'_, Server> {
     s.write().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Run one graph-backed read against a fresh snapshot. This is the single
+/// reload/freshen policy used by MCP and REST routes.
+pub(crate) fn with_fresh_server<T>(
+    server: &RwLock<Server>,
+    read: impl FnOnce(&Server) -> T,
+) -> (bool, T) {
+    let mut reloaded = false;
+    if read_server(server).is_stale() {
+        write_server(server).maybe_reload();
+        reloaded = true;
+    }
+    if let Some(report) = read_server(server).needs_freshen() {
+        write_server(server).apply_freshen(report);
+        reloaded = true;
+    }
+    let guard = read_server(server);
+    (reloaded, read(&guard))
 }
 
 /// 500 for when a `spawn_blocking` worker panicked (its `JoinError`) — return a
@@ -93,7 +115,7 @@ pub async fn serve_http(
 ) -> std::io::Result<()> {
     let api_key = api_key.filter(|k| !k.trim().is_empty());
     let state = HttpState {
-        server: Arc::new(RwLock::new(server)),
+        server: Arc::new(RwLock::new(server.with_resource_subscriptions(true))),
         api_key,
         allowed_hosts: host_allowlist(&addr),
         sessions: Arc::new(SessionStore::new()),
@@ -221,10 +243,15 @@ async fn handle_post(State(st): State<HttpState>, headers: HeaderMap, body: Byte
     if let Some(resp) = guard(&headers, &st) {
         return resp;
     }
-    let Ok(req) = serde_json::from_slice::<Value>(&body) else {
-        return (StatusCode::BAD_REQUEST, "invalid JSON").into_response();
+    let raw = match serde_json::from_slice::<Value>(&body) {
+        Ok(req) => req,
+        Err(_) => return (StatusCode::OK, Json(jsonrpc_parse_error())).into_response(),
     };
-    let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+    let req = match validate_jsonrpc_request(&raw) {
+        Ok(req) => req,
+        Err(error) => return (StatusCode::OK, Json(error)).into_response(),
+    };
+    let method = req.method.as_str();
 
     // MCP-Protocol-Version header (2025-11-25): a present-but-unsupported value
     // MUST get 400 on any post-initialization request. `initialize` is exempt
@@ -235,11 +262,40 @@ async fn handle_post(State(st): State<HttpState>, headers: HeaderMap, body: Byte
         }
     }
 
-    let mut new_session: Option<String> = None;
+    let mut initialize_negotiated: Option<NegotiatedClient> = None;
+    let mut active_session: Option<String> = None;
     if !st.stateless {
+        let supplied_session = session_header(&headers);
         if method == "initialize" {
-            new_session = Some(st.sessions.create());
-        } else if let Some(id) = session_header(&headers) {
+            if let Some(id) = supplied_session {
+                if !st.sessions.touch(&id) {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({ "error": "unknown or expired session" })),
+                    )
+                        .into_response();
+                }
+                let error = jsonrpc_error_response(
+                    req.id.clone().unwrap_or(Value::Null),
+                    -32600,
+                    "Server is already initializing or initialized",
+                );
+                return (StatusCode::OK, Json(error)).into_response();
+            }
+            if req.id.is_some() {
+                initialize_negotiated = match validate_initialize_params(&req.params) {
+                    Ok(negotiated) => Some(negotiated),
+                    Err((code, message)) => {
+                        let error = jsonrpc_error_response(
+                            req.id.clone().unwrap_or(Value::Null),
+                            code,
+                            message,
+                        );
+                        return (StatusCode::OK, Json(error)).into_response();
+                    }
+                };
+            }
+        } else if let Some(id) = supplied_session {
             // A supplied session id must be live; unknown/expired -> re-initialize.
             if !st.sessions.touch(&id) {
                 return (
@@ -248,31 +304,77 @@ async fn handle_post(State(st): State<HttpState>, headers: HeaderMap, body: Byte
                 )
                     .into_response();
             }
+            active_session = Some(id);
+        } else if req.id.is_some() && method != "ping" {
+            let error = jsonrpc_error_response(
+                req.id.clone().unwrap_or(Value::Null),
+                -32002,
+                "Server is not initialized; call initialize first",
+            );
+            return (StatusCode::OK, Json(error)).into_response();
         }
-        // A missing id on a non-initialize request is tolerated.
+
+        if let Some(session_id) = active_session.as_deref() {
+            if let Some(sent) = headers
+                .get("mcp-protocol-version")
+                .and_then(|value| value.to_str().ok())
+            {
+                if st.sessions.negotiated_protocol(session_id).as_deref() != Some(sent) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "MCP-Protocol-Version does not match the negotiated session version",
+                    )
+                        .into_response();
+                }
+            }
+            if method == "notifications/initialized" && req.id.is_none() {
+                st.sessions.mark_ready(session_id);
+            } else if method != "ping" && !st.sessions.is_ready(session_id) {
+                let error = jsonrpc_error_response(
+                    req.id.clone().unwrap_or(Value::Null),
+                    -32002,
+                    "Server is waiting for notifications/initialized",
+                );
+                return (StatusCode::OK, Json(error)).into_response();
+            }
+        }
+    }
+
+    if matches!(method, "resources/subscribe" | "resources/unsubscribe") {
+        let Some(session_id) = active_session.as_deref() else {
+            let error = jsonrpc_error_response(
+                req.id.clone().unwrap_or(Value::Null),
+                -32602,
+                "Resource subscriptions require a live Mcp-Session-Id",
+            );
+            return (StatusCode::OK, Json(error)).into_response();
+        };
+        let uri = match read_server(&st.server).validate_subscription_uri(&req.params) {
+            Ok(uri) => uri,
+            Err((code, message)) => {
+                let error =
+                    jsonrpc_error_response(req.id.clone().unwrap_or(Value::Null), code, message);
+                return (StatusCode::OK, Json(error)).into_response();
+            }
+        };
+        if method == "resources/subscribe" {
+            st.sessions.subscribe_resource(session_id, uri);
+        } else {
+            st.sessions.unsubscribe_resource(session_id, uri);
+        }
     }
 
     // Dispatch off the async executor (blocking PR tools must not stall the
     // runtime), under a shared read lock so concurrent reads don't serialize.
     // Reload only when graph.json actually changed; brief write lock.
-    let needs_reload = matches!(method, "tools/call" | "resources/read");
+    let needs_reload = request_needs_reload(method);
     let server = st.server.clone();
     let Ok((reloaded, resp)) = tokio::task::spawn_blocking(move || {
-        let mut reloaded = false;
-        if needs_reload && read_server(&server).is_stale() {
-            write_server(&server).maybe_reload();
-            reloaded = true;
-        }
-        // On-query catch-up: detect files added/changed since the build (cheap,
-        // debounced, under the read lock) and incrementally rebuild under the
-        // write lock before dispatching, so live-coded files are queryable.
         if needs_reload {
-            if let Some(report) = read_server(&server).needs_freshen() {
-                write_server(&server).apply_freshen(report);
-                reloaded = true;
-            }
+            with_fresh_server(&server, |server| server.dispatch_validated_request(&req))
+        } else {
+            (false, read_server(&server).dispatch_validated_request(&req))
         }
-        (reloaded, read_server(&server).dispatch_request(&req))
     })
     .await
     else {
@@ -284,13 +386,17 @@ async fn handle_post(State(st): State<HttpState>, headers: HeaderMap, body: Byte
     };
     // The graph (and thus every resource's content) changed: push to subscribers.
     if reloaded {
-        st.sessions.notify_all_resources_changed();
+        st.sessions.notify_resource_changed("synaptic://stats");
     }
     match resp {
-        Some(v) => match new_session {
-            Some(id) => (StatusCode::OK, [("mcp-session-id", id)], Json(v)).into_response(),
-            None => (StatusCode::OK, Json(v)).into_response(),
-        },
+        Some(v) => {
+            if let Some(negotiated) = initialize_negotiated {
+                let id = st.sessions.create_initializing(negotiated);
+                (StatusCode::OK, [("mcp-session-id", id)], Json(v)).into_response()
+            } else {
+                (StatusCode::OK, Json(v)).into_response()
+            }
+        }
         None => StatusCode::ACCEPTED.into_response(), // notification, no body
     }
 }
@@ -311,6 +417,13 @@ async fn handle_sse(State(st): State<HttpState>, headers: HeaderMap) -> Response
             if !st.sessions.touch(&id) {
                 return (StatusCode::NOT_FOUND, "unknown or expired session").into_response();
             }
+            if !st.sessions.is_ready(&id) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "session is waiting for notifications/initialized",
+                )
+                    .into_response();
+            }
             session_id = Some(id);
         }
     }
@@ -321,7 +434,7 @@ async fn handle_sse(State(st): State<HttpState>, headers: HeaderMap) -> Response
     let max_events = (DEFAULT_SESSION_IDLE.as_secs() / PING.as_secs()).max(1);
     let sessions = st.sessions.clone();
     // A tracked session subscribes; a sessionless GET only heartbeats.
-    let rx = session_id.as_ref().and_then(|id| sessions.subscribe(id));
+    let rx = session_id.as_ref().and_then(|id| sessions.updates(id));
     let body = futures_util::stream::unfold((0u64, rx), move |(count, mut rx)| {
         let sessions = sessions.clone();
         let session_id = session_id.clone();
@@ -340,9 +453,9 @@ async fn handle_sse(State(st): State<HttpState>, headers: HeaderMap) -> Response
                     tokio::select! {
                         biased;
                         signal = r.recv() => match signal {
-                            // Graph reloaded (or we lagged behind one): notify.
-                            Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                                resource_updated_event()
+                            Ok(uri) => resource_updated_event(&uri),
+                            Err(broadcast::error::RecvError::Lagged(_)) => {
+                                Event::default().comment("resource-updates-lagged")
                             }
                             // Sender gone (session dropped): end the stream.
                             Err(broadcast::error::RecvError::Closed) => return None,
@@ -366,11 +479,11 @@ async fn handle_sse(State(st): State<HttpState>, headers: HeaderMap) -> Response
 /// The server-initiated JSON-RPC notification telling a client a subscribed
 /// resource changed. The graph reload changes every resource's content; the
 /// stats URI is a representative signal to re-read.
-fn resource_updated_event() -> Event {
+fn resource_updated_event(uri: &str) -> Event {
     let note = json!({
         "jsonrpc": "2.0",
         "method": "notifications/resources/updated",
-        "params": { "uri": "synaptic://stats" }
+        "params": { "uri": uri }
     });
     Event::default().data(note.to_string())
 }
@@ -403,11 +516,15 @@ async fn rest_stats(State(st): State<HttpState>, headers: HeaderMap) -> Response
         return resp;
     }
     let server = st.server.clone();
-    let Ok(text) =
-        tokio::task::spawn_blocking(move || read_server(&server).tool_graph_stats()).await
+    let Ok((reloaded, text)) =
+        tokio::task::spawn_blocking(move || with_fresh_server(&server, Server::tool_graph_stats))
+            .await
     else {
         return internal_error();
     };
+    if reloaded {
+        st.sessions.notify_resource_changed("synaptic://stats");
+    }
     text_json(text)
 }
 
@@ -424,11 +541,16 @@ async fn rest_god_nodes(
         .and_then(|v| v.parse().ok())
         .unwrap_or(10usize);
     let server = st.server.clone();
-    let Ok(text) =
-        tokio::task::spawn_blocking(move || read_server(&server).tool_god_nodes(top_n, 0)).await
+    let Ok((reloaded, text)) = tokio::task::spawn_blocking(move || {
+        with_fresh_server(&server, |server| server.tool_god_nodes(top_n, 0))
+    })
+    .await
     else {
         return internal_error();
     };
+    if reloaded {
+        st.sessions.notify_resource_changed("synaptic://stats");
+    }
     text_json(text)
 }
 
@@ -443,14 +565,19 @@ async fn rest_repos(
     // `?repo=<tag>` -> one member's stats; otherwise list all members.
     let repo = q.get("repo").cloned();
     let server = st.server.clone();
-    let Ok(text) = tokio::task::spawn_blocking(move || match repo {
-        Some(repo) => read_server(&server).tool_repo_stats(&repo),
-        None => read_server(&server).tool_list_repos(),
+    let Ok((reloaded, text)) = tokio::task::spawn_blocking(move || {
+        with_fresh_server(&server, |server| match repo {
+            Some(repo) => server.tool_repo_stats(&repo),
+            None => server.tool_list_repos(),
+        })
     })
     .await
     else {
         return internal_error();
     };
+    if reloaded {
+        st.sessions.notify_resource_changed("synaptic://stats");
+    }
     text_json(text)
 }
 
@@ -463,11 +590,16 @@ async fn rest_node(
         return resp;
     }
     let server = st.server.clone();
-    let Ok(text) =
-        tokio::task::spawn_blocking(move || read_server(&server).tool_get_node(&label)).await
+    let Ok((reloaded, text)) = tokio::task::spawn_blocking(move || {
+        with_fresh_server(&server, |server| server.tool_get_node(&label))
+    })
+    .await
     else {
         return internal_error();
     };
+    if reloaded {
+        st.sessions.notify_resource_changed("synaptic://stats");
+    }
     text_json(text)
 }
 
@@ -489,18 +621,23 @@ async fn rest_query(
         .unwrap_or(1200usize);
     let question = question.clone();
     let server = st.server.clone();
-    let Ok(text) = tokio::task::spawn_blocking(move || {
-        read_server(&server).tool_query_graph(
-            &question,
-            synaptic_query::TraversalMode::Bfs,
-            token_budget,
-            &[],
-        )
+    let Ok((reloaded, text)) = tokio::task::spawn_blocking(move || {
+        with_fresh_server(&server, |server| {
+            server.tool_query_graph(
+                &question,
+                synaptic_query::TraversalMode::Bfs,
+                token_budget,
+                &[],
+            )
+        })
     })
     .await
     else {
         return internal_error();
     };
+    if reloaded {
+        st.sessions.notify_resource_changed("synaptic://stats");
+    }
     text_json(text)
 }
 
@@ -539,7 +676,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
+    use axum::body::{to_bytes, Body};
     use axum::http::Request;
     use serde_json::Map;
     use synaptic_core::GraphData;
@@ -556,7 +693,9 @@ mod tests {
             built_at_commit: None,
         };
         HttpState {
-            server: Arc::new(RwLock::new(Server::from_graph_data(gd, None))),
+            server: Arc::new(RwLock::new(
+                Server::from_graph_data(gd, None).with_resource_subscriptions(true),
+            )),
             api_key: api_key.map(str::to_string),
             allowed_hosts: None, // wildcard: no host check in tests
             sessions: Arc::new(SessionStore::new()),
@@ -566,7 +705,7 @@ mod tests {
 
     fn state_with_server(server: Server) -> HttpState {
         HttpState {
-            server: Arc::new(RwLock::new(server)),
+            server: Arc::new(RwLock::new(server.with_resource_subscriptions(true))),
             api_key: None,
             allowed_hosts: None, // wildcard: no host check in tests
             sessions: Arc::new(SessionStore::new()),
@@ -581,7 +720,152 @@ mod tests {
     }
 
     fn init_body() -> Body {
-        Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)
+        Body::from(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"http-test","version":"1.0"}}}"#,
+        )
+    }
+
+    async fn finish_initialize(app: &Router, sid: &str) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp")
+                    .header("mcp-session-id", sid)
+                    .header("mcp-protocol-version", crate::LATEST_PROTOCOL)
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn post_returns_jsonrpc_parse_and_invalid_request_errors() {
+        let app = router(test_state(None));
+        for (body, expected) in [
+            ("{", -32700),
+            ("[]", -32600),
+            (r#"{"jsonrpc":"1.0","id":1,"method":"ping"}"#, -32600),
+            (r#"{"id":2,"method":"ping"}"#, -32600),
+            (r#"{"jsonrpc":"2.0","id":3,"method":7}"#, -32600),
+            (
+                r#"{"jsonrpc":"2.0","id":4,"method":"ping","params":"wrong-shape"}"#,
+                -32600,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/mcp")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["error"]["code"], expected, "{value}");
+            assert_eq!(value["id"], Value::Null, "{value}");
+        }
+
+        let notification = app
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(notification.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn idless_or_rejected_initialize_does_not_allocate_session() {
+        let state = test_state(None);
+        let sessions = state.sessions.clone();
+        let app = router(state);
+
+        let idless = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"http-test","version":"1.0"}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(idless.status(), StatusCode::ACCEPTED);
+        assert!(idless.headers().get("mcp-session-id").is_none());
+        assert_eq!(sessions.len(), 0);
+
+        let malformed = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"1.0","id":1,"method":"initialize"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(malformed.status(), StatusCode::OK);
+        assert!(malformed.headers().get("mcp-session-id").is_none());
+        assert_eq!(sessions.len(), 0);
+
+        let invalid_params = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(invalid_params.headers().get("mcp-session-id").is_none());
+        let bytes = to_bytes(invalid_params.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"]["code"], -32602, "{value}");
+        assert_eq!(sessions.len(), 0);
+
+        let before_initialize = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = to_bytes(before_initialize.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"]["code"], -32002, "{value}");
+
+        let valid = app
+            .oneshot(Request::post("/mcp").body(init_body()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(valid.status(), StatusCode::OK);
+        assert!(valid.headers().get("mcp-session-id").is_some());
+        assert_eq!(sessions.len(), 1);
     }
 
     /// C1: a slow PR tool (blocking `gh`/`git` subprocess) must NOT serialize
@@ -631,7 +915,9 @@ mod tests {
             built_at_commit: None,
         };
         let server = Server::from_graph_data(gd, None).with_runner(Box::new(runner));
-        let state = state_with_server(server);
+        let mut state = state_with_server(server);
+        // This test isolates request concurrency, not session handshaking.
+        state.stateless = true;
 
         // Fire a slow triage_prs; `base` is supplied so it skips the default-branch
         // lookup and blocks at the first `gh pr list`, holding the server.
@@ -811,7 +1097,9 @@ mod tests {
 
     #[tokio::test]
     async fn stateful_session_lifecycle() {
-        let app = router(test_state(None));
+        let state = test_state(None);
+        let sessions = state.sessions.clone();
+        let app = router(state);
 
         // initialize -> 200 + a fresh Mcp-Session-Id header.
         let r = app
@@ -828,8 +1116,14 @@ mod tests {
             .unwrap()
             .to_string();
         assert_eq!(sid.len(), 32);
+        let negotiated = sessions.negotiated_client(&sid).unwrap();
+        assert_eq!(negotiated.protocol_version, crate::LATEST_PROTOCOL);
+        assert_eq!(negotiated.name, "http-test");
+        assert_eq!(negotiated.version, "1.0");
+        assert!(!sessions.is_ready(&sid));
 
-        // A follow-up carrying that id -> 200.
+        // Requests are gated until notifications/initialized completes the
+        // handshake, even when they carry the newly issued session id.
         let r = app
             .clone()
             .oneshot(
@@ -843,6 +1137,58 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
+        let body = to_bytes(r.into_body(), 1024 * 1024).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], -32002, "{value}");
+
+        finish_initialize(&app, &sid).await;
+        assert!(sessions.is_ready(&sid));
+
+        let r = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp")
+                    .header("mcp-session-id", &sid)
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":20,"method":"tools/list"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(r.into_body(), 1024 * 1024).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert!(value["result"]["tools"].is_array(), "{value}");
+
+        let mismatch = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp")
+                    .header("mcp-session-id", &sid)
+                    .header("mcp-protocol-version", "2025-06-18")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":21,"method":"tools/list"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
+
+        // Re-initialize on the same session is an invalid request.
+        let duplicate = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp")
+                    .header("mcp-session-id", &sid)
+                    .body(init_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(duplicate.into_body(), 1024 * 1024).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], -32600, "{value}");
 
         // A bogus session id -> 404 (client should re-initialize).
         let r = app
@@ -903,6 +1249,293 @@ mod tests {
         assert!(ct.starts_with("text/event-stream"), "content-type: {ct}");
     }
 
+    #[tokio::test]
+    async fn resource_subscribe_and_unsubscribe_update_session_state() {
+        let state = test_state(None);
+        let sessions = state.sessions.clone();
+        let app = router(state);
+
+        let init = app
+            .clone()
+            .oneshot(Request::post("/mcp").body(init_body()).unwrap())
+            .await
+            .unwrap();
+        let sid = init
+            .headers()
+            .get("mcp-session-id")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let init_body = to_bytes(init.into_body(), 1024 * 1024).await.unwrap();
+        let init_json: Value = serde_json::from_slice(&init_body).unwrap();
+        assert_eq!(
+            init_json["result"]["capabilities"]["resources"]["subscribe"],
+            true
+        );
+        finish_initialize(&app, &sid).await;
+
+        let mut updates = sessions.updates(&sid).unwrap();
+        sessions.notify_resource_changed("synaptic://stats");
+        assert!(updates.try_recv().is_err(), "never-subscribed session");
+
+        let subscribe = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp")
+                    .header("mcp-session-id", &sid)
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":2,"method":"resources/subscribe","params":{"uri":"synaptic://stats"}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(subscribe.status(), StatusCode::OK);
+        sessions.notify_resource_changed("synaptic://stats");
+        assert_eq!(updates.try_recv().unwrap(), "synaptic://stats");
+
+        for (id, method, uri) in [
+            (3, "resources/unsubscribe", "synaptic://stats"),
+            (4, "resources/subscribe", "synaptic://report"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/mcp")
+                        .header("mcp-session-id", &sid)
+                        .body(Body::from(
+                            json!({
+                                "jsonrpc":"2.0","id":id,"method":method,
+                                "params":{"uri":uri}
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        sessions.notify_resource_changed("synaptic://stats");
+        assert!(updates.try_recv().is_err(), "different/unsubscribed URI");
+    }
+
+    #[tokio::test]
+    async fn completion_and_every_rest_graph_route_refresh_independently() {
+        fn write_graph(
+            path: &std::path::Path,
+            nodes: &[(&str, &str, Option<&str>)],
+            links: &[(&str, &str)],
+        ) {
+            let nodes: Vec<Value> = nodes
+                .iter()
+                .map(|(id, label, repo)| {
+                    let mut node = json!({
+                        "id": id,
+                        "label": label,
+                        "file_type": "code",
+                        "source_file": format!("{id}.rs")
+                    });
+                    if let Some(repo) = repo {
+                        node["repo"] = json!(repo);
+                    }
+                    node
+                })
+                .collect();
+            let links: Vec<Value> = links
+                .iter()
+                .map(|(source, target)| {
+                    json!({
+                        "source": source,
+                        "target": target,
+                        "relation": "calls",
+                        "confidence": "EXTRACTED",
+                        "source_file": format!("{source}.rs")
+                    })
+                })
+                .collect();
+            std::fs::write(
+                path,
+                serde_json::to_vec(&json!({
+                    "directed": true,
+                    "multigraph": false,
+                    "graph": {},
+                    "nodes": nodes,
+                    "links": links,
+                    "hyperedges": []
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        async fn json_body(response: Response) -> Value {
+            let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.json");
+        write_graph(&path, &[("initial", "Initial", None)], &[]);
+        let mut state = state_with_server(Server::load(path.clone()).unwrap());
+        // This test isolates graph freshness across routes; session lifecycle has
+        // dedicated coverage and would add unrelated setup to the MCP completion.
+        state.stateless = true;
+        let server = state.server.clone();
+        let app = router(state);
+
+        write_graph(
+            &path,
+            &[("stats_a", "StatsA", None), ("stats_b", "StatsB", None)],
+            &[],
+        );
+        let stats = app
+            .clone()
+            .oneshot(Request::get("/api/stats").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert!(json_body(stats).await["text"]
+            .as_str()
+            .unwrap()
+            .contains("2 nodes"));
+
+        write_graph(
+            &path,
+            &[
+                ("god", "GodFresh", None),
+                ("leaf1", "LeafOne", None),
+                ("leaf2", "LeafTwo", None),
+                ("leaf3", "LeafThree", None),
+                ("leaf4", "LeafFour", None),
+            ],
+            &[
+                ("god", "leaf1"),
+                ("god", "leaf2"),
+                ("god", "leaf3"),
+                ("god", "leaf4"),
+            ],
+        );
+        let gods = app
+            .clone()
+            .oneshot(Request::get("/api/god-nodes").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert!(json_body(gods).await["text"]
+            .as_str()
+            .unwrap()
+            .contains("GodFresh"));
+
+        write_graph(&path, &[("node", "NodeFreshExtraLong", None)], &[]);
+        let node = app
+            .clone()
+            .oneshot(
+                Request::get("/api/node/NodeFreshExtraLong")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(json_body(node).await["text"]
+            .as_str()
+            .unwrap()
+            .contains("NodeFreshExtraLong"));
+
+        write_graph(
+            &path,
+            &[
+                ("query", "QueryFreshEvenLonger", None),
+                ("query_leaf", "QueryLeaf", None),
+            ],
+            &[("query", "query_leaf")],
+        );
+        let query = app
+            .clone()
+            .oneshot(
+                Request::get("/api/query?q=QueryFreshEvenLonger")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(json_body(query).await["text"]
+            .as_str()
+            .unwrap()
+            .contains("QueryFreshEvenLonger"));
+
+        write_graph(
+            &path,
+            &[
+                ("repo1", "RepoFreshOne", Some("repo_fresh")),
+                ("repo2", "RepoFreshTwo", Some("repo_fresh")),
+                ("repo3", "RepoFreshThree", Some("repo_fresh")),
+            ],
+            &[],
+        );
+        let repos = app
+            .clone()
+            .oneshot(Request::get("/api/repos").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert!(json_body(repos).await["text"]
+            .as_str()
+            .unwrap()
+            .contains("repo_fresh"));
+
+        write_graph(
+            &path,
+            &[
+                ("completion", "CompletionFreshLongestOfAll", None),
+                ("c2", "OtherTwo", None),
+                ("c3", "OtherThree", None),
+                ("c4", "OtherFour", None),
+            ],
+            &[],
+        );
+        let completion = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":20,"method":"completion/complete","params":{"ref":{"type":"ref/resource","uri":"synaptic://node/{label}"},"argument":{"name":"label","value":"Completion"}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let completion = json_body(completion).await;
+        assert!(completion["result"]["completion"]["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "CompletionFreshLongestOfAll"));
+
+        // Protocol-only requests do not pay the reload cost.
+        write_graph(
+            &path,
+            &[
+                ("ping1", "PingMustNotReloadOne", None),
+                ("ping2", "PingMustNotReloadTwo", None),
+                ("ping3", "PingMustNotReloadThree", None),
+                ("ping4", "PingMustNotReloadFour", None),
+                ("ping5", "PingMustNotReloadFive", None),
+            ],
+            &[],
+        );
+        assert!(read_server(&server).is_stale());
+        let ping = app
+            .oneshot(
+                Request::post("/mcp")
+                    .body(Body::from(r#"{"jsonrpc":"2.0","id":21,"method":"ping"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json_body(ping).await["result"], json!({}));
+        assert!(read_server(&server).is_stale());
+    }
+
     /// End-to-end subscription push: open the SSE stream for a session, change
     /// graph.json on disk, fire a tools/call that triggers the hot-reload, and
     /// assert a `notifications/resources/updated` frame arrives on the stream.
@@ -930,8 +1563,23 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string();
+        finish_initialize(&app, &sid).await;
 
-        // Open the SSE stream (this subscribes the session to its channel).
+        let subscribe = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp")
+                    .header("mcp-session-id", &sid)
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":10,"method":"resources/subscribe","params":{"uri":"synaptic://stats"}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(subscribe.status(), StatusCode::OK);
+
+        // Open the SSE stream for the resource-subscribed session.
         let sse = app
             .clone()
             .oneshot(

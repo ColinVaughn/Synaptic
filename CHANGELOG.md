@@ -8,6 +8,68 @@ All notable changes to Synaptic are documented here. The format is based on
 > **CodeGraph**, and reference the old `codegraph` command and crate names. They
 > are preserved verbatim as historical record.
 
+## [0.6.4] - 2026-07-17
+
+> **Upgrade note:** this patch tightens MCP protocol conformance, makes live
+> graph reads consistently fresh, and removes several large-graph query
+> bottlenecks. The graph schema and CLI remain compatible with 0.6.3.
+
+### Added
+
+- **Stateful MCP sessions now implement the complete initialization lifecycle.**
+  Streamable HTTP records the negotiated client and protocol version, gates
+  requests until `notifications/initialized`, rejects duplicate initialization,
+  and supports URI-specific resource subscribe/unsubscribe notifications.
+- **MCP regression and performance coverage is substantially broader.** New
+  unit, stdio, HTTP, and end-to-end cases cover malformed envelopes, invalid
+  initialization, schema validation, prompts and completions, resource URIs,
+  cancellation, queue saturation, concurrency, session isolation, subscriptions,
+  graph refresh, cached impact traversal, and structured-search limits.
+
+### Changed
+
+- **All graph-backed interfaces share one freshness policy.** MCP tools,
+  resources, completion, and REST routes now reload or incrementally freshen the
+  graph before reading, and cache entries are scoped to the graph version.
+- **Large-graph MCP queries reuse indexed and shared results.** Reverse-impact
+  traversal uses a cached adjacency index, structural search computes matches
+  once and applies limits before projection, and repository, statistics, and
+  neighbor responses share their computed reports. In the validated 50k-node
+  fixtures, full impact traversal fell from about 55 ms to 4 ms, structural
+  search from 300-430 ms to 56.6-70 ms, and neighbor lookup from a 52.782 ms
+  median to 23.008 ms.
+- **Completion caching avoids repeated broad scans.** A repeated broad
+  50k-node completion request fell from roughly 10.1-10.6 ms to a 21.777 us
+  median after the first graph-version-scoped result was cached.
+- **Stdio request execution is bounded and control-aware.** A four-worker,
+  32-request queue replaces unbounded per-request thread creation; a dedicated
+  writer serializes output, while ping, initialization lifecycle, cancellation,
+  and busy responses remain available under load.
+- **Tool discovery is more concise without losing schemas.** `tools/list`
+  descriptions were reduced from approximately 9,427 to 7,380 tokens, and the
+  MCP wiki now documents lifecycle, subscription, watch, structured output, and
+  error behavior.
+
+### Fixed
+
+- **JSON-RPC and MCP validation now return protocol-correct errors.** Invalid
+  envelopes, malformed parameters, unsupported methods, invalid resource URIs,
+  prompt/completion errors, and tool failures preserve request ids and use the
+  appropriate JSON-RPC or MCP error code instead of successful-looking results.
+- **Session and notification behavior is isolated per client.** Rejected or
+  id-less initialization no longer allocates sessions, negotiated versions
+  cannot drift, unsubscribe stops delivery, and graph updates are sent only to
+  sessions subscribed to the changed URI.
+- **Cached reverse-impact traversal preserves type-folding semantics.** Member
+  roots reached through siblings remain visible while only explicitly excluded
+  roots are omitted, matching the one-shot traversal at every tested depth.
+- **The dependency audit no longer fails on a yanked lockfile entry.** The
+  transitive `spin` crate is updated from 0.9.8 to 0.9.9; `cargo deny check`
+  now passes advisories, bans, licenses, and sources.
+- **Server benchmarks measure the intended operations.** The benchmark suite
+  now avoids setup inside timed regions and includes the affected, structural
+  search, neighbor, and completion paths optimized in this release.
+
 ## [0.6.3] - 2026-07-16
 
 > **Upgrade note:** this is a graph-performance and connection-correctness patch.

@@ -8,11 +8,13 @@
 //! Time is injected (`*_at` / `reap` take `Instant`) so the reaper is tested
 //! deterministically without sleeping.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
+
+use crate::NegotiatedClient;
 
 /// Default idle timeout (reference default: 3600s).
 pub const DEFAULT_SESSION_IDLE: Duration = Duration::from_secs(3600);
@@ -22,7 +24,10 @@ pub const DEFAULT_SESSION_IDLE: Duration = Duration::from_secs(3600);
 /// graph reloads.
 struct Session {
     last: Instant,
-    tx: broadcast::Sender<()>,
+    resources: HashSet<String>,
+    tx: broadcast::Sender<String>,
+    negotiated: NegotiatedClient,
+    ready: bool,
 }
 
 /// Thread-safe map of session id → `Session`.
@@ -46,15 +51,73 @@ impl SessionStore {
     /// Mint a new opaque, unguessable session id (128 random bits, hex) and
     /// record it as active at `now`.
     pub fn create_at(&self, now: Instant) -> String {
+        self.create_initializing_at(
+            now,
+            NegotiatedClient {
+                protocol_version: crate::LATEST_PROTOCOL.to_string(),
+                capabilities: serde_json::json!({}),
+                name: "unspecified".to_string(),
+                version: "unspecified".to_string(),
+            },
+        )
+    }
+
+    /// Create a session after a valid initialize request. It remains gated until
+    /// the client sends `notifications/initialized`.
+    pub(crate) fn create_initializing_at(
+        &self,
+        now: Instant,
+        negotiated: NegotiatedClient,
+    ) -> String {
         let id = random_id();
-        let (tx, _) = broadcast::channel(8);
-        self.guard().insert(id.clone(), Session { last: now, tx });
+        let (tx, _) = broadcast::channel(64);
+        self.guard().insert(
+            id.clone(),
+            Session {
+                last: now,
+                resources: HashSet::new(),
+                tx,
+                negotiated,
+                ready: false,
+            },
+        );
         id
     }
 
     /// [`create_at`](Self::create_at) using the real clock.
     pub fn create(&self) -> String {
         self.create_at(Instant::now())
+    }
+
+    pub(crate) fn create_initializing(&self, negotiated: NegotiatedClient) -> String {
+        self.create_initializing_at(Instant::now(), negotiated)
+    }
+
+    /// Complete the initialize handshake for a live session.
+    pub(crate) fn mark_ready(&self, id: &str) -> bool {
+        let mut map = self.guard();
+        let Some(session) = map.get_mut(id) else {
+            return false;
+        };
+        session.ready = true;
+        true
+    }
+
+    pub(crate) fn is_ready(&self, id: &str) -> bool {
+        self.guard().get(id).is_some_and(|session| session.ready)
+    }
+
+    pub(crate) fn negotiated_protocol(&self, id: &str) -> Option<String> {
+        self.guard()
+            .get(id)
+            .map(|session| session.negotiated.protocol_version.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn negotiated_client(&self, id: &str) -> Option<NegotiatedClient> {
+        self.guard()
+            .get(id)
+            .map(|session| session.negotiated.clone())
     }
 
     /// Update a session's last-activity to `now`; returns false for unknown ids.
@@ -70,15 +133,35 @@ impl SessionStore {
 
     /// Subscribe to a session's resource-change signal, or `None` if unknown.
     /// The transport awaits this receiver and pushes a notification on each send.
-    pub fn subscribe(&self, id: &str) -> Option<broadcast::Receiver<()>> {
+    pub fn updates(&self, id: &str) -> Option<broadcast::Receiver<String>> {
         self.guard().get(id).map(|s| s.tx.subscribe())
     }
 
-    /// Signal every live session that the graph (and thus its resources) changed.
-    /// A session with no current subscriber simply drops the signal.
-    pub fn notify_all_resources_changed(&self) {
-        for s in self.guard().values() {
-            let _ = s.tx.send(());
+    /// Add/remove one resource URI in a live session's subscription set.
+    pub fn subscribe_resource(&self, id: &str, uri: &str) -> bool {
+        let mut map = self.guard();
+        let Some(session) = map.get_mut(id) else {
+            return false;
+        };
+        session.resources.insert(uri.to_string());
+        true
+    }
+
+    pub fn unsubscribe_resource(&self, id: &str, uri: &str) -> bool {
+        let mut map = self.guard();
+        let Some(session) = map.get_mut(id) else {
+            return false;
+        };
+        session.resources.remove(uri);
+        true
+    }
+
+    /// Notify only sessions currently subscribed to `uri`.
+    pub fn notify_resource_changed(&self, uri: &str) {
+        for session in self.guard().values() {
+            if session.resources.contains(uri) {
+                let _ = session.tx.send(uri.to_string());
+            }
         }
     }
 
@@ -177,18 +260,30 @@ mod tests {
     }
 
     #[test]
-    fn session_broadcast_delivers_to_subscriber() {
+    fn resource_updates_are_filtered_by_subscription_state() {
         let s = SessionStore::new();
-        let id = s.create();
-        let mut rx = s.subscribe(&id).expect("a live session subscribes");
-        s.notify_all_resources_changed();
-        // try_recv is synchronous: no runtime needed to verify delivery.
-        assert!(
-            rx.try_recv().is_ok(),
-            "subscriber receives the change signal"
-        );
+        let never = s.create();
+        let subscribed = s.create();
+        let different = s.create();
+        let unsubscribed = s.create();
+        let mut never_rx = s.updates(&never).unwrap();
+        let mut subscribed_rx = s.updates(&subscribed).unwrap();
+        let mut different_rx = s.updates(&different).unwrap();
+        let mut unsubscribed_rx = s.updates(&unsubscribed).unwrap();
+
+        assert!(s.subscribe_resource(&subscribed, "synaptic://stats"));
+        assert!(s.subscribe_resource(&different, "synaptic://report"));
+        assert!(s.subscribe_resource(&unsubscribed, "synaptic://stats"));
+        assert!(s.unsubscribe_resource(&unsubscribed, "synaptic://stats"));
+        s.notify_resource_changed("synaptic://stats");
+
+        assert_eq!(subscribed_rx.try_recv().unwrap(), "synaptic://stats");
+        assert!(never_rx.try_recv().is_err());
+        assert!(different_rx.try_recv().is_err());
+        assert!(unsubscribed_rx.try_recv().is_err());
         // Unknown id -> no receiver.
-        assert!(s.subscribe("nope").is_none());
+        assert!(s.updates("nope").is_none());
+        assert!(!s.subscribe_resource("nope", "synaptic://stats"));
     }
 
     #[test]
