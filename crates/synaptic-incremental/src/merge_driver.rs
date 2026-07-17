@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use synaptic_core::{GraphData, Node, NodeId};
+use synaptic_core::{EdgeKey, EdgeSiteAccumulator, GraphData, Node, NodeId};
 
 /// Errors the merge driver can surface (all fail-loud). The byte and node caps
 /// default to 50 MiB / 100k (`synaptic_core::limits`) and honor the
@@ -41,48 +41,97 @@ pub enum MergeDriverError {
 /// are unioned by identity. `current`'s ordering is preserved, with `other`'s
 /// new entries appended — deterministic (`nx.compose` analogue).
 pub fn union_graphs(current: GraphData, other: GraphData) -> GraphData {
+    union_graphs_many([current, other])
+}
+
+/// Union any number of graphs with one set of node/edge/hyperedge indexes.
+/// First-seen positions are stable, later node content wins, and metadata comes
+/// from the first graph, matching repeated binary union semantics.
+pub fn union_graphs_many(graphs: impl IntoIterator<Item = GraphData>) -> GraphData {
     use std::collections::{HashMap, HashSet};
 
-    // Nodes: keep first-seen position; let `other` overwrite content on collision.
     let mut order: Vec<NodeId> = Vec::new();
     let mut nodes: HashMap<NodeId, Node> = HashMap::new();
-    for n in current.nodes.into_iter().chain(other.nodes) {
-        if !nodes.contains_key(&n.id) {
-            order.push(n.id.clone());
-        }
-        nodes.insert(n.id.clone(), n);
-    }
-    let merged_nodes: Vec<Node> = order
-        .into_iter()
-        .filter_map(|id| nodes.remove(&id))
-        .collect();
-
-    // Edges: union by (source, target, relation), first occurrence kept.
-    let mut seen: HashSet<(NodeId, NodeId, String)> = HashSet::new();
-    let mut merged_edges = Vec::new();
-    for e in current.links.into_iter().chain(other.links) {
-        if seen.insert((e.source.clone(), e.target.clone(), e.relation.clone())) {
-            merged_edges.push(e);
-        }
-    }
-
-    // Hyperedges: union by id.
+    let mut seen: HashMap<EdgeKey, usize> = HashMap::new();
+    let mut merged_edges: Vec<synaptic_core::Edge> = Vec::new();
+    let mut edge_sites: Vec<Option<EdgeSiteAccumulator>> = Vec::new();
     let mut hseen: HashSet<String> = HashSet::new();
     let mut merged_hyper = Vec::new();
-    for h in current.hyperedges.into_iter().chain(other.hyperedges) {
-        if hseen.insert(h.id.clone()) {
-            merged_hyper.push(h);
+    let mut directed = false;
+    let mut multigraph = false;
+    let mut graph_meta = serde_json::Map::new();
+    let mut built_at_commit = None;
+    let mut first = true;
+
+    for graph in graphs {
+        let GraphData {
+            directed: graph_directed,
+            multigraph: graph_multigraph,
+            graph,
+            nodes: graph_nodes,
+            links,
+            hyperedges,
+            built_at_commit: graph_commit,
+        } = graph;
+
+        if first {
+            multigraph = graph_multigraph;
+            graph_meta = graph;
+            first = false;
+        }
+        directed |= graph_directed;
+        if built_at_commit.is_none() {
+            built_at_commit = graph_commit;
+        }
+
+        for node in graph_nodes {
+            if let Some(existing) = nodes.get_mut(&node.id) {
+                *existing = node;
+            } else {
+                order.push(node.id.clone());
+                nodes.insert(node.id.clone(), node);
+            }
+        }
+        for edge in links {
+            let key = EdgeKey::new(&edge, true);
+            if let Some(&index) = seen.get(&key) {
+                if edge_sites[index].is_none() {
+                    edge_sites[index] = Some(EdgeSiteAccumulator::new(&merged_edges[index]));
+                }
+                edge_sites[index]
+                    .as_mut()
+                    .expect("duplicate edge has a site accumulator")
+                    .include_edge(&edge);
+            } else {
+                seen.insert(key, merged_edges.len());
+                merged_edges.push(edge);
+                edge_sites.push(None);
+            }
+        }
+        for hyperedge in hyperedges {
+            if hseen.insert(hyperedge.id.clone()) {
+                merged_hyper.push(hyperedge);
+            }
+        }
+    }
+
+    for (edge, sites) in merged_edges.iter_mut().zip(edge_sites) {
+        if let Some(sites) = sites {
+            sites.apply_to(edge);
         }
     }
 
     GraphData {
-        directed: current.directed || other.directed,
-        multigraph: current.multigraph,
-        graph: current.graph,
-        nodes: merged_nodes,
+        directed,
+        multigraph,
+        graph: graph_meta,
+        nodes: order
+            .into_iter()
+            .filter_map(|id| nodes.remove(&id))
+            .collect(),
         links: merged_edges,
         hyperedges: merged_hyper,
-        built_at_commit: current.built_at_commit.or(other.built_at_commit),
+        built_at_commit,
     }
 }
 
@@ -222,6 +271,57 @@ mod tests {
         assert_eq!(m.nodes.len(), 1);
         assert_eq!(m.nodes[0].label, "NEW", "other branch wins the collision");
         assert_eq!(m.nodes[0].community, Some(7));
+    }
+
+    #[test]
+    fn union_keeps_distinct_contexts_and_merges_duplicate_sites() {
+        let mut get = edge("a", "b");
+        get.context = Some("GET".into());
+        get.source_location = Some("L1".into());
+        let mut post = get.clone();
+        post.context = Some("POST".into());
+        let mut second_get = get.clone();
+        second_get.source_location = Some("L2".into());
+
+        let merged = union_graphs(
+            gd(vec![node("a", "A"), node("b", "B")], vec![get]),
+            gd(vec![], vec![post, second_get]),
+        );
+
+        assert_eq!(merged.links.len(), 2);
+        let get = merged
+            .links
+            .iter()
+            .find(|edge| edge.context.as_deref() == Some("GET"))
+            .unwrap();
+        assert_eq!(get.sites().len(), 2);
+    }
+
+    #[test]
+    fn union_many_preserves_fold_order_and_metadata() {
+        let mut first = gd(vec![node("shared", "first"), node("a", "A")], vec![]);
+        first
+            .graph
+            .insert("owner".into(), serde_json::json!("first"));
+        first.built_at_commit = Some("abc".into());
+        let second = gd(vec![node("shared", "second"), node("b", "B")], vec![]);
+        let third = gd(vec![node("shared", "third"), node("c", "C")], vec![]);
+
+        let merged = union_graphs_many(vec![first, second, third]);
+
+        let ids: Vec<_> = merged.nodes.iter().map(|node| node.id.as_str()).collect();
+        assert_eq!(ids, ["shared", "a", "b", "c"]);
+        assert_eq!(merged.nodes[0].label, "third");
+        assert_eq!(merged.graph["owner"], "first");
+        assert_eq!(merged.built_at_commit.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn union_many_empty_is_default() {
+        assert_eq!(
+            union_graphs_many(Vec::<GraphData>::new()),
+            GraphData::default()
+        );
     }
 
     #[test]

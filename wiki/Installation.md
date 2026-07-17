@@ -5,7 +5,7 @@ interpreter to install alongside it.
 
 ## Requirements
 
-- A stable Rust toolchain. The repo pins **Rust 1.95** via `rust-toolchain.toml`, so a
+- A stable Rust toolchain. The repo pins **Rust 1.96** via `rust-toolchain.toml`, so a
   `rustup`-managed environment will select it automatically.
 - Git, if you plan to use the PR dashboard, git hooks, or git-based workspace members.
 

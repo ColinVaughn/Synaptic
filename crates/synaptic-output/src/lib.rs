@@ -289,6 +289,12 @@ pub fn to_html_string(kg: &KnowledgeGraph) -> String {
   // Relation toggles.
   const relState = {{}};
   const relDiv = document.getElementById('relations');
+  const edgesByRelation = new Map();
+  allEdges.forEach(e => {{
+    const relationEdges = edgesByRelation.get(e.relation);
+    if (relationEdges) relationEdges.push(e);
+    else edgesByRelation.set(e.relation, [e]);
+  }});
   relations.forEach(r => {{
     relState[r] = true;
     const l = document.createElement('label');
@@ -296,19 +302,75 @@ pub fn to_html_string(kg: &KnowledgeGraph) -> String {
     relDiv.appendChild(l);
   }});
 
-  function applyFilters() {{
+  let visibleIds = new Set(allNodes.map(n => n.id));
+  const nodeHidden = new Map(allNodes.map(n => [n.id, false]));
+  const edgeHidden = new Map(allEdges.map(e => [e.id, false]));
+  const pendingRelations = new Set();
+  let filterFrame = null;
+  let fullFilterPending = false;
+
+  function collectEdgeChanges(candidates, changes) {{
+    for (const e of candidates) {{
+      const hidden = relState[e.relation] === false || !visibleIds.has(e.from) || !visibleIds.has(e.to);
+      if (edgeHidden.get(e.id) !== hidden) {{
+        edgeHidden.set(e.id, hidden);
+        changes.push({{ id: e.id, hidden }});
+      }}
+    }}
+  }}
+
+  function flushFilters() {{
+    filterFrame = null;
+    const edgeChanges = [];
+
+    if (!fullFilterPending) {{
+      pendingRelations.forEach(relation => {{
+        collectEdgeChanges(edgesByRelation.get(relation) || [], edgeChanges);
+      }});
+      pendingRelations.clear();
+      if (edgeChanges.length) edges.update(edgeChanges);
+      return;
+    }}
+
     const minDeg = +document.getElementById('mindeg').value;
     const comm = document.getElementById('community').value;
     const hc = document.getElementById('hidecols');
     const hideCols = hc && hc.checked;
-    const visible = new Set(allNodes
-      .filter(n => (n.deg || 0) >= minDeg && (comm === '' || String(n.group) === comm) && !(hideCols && n.kind === 'column'))
-      .map(n => n.id));
-    nodes.update(allNodes.map(n => ({{ id: n.id, hidden: !visible.has(n.id) }})));
-    edges.update(allEdges.map(e => ({{
-      id: e.id,
-      hidden: !(relState[e.relation] !== false && visible.has(e.from) && visible.has(e.to)),
-    }})));
+    const nextVisible = new Set();
+    const nodeChanges = [];
+
+    for (const n of allNodes) {{
+      const visible = (n.deg || 0) >= minDeg
+        && (comm === '' || String(n.group) === comm)
+        && !(hideCols && n.kind === 'column');
+      if (visible) nextVisible.add(n.id);
+      const hidden = !visible;
+      if (nodeHidden.get(n.id) !== hidden) {{
+        nodeHidden.set(n.id, hidden);
+        nodeChanges.push({{ id: n.id, hidden }});
+      }}
+    }}
+
+    visibleIds = nextVisible;
+    collectEdgeChanges(allEdges, edgeChanges);
+    fullFilterPending = false;
+    pendingRelations.clear();
+    if (nodeChanges.length) nodes.update(nodeChanges);
+    if (edgeChanges.length) edges.update(edgeChanges);
+  }}
+
+  function scheduleFilterFlush() {{
+    if (filterFrame === null) filterFrame = requestAnimationFrame(flushFilters);
+  }}
+
+  function applyFilters() {{
+    fullFilterPending = true;
+    scheduleFilterFlush();
+  }}
+
+  function applyRelationFilter(relation) {{
+    pendingRelations.add(relation);
+    scheduleFilterFlush();
   }}
   document.getElementById('mindeg').addEventListener('input', ev => {{
     document.getElementById('mindegval').textContent = ev.target.value;
@@ -319,8 +381,9 @@ pub fn to_html_string(kg: &KnowledgeGraph) -> String {
   if (hcEl) hcEl.addEventListener('change', applyFilters);
   relDiv.addEventListener('change', ev => {{
     if (ev.target.dataset && ev.target.dataset.rel) {{
-      relState[ev.target.dataset.rel] = ev.target.checked;
-      applyFilters();
+      const relation = ev.target.dataset.rel;
+      relState[relation] = ev.target.checked;
+      applyRelationFilter(relation);
     }}
   }});
   document.getElementById('search').addEventListener('input', ev => {{
@@ -534,6 +597,39 @@ mod tests {
         assert!(html.contains("id=\"relations\""), "relation toggles");
         assert!(html.contains("id=\"community\""), "community filter");
         assert!(html.contains("applyFilters"), "filter logic present");
+    }
+
+    #[test]
+    fn html_batches_and_deduplicates_filter_updates() {
+        let html = to_html_string(&sample_kg());
+        assert!(
+            html.contains("const edgesByRelation = new Map()"),
+            "relation changes use a prebuilt edge index"
+        );
+        assert!(
+            html.contains("requestAnimationFrame(flushFilters)"),
+            "bursty filter events are batched to one browser frame"
+        );
+        assert!(
+            html.contains("if (nodeChanges.length) nodes.update(nodeChanges)"),
+            "nodes receive only changed hidden states"
+        );
+        assert!(
+            html.contains("if (edgeChanges.length) edges.update(edgeChanges)"),
+            "edges receive only changed hidden states"
+        );
+        assert!(
+            html.contains("applyRelationFilter(relation)"),
+            "relation toggles update their indexed edge subset"
+        );
+        assert!(
+            !html.contains("nodes.update(allNodes.map"),
+            "filters must not submit every node on each event"
+        );
+        assert!(
+            !html.contains("edges.update(allEdges.map"),
+            "filters must not submit every edge on each event"
+        );
     }
 
     #[test]

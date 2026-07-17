@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use synaptic_core::{Edge, Hyperedge, Node, NodeId};
+use synaptic_core::{Edge, EdgeKey, EdgeSiteAccumulator, Hyperedge, Node, NodeId};
 
 use crate::error::GraphError;
 use crate::graph::KnowledgeGraph;
@@ -182,7 +182,10 @@ fn add_edges(
     // via the sorted order). Distinct relations between the same pair are kept
     // (a deliberate improvement over NetworkX's collapse-all-edges-per-pair, so a
     // `calls` and an `imports` between two nodes both survive). O(E), not O(E²).
-    let mut seen: HashSet<(NodeId, NodeId, String)> = HashSet::new();
+    let mut seen: HashMap<EdgeKey, usize> = HashMap::new();
+    let mut kept: Vec<(petgraph::graph::NodeIndex, petgraph::graph::NodeIndex, Edge)> =
+        Vec::with_capacity(edges.len());
+    let mut site_accumulators: Vec<Option<EdgeSiteAccumulator>> = Vec::with_capacity(edges.len());
     for mut edge in edges {
         let (Some(src), Some(tgt)) = (
             resolve(kg, &edge.source, norm_to_id),
@@ -198,15 +201,26 @@ fn add_edges(
             _ => continue,
         };
 
-        let key = if directed || src <= tgt {
-            (src.clone(), tgt.clone(), edge.relation.clone())
-        } else {
-            (tgt.clone(), src.clone(), edge.relation.clone())
-        };
-        if !seen.insert(key) {
-            continue; // duplicate (exact, or undirected reverse same-relation)
+        let key = EdgeKey::new(&edge, directed);
+        if let Some(&index) = seen.get(&key) {
+            if site_accumulators[index].is_none() {
+                site_accumulators[index] = Some(EdgeSiteAccumulator::new(&kept[index].2));
+            }
+            site_accumulators[index]
+                .as_mut()
+                .expect("duplicate edge has a site accumulator")
+                .include_edge(&edge);
+            continue; // duplicate semantic edge; provenance was retained
         }
-        kg.add_edge_raw(si, ti, edge);
+        seen.insert(key, kept.len());
+        kept.push((si, ti, edge));
+        site_accumulators.push(None);
+    }
+    for ((source, target, mut edge), sites) in kept.into_iter().zip(site_accumulators) {
+        if let Some(sites) = sites {
+            sites.apply_to(&mut edge);
+        }
+        kg.add_edge_raw(source, target, edge);
     }
 }
 
@@ -382,6 +396,49 @@ mod tests {
             );
             assert_eq!(kg.edge_count(), 1, "directed={directed}");
         }
+    }
+
+    #[test]
+    fn distinct_contexts_between_pair_are_kept() {
+        let mut get = edge("a", "b", "calls_service");
+        get.context = Some("GET".into());
+        let mut post = get.clone();
+        post.context = Some("POST".into());
+        let kg = build_from_parts(
+            vec![node("a", "a", "a.py"), node("b", "b", "b.py")],
+            vec![get, post],
+            vec![],
+            &BuildOptions {
+                directed: true,
+                root: None,
+            },
+        );
+        let mut contexts: Vec<_> = kg
+            .edges()
+            .filter_map(|edge| edge.context.as_deref())
+            .collect();
+        contexts.sort_unstable();
+        assert_eq!(contexts, ["GET", "POST"]);
+    }
+
+    #[test]
+    fn duplicate_edges_preserve_all_source_sites() {
+        let first = edge("a", "b", "calls");
+        let mut second = first.clone();
+        second.source_location = Some("L2".into());
+        let kg = build_from_parts(
+            vec![node("a", "a", "a.py"), node("b", "b", "b.py")],
+            vec![first, second],
+            vec![],
+            &BuildOptions {
+                directed: true,
+                root: None,
+            },
+        );
+        let sites = kg.edges().next().unwrap().sites();
+        assert_eq!(sites.len(), 2);
+        assert_eq!(sites[0].source_location.as_deref(), Some("L1"));
+        assert_eq!(sites[1].source_location.as_deref(), Some("L2"));
     }
 
     #[test]

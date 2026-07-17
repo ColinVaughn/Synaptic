@@ -17,7 +17,8 @@ use std::collections::HashSet;
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
-use synaptic_incremental::{merge_incremental, topology, union_graphs};
+use synaptic_graph::KnowledgeGraph;
+use synaptic_incremental::{merge_incremental, same_topology, topology, union_graphs};
 
 fn node(i: usize, id_prefix: &str) -> Node {
     Node {
@@ -82,6 +83,7 @@ fn bench_incremental(c: &mut Criterion) {
     for &n in &[1_000usize, 10_000] {
         let existing = synth_graph_data(n);
         let other = synth_graph_data(n);
+        let current = KnowledgeGraph::from_graph_data(existing.clone());
         // ~10% "changed": regenerate the first tenth of the nodes/edges by id.
         let changed = (n / 10).max(1);
         let (fresh_nodes, fresh_edges) = {
@@ -97,6 +99,16 @@ fn bench_incremental(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("topology", n), &n, |b, _| {
             b.iter(|| black_box(topology(black_box(&existing))));
         });
+
+        group.bench_with_input(BenchmarkId::new("topology_compare_old", n), &n, |b, _| {
+            b.iter(|| black_box(topology(&current.to_graph_data()) == topology(&existing)));
+        });
+
+        group.bench_with_input(
+            BenchmarkId::new("topology_compare_borrowed", n),
+            &n,
+            |b, _| b.iter(|| black_box(same_topology(&current, &existing))),
+        );
 
         group.bench_with_input(BenchmarkId::new("merge_incremental", n), &n, |b, _| {
             b.iter_batched(

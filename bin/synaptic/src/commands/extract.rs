@@ -267,9 +267,10 @@ pub(crate) fn run_extract(
     if !resolved.is_empty() {
         println!("Resolved {} cross-file call edge(s)", resolved.len());
     }
-    let n: Vec<_> = kg.nodes().cloned().collect();
-    let mut e: Vec<_> = kg.edges().cloned().collect();
-    e.extend(resolved);
+    let mut parts = kg.into_graph_data();
+    parts.links.extend(resolved);
+    let n = parts.nodes;
+    let e = parts.links;
 
     // Cross-language: retarget subprocess command stubs to a matching in-repo file
     // node (e.g. Python subprocess.run("tool") -> the Rust binary src/bin/tool.rs).
@@ -349,7 +350,7 @@ pub(crate) fn run_extract(
         println!("Deduplicated {} node(s)", before - n.len());
     }
 
-    kg = build_from_parts(n, e, vec![], &opts);
+    kg = build_from_parts(n, e, parts.hyperedges, &opts);
 
     // Dedup tiebreaker: resolve ambiguous concept pairs (fuzzy score in the 75-92
     // band) the structural pass left unmerged. With an LLM (--semantic) the model

@@ -40,7 +40,11 @@ A rebuild that would reduce the node count without an explicit deletion (a remov
 
 ### No-change short-circuit
 
-If the rebuilt topology (node id set plus `(source, target, relation)` edge triples) equals the prior graph, `update` reuses the previous community assignment, skips re-clustering, and does not rewrite the artifacts:
+If the rebuilt topology (node id set plus `(source, target, relation, context)`
+edge identities) equals the prior graph, `update` reuses the previous community
+assignment, skips re-clustering, and does not rewrite the artifacts. The
+comparison borrows both graphs instead of cloning/sorting their payloads, and a
+changed context correctly invalidates the fast path:
 
 ```
 No changes — graph is up to date (1234 nodes).
@@ -129,7 +133,7 @@ The install resolves the hooks directory honoring `core.hooksPath` (including Hu
 
 - Sets git config `merge.synaptic.name` and `merge.synaptic.driver` (the driver invokes `synaptic merge-driver %O %A %B`).
 
-When two branches both rebuilt the graph, git invokes the driver instead of producing a textual conflict. The driver union-composes the two sides (the "other" side wins on a node-id collision; edges union by `(source, target, relation)`; hyperedges union by id) and writes the result back, so `graph.json` never conflicts. The base (`%O`) is unused, since a union cannot lose nodes.
+When two branches both rebuilt the graph, git invokes the driver instead of producing a textual conflict. The driver union-composes the two sides in one indexed pass (the "other" side wins on a node-id collision; edges union by `(source, target, relation, context)` while retaining all distinct source sites; hyperedges union by id) and writes the result back, so `graph.json` never conflicts. The base (`%O`) is unused, since a union cannot lose nodes.
 
 The driver is fail-loud: a corrupt or oversized input (over 50 MiB, or a merged graph over 100,000 nodes, by default) returns an error so git surfaces a real conflict rather than silently writing garbage. For repositories that legitimately exceed the defaults, raise the caps with `SYNAPTIC_MAX_GRAPH_MB` / `SYNAPTIC_MAX_NODES` (`0` disables a cap; see [Configuration](Configuration)). The same caps govern federation and global-store loads, and `extract`/`update` warn at write time when the graph they produced is over them. `synaptic merge-driver` is invoked by git, not by users (it is hidden from the command list).
 

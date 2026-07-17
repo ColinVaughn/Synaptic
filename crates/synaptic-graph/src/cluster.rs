@@ -76,6 +76,66 @@ pub fn cohesion_score(kg: &KnowledgeGraph, nodes: &[NodeId]) -> f64 {
     }
 }
 
+/// Compute cohesion for a node partition with one pass over the graph's edges.
+/// `groups` is a partition produced by the clustering pipeline, so each node is
+/// expected to occur in at most one group.
+fn partition_cohesion_scores(
+    kg: &KnowledgeGraph,
+    groups: &[Vec<NodeId>],
+    minimum_size: usize,
+) -> Vec<f64> {
+    let mut owner: HashMap<&NodeId, usize> = HashMap::new();
+    for (group_index, group) in groups.iter().enumerate() {
+        if group.len() < minimum_size {
+            continue;
+        }
+        for id in group {
+            debug_assert!(
+                owner.insert(id, group_index).is_none(),
+                "cluster partition contains node {id} more than once"
+            );
+        }
+    }
+    if owner.is_empty() {
+        return vec![1.0; groups.len()];
+    }
+
+    let mut pairs: Vec<HashSet<(&NodeId, &NodeId)>> =
+        (0..groups.len()).map(|_| HashSet::new()).collect();
+    for edge in kg.edges() {
+        if edge.source == edge.target {
+            continue;
+        }
+        let (Some(&source_group), Some(&target_group)) =
+            (owner.get(&edge.source), owner.get(&edge.target))
+        else {
+            continue;
+        };
+        if source_group != target_group {
+            continue;
+        }
+        let pair = if edge.source <= edge.target {
+            (&edge.source, &edge.target)
+        } else {
+            (&edge.target, &edge.source)
+        };
+        pairs[source_group].insert(pair);
+    }
+
+    groups
+        .iter()
+        .zip(pairs)
+        .map(|(group, pairs)| {
+            let n = group.len();
+            if n < minimum_size || n <= 1 {
+                return 1.0;
+            }
+            let possible = (n * (n - 1)) as f64 / 2.0;
+            pairs.len() as f64 / possible
+        })
+        .collect()
+}
+
 fn undirected_neighbors(kg: &KnowledgeGraph) -> HashMap<NodeId, HashSet<NodeId>> {
     let mut m: HashMap<NodeId, HashSet<NodeId>> = HashMap::new();
     for n in kg.nodes() {
@@ -237,12 +297,12 @@ pub fn cluster(kg: &KnowledgeGraph, opts: &ClusterOptions) -> BTreeMap<u32, Vec<
         }
     }
 
-    // Re-split low-cohesion communities.
+    // Re-split low-cohesion communities. Cohesion is calculated for the whole
+    // partition in one edge pass instead of rescanning every edge per group.
+    let cohesion_scores = partition_cohesion_scores(kg, &after_size, COHESION_SPLIT_MIN_SIZE);
     let mut after_coh: Vec<Vec<NodeId>> = Vec::new();
-    for grp in after_size {
-        if grp.len() >= COHESION_SPLIT_MIN_SIZE
-            && cohesion_score(kg, &grp) < COHESION_SPLIT_THRESHOLD
-        {
+    for (grp, cohesion) in after_size.into_iter().zip(cohesion_scores) {
+        if grp.len() >= COHESION_SPLIT_MIN_SIZE && cohesion < COHESION_SPLIT_THRESHOLD {
             let splits = split_community(kg, &grp, opts);
             if splits.len() > 1 {
                 after_coh.extend(splits);
@@ -277,24 +337,32 @@ pub fn remap_communities_to_previous(
     if communities.is_empty() {
         return BTreeMap::new();
     }
-    let new_sets: BTreeMap<u32, HashSet<&NodeId>> = communities
-        .iter()
-        .map(|(c, v)| (*c, v.iter().collect()))
-        .collect();
-    let mut old_sets: HashMap<u32, HashSet<&NodeId>> = HashMap::new();
-    for (node, oc) in previous {
-        old_sets.entry(*oc).or_default().insert(node);
-    }
-
-    let mut overlaps: Vec<(usize, u32, u32)> = Vec::new();
-    for (oc, oset) in &old_sets {
-        for (nc, nset) in &new_sets {
-            let ov = oset.intersection(nset).count();
-            if ov > 0 {
-                overlaps.push((ov, *oc, *nc));
+    // Index each current node to the communities containing it, then count only
+    // overlap pairs that actually exist. Cluster output is a partition, while
+    // the small Vec also preserves the old behavior for overlapping input.
+    let mut new_memberships: HashMap<&NodeId, Vec<u32>> = HashMap::new();
+    for (new_id, nodes) in communities {
+        for node in nodes {
+            let memberships = new_memberships.entry(node).or_default();
+            // Community node lists are sorted, so duplicate ids are adjacent.
+            if memberships.last() != Some(new_id) {
+                memberships.push(*new_id);
             }
         }
     }
+
+    let mut overlap_counts: HashMap<(u32, u32), usize> = HashMap::new();
+    for (node, old_id) in previous {
+        if let Some(new_ids) = new_memberships.get(node) {
+            for new_id in new_ids {
+                *overlap_counts.entry((*old_id, *new_id)).or_default() += 1;
+            }
+        }
+    }
+    let mut overlaps: Vec<(usize, u32, u32)> = overlap_counts
+        .into_iter()
+        .map(|((old_id, new_id), count)| (count, old_id, new_id))
+        .collect();
     overlaps.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
 
     let mut new_to_final: HashMap<u32, u32> = HashMap::new();
@@ -451,6 +519,30 @@ mod tests {
     }
 
     #[test]
+    fn partition_cohesion_matches_individual_scores() {
+        let kg = kg_from(
+            &["a", "b", "c", "d", "e", "f"],
+            &[
+                ("a", "b"),
+                ("b", "a"),
+                ("a", "b"),
+                ("b", "c"),
+                ("c", "c"),
+                ("c", "d"),
+                ("e", "f"),
+            ],
+        );
+        let groups = vec![ids(&["a", "b", "c"]), ids(&["d"]), ids(&["e", "f"])];
+        let actual = partition_cohesion_scores(&kg, &groups, 0);
+        let expected: Vec<f64> = groups
+            .iter()
+            .map(|group| cohesion_score(&kg, group))
+            .collect();
+        assert_eq!(actual, expected);
+        assert_eq!(actual, vec![2.0 / 3.0, 1.0, 1.0]);
+    }
+
+    #[test]
     fn hub_exclusion_separates_bridged_cliques() {
         // Two K5 cliques, each connected only through a central hub H.
         let mut names = vec!["H".to_string()];
@@ -508,6 +600,34 @@ mod tests {
         assert_eq!(remapped.keys().copied().collect::<Vec<_>>(), vec![0, 1]);
         assert_eq!(remapped[&0], ids(&["x", "y", "z"]));
         assert_eq!(remapped[&1], ids(&["m"]));
+    }
+
+    #[test]
+    fn remap_breaks_equal_overlap_ties_by_old_then_new_id() {
+        let communities = comms(&[
+            (10, &["a", "b", "c", "d"]),
+            (11, &["e", "f", "g", "h"]),
+            (12, &["z"]),
+        ]);
+        let previous: HashMap<NodeId, u32> = [
+            ("a", 1u32),
+            ("b", 1),
+            ("e", 1),
+            ("f", 1),
+            ("c", 2),
+            ("d", 2),
+            ("g", 2),
+            ("h", 2),
+        ]
+        .into_iter()
+        .map(|(node, community)| (NodeId(node.into()), community))
+        .collect();
+
+        let remapped = remap_communities_to_previous(&communities, &previous);
+
+        assert_eq!(remapped[&1], ids(&["a", "b", "c", "d"]));
+        assert_eq!(remapped[&2], ids(&["e", "f", "g", "h"]));
+        assert_eq!(remapped[&0], ids(&["z"]));
     }
 
     #[test]

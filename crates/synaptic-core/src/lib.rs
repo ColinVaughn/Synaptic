@@ -27,7 +27,7 @@ pub mod validate;
 
 pub use confidence::Confidence;
 pub use dynamic::{DynamicKind, DynamicSite};
-pub use edge::Edge;
+pub use edge::{Edge, EdgeKey, EdgeSite, EdgeSiteAccumulator};
 pub use error::{CoreError, Result};
 pub use file_type::FileType;
 pub use fsio::write_atomic;

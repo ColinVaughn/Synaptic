@@ -8,6 +8,54 @@ All notable changes to Synaptic are documented here. The format is based on
 > **CodeGraph**, and reference the old `codegraph` command and crate names. They
 > are preserved verbatim as historical record.
 
+## [0.6.3] - 2026-07-16
+
+> **Upgrade note:** this is a graph-performance and connection-correctness patch.
+> The graph schema and CLI remain compatible with 0.6.2. Re-run `extract` or
+> `workspace build` to regenerate viewers and retain all deduplicated edge sites.
+
+### Changed
+
+- **Graph assembly and federation avoid repeated whole-graph work.** Workspace
+  composition now unions all members in one indexed pass; clustering calculates
+  eligible-community cohesion in one edge scan; entity-component application
+  and community-id remapping use linear/sparse indexes; incremental topology
+  comparison borrows graph data instead of cloning and sorting it; and consuming
+  graph handoffs move node/edge payloads instead of cloning them. On the audit
+  fixtures, 16 x 500-node federation fell from about 136.1 ms to 6.07 ms,
+  10k-node topology comparison from 54.92 ms to 9.77 ms, and a 10k-node
+  clustering fixture from 192.69 ms to 98.36 ms.
+- **Duplicate edge provenance is accumulated once.** Semantic duplicates now
+  collect extraction sites in first-seen order with hash-based membership and
+  materialize the flattened `sites` metadata once per group. A 1,000-site
+  duplicate group fell from 240.74 ms to 0.56 ms; the new path processes 10,000
+  sites in about 6.13 ms.
+- **Large viewers do less work per interaction and frame.** The 2D viewer
+  coalesces filter events into one animation-frame flush, indexes edges by
+  relation, and sends only changed visibility records to vis-network. The 3D
+  fast path updates and raycasts only visible GPU instances, keeps all fast-path
+  edges as GL lines, and reuses Three.js scratch objects instead of allocating
+  them on every simulation tick.
+- **Federated serving and repository loading are contention-aware.** Bridge
+  endpoint incidence indexes replace repeated full bridge scans; cross-shard
+  shortest paths build one BFS tree per participating shard; concurrent misses
+  for the same cold shard share one materialization (including a shared error,
+  with later retry); and declared remote repos load on a dedicated four-thread
+  pool while results and errors remain in manifest order.
+
+### Fixed
+
+- **Edge identity keeps relationship context.** Context-bearing connections
+  such as GET and POST between the same endpoints no longer collapse into one
+  edge. Directed and undirected endpoint canonicalization remain explicit.
+- **Deduplication no longer loses source locations.** The primary source site
+  stays in the typed fields and every additional extraction site is retained in
+  `sites`. Federation now repo-prefixes all of those paths, so MCP source lookup
+  cannot resolve an additional site against the wrong member root.
+- **Parallel repo loads reject ambiguous cache tags before starting.** Two
+  declared repo names that sanitize to the same tag now fail deterministically
+  instead of racing on one clone/cache destination.
+
 ## [0.6.2] - 2026-07-07
 
 > **Upgrade note:** `extract` and `update` now index structured data/resource

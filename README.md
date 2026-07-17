@@ -163,6 +163,14 @@ source. Criterion micro-benchmarks (dev machine; run `cargo bench -p synaptic-sy
 | SYNQL relationship-pattern join (`search`) | one-hop join over a 2,000-node graph | **~0.97 ms** |
 | Safe-refactor rename plan (`refactor rename`) | hot symbol, ~120 call sites across 40 files, incl. the textual scan | **~4.9 ms** |
 
+The 0.6.3 graph-pipeline audit added dedicated Criterion coverage for construction,
+incremental comparison, and federation (`cargo bench -p synaptic-graph -p
+synaptic-incremental -p synaptic-workspace`). On the audit fixtures, one-pass
+16 x 500-node federation measured **136.1 -> 6.07 ms**, a 10k-node topology
+comparison **54.92 -> 9.77 ms**, and a 1,000-site duplicate edge **240.74 ->
+0.56 ms**. These are machine-dependent micro-benchmarks; the committed fixtures
+and growth curves are the reproducible evidence.
+
 Time-travel `diff` is build-bound rather than query-bound: the graph delta itself is
 near-instant, and the cost is building each revision in a throwaway git worktree. Built
 graphs are cached per commit SHA under `synaptic-out/history/`, so a repeat diff of the same
@@ -265,7 +273,7 @@ in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Install
 
-Synaptic builds with a stable Rust toolchain (pinned to 1.95 via
+Synaptic builds with a stable Rust toolchain (pinned to 1.96 via
 [rust-toolchain.toml](rust-toolchain.toml)).
 
 ```sh

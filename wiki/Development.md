@@ -4,8 +4,8 @@ This page covers building, testing, and the repository layout for contributors.
 
 ## Toolchain
 
-- **Rust 1.95**, pinned in `rust-toolchain.toml` (with `rustfmt` and `clippy` components).
-- Edition 2021. The workspace `rust-version` is `1.95`.
+- **Rust 1.96**, pinned in `rust-toolchain.toml` (with `rustfmt` and `clippy` components).
+- Edition 2021. The workspace `rust-version` is `1.96`.
 
 ## Build, test, lint
 
@@ -60,6 +60,19 @@ Several crates ship Criterion benchmarks (for example `synaptic-extract`,
 ```sh
 cargo bench
 ```
+
+The graph-performance release gates can also be run independently:
+
+```sh
+cargo bench -p synaptic-graph --bench graph -- graph/duplicate_edge_provenance
+cargo bench -p synaptic-graph --bench graph -- graph/scaling/cluster/10000
+cargo bench -p synaptic-incremental --bench incremental
+cargo bench -p synaptic-workspace --bench workspace -- workspace/compose/16x500
+```
+
+The duplicate-provenance benchmark intentionally runs the former repeated-
+materialization comparison only through 1,000 sites; the linear accumulator is
+also measured at 10,000 sites so the full benchmark remains practical.
 
 ## Repository layout
 

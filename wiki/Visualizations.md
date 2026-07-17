@@ -35,6 +35,12 @@ Interactive features:
 
 Large-graph behavior: above 5000 nodes the page renders a community-aggregated view instead of every node, collapsing each community into one super-node sized by member count, with inter-community edges between them, plus a notice telling you to open `graph-3d.html` for the full node-level view. This keeps the browser responsive.
 
+Filtering is frame-coalesced: rapid slider/select changes produce one visibility
+flush per animation frame, node and edge datasets receive only changed records,
+and a relation checkbox visits only that relation's pre-indexed edges. Full
+node filters still evaluate the complete displayed graph, but repeated UI events
+do not multiply that work.
+
 Security: node labels and relations are embedded JSON-escaped, with `</` rewritten to `<\/`, so a label cannot break out of the `<script>` block.
 
 ## graph-3d.html (3D force graph)
@@ -63,7 +69,7 @@ Node shapes: SQL schema objects and assets render as distinct 3D meshes (table =
 
 Federation: when the graph carries `repo` tags, the "Color by" selector gains a `repo` option and extra controls appear — a "cross-repo edges only" filter and a repo legend. Cross-repo edges use a distinct accent color, and external-package stubs render as translucent spheres (the 3D analog of the 2D dashed ring).
 
-Large-graph performance: when nodes + edges exceed 6000, the viewer transparently switches to a faster render path: edges drop from cylinder meshes to GL lines, regular code nodes collapse into a single GPU-instanced mesh (one draw call, with a custom raycast picker so click-to-focus and hover tooltips still work), node spheres get a coarser resolution, the layout warms up off-screen, the link haze dims, the simulation is bounded so it settles and stops, and the device-pixel-ratio is capped. None of this caps the scan itself.
+Large-graph performance: when nodes + edges exceed 6000, the viewer transparently switches to a faster render path: edges drop from cylinder meshes to GL lines, regular code nodes collapse into a single GPU-instanced mesh (one draw call, with a custom raycast picker so click-to-focus and hover tooltips still work), and filtering compacts that mesh to visible instances so hidden nodes are neither transformed, recolored, nor raycast. Matrix/quaternion/vector/color scratch objects are reused on simulation ticks instead of allocated per node. Node spheres get a coarser resolution, the layout warms up off-screen, the link haze dims, the simulation is bounded so it settles and stops, and the device-pixel-ratio is capped. None of this caps the scan itself.
 
 ## graph.svg (static layout)
 
