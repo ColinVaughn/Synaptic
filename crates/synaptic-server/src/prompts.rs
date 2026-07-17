@@ -18,8 +18,37 @@ pub fn prompts_list() -> Value {
     ])
 }
 
-/// Build a `prompts/get` response, or `None` for an unknown name.
-pub fn prompts_get(name: &str, args: &Value) -> Option<Value> {
+/// Build a `prompts/get` response, or `Ok(None)` for an unknown name. Known
+/// prompts are validated against the same argument declarations returned by
+/// `prompts/list` before any text is rendered.
+pub fn prompts_get(name: &str, args: &Value) -> Result<Option<Value>, String> {
+    let definitions = prompts_list();
+    let Some(definition) = definitions.as_array().and_then(|prompts| {
+        prompts
+            .iter()
+            .find(|prompt| prompt.get("name").and_then(Value::as_str) == Some(name))
+    }) else {
+        return Ok(None);
+    };
+
+    if !args.is_null() && !args.is_object() {
+        return Err("prompt arguments must be an object".to_string());
+    }
+    for declared in definition["arguments"].as_array().into_iter().flatten() {
+        let Some(argument_name) = declared.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let supplied = args.get(argument_name);
+        if declared.get("required").and_then(Value::as_bool) == Some(true) && supplied.is_none() {
+            return Err(format!("prompt argument '{argument_name}' is required"));
+        }
+        if supplied.is_some_and(|value| !value.is_string()) {
+            return Err(format!(
+                "prompt argument '{argument_name}' must be a string"
+            ));
+        }
+    }
+
     let arg = |k: &str| {
         args.get(k)
             .and_then(Value::as_str)
@@ -45,7 +74,9 @@ pub fn prompts_get(name: &str, args: &Value) -> Option<Value> {
             arg("from"),
             arg("to")
         ),
-        _ => return None,
+        _ => unreachable!("unknown prompts return before rendering"),
     };
-    Some(json!({ "messages": [{ "role": "user", "content": { "type": "text", "text": text } }] }))
+    Ok(Some(
+        json!({ "messages": [{ "role": "user", "content": { "type": "text", "text": text } }] }),
+    ))
 }

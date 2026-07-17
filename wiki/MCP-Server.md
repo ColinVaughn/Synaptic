@@ -6,11 +6,13 @@ dependency). The server is read-only over the graph; the PR and working-changes
 tools shell out to `gh`/`git` to read state but never write.
 
 The graph is loaded once at startup from a `graph.json` and hot-reloads when that
-file changes on disk. It also keeps itself current as you edit source: there is no
-live filesystem watcher — instead each query first does a cheap, debounced
-staleness check against the build manifest and re-extracts any changed files
-before answering. So a file you edit but never query is reflected on the *next*
-query, not the instant you save. See
+file changes on disk. It also keeps itself current as you edit source. By default,
+each query performs a cheap, debounced staleness check against the build manifest
+and re-extracts changed files before answering. `serve --watch` (or
+`SYNAPTIC_SERVE_WATCH=1`) embeds a filesystem watcher that makes this gate
+event-driven: clean queries skip the manifest walk, while the first query after a
+relevant event performs the same bounded catch-up. If the watcher cannot start,
+serve falls back to the debounced check. See
 [Incremental-Updates → serve auto-freshen](Incremental-Updates#synaptic-serve-auto-freshen-on-query-catch-up).
 Every node
 label, relation, and file path is sanitized before it reaches tool output (a
@@ -21,11 +23,12 @@ the agent asked for.
 
 ## Protocol version
 
-The `initialize` reply negotiates the protocol version: if the client requests
-one the server supports (`2025-11-25`, `2025-06-18`, `2025-03-26`, or
-`2024-11-05`) the server echoes it back, otherwise it returns its latest,
-`2025-11-25`. A client that sends no `protocolVersion` gets `2025-11-25`. Server
-info is `{ "name": "synaptic", "version": <crate version>, "description": <one-line summary> }`.
+A valid `initialize` request includes string `protocolVersion`, object
+`capabilities`, and `clientInfo` with string `name` and `version`. If the client
+requests a supported version (`2025-11-25`, `2025-06-18`, `2025-03-26`, or
+`2024-11-05`) the server echoes it; otherwise it negotiates its latest,
+`2025-11-25`. Missing or malformed required fields return JSON-RPC invalid params
+(`-32602`). Server info is `{ "name": "synaptic", "version": <crate version>, "description": <one-line summary> }`.
 
 Over HTTP, requests sent after initialization carry an `MCP-Protocol-Version`
 header. A present-but-unsupported value is rejected with `400 Bad Request`; an
@@ -33,7 +36,7 @@ absent header is tolerated (assumed `2025-03-26`, for backwards compatibility),
 and the `initialize` request itself is exempt because its version is set by the
 negotiation above.
 
-The `initialize` reply also advertises capabilities:
+The HTTP `initialize` reply advertises capabilities including subscriptions:
 
 ```json
 {
@@ -45,6 +48,10 @@ The `initialize` reply also advertises capabilities:
 }
 ```
 
+Stdio advertises the same capabilities except `resources.subscribe`: stdio has
+no asynchronous server-to-client update channel. Both transports require the
+client's `notifications/initialized` notification before ordinary operations.
+
 and carries a server-level `instructions` string that orients an assistant to
 the whole toolset (the recommended flow, and what "god node", "community", and
 edge confidence mean).
@@ -52,7 +59,7 @@ edge confidence mean).
 ## Running the server
 
 ```
-synaptic serve [--graph <path>] [--http <addr>] [--api-key <key>] [--source-root <dir>] [--allow-exec] [--concise]
+synaptic serve [--graph <path>] [--http <addr>] [--api-key <key>] [--source-root <dir>] [--allow-exec] [--concise] [--watch]
 ```
 
 - `--graph <path>` selects the `graph.json` to load. Default is the standard
@@ -70,8 +77,11 @@ synaptic serve [--graph <path>] [--http <addr>] [--api-key <key>] [--source-root
   This makes the server **no longer read-only** — `speculate` executes the
   project's test/build commands in a throwaway worktree — so enable it only for
   trusted clients. Without it the tool is neither advertised nor runnable.
+- `--watch`: embed the event-driven source watcher described above. Equivalent
+  to `SYNAPTIC_SERVE_WATCH=1`; watcher startup failure falls back safely to the
+  debounced per-query staleness check.
 - `--concise`: token-lean output. Lowers the default list/budget sizes so tool
-  results return less to the model (`query_graph` `token_budget` 1200, list limits
+  results return less to the model (`query_graph` `token_budget` 800, list limits
   to 20, `dynamic_hazards` to 20, `get_community` to 40, `top_n` to 6,
   `context_lines` to 25). An explicit per-call argument always wins. Equivalent to
   setting the `SYNAPTIC_CONCISE` environment variable (see [Configuration]).
@@ -84,7 +94,8 @@ synaptic serve
 
 Newline-delimited JSON-RPC 2.0 on stdin/stdout: one request per line, one
 response line per request. Notifications (requests with no `id`) get no reply.
-Blank lines and unparseable lines are ignored. A status line is printed to
+Blank lines are ignored; malformed JSON produces a JSON-RPC parse error
+(`-32700`). A status line is printed to
 stderr (`[synaptic] MCP server ready on stdio`) so it never pollutes the
 JSON-RPC stream on stdout.
 
@@ -219,7 +230,7 @@ annotated honestly as `readOnlyHint: false, openWorldHint: true`. The default
 server never advertises or runs it, preserving the strictly read-only surface.
 
 Each tool returns a text content block (the load-bearing, purpose-formatted
-output). Fifteen tools additionally declare an `outputSchema` and return a typed
+output). Sixteen tools additionally declare an `outputSchema` and return a typed
 `structuredContent` object alongside the text (a 2025-06-18 feature) -- see
 [Structured output](#structured-output).
 
@@ -893,13 +904,14 @@ Returns the findings as text + `structuredContent`.
 
 ### Structured output
 
-Fifteen tools declare an `outputSchema` and return a `structuredContent` object
+Sixteen tools declare an `outputSchema` and return a `structuredContent` object
 beside the text content, so a client can parse the result instead of scraping the
 formatted text:
 
 | Tool | `structuredContent` shape |
 |---|---|
-| `graph_stats` | `{ nodes, edges, communities, extracted, inferred, ambiguous, cross_repo, cross_language }` |
+| `graph_stats` | `{ nodes, edges, communities, extracted, inferred, ambiguous, cross_repo, cross_language, dynamic_sites, dynamic_sites_opaque, dynamic_refs_linked }` |
+| `dynamic_hazards` | `{ total, truncated, sites: [{ repo?, file, line, kind, key?, host }] }` |
 | `get_node` | `{ found, id, label, source_file, file_type, degree, community?, kind?, visibility?, loc? }` (on an ambiguous name: `found:false` with `ambiguous`+`candidates`, matching `affected`/`describe_node`) |
 | `god_nodes` | `{ god_nodes: [{ label, degree, id, test_count }] }` (`degree` = total connections incl. members; centrality/size, not incoming-dependence) |
 | `affected` | `{ seed, resolved, affected: [{ label, depth, via_relation }], total, truncated, by_depth, aggregated_over_members? }` (on an unresolved name: `resolved:false` with `ambiguous`+`candidates` or `found:false`) |
@@ -907,7 +919,7 @@ formatted text:
 | `structural_search` | `{ columns, results: [[{ id, label, kind, visibility, file, line, loc, signature }]] }` (or `groups` for aggregates) |
 | `search_text` | `{ pattern, total, truncated, files_scanned, hits: [{ repo, file, line, col, match, line_text, node? }] }` (`node` is the enclosing symbol `{ id, label, kind, community }`, or null when the hit is outside any captured span) |
 | `describe_node` | `{ found, id, label, kind, summary, callees, signature, members?, member_count? }` (`members` listed for a class/type; on an ambiguous name: `found:false` with `ambiguous`+`candidates`) |
-| `get_neighbors` | `{ seed, neighbors: [{ label, relation, direction }], by_relation: { <relation>: <count> }, total, truncated }` (`by_relation` tallies every edge before any filter; `total` is the full matched count, capped to `limit`) |
+| `get_neighbors` | `{ seed, neighbors: [{ label, relation, direction }], by_relation: { <relation>: <count> }, total, truncated }` (`by_relation` tallies every edge before any filter; `total` is the full matched count, while `neighbors` is capped to `limit`) |
 | `list_repos` | `{ repos: [{ repo, nodes, edges, source_hash? }] }` (empty array for a single-repo graph; `source_hash` present when a `workspace-state.json` sibling exists) |
 | `predict_impact` | the full `ChangeForecast`: `{ summary, changed_files, changed_nodes, public_api_breaks, blast_radius, blast_radius_total, at_risk_tests, verify_checklist, risk }` (not truncated by `limit`, which caps only the text) |
 | `affected_tests` | `{ tests: [{ id, label, file, depth, via_relation }], total }` |
@@ -921,10 +933,11 @@ disambiguation message.
 
 ### Tool error behavior
 
-An unknown tool name is returned as a tool result with `isError: true` and a text
-body `Unknown tool: <name>` (not a JSON-RPC protocol error). An unknown JSON-RPC
-method returns error code `-32601`. An unknown resource or prompt returns
-`-32602`.
+An unknown tool name is invalid `tools/call` parameters and returns JSON-RPC
+`-32602`; tool execution failures after a valid dispatch stay in the tool-result
+channel with `isError: true`. An unknown JSON-RPC method returns `-32601`, an
+unknown resource returns MCP resource-not-found `-32002`, and an unknown prompt
+returns `-32602`.
 
 ### Limitations
 
@@ -1059,7 +1072,8 @@ curl -H "X-API-Key: s3cret" "http://127.0.0.1:8765/api/query?q=authentication&to
 ## Example: a raw JSON-RPC session over stdio
 
 ```
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"example-client","version":"1.0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_graph","arguments":{"question":"how does login work","mode":"bfs"}}}
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_source","arguments":{"label":"login_user"}}}
 {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"affected","arguments":{"label":"login_user"}}}

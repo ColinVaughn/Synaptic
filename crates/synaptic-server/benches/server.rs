@@ -1,9 +1,8 @@
 //! Criterion benchmarks for the MCP `synaptic-server` tool surface added in
 //! the Tier 1 work: `get_source`, `affected`, and the `query_graph` request
-//! path. The headline measurement is the **structured-output double-compute**:
-//! a `tools/call` for `query_graph` now renders the text (one index query) and
-//! a typed `structuredContent` mirror (a second index query), so the two groups
-//! below isolate that added per-request cost against a single text-only call.
+//! path. The `query_graph` comparison holds traversal, budget, fullness, and
+//! edge inclusion constant, then measures direct text rendering against full
+//! MCP dispatch (the same retrieval plus structured serialization/enveloping).
 //!
 //! Run: `cargo bench -p synaptic-server`
 
@@ -17,6 +16,8 @@ use synaptic_query::TraversalMode;
 use synaptic_server::Server;
 
 const SCALES: [usize; 2] = [1_000, 5_000];
+const AFFECTED_SCALES: [usize; 2] = [5_000, 50_000];
+const COMPLETION_SCALES: [usize; 2] = [5_000, 50_000];
 
 fn node(i: usize) -> Node {
     Node {
@@ -66,9 +67,23 @@ fn synthetic_graph(n: usize) -> GraphData {
     }
 }
 
+fn star_graph(n: usize) -> GraphData {
+    let nodes: Vec<Node> = (0..n).map(node).collect();
+    let links = (1..n).map(|i| edge(i, 0)).collect();
+    GraphData {
+        directed: true,
+        multigraph: false,
+        graph: serde_json::Map::new(),
+        nodes,
+        links,
+        hyperedges: vec![],
+        built_at_commit: None,
+    }
+}
+
 /// The `query_graph` request path: text-only render vs the full `tools/call`
-/// dispatch (text + a typed `structuredContent` mirror). The delta is exactly
-/// the extra index query the structured output adds per request.
+/// dispatch (text + a typed `structuredContent` mirror). Setup asserts the
+/// text is identical so a future default change cannot invalidate the comparison.
 fn bench_query_graph_structured(c: &mut Criterion) {
     let mut group = c.benchmark_group("server/query_graph");
     group.sample_size(20);
@@ -79,16 +94,33 @@ fn bench_query_graph_structured(c: &mut Criterion) {
     for &n in &SCALES {
         let mut server = Server::from_graph_data(synthetic_graph(n), None);
 
-        // Text only: one retrieval (the pre-structured-output cost).
-        group.bench_with_input(BenchmarkId::new("text_only", n), &n, |b, _| {
+        // Text only: the same full, 2,000-token BFS workload as the request below.
+        group.bench_with_input(BenchmarkId::new("text_full_direct", n), &n, |b, _| {
             b.iter(|| black_box(server.tool_query_graph(q, TraversalMode::Bfs, 2000, &[])));
         });
 
-        // Full dispatch: text + structuredContent (two retrievals today).
+        // Full dispatch: one shared retrieval rendered as text + structuredContent.
         let req = json!({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": { "name": "query_graph", "arguments": { "question": q } }
+            "params": { "name": "query_graph", "arguments": {
+                "question": q,
+                "mode": "bfs",
+                "full": true,
+                "token_budget": 2000,
+                "context_filter": []
+            } }
         });
+        let expected = server.tool_query_graph(q, TraversalMode::Bfs, 2000, &[]);
+        let response = server
+            .handle_request(&req)
+            .expect("equivalence request must produce a response");
+        let actual = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("query_graph text result");
+        assert_eq!(
+            actual, expected,
+            "query_graph benchmark workloads diverged at scale {n}"
+        );
         group.bench_with_input(BenchmarkId::new("full_dispatch", n), &n, |b, _| {
             b.iter(|| black_box(server.handle_request(&req)));
         });
@@ -110,13 +142,31 @@ fn bench_new_tools(c: &mut Criterion) {
     let body: String = (0..500).map(|i| format!("fn line_{i}() {{}}\n")).collect();
     std::fs::write(dir.path().join("src/mod_0.rs"), body).unwrap();
 
-    for &n in &SCALES {
-        let server = Server::from_graph_data(synthetic_graph(n), None)
+    for &n in &AFFECTED_SCALES {
+        let mut server = Server::from_graph_data(synthetic_graph(n), None)
             .with_source_root(dir.path().to_path_buf());
 
         group.bench_with_input(BenchmarkId::new("affected_depth8", n), &n, |b, _| {
             b.iter(|| black_box(server.tool_affected("n0", 8, &[], 50, true)));
         });
+
+        let affected_req = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "affected", "arguments": {
+                "label": "n0", "depth": 8, "limit": 50, "verbose": true
+            } }
+        });
+        group.bench_with_input(
+            BenchmarkId::new("affected_full_dispatch_depth8", n),
+            &n,
+            |b, _| b.iter(|| black_box(server.handle_request(&affected_req))),
+        );
+
+        // get_source is independent of graph scale; retain its existing coverage
+        // only at the smaller affected scale.
+        if n != AFFECTED_SCALES[0] {
+            continue;
+        }
 
         group.bench_with_input(BenchmarkId::new("get_source_40", n), &n, |b, _| {
             b.iter(|| black_box(server.tool_get_source("n0", None, None, 40)));
@@ -125,25 +175,118 @@ fn bench_new_tools(c: &mut Criterion) {
     group.finish();
 }
 
-/// `completion/complete` over the full dispatch: an O(nodes) label prefix scan
-/// plus sort/dedup/cap. Low-frequency autocomplete, but it scans every node.
+/// `completion/complete` over the full dispatch after the graph-version index
+/// has been built during Criterion warm-up. Cover a broad duplicate-heavy
+/// match, a miss, and bare-name lookup past leading method punctuation.
 fn bench_completion(c: &mut Criterion) {
     let mut group = c.benchmark_group("server/completion");
     group.sample_size(20);
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(3));
 
-    // "Serv" matches every synthetic label ("Service_..."), the worst case.
-    let req = json!({
-        "jsonrpc": "2.0", "id": 1, "method": "completion/complete",
-        "params": { "argument": { "name": "label", "value": "Serv" } }
-    });
-    for &n in &SCALES {
+    let request = |prefix: &str| {
+        json!({
+            "jsonrpc": "2.0", "id": 1, "method": "completion/complete",
+            "params": {
+                "ref": { "type": "ref/resource", "uri": "synaptic://node/{label}" },
+                "argument": { "name": "label", "value": prefix }
+            }
+        })
+    };
+    for &n in &COMPLETION_SCALES {
         let mut server = Server::from_graph_data(synthetic_graph(n), None);
-        group.bench_with_input(BenchmarkId::new("label_prefix", n), &n, |b, _| {
+        let broad = request("Serv");
+        group.bench_with_input(BenchmarkId::new("broad_match", n), &n, |b, _| {
+            b.iter(|| black_box(server.handle_request(&broad)));
+        });
+        let miss = request("NoSuchLabelPrefix");
+        group.bench_with_input(BenchmarkId::new("miss", n), &n, |b, _| {
+            b.iter(|| black_box(server.handle_request(&miss)));
+        });
+
+        let mut leading_graph = synthetic_graph(n);
+        for node in &mut leading_graph.nodes {
+            node.label.insert(0, '.');
+        }
+        let mut leading_server = Server::from_graph_data(leading_graph, None);
+        let leading = request("Serv");
+        group.bench_with_input(BenchmarkId::new("leading_punctuation", n), &n, |b, _| {
+            b.iter(|| black_box(leading_server.handle_request(&leading)));
+        });
+    }
+    group.finish();
+}
+
+/// Broad structural search with a small response limit. This isolates whether
+/// full MCP dispatch executes SynQL twice and whether node-view projection stops
+/// at the configured limit.
+fn bench_structural_search(c: &mut Criterion) {
+    let mut group = c.benchmark_group("server/structural_search");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
+
+    const QUERY: &str = "MATCH (n) RETURN n";
+    for &n in &AFFECTED_SCALES {
+        let mut server = Server::from_graph_data(synthetic_graph(n), None);
+        group.bench_with_input(BenchmarkId::new("direct_limit25", n), &n, |b, _| {
+            b.iter(|| black_box(server.tool_structural_search(Some(QUERY), None, None, 25)));
+        });
+
+        let req = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "structural_search", "arguments": {
+                "query": QUERY, "limit": 25
+            } }
+        });
+        group.bench_with_input(BenchmarkId::new("full_dispatch_limit25", n), &n, |b, _| {
             b.iter(|| black_box(server.handle_request(&req)));
         });
     }
+    group.finish();
+}
+
+fn bench_remaining_structured_mirrors(c: &mut Criterion) {
+    let mut group = c.benchmark_group("server/structured_mirrors");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
+
+    const N: usize = 50_000;
+    let mut general = Server::from_graph_data(synthetic_graph(N), None);
+    for (name, direct) in [
+        (
+            "list_repos_direct",
+            Server::tool_list_repos as fn(&Server) -> String,
+        ),
+        (
+            "graph_stats_direct",
+            Server::tool_graph_stats as fn(&Server) -> String,
+        ),
+    ] {
+        group.bench_function(name, |b| b.iter(|| black_box(direct(&general))));
+    }
+    for name in ["list_repos", "graph_stats"] {
+        let request = json!({
+            "jsonrpc":"2.0", "id":1, "method":"tools/call",
+            "params":{"name":name,"arguments":{}}
+        });
+        group.bench_function(format!("{name}_full_dispatch"), |b| {
+            b.iter(|| black_box(general.handle_request(&request)));
+        });
+    }
+
+    let mut star = Server::from_graph_data(star_graph(N), None);
+    group.bench_function("get_neighbors_star_direct", |b| {
+        b.iter(|| black_box(star.tool_get_neighbors("n0", None, false, 50, false)));
+    });
+    let request = json!({
+        "jsonrpc":"2.0", "id":1, "method":"tools/call",
+        "params":{"name":"get_neighbors","arguments":{"label":"n0","limit":50}}
+    });
+    group.bench_function("get_neighbors_star_full_dispatch", |b| {
+        b.iter(|| black_box(star.handle_request(&request)));
+    });
     group.finish();
 }
 
@@ -151,6 +294,8 @@ criterion_group!(
     benches,
     bench_query_graph_structured,
     bench_new_tools,
-    bench_completion
+    bench_completion,
+    bench_structural_search,
+    bench_remaining_structured_mirrors
 );
 criterion_main!(benches);

@@ -11,6 +11,22 @@ fn write(root: &std::path::Path, rel: &str, body: &str) {
 }
 
 #[test]
+fn serve_help_lists_mcp_behavior_flags() {
+    let assertion = Command::cargo_bin("synaptic")
+        .unwrap()
+        .args(["serve", "--help"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout);
+    for flag in ["--watch", "--concise", "--allow-exec"] {
+        assert!(
+            stdout.contains(flag),
+            "serve help is missing {flag}: {stdout}"
+        );
+    }
+}
+
+#[test]
 fn extract_then_query_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -765,10 +781,12 @@ fn serve_answers_mcp_over_stdio() {
         .assert()
         .success();
 
-    // Drive the MCP server over stdio with two JSON-RPC requests; it reads to
-    // EOF then exits.
+    // Drive the MCP server over stdio through the complete lifecycle; it reads
+    // to EOF, drains its bounded worker queue, then exits.
     let stdin = concat!(
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"e2e","version":"1.0"}}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
         "\n",
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
         "\n",
