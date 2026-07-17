@@ -11,8 +11,10 @@
 //! `subgraph` (best-effort; the network path is untested offline).
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
-use std::collections::BTreeMap;
+use rayon::prelude::*;
+use std::collections::{BTreeMap, HashMap};
 use synaptic_core::{GraphData, NodeId};
 use synaptic_graph::{
     apply_communities, cluster, link_dynamic_refs, mark_cross_repo_edges,
@@ -88,7 +90,7 @@ fn build_member_graph(member: &Member, opts: &WorkspaceBuildOptions) -> Result<G
         member: member.tag.clone(),
         source,
     })?;
-    Ok(outcome.kg.to_graph_data())
+    Ok(outcome.kg.into_graph_data())
 }
 
 /// Compose + cross-repo-resolve + re-cluster the collected subgraphs.
@@ -322,6 +324,44 @@ type LoadedRepos = (
     Vec<(String, PathBuf)>,
 );
 
+static REPO_LOAD_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .thread_name(|index| format!("synaptic-repo-{index}"))
+        .build()
+        .expect("build bounded repository loader")
+});
+
+fn validate_unique_repo_tags(repos: &[RepoMember]) -> Result<()> {
+    let mut names_by_tag = HashMap::with_capacity(repos.len());
+    for repo in repos {
+        let tag = sanitize_tag(&repo.name);
+        if let Some(first_name) = names_by_tag.get(&tag) {
+            return Err(WorkspaceError::Remote {
+                member: repo.name.clone(),
+                reason: format!(
+                    "repository names `{first_name}` and `{}` both sanitize to cache/tag `{tag}`",
+                    repo.name
+                ),
+            });
+        }
+        names_by_tag.insert(tag, repo.name.as_str());
+    }
+    Ok(())
+}
+
+fn load_repo_members_bounded<T, F>(repos: &[RepoMember], load: F) -> Result<Vec<T>>
+where
+    T: Send,
+    F: Fn(&RepoMember) -> Result<T> + Send + Sync,
+{
+    validate_unique_repo_tags(repos)?;
+    // Collect every result in manifest order before selecting the first error.
+    // This keeps diagnostics deterministic while overlapping independent I/O.
+    let results: Vec<Result<T>> = REPO_LOAD_POOL.install(|| repos.par_iter().map(load).collect());
+    results.into_iter().collect()
+}
+
 /// Load each declared `[[repos]]` member into a subgraph (+ surface + report + root).
 /// Shared by [`build_workspace`] and [`federate_repos`].
 fn load_repos(
@@ -330,12 +370,13 @@ fn load_repos(
     opts: &WorkspaceBuildOptions,
     cache: &Path,
 ) -> Result<LoadedRepos> {
-    let mut subgraphs = Vec::new();
+    let loaded =
+        load_repo_members_bounded(repos, |repo| load_repo_member(root, repo, opts, cache))?;
+    let mut subgraphs = Vec::with_capacity(loaded.len());
     let mut surfaces = Vec::new();
-    let mut reports = Vec::new();
+    let mut reports = Vec::with_capacity(loaded.len());
     let mut roots = Vec::new();
-    for repo in repos {
-        let loaded = load_repo_member(root, repo, opts, cache)?;
+    for loaded in loaded {
         if let Some(s) = loaded.surface {
             surfaces.push(s);
         }
@@ -695,5 +736,91 @@ mod tests {
         .err()
         .unwrap();
         assert!(matches!(err, WorkspaceError::Remote { .. }));
+    }
+
+    fn declared_repo(name: &str) -> RepoMember {
+        RepoMember {
+            name: name.into(),
+            git: None,
+            rev: None,
+            subgraph: None,
+            path: None,
+        }
+    }
+
+    #[test]
+    fn bounded_repo_loader_preserves_order_and_overlaps_work() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+
+        let repos: Vec<_> = (0..8)
+            .map(|index| declared_repo(&format!("repo-{index}")))
+            .collect();
+        let active = AtomicUsize::new(0);
+        let max_active = AtomicUsize::new(0);
+        let started = Instant::now();
+        let loaded = load_repo_members_bounded(&repos, |repo| {
+            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+            max_active.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(40));
+            active.fetch_sub(1, Ordering::SeqCst);
+            Ok(repo.name.clone())
+        })
+        .unwrap();
+
+        assert_eq!(
+            loaded,
+            repos
+                .iter()
+                .map(|repo| repo.name.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!((2..=4).contains(&max_active.load(Ordering::SeqCst)));
+        eprintln!("eight 40ms loads completed in {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn bounded_repo_loader_reports_first_manifest_error() {
+        let repos = vec![declared_repo("first"), declared_repo("second")];
+        let error = load_repo_members_bounded(&repos, |repo| {
+            if repo.name == "first" {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err::<(), _>(WorkspaceError::Remote {
+                member: repo.name.clone(),
+                reason: "failed".into(),
+            })
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("first"), "{error}");
+    }
+
+    #[test]
+    fn bounded_repo_loader_rejects_sanitized_tag_collisions_before_starting_work() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let repos = vec![
+            declared_repo("acme/billing"),
+            declared_repo("unrelated"),
+            declared_repo("acme billing"),
+            declared_repo("acme:billing"),
+        ];
+        let calls = AtomicUsize::new(0);
+        let error = load_repo_members_bounded(&repos, |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            &error,
+            WorkspaceError::Remote { member, reason }
+                if member == "acme billing"
+                    && reason.contains("acme/billing")
+                    && reason.contains("acme billing")
+                    && reason.contains("acme-billing")
+        ));
     }
 }

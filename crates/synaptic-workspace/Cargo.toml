@@ -14,6 +14,7 @@ glob = { workspace = true }
 roxmltree = { workspace = true }
 thiserror = { workspace = true }
 blake3 = { workspace = true }
+rayon = { workspace = true }
 synaptic-core = { workspace = true }
 synaptic-detect = { workspace = true }
 synaptic-graph = { workspace = true }

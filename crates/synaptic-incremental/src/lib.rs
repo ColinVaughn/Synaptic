@@ -32,7 +32,7 @@ pub use freshen::{
     detect_changes, graph_input_files, is_extractable_markdown, manifest_path, persist_manifest,
     persist_manifest_with, snapshot_manifest, ChangeReport,
 };
-pub use merge_driver::{run_merge_driver, union_graphs, MergeDriverError};
+pub use merge_driver::{run_merge_driver, union_graphs, union_graphs_many, MergeDriverError};
 pub use watch::{is_rebuildable, should_ignore_path, ChangeBatch, DEBOUNCE_MS};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -169,6 +169,42 @@ pub fn topology(gd: &GraphData) -> (Vec<String>, Vec<(String, String, String)>) 
     edges.sort();
     edges.dedup();
     (ids, edges)
+}
+
+/// Compare a built graph with persisted data without cloning or sorting either
+/// payload. Context is part of topology because it is part of semantic edge
+/// identity; confidence, community, and display metadata remain ignored.
+pub fn same_topology(kg: &KnowledgeGraph, previous: &GraphData) -> bool {
+    let current_nodes: HashSet<&NodeId> = kg.nodes().map(|node| &node.id).collect();
+    let previous_nodes: HashSet<&NodeId> = previous.nodes.iter().map(|node| &node.id).collect();
+    if current_nodes != previous_nodes {
+        return false;
+    }
+
+    let current_edges: HashSet<(&NodeId, &NodeId, &str, Option<&str>)> = kg
+        .edges()
+        .map(|edge| {
+            (
+                &edge.source,
+                &edge.target,
+                edge.relation.as_str(),
+                edge.context.as_deref(),
+            )
+        })
+        .collect();
+    let previous_edges: HashSet<(&NodeId, &NodeId, &str, Option<&str>)> = previous
+        .links
+        .iter()
+        .map(|edge| {
+            (
+                &edge.source,
+                &edge.target,
+                edge.relation.as_str(),
+                edge.context.as_deref(),
+            )
+        })
+        .collect();
+    current_edges == previous_edges
 }
 
 /// Per-node previous community assignment, for [`remap_communities_to_previous`].
@@ -615,10 +651,10 @@ pub fn rebuild_with_detect(
     // route handlers (before the parameterized-route merge), SQL table stubs,
     // parameterized routes, pyo3 modules + imports, dynamic-dispatch evidence,
     // entity dedup.
-    let hyper = kg.hyperedges.clone();
-    let n: Vec<Node> = kg.nodes().cloned().collect();
-    let mut e: Vec<Edge> = kg.edges().cloned().collect();
-    e.extend(resolved);
+    let mut parts = kg.into_graph_data();
+    parts.links.extend(resolved);
+    let n = parts.nodes;
+    let e = parts.links;
     let (n, e) = resolve_command_invocations(n, e);
     let (n, e) = resolve_route_handlers(n, e);
     let (n, e) = resolve_sql_queries(n, e);
@@ -627,7 +663,7 @@ pub fn rebuild_with_detect(
     let (n, e) = resolve_pyo3_imports(n, e);
     let (n, e) = link_dynamic_refs(n, e);
     let (n, e) = deduplicate_entities(n, e, &HashMap::new());
-    kg = build_from_parts(n, e, hyper, &build_opts);
+    kg = build_from_parts(n, e, parts.hyperedges, &build_opts);
 
     // Refuse a silent shrink (unless forced or an explicit deletion happened).
     // An incremental rebuild is scoped to explicitly-changed files, so any shrink
@@ -655,7 +691,7 @@ pub fn rebuild_with_detect(
     // community assignment, skip re-clustering, and tell the caller nothing needs
     // rewriting.
     if let Some(prev) = existing {
-        if topology(&kg.to_graph_data()) == topology(prev) {
+        if same_topology(&kg, prev) {
             let mut communities: BTreeMap<u32, Vec<NodeId>> = BTreeMap::new();
             for (id, c) in previous_communities(prev) {
                 communities.entry(c).or_default().push(id);
@@ -1079,6 +1115,28 @@ mod tests {
         let mut b = a.clone();
         b.nodes[0].community = Some(99); // different community only
         assert_eq!(topology(&a), topology(&b));
+    }
+
+    #[test]
+    fn same_topology_ignores_metadata_but_detects_context_changes() {
+        let mut previous = graph_data(
+            vec![
+                node("a", "A", "a.py", Some("ast")),
+                node("b", "B", "b.py", Some("ast")),
+            ],
+            vec![edge("a", "b", "calls_service")],
+        );
+        previous.links[0].context = Some("GET".into());
+        let kg = KnowledgeGraph::from_graph_data(previous.clone());
+
+        let mut metadata_only = previous.clone();
+        metadata_only.nodes[0].community = Some(42);
+        metadata_only.links[0].confidence_score = Some(0.25);
+        assert!(same_topology(&kg, &metadata_only));
+
+        let mut changed_context = previous;
+        changed_context.links[0].context = Some("POST".into());
+        assert!(!same_topology(&kg, &changed_context));
     }
 
     // integration: the full rebuild orchestration on a real temp project

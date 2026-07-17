@@ -38,7 +38,7 @@ mod source;
 pub use http::serve_http;
 pub use session::{SessionStore, DEFAULT_SESSION_IDLE};
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -423,6 +423,107 @@ pub struct PreparedIndexes {
     pub affected_index: Option<ReverseImpactIndex>,
 }
 
+/// A complete undirected BFS tree for one materialized shard. Building it once
+/// lets a cross-shard path score every incident bridge endpoint in constant time
+/// instead of rebuilding the same adjacency and traversal for every candidate.
+struct UndirectedBfsTree {
+    root: NodeId,
+    adjacency: HashMap<NodeId, Vec<NodeId>>,
+    distance: HashMap<NodeId, usize>,
+    parent: HashMap<NodeId, NodeId>,
+}
+
+impl UndirectedBfsTree {
+    fn build(kg: &KnowledgeGraph, root: &NodeId) -> Option<Self> {
+        if !kg.contains_node(root) {
+            return None;
+        }
+
+        let mut adjacency: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for node in kg.nodes() {
+            adjacency.entry(node.id.clone()).or_default();
+        }
+        for edge in kg.edges() {
+            if edge.source == edge.target {
+                continue;
+            }
+            adjacency
+                .entry(edge.source.clone())
+                .or_default()
+                .push(edge.target.clone());
+            adjacency
+                .entry(edge.target.clone())
+                .or_default()
+                .push(edge.source.clone());
+        }
+        for neighbors in adjacency.values_mut() {
+            neighbors.sort();
+            neighbors.dedup();
+        }
+
+        let mut distance = HashMap::new();
+        let mut parent = HashMap::new();
+        let mut queue = VecDeque::new();
+        distance.insert(root.clone(), 0);
+        queue.push_back(root.clone());
+        while let Some(current) = queue.pop_front() {
+            let next_distance = distance[&current] + 1;
+            if let Some(neighbors) = adjacency.get(&current) {
+                for neighbor in neighbors {
+                    if distance.contains_key(neighbor) {
+                        continue;
+                    }
+                    distance.insert(neighbor.clone(), next_distance);
+                    parent.insert(neighbor.clone(), current.clone());
+                    queue.push_back(neighbor.clone());
+                }
+            }
+        }
+
+        Some(Self {
+            root: root.clone(),
+            adjacency,
+            distance,
+            parent,
+        })
+    }
+
+    fn distance_to(&self, node: &NodeId) -> Option<usize> {
+        self.distance.get(node).copied()
+    }
+
+    /// Reconstruct the same path a sorted-neighbor BFS rooted at the tree root returns.
+    fn path_from_root(&self, node: &NodeId) -> Option<Vec<NodeId>> {
+        self.distance_to(node)?;
+        let mut path = vec![node.clone()];
+        let mut current = node.clone();
+        while current != self.root {
+            current = self.parent.get(&current)?.clone();
+            path.push(current.clone());
+        }
+        path.reverse();
+        Some(path)
+    }
+
+    /// Reconstruct the path that a sorted-neighbor BFS rooted at the supplied
+    /// node would choose toward this tree's root. Greedily taking the smallest
+    /// neighbor whose target distance decreases preserves the existing tie
+    /// behavior; simply reversing this tree's parent path would not.
+    fn path_to_root(&self, node: &NodeId) -> Option<Vec<NodeId>> {
+        let mut current = node.clone();
+        let mut path = vec![current.clone()];
+        while current != self.root {
+            let distance = self.distance_to(&current)?;
+            let next = self.adjacency.get(&current)?.iter().find(|neighbor| {
+                self.distance.get(*neighbor).copied() == distance.checked_sub(1)
+            })?;
+            current = (*next).clone();
+            path.push(current.clone());
+        }
+        Some(path)
+    }
+}
+
 impl Server {
     /// Build a server from already-parsed graph data, building every derived
     /// index from the graph (the json load path; unchanged behavior).
@@ -666,9 +767,11 @@ impl Server {
                 continue;
             };
             let v = into.entry((nb, e.relation.clone(), dir)).or_default();
-            let site = (e.source_file.clone(), e.source_location.clone());
-            if !v.contains(&site) {
-                v.push(site);
+            for site in e.sites() {
+                let site = (site.source_file, site.source_location);
+                if !v.contains(&site) {
+                    v.push(site);
+                }
             }
         }
     }
@@ -2583,7 +2686,9 @@ Cross-repo: {} edge(s) span repositories{}",
         to: &NodeId,
     ) -> Option<Vec<NodeId>> {
         let tsh = self.provider.owner_shard(to)?;
-        let mut best: Option<Vec<NodeId>> = None;
+        let from_tree = UndirectedBfsTree::build(&sh.kg, from)?;
+        let to_tree = UndirectedBfsTree::build(&tsh.kg, to)?;
+        let mut best: Option<(usize, NodeId, NodeId)> = None;
         for e in self.provider.bridge() {
             // Orient the edge: `a` must live in the from-shard, `b` in the
             // to-shard (paths are undirected, matching shortest_path).
@@ -2594,29 +2699,26 @@ Cross-repo: {} edge(s) span repositories{}",
             } else {
                 continue;
             };
-            let leg1 = if &a == from {
-                vec![from.clone()]
-            } else {
-                match shortest_path(&sh.kg, from, &a) {
-                    Some(p) => p,
-                    None => continue,
-                }
+            let Some(from_distance) = from_tree.distance_to(&a) else {
+                continue;
             };
-            let leg2 = if &b == to {
-                vec![to.clone()]
-            } else {
-                match shortest_path(&tsh.kg, &b, to) {
-                    Some(p) => p,
-                    None => continue,
-                }
+            let Some(to_distance) = to_tree.distance_to(&b) else {
+                continue;
             };
-            let mut path = leg1;
-            path.extend(leg2);
-            if best.as_ref().is_none_or(|b| path.len() < b.len()) {
-                best = Some(path);
+            let hops = from_distance + 1 + to_distance;
+            // Strictly-shorter replacement preserves the original first-bridge
+            // winner when multiple candidates have equal total length.
+            if best
+                .as_ref()
+                .is_none_or(|(best_hops, _, _)| hops < *best_hops)
+            {
+                best = Some((hops, a, b));
             }
         }
-        best
+        let (_, from_bridge, to_bridge) = best?;
+        let mut path = from_tree.path_from_root(&from_bridge)?;
+        path.extend(to_tree.path_to_root(&to_bridge)?);
+        Some(path)
     }
 
     /// The relation connecting two adjacent path nodes, picking the most
@@ -9314,6 +9416,37 @@ mod tests {
         assert!(path.starts_with("Shortest path"), "{path}");
         assert!(path.contains("-[calls]->"), "calls hop shown: {path}");
         assert!(path.contains("-[uses]->"), "uses hop shown: {path}");
+    }
+
+    #[test]
+    fn target_rooted_bfs_reconstruction_preserves_source_rooted_ties() {
+        let gd = GraphData {
+            directed: false,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: ["tb", "ta", "tz", "tc", "td", "tt"]
+                .into_iter()
+                .map(|id| node(id, id, None))
+                .collect(),
+            links: vec![
+                edge("tb", "ta", "calls"),
+                edge("ta", "tz", "calls"),
+                edge("tz", "tt", "calls"),
+                edge("tb", "tc", "calls"),
+                edge("tc", "td", "calls"),
+                edge("td", "tt", "calls"),
+            ],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let kg = KnowledgeGraph::from_graph_data(gd);
+        let from = NodeId("tb".into());
+        let to = NodeId("tt".into());
+        let target_tree = UndirectedBfsTree::build(&kg, &to).unwrap();
+        assert_eq!(
+            target_tree.path_to_root(&from),
+            shortest_path(&kg, &from, &to)
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # Architecture
 
-Synaptic is a Rust workspace: **22 library crates** under `crates/*` plus the `synaptic`
-CLI under `bin/`. The workspace uses edition 2021 and a pinned Rust 1.95 toolchain, with
+Synaptic is a Rust workspace: **25 library crates** under `crates/*` plus the `synaptic`
+CLI under `bin/`. The workspace uses edition 2021 and a pinned Rust 1.96 toolchain, with
 dependencies centralized in the root `Cargo.toml`.
 
 ## The pipeline
@@ -69,7 +69,11 @@ The graph is a node-link structure serialized to `graph.json` (NetworkX-compatib
 - **Edges** (serialized under `links`) have a `source`, `target`, `relation` (for example
   `calls`, `imports`, `imports_from`, `inherits`, `implements`, `references`, `contains`,
   `depends_on`, `reads_from`, `shadows`), and a `confidence` of `EXTRACTED`, `INFERRED`, or
-  `AMBIGUOUS`. Cross-repo edges are flagged with `cross_repo`.
+  `AMBIGUOUS`. Cross-repo edges are flagged with `cross_repo`. Semantic edge identity also
+  includes optional `context` (so GET and POST couplings between the same nodes remain
+  distinct). When several extraction sites produce the same semantic edge, the typed
+  `source_file` / `source_location` remain the primary site and additional distinct sites
+  are retained in the flattened `sites` array.
 - **Resource nodes** (`file_type: document`, tagged `_node_type: resource`) index
   data/resource files (data JSON, `.mcmeta`) one node per file — never one per key.
   Reference-like strings inside them bind to the file, resource (by path-derived

@@ -244,6 +244,27 @@ impl KnowledgeGraph {
         }
     }
 
+    /// Consume the graph into the node-link contract without cloning payloads.
+    pub fn into_graph_data(self) -> GraphData {
+        let KnowledgeGraph {
+            graph,
+            index: _,
+            directed,
+            hyperedges,
+            built_at_commit,
+        } = self;
+        let (nodes, edges) = graph.into_nodes_edges();
+        GraphData {
+            directed,
+            multigraph: false,
+            graph: serde_json::Map::new(),
+            nodes: nodes.into_iter().map(|node| node.weight).collect(),
+            links: edges.into_iter().map(|edge| edge.weight).collect(),
+            hyperedges,
+            built_at_commit,
+        }
+    }
+
     /// Load a `KnowledgeGraph` from existing node-link data as-is (no remap or
     /// dedup — use [`crate::build_from_parts`] to assemble fresh extraction).
     pub fn from_graph_data(data: GraphData) -> KnowledgeGraph {
@@ -453,5 +474,25 @@ mod tests {
         let kg = KnowledgeGraph::from_graph_data(gd);
         assert_eq!(kg.node_count(), 1);
         assert_eq!(kg.edge_count(), 0);
+    }
+
+    #[test]
+    fn consuming_graph_data_matches_borrowed_conversion() {
+        let data = GraphData {
+            directed: true,
+            nodes: vec![node("a", "a", "a.rs"), node("b", "b", "b.rs")],
+            links: vec![edge("a", "b", "calls")],
+            hyperedges: vec![Hyperedge {
+                id: "h".into(),
+                label: "group".into(),
+                nodes: vec![NodeId("a".into()), NodeId("b".into())],
+                relation: None,
+                confidence: None,
+            }],
+            built_at_commit: Some("abc".into()),
+            ..Default::default()
+        };
+        let graph = KnowledgeGraph::from_graph_data(data);
+        assert_eq!(graph.to_graph_data(), graph.into_graph_data());
     }
 }

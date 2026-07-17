@@ -204,22 +204,24 @@ fn bench_workspace(c: &mut Criterion) {
         });
     }
 
-    // compose: 16 members of 500 nodes each (~8k-node federated graph).
-    let subgraphs: Vec<(String, GraphData)> = (0..16)
-        .map(|r| {
-            let tag = format!("repo{r}");
-            let g = member_graph(500, &tag);
-            (tag, g)
-        })
-        .collect();
-    group.throughput(Throughput::Elements(16 * 500));
-    group.bench_function("compose/16x500", |b| {
-        b.iter_batched(
-            || subgraphs.clone(),
-            |subs| black_box(compose(subs)),
-            BatchSize::SmallInput,
-        );
-    });
+    // Hold member size fixed so the curve exposes repeated-prefix composition.
+    for &members in &[4usize, 16, 64] {
+        let subgraphs: Vec<(String, GraphData)> = (0..members)
+            .map(|r| {
+                let tag = format!("repo{r}");
+                let graph = member_graph(500, &tag);
+                (tag, graph)
+            })
+            .collect();
+        group.throughput(Throughput::Elements((members * 500) as u64));
+        group.bench_function(format!("compose/{members}x500"), |b| {
+            b.iter_batched(
+                || subgraphs.clone(),
+                |subs| black_box(compose(subs)),
+                BatchSize::SmallInput,
+            );
+        });
+    }
 
     // resolve_cross_repo: the D3 hot path, two repos.
     for &n in &[1_000usize, 5_000] {

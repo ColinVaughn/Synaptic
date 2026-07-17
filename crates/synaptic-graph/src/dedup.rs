@@ -345,26 +345,40 @@ fn apply_components(
     edges: Vec<Edge>,
     uf: &mut UnionFind,
 ) -> (Vec<Node>, Vec<Edge>) {
+    let components = uf.components();
+    if components.values().all(|members| members.len() <= 1) {
+        return (unique, edges);
+    }
+
+    // Record input order once so tied winner candidates keep pick_winner's
+    // first-on-tie rule without rescanning every node for every component.
+    let mut input_order: HashMap<&str, usize> = HashMap::with_capacity(unique.len());
+    for (index, node) in unique.iter().enumerate() {
+        input_order.entry(node.id.as_str()).or_insert(index);
+    }
+
     let mut remap: HashMap<NodeId, NodeId> = HashMap::new();
-    for (_root, members) in uf.components() {
+    for members in components.into_values() {
         if members.len() <= 1 {
             continue;
         }
-        let ordered: Vec<NodeId> = unique
+        let Some(winner) = members
             .iter()
-            .filter(|n| members.contains(&n.id))
-            .map(|n| n.id.clone())
-            .collect();
-        if ordered.is_empty() {
+            .filter_map(|id| input_order.get(id.as_str()).map(|&order| (id, order)))
+            .min_by_key(|(id, order)| (CHUNK_SUFFIX.is_match(&id.0) as u8, id.0.len(), *order))
+            .map(|(id, _)| id.clone())
+        else {
+            // merge_pairs accepts caller-provided ids, so a component can
+            // contain no node from this graph. Match the previous no-op behavior.
             continue;
-        }
-        let winner = pick_winner(&ordered);
+        };
         for m in members {
             if m != winner {
                 remap.insert(m, winner.clone());
             }
         }
     }
+    drop(input_order);
 
     if remap.is_empty() {
         return (unique, edges);
@@ -726,5 +740,34 @@ mod tests {
             pick_winner(&[NodeId("longer_id".into()), NodeId("short".into())]),
             NodeId("short".into())
         );
+    }
+
+    #[test]
+    fn merge_pairs_preserves_input_order_for_tied_winners() {
+        let nodes = vec![
+            n("bbbb", "First", FileType::Concept, "d.md"),
+            n("aaaa", "Second", FileType::Concept, "d.md"),
+        ];
+        let edges = vec![edge("aaaa", "external")];
+        let pairs = vec![(NodeId("aaaa".into()), NodeId("bbbb".into()))];
+
+        let (merged, rewired) = merge_pairs(nodes, edges, &pairs);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, NodeId("bbbb".into()));
+        assert_eq!(rewired[0].source, NodeId("bbbb".into()));
+    }
+
+    #[test]
+    fn merge_pairs_still_rewires_unknown_component_members() {
+        let nodes = vec![n("known", "Known", FileType::Concept, "d.md")];
+        let edges = vec![edge("missing", "external")];
+        let pairs = vec![(NodeId("known".into()), NodeId("missing".into()))];
+
+        let (merged, rewired) = merge_pairs(nodes, edges, &pairs);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, NodeId("known".into()));
+        assert_eq!(rewired[0].source, NodeId("known".into()));
     }
 }

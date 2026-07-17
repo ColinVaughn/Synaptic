@@ -11,11 +11,11 @@
 //! [`crate::export_surface`]/D3 and runs on the composed graph this module
 //! produces.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use serde_json::Value;
-use synaptic_core::{GraphData, NodeId};
-use synaptic_incremental::union_graphs;
+use synaptic_core::{EdgeKey, EdgeSiteAccumulator, GraphData, NodeId};
+use synaptic_incremental::union_graphs_many;
 
 /// Namespace one subgraph under `tag`: `id` → `tag::id`, set `repo`, stash the
 /// original id as `local_id`, repo-prefix non-empty `source_file`s, and remap
@@ -41,8 +41,22 @@ pub fn prefix_graph(graph: GraphData, tag: &str) -> GraphData {
     for mut e in graph.links {
         e.source = pfx(&e.source);
         e.target = pfx(&e.target);
+        let mut aggregated_sites = e
+            .extra
+            .contains_key("sites")
+            .then(|| EdgeSiteAccumulator::new(&e));
         if !e.source_file.is_empty() {
             e.source_file = format!("{tag}/{}", e.source_file);
+        }
+        if let Some(sites) = &mut aggregated_sites {
+            sites.rewrite(|site| {
+                if !site.source_file.is_empty() {
+                    site.source_file = format!("{tag}/{}", site.source_file);
+                }
+            });
+        }
+        if let Some(sites) = aggregated_sites {
+            sites.apply_to(&mut e);
         }
         links.push(e);
     }
@@ -115,8 +129,9 @@ pub fn dedup_externals(mut g: GraphData) -> GraphData {
     let links = std::mem::take(&mut g.links);
     // Context is part of edge identity: a GET and a POST calls_service between
     // the same fn and route are two couplings, not a duplicate (wave-2 low).
-    let mut seen: HashSet<(NodeId, NodeId, String, Option<String>)> = HashSet::new();
-    let mut kept = Vec::with_capacity(links.len());
+    let mut seen: HashMap<EdgeKey, usize> = HashMap::new();
+    let mut kept: Vec<synaptic_core::Edge> = Vec::with_capacity(links.len());
+    let mut site_accumulators: Vec<Option<EdgeSiteAccumulator>> = Vec::with_capacity(links.len());
     for mut e in links {
         let s = remap.get(&e.source);
         let t = remap.get(&e.target);
@@ -132,13 +147,24 @@ pub fn dedup_externals(mut g: GraphData) -> GraphData {
         if collapsed && e.source == e.target {
             continue;
         }
-        if seen.insert((
-            e.source.clone(),
-            e.target.clone(),
-            e.relation.clone(),
-            e.context.clone(),
-        )) {
+        let key = EdgeKey::new(&e, true);
+        if let Some(&index) = seen.get(&key) {
+            if site_accumulators[index].is_none() {
+                site_accumulators[index] = Some(EdgeSiteAccumulator::new(&kept[index]));
+            }
+            site_accumulators[index]
+                .as_mut()
+                .expect("duplicate edge has a site accumulator")
+                .include_edge(&e);
+        } else {
+            seen.insert(key, kept.len());
             kept.push(e);
+            site_accumulators.push(None);
+        }
+    }
+    for (edge, sites) in kept.iter_mut().zip(site_accumulators) {
+        if let Some(sites) = sites {
+            sites.apply_to(edge);
         }
     }
     g.links = kept;
@@ -157,22 +183,22 @@ pub fn dedup_externals(mut g: GraphData) -> GraphData {
 /// them, then dedup shared externals. The federated graph is *not* re-clustered
 /// here (the build step does that after cross-repo resolution).
 pub fn compose(subgraphs: Vec<(String, GraphData)>) -> GraphData {
-    let mut iter = subgraphs.into_iter().map(|(tag, g)| prefix_graph(g, &tag));
-    let Some(first) = iter.next() else {
-        return GraphData::default();
-    };
-    let unioned = iter.fold(first, union_graphs);
+    let unioned = union_graphs_many(
+        subgraphs
+            .into_iter()
+            .map(|(tag, graph)| prefix_graph(graph, &tag)),
+    );
     dedup_externals(unioned)
 }
 
 /// Like [`compose`] but **without** external dedup — the `merge-graphs` path,
 /// which composes inputs verbatim.
 pub fn compose_no_dedup(subgraphs: Vec<(String, GraphData)>) -> GraphData {
-    let mut iter = subgraphs.into_iter().map(|(tag, g)| prefix_graph(g, &tag));
-    let Some(first) = iter.next() else {
-        return GraphData::default();
-    };
-    iter.fold(first, union_graphs)
+    union_graphs_many(
+        subgraphs
+            .into_iter()
+            .map(|(tag, graph)| prefix_graph(graph, &tag)),
+    )
 }
 
 #[cfg(test)]
@@ -231,8 +257,31 @@ mod tests {
         assert_eq!(p.nodes[0].source_file, "billing/src/foo.py");
         assert_eq!(p.links[0].source.0, "billing::f");
         assert_eq!(p.links[0].target.0, "billing::f");
+        assert_eq!(p.links[0].source_file, "billing/a.py");
         // label is untouched (display).
         assert_eq!(p.nodes[0].label, "Foo");
+    }
+
+    #[test]
+    fn prefix_rewrites_every_aggregated_edge_site() {
+        let mut first = edge("f", "f", "calls");
+        first.source_location = Some("L1".into());
+        let mut second = first.clone();
+        second.source_file = "src/other.py".into();
+        second.source_location = Some("L2".into());
+        first.merge_sites_from(&second);
+
+        let prefixed = prefix_graph(
+            gd(vec![node("f", "Foo", "src/foo.py")], vec![first]),
+            "billing",
+        );
+        let sites = prefixed.links[0].sites();
+
+        assert_eq!(sites.len(), 2);
+        assert_eq!(sites[0].source_file, "billing/a.py");
+        assert_eq!(sites[1].source_file, "billing/src/other.py");
+        assert_eq!(sites[0].source_location.as_deref(), Some("L1"));
+        assert_eq!(sites[1].source_location.as_deref(), Some("L2"));
     }
 
     #[test]

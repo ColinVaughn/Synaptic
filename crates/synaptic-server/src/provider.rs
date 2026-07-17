@@ -7,7 +7,7 @@
 //! server tests are the regression net for the whole refactor.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use synaptic_core::{Edge, GraphData, Node, NodeId};
 use synaptic_graph::{god_nodes, graph_stats, GodNode, GraphStats, KnowledgeGraph};
@@ -127,29 +127,91 @@ impl ShardLru {
     }
 }
 
+/// One materialization shared by all concurrent callers for the same cold tag.
+/// Results are published once; failures are deliberately not retained after the
+/// callers are released so a later request can retry.
+struct PendingShardLoad {
+    result: Mutex<Option<Result<Arc<MaterializedShard>, String>>>,
+    ready: Condvar,
+}
+
+impl PendingShardLoad {
+    fn new() -> Self {
+        Self {
+            result: Mutex::new(None),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn wait(&self) -> Result<Arc<MaterializedShard>, String> {
+        let mut result = self.result.lock().unwrap();
+        while result.is_none() {
+            result = self.ready.wait(result).unwrap();
+        }
+        result.as_ref().unwrap().clone()
+    }
+
+    fn publish(&self, result: Result<Arc<MaterializedShard>, String>) {
+        *self.result.lock().unwrap() = Some(result);
+        self.ready.notify_all();
+    }
+}
+
+type BridgeIncidence = HashMap<NodeId, Vec<usize>>;
+
+fn build_bridge_incidence(bridge: &[Edge]) -> BridgeIncidence {
+    let mut incidence = HashMap::new();
+    for (index, edge) in bridge.iter().enumerate() {
+        incidence
+            .entry(edge.source.clone())
+            .or_insert_with(Vec::new)
+            .push(index);
+        if edge.target != edge.source {
+            incidence
+                .entry(edge.target.clone())
+                .or_insert_with(Vec::new)
+                .push(index);
+        }
+    }
+    incidence
+}
+
 /// Per-repo shards materialized on demand from a [`ShardStore`], with a bounded
 /// LRU so a federated serve never holds the whole union in RAM.
 pub struct ShardProvider {
     store: ShardStore,
     lru: Mutex<ShardLru>,
+    /// Per-tag cold loads. This prevents concurrent requests for the same shard
+    /// from each materializing and rebuilding all indexes independently.
+    in_flight: Mutex<HashMap<String, Arc<PendingShardLoad>>>,
     /// Content fingerprint of all shards (sorted `tag:source_hash`); the cache key
     /// for streaming aggregates, bumped whenever any shard changes.
     version: String,
     /// Cross-repo edges, loaded up front (small relative to any shard).
     bridge: Vec<Edge>,
+    /// Bridge-edge positions keyed by either endpoint, in bridge insertion order.
+    bridge_incidence: BridgeIncidence,
     /// Whether walks may follow bridge edges into other shards. On by default
     /// when the store has bridge edges (auto-detected); `SYNAPTIC_CROSS_REPO=0`
     /// forces per-repo isolation, `=1` forces traversal on.
     cross_repo: bool,
     #[allow(dead_code)] // consumed by the streaming aggregator tasks
     agg: AggregateCache,
+    #[cfg(test)]
+    cold_loads: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    cold_load_delay: std::time::Duration,
 }
 
 impl ShardProvider {
-    /// Materialize a shard (LRU-cached), loading its persisted indexes when present.
-    fn get_shard(&self, tag: &str) -> Result<Arc<MaterializedShard>, String> {
-        if let Some(s) = self.lru.lock().unwrap().get(tag) {
-            return Ok(s);
+    fn load_shard(&self, tag: &str) -> Result<Arc<MaterializedShard>, String> {
+        #[cfg(test)]
+        {
+            self.cold_loads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if !self.cold_load_delay.is_zero() {
+                std::thread::sleep(self.cold_load_delay);
+            }
         }
         let kg = self.store.materialize(tag).map_err(|e| e.to_string())?;
         let hash = self
@@ -172,9 +234,50 @@ impl ShardProvider {
             ),
             None => (None, None),
         };
-        let shard = Arc::new(MaterializedShard::from_prepared(kg, qi, ai));
-        self.lru.lock().unwrap().put(tag.to_string(), shard.clone());
-        Ok(shard)
+        Ok(Arc::new(MaterializedShard::from_prepared(kg, qi, ai)))
+    }
+
+    /// Materialize a shard (LRU-cached), loading its persisted indexes when
+    /// present. Concurrent misses for one tag share the same materialization.
+    fn get_shard(&self, tag: &str) -> Result<Arc<MaterializedShard>, String> {
+        if let Some(shard) = self.lru.lock().unwrap().get(tag) {
+            return Ok(shard);
+        }
+
+        let (pending, is_leader) = {
+            let mut in_flight = self.in_flight.lock().unwrap();
+            if let Some(pending) = in_flight.get(tag) {
+                (pending.clone(), false)
+            } else {
+                let pending = Arc::new(PendingShardLoad::new());
+                in_flight.insert(tag.to_string(), pending.clone());
+                (pending, true)
+            }
+        };
+
+        if !is_leader {
+            let result = pending.wait();
+            if let Ok(shard) = &result {
+                self.lru.lock().unwrap().put(tag.to_string(), shard.clone());
+            }
+            return result;
+        }
+
+        // A previous leader may have completed between the optimistic LRU miss
+        // and installing this tag's in-flight entry.
+        let cached = { self.lru.lock().unwrap().get(tag) };
+        let result = if let Some(shard) = cached {
+            Ok(shard)
+        } else {
+            let loaded = self.load_shard(tag);
+            if let Ok(shard) = &loaded {
+                self.lru.lock().unwrap().put(tag.to_string(), shard.clone());
+            }
+            loaded
+        };
+        pending.publish(result.clone());
+        self.in_flight.lock().unwrap().remove(tag);
+        result
     }
 
     /// Number of shards currently resident in the LRU (for tests/diagnostics).
@@ -325,6 +428,7 @@ impl GraphProvider {
     pub fn from_store(store: ShardStore) -> Self {
         let version = shard_version(&store);
         let bridge = store.read_bridge_edges().unwrap_or_default();
+        let bridge_incidence = build_bridge_incidence(&bridge);
         let cap = std::env::var("SYNAPTIC_SHARD_LRU")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
@@ -333,10 +437,16 @@ impl GraphProvider {
         GraphProvider::Shard(Box::new(ShardProvider {
             store,
             lru: Mutex::new(ShardLru::new(cap)),
+            in_flight: Mutex::new(HashMap::new()),
             version: version.clone(),
             bridge,
+            bridge_incidence,
             cross_repo,
             agg: AggregateCache::new(version),
+            #[cfg(test)]
+            cold_loads: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            cold_load_delay: std::time::Duration::ZERO,
         }))
     }
 
@@ -610,10 +720,18 @@ impl GraphProvider {
                     counts_of(&sh.kg, &mut counts);
                     // Bridge edges live outside the shards; attribute each to
                     // its source repo while that shard is resident.
-                    for e in &sp.bridge {
-                        if let Some(r) = sh.kg.node(&e.source).and_then(|n| n.repo.as_deref()) {
-                            counts.entry(r.to_string()).or_default().1 += 1;
-                        }
+                    for node in sh.kg.nodes() {
+                        let Some(repo) = node.repo.as_deref() else {
+                            continue;
+                        };
+                        let outgoing = sp
+                            .bridge_incidence
+                            .get(&node.id)
+                            .into_iter()
+                            .flatten()
+                            .filter(|&&index| sp.bridge[index].source == node.id)
+                            .count();
+                        counts.entry(repo.to_string()).or_default().1 += outgoing;
                     }
                     Ok(())
                 });
@@ -730,10 +848,11 @@ impl GraphProvider {
         match self {
             GraphProvider::Single(_) => Vec::new(),
             GraphProvider::Shard(sp) => sp
-                .bridge
-                .iter()
-                .filter(|e| &e.source == id || &e.target == id)
-                .cloned()
+                .bridge_incidence
+                .get(id)
+                .into_iter()
+                .flatten()
+                .map(|&index| sp.bridge[index].clone())
                 .collect(),
         }
     }
@@ -745,8 +864,11 @@ impl GraphProvider {
         match self {
             GraphProvider::Single(_) => None,
             GraphProvider::Shard(sp) => sp
-                .bridge
-                .iter()
+                .bridge_incidence
+                .get(a)
+                .into_iter()
+                .flatten()
+                .map(|&index| &sp.bridge[index])
                 .filter(|e| {
                     (&e.source == a && &e.target == b) || (&e.source == b && &e.target == a)
                 })
@@ -804,9 +926,12 @@ impl GraphProvider {
                     .map(|sh| sh.kg.degree(id))
                     .unwrap_or(0);
                 let bridge_nbrs: std::collections::HashSet<&NodeId> = sp
-                    .bridge
-                    .iter()
-                    .filter_map(|e| {
+                    .bridge_incidence
+                    .get(id)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|&index| {
+                        let e = &sp.bridge[index];
                         if &e.source == id {
                             Some(&e.target)
                         } else if &e.target == id {
@@ -1060,6 +1185,30 @@ mod tests {
         }
     }
 
+    fn bridge_heavy_gd() -> GraphData {
+        GraphData {
+            directed: true,
+            multigraph: true,
+            graph: Map::new(),
+            nodes: vec![
+                rnode("a", Some("billing")),
+                rnode("b", Some("billing")),
+                rnode("x", Some("web")),
+                rnode("y", Some("web")),
+            ],
+            links: vec![
+                xedge("a", "b", "calls", Confidence::Extracted, false),
+                xedge("x", "y", "calls", Confidence::Extracted, false),
+                xedge("a", "x", "zeta", Confidence::Extracted, true),
+                xedge("x", "a", "alpha", Confidence::Inferred, true),
+                xedge("a", "y", "beta", Confidence::Extracted, true),
+                xedge("b", "x", "calls", Confidence::Extracted, true),
+            ],
+            hyperedges: vec![],
+            built_at_commit: None,
+        }
+    }
+
     fn shard_provider_over(gd: &GraphData) -> GraphProvider {
         use synaptic_store::{migrate, ShardStore};
         let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
@@ -1067,6 +1216,28 @@ mod tests {
         let mut store = ShardStore::open(&store_dir).unwrap();
         migrate::migrate_into(&mut store, gd).unwrap();
         GraphProvider::from_store(ShardStore::open(&store_dir).unwrap())
+    }
+
+    fn concurrent_shard_requests(
+        provider: Arc<GraphProvider>,
+        tag: &str,
+        count: usize,
+    ) -> Vec<Result<Arc<MaterializedShard>, String>> {
+        let barrier = Arc::new(std::sync::Barrier::new(count));
+        let mut handles = Vec::new();
+        for _ in 0..count {
+            let provider = provider.clone();
+            let barrier = barrier.clone();
+            let tag = tag.to_string();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                provider.shard(&tag)
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
     }
 
     /// Cross-repo traversal defaults on exactly when the store holds bridge
@@ -1222,6 +1393,43 @@ mod tests {
     }
 
     #[test]
+    fn bridge_incidence_matches_full_scan_semantics() {
+        let gd = bridge_heavy_gd();
+        let unified = GraphProvider::single(gd.clone(), Prepared::default());
+        let sharded = shard_provider_over(&gd);
+        let a = NodeId("a".into());
+        let x = NodeId("x".into());
+        let expected: Vec<Edge> = sharded
+            .bridge()
+            .iter()
+            .filter(|edge| edge.source == a || edge.target == a)
+            .cloned()
+            .collect();
+        assert_eq!(expected.len(), 3);
+        assert_eq!(sharded.bridge_edges_of(&a), expected);
+        assert_eq!(sharded.bridge_relation(&a, &x).as_deref(), Some("alpha"));
+        for id in ["a", "b", "x", "y"] {
+            let id = NodeId(id.into());
+            let in_shard = sharded.owner_shard(&id).unwrap().kg.degree(&id);
+            let bridge_neighbors: std::collections::HashSet<_> = sharded
+                .bridge()
+                .iter()
+                .filter_map(|edge| {
+                    if edge.source == id {
+                        Some(&edge.target)
+                    } else if edge.target == id {
+                        Some(&edge.source)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(sharded.degree_of(&id), in_shard + bridge_neighbors.len());
+        }
+        assert_eq!(sharded.repo_counts(), unified.repo_counts());
+    }
+
+    #[test]
     fn lru_bounds_resident_shards() {
         let gd = GraphData {
             directed: true,
@@ -1249,6 +1457,50 @@ mod tests {
         } else {
             panic!("expected shard provider");
         }
+    }
+
+    #[test]
+    fn concurrent_same_tag_misses_share_one_cold_load() {
+        let mut provider = shard_provider_over(&two_repo_gd());
+        if let GraphProvider::Shard(sp) = &mut provider {
+            sp.cold_load_delay = std::time::Duration::from_millis(75);
+        }
+        let provider = Arc::new(provider);
+        let shards: Vec<_> = concurrent_shard_requests(provider.clone(), "billing", 8)
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+        for shard in &shards[1..] {
+            assert!(Arc::ptr_eq(&shards[0], shard));
+        }
+        let GraphProvider::Shard(sp) = provider.as_ref() else {
+            unreachable!();
+        };
+        let loads = sp.cold_loads.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(loads, 1);
+        assert_eq!(sp.resident_count(), 1);
+    }
+
+    #[test]
+    fn concurrent_same_tag_errors_are_shared_but_retryable() {
+        let mut provider = shard_provider_over(&two_repo_gd());
+        if let GraphProvider::Shard(sp) = &mut provider {
+            sp.cold_load_delay = std::time::Duration::from_millis(75);
+        }
+        let provider = Arc::new(provider);
+        let results = concurrent_shard_requests(provider.clone(), "missing", 8);
+        assert!(results.iter().all(Result::is_err));
+        let first_error = results[0].as_ref().err().unwrap();
+        assert!(results
+            .iter()
+            .all(|result| result.as_ref().err() == Some(first_error)));
+        let GraphProvider::Shard(sp) = provider.as_ref() else {
+            unreachable!();
+        };
+        assert_eq!(sp.cold_loads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(sp.resident_count(), 0);
+        assert!(provider.shard("missing").is_err());
+        assert_eq!(sp.cold_loads.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]

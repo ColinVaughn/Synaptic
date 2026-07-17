@@ -20,11 +20,13 @@ use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
-use synaptic_core::{Confidence, Edge, FileType, ImportRecord, Node, NodeId, RawCall};
+use synaptic_core::{
+    Confidence, Edge, EdgeSiteAccumulator, FileType, ImportRecord, Node, NodeId, RawCall,
+};
 use synaptic_graph::{
     analyze, build_from_parts, cluster, deduplicate_entities, find_import_cycles, god_nodes,
-    resolve_symbols, suggest_questions, surprising_connections, BuildOptions, ClusterOptions,
-    KnowledgeGraph,
+    remap_communities_to_previous, resolve_symbols, suggest_questions, surprising_connections,
+    BuildOptions, ClusterOptions, KnowledgeGraph,
 };
 
 const SCALES: [usize; 3] = [100, 1_000, 10_000];
@@ -32,17 +34,17 @@ const SCALES: [usize; 3] = [100, 1_000, 10_000];
 // Synthetic, deterministic fixtures
 
 fn node(i: usize) -> Node {
+    let mut extra = serde_json::Map::new();
+    extra.insert("_origin".into(), serde_json::Value::String("ast".into()));
     Node {
-        // 64 distinct label stems => deliberate label collisions so dedup's
-        // MinHash/LSH near-duplicate detection has real work to do.
         id: NodeId(format!("n{i}")),
-        label: format!("func_{}", i % 64),
+        label: format!("func_{i}"),
         file_type: FileType::Code,
-        source_file: format!("src/mod_{}.rs", i % 32),
+        source_file: format!("src/mod_{i}.rs"),
         source_location: Some(format!("L{i}")),
         community: None,
         repo: None,
-        extra: serde_json::Map::new(),
+        extra,
     }
 }
 
@@ -74,17 +76,94 @@ fn synthetic_parts(n: usize) -> (Vec<Node>, Vec<Edge>) {
     (nodes, edges)
 }
 
+fn duplicate_site_edges(n: usize) -> Vec<Edge> {
+    (0..n)
+        .map(|i| {
+            let mut duplicate = edge(0, 1);
+            duplicate.source_file = "src/caller.rs".into();
+            duplicate.source_location = Some(format!("L{i}"));
+            duplicate
+        })
+        .collect()
+}
+
+/// The former dedup call-site pattern: every duplicate reparses and
+/// rematerializes all sites collected so far.
+fn merge_sites_repeated(mut edges: Vec<Edge>) -> Edge {
+    let mut winner = edges.remove(0);
+    for edge in &edges {
+        winner.merge_sites_from(edge);
+    }
+    winner
+}
+
+/// The production dedup pattern: visit every input site once and materialize
+/// the completed group once.
+fn merge_sites_accumulated(mut edges: Vec<Edge>) -> Edge {
+    let mut winner = edges.remove(0);
+    let mut sites = EdgeSiteAccumulator::new(&winner);
+    for edge in &edges {
+        sites.include_edge(edge);
+    }
+    sites.apply_to(&mut winner);
+    winner
+}
+
 fn synthetic_raw_calls(n: usize) -> Vec<RawCall> {
     (0..n)
         .map(|i| RawCall {
             caller: NodeId(format!("n{i}")),
-            callee: format!("func_{}", (i * 13 + 1) % 64),
+            callee: format!("func_{}", (i * 13 + 1) % n),
             is_member_call: false,
             source_file: format!("src/mod_{}.rs", i % 32),
             source_location: Some(format!("L{i}")),
             span: None,
         })
         .collect()
+}
+
+fn dedup_id(i: usize) -> NodeId {
+    let pair = i / 2;
+    if i.is_multiple_of(2) {
+        NodeId(format!("concept_{pair}"))
+    } else {
+        NodeId(format!("concept_{pair}_c1"))
+    }
+}
+
+/// Exact concept-duplicate pairs exercise component application and rewiring.
+fn synthetic_dedup_parts(n: usize) -> (Vec<Node>, Vec<Edge>) {
+    let nodes = (0..n)
+        .map(|i| {
+            let pair = i / 2;
+            Node {
+                id: dedup_id(i),
+                label: format!("aaaaaaaaaaaaaaaa {pair}"),
+                file_type: FileType::Concept,
+                source_file: format!("docs/doc_{pair}.md"),
+                source_location: None,
+                community: None,
+                repo: None,
+                extra: serde_json::Map::new(),
+            }
+        })
+        .collect();
+    let edges = (0..n)
+        .map(|i| Edge {
+            source: dedup_id(i),
+            target: dedup_id((i + 2) % n),
+            relation: "mentions".into(),
+            confidence: Confidence::Extracted,
+            source_file: format!("docs/doc_{}.md", i / 2),
+            source_location: None,
+            confidence_score: None,
+            weight: 1.0,
+            context: None,
+            cross_repo: false,
+            extra: serde_json::Map::new(),
+        })
+        .collect();
+    (nodes, edges)
 }
 
 fn build_opts() -> BuildOptions {
@@ -193,9 +272,20 @@ fn bench_scaling(c: &mut Criterion) {
 
     for &n in &SCALES {
         let (nodes, edges) = synthetic_parts(n);
+        let (dedup_nodes, dedup_edges) = synthetic_dedup_parts(n);
         let raw_calls = synthetic_raw_calls(n);
         let kg = build_from_parts(nodes.clone(), edges.clone(), Vec::new(), &build_opts());
+        assert_eq!(kg.node_count(), n, "scaling fixture collapsed nodes");
+        let (deduped, _) =
+            deduplicate_entities(dedup_nodes.clone(), dedup_edges.clone(), &empty_communities);
+        assert_eq!(deduped.len(), n.div_ceil(2), "dedup fixture missed pairs");
         let (communities, labels) = communities_and_labels(&kg);
+        let remap_communities: BTreeMap<u32, Vec<NodeId>> = (0..n)
+            .map(|i| (i as u32, vec![NodeId(format!("n{i}"))]))
+            .collect();
+        let previous: HashMap<NodeId, u32> = (0..n)
+            .map(|i| (NodeId(format!("n{i}")), ((i + 1) % n) as u32))
+            .collect();
 
         group.throughput(Throughput::Elements(n as u64));
 
@@ -208,13 +298,17 @@ fn bench_scaling(c: &mut Criterion) {
             );
         });
 
-        // deduplicate_entities also consumes its Vecs (MinHash/LSH path).
+        // Exact concept pairs exercise union-find component application and edge rewiring.
         group.bench_with_input(BenchmarkId::new("deduplicate_entities", n), &n, |b, _| {
             b.iter_batched(
-                || (nodes.clone(), edges.clone()),
+                || (dedup_nodes.clone(), dedup_edges.clone()),
                 |(ns, es)| black_box(deduplicate_entities(ns, es, &empty_communities)),
                 BatchSize::SmallInput,
             );
+        });
+
+        group.bench_with_input(BenchmarkId::new("remap_communities", n), &n, |b, _| {
+            b.iter(|| black_box(remap_communities_to_previous(&remap_communities, &previous)));
         });
 
         // resolve_symbols borrows the graph + call/import evidence.
@@ -273,6 +367,18 @@ fn bench_real(c: &mut Criterion) {
 
     group.bench_function("analyze", |b| {
         b.iter(|| black_box(analyze(&fx.kg, &fx.communities, &fx.labels)));
+    });
+
+    group.bench_function("to_graph_data_clone", |b| {
+        b.iter(|| black_box(fx.kg.to_graph_data()));
+    });
+
+    group.bench_function("into_graph_data_move", |b| {
+        b.iter_batched(
+            || fx.kg.clone(),
+            |kg| black_box(kg.into_graph_data()),
+            BatchSize::SmallInput,
+        );
     });
 
     group.finish();
@@ -346,11 +452,45 @@ fn bench_degree(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_duplicate_edge_provenance(c: &mut Criterion) {
+    let mut group = c.benchmark_group("graph/duplicate_edge_provenance");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(3));
+
+    for &n in &SCALES {
+        let edges = duplicate_site_edges(n);
+        let accumulated = merge_sites_accumulated(edges.clone());
+        assert_eq!(accumulated.sites().len(), n);
+        group.throughput(Throughput::Elements(n as u64));
+
+        if n <= 1_000 {
+            group.bench_with_input(BenchmarkId::new("repeated_materialize", n), &n, |b, _| {
+                b.iter_batched(
+                    || edges.clone(),
+                    |edges| black_box(merge_sites_repeated(edges)),
+                    BatchSize::SmallInput,
+                );
+            });
+        }
+        group.bench_with_input(BenchmarkId::new("accumulate_once", n), &n, |b, _| {
+            b.iter_batched(
+                || edges.clone(),
+                |edges| black_box(merge_sites_accumulated(edges)),
+                BatchSize::SmallInput,
+            );
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_scaling,
     bench_real,
     bench_analyze_breakdown,
-    bench_degree
+    bench_degree,
+    bench_duplicate_edge_provenance
 );
 criterion_main!(benches);

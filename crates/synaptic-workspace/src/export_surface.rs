@@ -418,12 +418,22 @@ pub fn resolve_cross_repo(
 
     // (3) Dedup rewired collisions (e.g. several modules -> one anchor), keeping
     // the highest-confidence edge for each (source, target, relation).
-    let mut idx: HashMap<(NodeId, NodeId, String), usize> = HashMap::new();
+    let mut idx: HashMap<synaptic_core::EdgeKey, usize> = HashMap::new();
     let mut deduped: Vec<synaptic_core::Edge> = Vec::with_capacity(g.links.len());
+    let mut site_accumulators: Vec<Option<synaptic_core::EdgeSiteAccumulator>> =
+        Vec::with_capacity(g.links.len());
     for e in std::mem::take(&mut g.links) {
-        let key = (e.source.clone(), e.target.clone(), e.relation.clone());
+        let key = synaptic_core::EdgeKey::new(&e, true);
         match idx.get(&key) {
             Some(&i) => {
+                if site_accumulators[i].is_none() {
+                    site_accumulators[i] =
+                        Some(synaptic_core::EdgeSiteAccumulator::new(&deduped[i]));
+                }
+                site_accumulators[i]
+                    .as_mut()
+                    .expect("duplicate edge has a site accumulator")
+                    .include_edge(&e);
                 let prev = deduped[i].confidence_score.unwrap_or(0.0);
                 if e.confidence_score.unwrap_or(0.0) > prev {
                     deduped[i] = e;
@@ -432,7 +442,13 @@ pub fn resolve_cross_repo(
             None => {
                 idx.insert(key, deduped.len());
                 deduped.push(e);
+                site_accumulators.push(None);
             }
+        }
+    }
+    for (edge, sites) in deduped.iter_mut().zip(site_accumulators) {
+        if let Some(sites) = sites {
+            sites.apply_to(edge);
         }
     }
     g.links = deduped;
@@ -616,6 +632,51 @@ mod tests {
         assert_eq!(e.target.0, "repob::Ledger"); // anchor (only symbol)
                                                  // The matched stub is gone (orphaned).
         assert!(!g.nodes.iter().any(|n| n.id.0 == "repoa::billing"));
+    }
+
+    #[test]
+    fn rewired_collision_keeps_highest_confidence_and_all_sites() {
+        let mut package_edge = import_edge("app", "billing", "imports_from");
+        package_edge.source_file = "package.rs".into();
+        package_edge.source_location = Some("L1".into());
+        let mut symbol_edge = import_edge("app", "Ledger", "imports_from");
+        symbol_edge.source_file = "symbol.rs".into();
+        symbol_edge.source_location = Some("L2".into());
+        let a = gd(
+            vec![
+                node("app", "app", "app.rs"),
+                node("billing", "billing", ""),
+                node("Ledger", "Ledger", ""),
+            ],
+            vec![package_edge, symbol_edge],
+        );
+        let b = gd(vec![node("Ledger", "Ledger", "ledger.rs")], vec![]);
+        let composed = compose(vec![("repoa".into(), a), ("repob".into(), b.clone())]);
+        let surfaces = vec![build_export_surface(
+            "repob",
+            coord("billing", Ecosystem::Cargo),
+            &b,
+        )];
+
+        let (g, _) = resolve_cross_repo(composed, &surfaces, &crate::alias::AliasMap::default());
+        let resolved: Vec<_> = g
+            .links
+            .iter()
+            .filter(|edge| {
+                edge.source.0 == "repoa::app"
+                    && edge.target.0 == "repob::Ledger"
+                    && edge.relation == "imports_from"
+            })
+            .collect();
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].confidence, Confidence::Extracted);
+        assert_eq!(resolved[0].confidence_score, Some(1.0));
+        assert_eq!(resolved[0].source_location.as_deref(), Some("L2"));
+        let sites = resolved[0].sites();
+        assert_eq!(sites.len(), 2);
+        assert_eq!(sites[0].source_file, "repoa/symbol.rs");
+        assert_eq!(sites[1].source_file, "repoa/package.rs");
     }
 
     #[test]

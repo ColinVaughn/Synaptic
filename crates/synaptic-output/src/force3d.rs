@@ -454,7 +454,7 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
     .nodeOpacity(0.92)
     .nodeThreeObject(n => meshKind(n) ? assetMesh(n) : (n.external ? externalMesh(n) : ((PERF && THREE) ? new THREE.Object3D() : null)))
     .linkColor(l => hlLinks.has(l) ? '#ffffff' : (l.crossRepo ? CROSS : l.color))
-    .linkWidth(l => hlLinks.has(l) ? 1.5 : (l.crossRepo ? 1.2 : (l.bridge ? 0.9 : (PERF ? 0 : 0.4))))
+    .linkWidth(l => PERF ? 0 : (hlLinks.has(l) ? 1.5 : (l.crossRepo ? 1.2 : (l.bridge ? 0.9 : 0.4))))
     // GL lines render brighter (constant 1px) than the thin cylinders they
     // replace, so on a dense graph the majority "extracted" (green) edges wash
     // everything out. A lower opacity in PERF mode keeps the link mesh readable
@@ -478,7 +478,7 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
   } catch (e) {}
 
   function applyHighlight() { Graph.nodeColor(Graph.nodeColor()).linkColor(Graph.linkColor()).linkWidth(Graph.linkWidth()); paintCustom(); if (PERF) paintInstances(); }
-  function applyFilters() { Graph.nodeVisibility(Graph.nodeVisibility()).linkVisibility(Graph.linkVisibility()); if (PERF) updateInstances(); }
+  function applyFilters() { Graph.nodeVisibility(Graph.nodeVisibility()).linkVisibility(Graph.linkVisibility()); if (PERF) rebuildActiveInstances(); }
 
   // --- GPU node instancing (PERF mode) --------------------------------------
   // Once edges are GL lines, the last big per-frame cost is one sphere *mesh*
@@ -493,7 +493,8 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
   // both click-to-focus and hover tooltips. Positions/colors are synced from
   // the live layout each tick and frozen on stop, so steady-state rotation does
   // no extra per-frame work.
-  let instMesh = null, instNodes = [], pickObjs = [], _ray = null, _hovEv = null, _hovPending = false, _downPt = null;
+  let instMesh = null, instNodes = [], activeInstNodes = [], pickObjs = [], _ray = null, _hovEv = null, _hovPending = false, _downPt = null;
+  let _instMatrix = null, _instQuaternion = null, _instPosition = null, _instScale = null, _instPaint = null;
   const NODE_REL = 4; // 3d-force-graph's nodeRelSize default: radius = cbrt(val) * 4
   function instColor(n) {
     if (hlNodes.size) return hlNodes.has(n) ? (n === selected ? '#ffffff' : baseColor(n)) : '#2b2b3c';
@@ -501,21 +502,26 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
   }
   function paintInstances() {
     if (!instMesh) return;
-    const c = new THREE.Color();
-    for (let i = 0; i < instNodes.length; i++) instMesh.setColorAt(i, c.set(instColor(instNodes[i])));
+    for (let i = 0; i < activeInstNodes.length; i++) instMesh.setColorAt(i, _instPaint.set(instColor(activeInstNodes[i])));
     if (instMesh.instanceColor) instMesh.instanceColor.needsUpdate = true;
   }
   function updateInstances() {
     if (!instMesh) return;
-    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), s = new THREE.Vector3();
-    for (let i = 0; i < instNodes.length; i++) {
-      const n = instNodes[i];
-      // The degree slider hides low-connection nodes by scaling them to nothing.
-      const k = n.val >= minDeg ? Math.cbrt(Math.max(n.val, 1)) * NODE_REL : 0;
-      p.set(n.x || 0, n.y || 0, n.z || 0); s.set(k, k, k);
-      instMesh.setMatrixAt(i, m.compose(p, q, s));
+    for (let i = 0; i < activeInstNodes.length; i++) {
+      const n = activeInstNodes[i];
+      const k = Math.cbrt(Math.max(n.val, 1)) * NODE_REL;
+      _instPosition.set(n.x ?? 0, n.y ?? 0, n.z ?? 0);
+      _instScale.set(k, k, k);
+      instMesh.setMatrixAt(i, _instMatrix.compose(_instPosition, _instQuaternion, _instScale));
     }
     instMesh.instanceMatrix.needsUpdate = true;
+  }
+  function rebuildActiveInstances() {
+    if (!instMesh) return;
+    activeInstNodes = instNodes.filter(nodeVisible);
+    instMesh.count = activeInstNodes.length;
+    updateInstances();
+    paintInstances();
   }
   function buildInstances() {
     if (!THREE || instMesh) return;
@@ -527,6 +533,11 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
     // makes the nodes read clearly on top of the translucent link haze.
     const mat = new THREE.MeshLambertMaterial({});
     instMesh = new THREE.InstancedMesh(geo, mat, instNodes.length);
+    _instMatrix = new THREE.Matrix4();
+    _instQuaternion = new THREE.Quaternion();
+    _instPosition = new THREE.Vector3();
+    _instScale = new THREE.Vector3();
+    _instPaint = new THREE.Color();
     instMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     instMesh.frustumCulled = false; // one object for the whole cloud; per-instance cull buys nothing
     // Raycast picking: three caches ONE bounding sphere for the whole instanced
@@ -537,7 +548,7 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
     // instance is tested precisely — picking stays exact at any layout spread.
     instMesh.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e9);
     Graph.scene().add(instMesh);
-    updateInstances(); paintInstances();
+    rebuildActiveInstances();
     // The library can't pick instanced nodes: take over picking/hover and drop
     // its (now redundant) pointer raycasting. Camera controls are unaffected.
     Graph.enablePointerInteraction(false);
@@ -572,13 +583,13 @@ const TEMPLATE: &str = r##"<!DOCTYPE html>
     let best = null, bestDist = Infinity;
     if (instMesh) {
       const hits = _ray.intersectObject(instMesh, false);
-      if (hits.length) { const n = instNodes[hits[0].instanceId]; if (n && n.val >= minDeg) { best = n; bestDist = hits[0].distance; } }
+      if (hits.length) { const n = activeInstNodes[hits[0].instanceId]; if (n) { best = n; bestDist = hits[0].distance; } }
     }
     // Asset/external meshes carry userData.node — raycast just those, not the lines.
     if (pickObjs.length) for (const h of _ray.intersectObjects(pickObjs, true)) {
       if (h.distance >= bestDist) break;
       let o = h.object; while (o && !(o.userData && o.userData.node)) o = o.parent;
-      if (o) { best = o.userData.node; break; }
+      if (o && nodeVisible(o.userData.node)) { best = o.userData.node; break; }
     }
     return best;
   }
@@ -968,8 +979,8 @@ mod tests {
         );
         assert!(html.contains("setPixelRatio"), "device-pixel-ratio cap");
         assert!(
-            html.contains("PERF ? 0 : 0.4"),
-            "normal edges drop to GL lines (width 0) on large graphs"
+            html.contains(".linkWidth(l => PERF ? 0 :"),
+            "all PERF-mode edges stay GL lines, including highlighted and bridge edges"
         );
         assert!(
             html.contains("linkOpacity(PERF ? 0.15 : 0.3)"),
@@ -1041,6 +1052,30 @@ mod tests {
         assert!(
             html.contains("boundingSphere = new THREE.Sphere"),
             "instanced cloud pins a bounding sphere so picking never early-outs"
+        );
+        assert!(
+            html.contains("activeInstNodes = instNodes.filter(nodeVisible)"),
+            "instanced cloud applies the complete shared visibility predicate"
+        );
+        assert!(
+            html.contains("instMesh.count = activeInstNodes.length"),
+            "only visible instances are submitted to WebGL"
+        );
+        assert!(
+            html.contains("activeInstNodes[hits[0].instanceId]"),
+            "raycast instance ids map through the filtered instance order"
+        );
+        assert!(
+            html.contains("_instMatrix = new THREE.Matrix4()"),
+            "matrix scratch storage is allocated once when the mesh is built"
+        );
+        assert!(
+            html.contains("_instPaint = new THREE.Color()"),
+            "color scratch storage is allocated once when the mesh is built"
+        );
+        assert!(
+            !html.contains("const m = new THREE.Matrix4()"),
+            "engine ticks must not allocate fresh transform scratch objects"
         );
     }
 

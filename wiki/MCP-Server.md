@@ -186,6 +186,14 @@ size.
 - **Hot reload is manifest-keyed**: any store rewrite (a member re-extracted
   into its shard) is picked up on the next data request; shards rematerialize
   on demand from persisted indexes.
+- **Cold loads are coalesced per repo**: concurrent requests that miss the same
+  shard wait for one materialization/index load instead of rebuilding it once
+  per request. A shared failure wakes every waiter and is then discarded so a
+  later request can retry.
+- **Bridge work is indexed**: endpoint-to-bridge incidence avoids full bridge
+  scans for neighbor/degree/repo queries. A cross-shard shortest path builds one
+  sorted-neighbor BFS tree in each participating shard, scores every candidate
+  bridge from those trees, and preserves deterministic shortest-path ties.
 
 ## MCP tools
 
@@ -334,9 +342,9 @@ Parameters:
 - `label` (string, required).
 - `relation_filter` (string) -- case-insensitive substring; keep only neighbours
   whose relation contains it.
-- `show_sites` (boolean) -- under each neighbour, print the actual source line of
-  that edge's call/reference site (`at file:line: <code>`, read from the jail).
-  Default false; enriches the text view only.
+- `show_sites` (boolean) -- under each neighbour, print the actual source lines
+  for every retained call/reference site on that semantic edge (`at file:line:
+  <code>`, read from the jail). Default false; enriches the text view only.
 - `limit` (integer, default 50) -- max neighbours listed before a `+N more`
   summary. Ignored when `verbose` is true.
 - `verbose` (boolean, default false) -- list every neighbour instead of the

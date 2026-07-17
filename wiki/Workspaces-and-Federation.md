@@ -220,6 +220,12 @@ Exactly one of `path`, `git`, or `subgraph` drives how it is built:
   either a local path (relative to the root) or an `http(s)` URL, consumed
   directly instead of cloning and building.
 
+Declared `[[repos]]` members load on a dedicated pool of at most four workers.
+Results and the first reported error remain in manifest order. Repository names
+must sanitize to distinct tags: for example, two names that both become
+`acme-billing` are rejected before any clone/build starts, because they would
+otherwise share one cache directory and graph namespace.
+
 ## Member auto-discovery
 
 When no `synaptic-workspace.toml` exists, members are auto-discovered from
@@ -354,7 +360,8 @@ never `@apple`). On duplicate aliases, the first mapping wins.
 
 Composition prefixes every member's subgraph with its tag (`id` becomes
 `tag::id`), sets a `repo` attribute on each node, stashes the original id as
-`local_id`, repo-prefixes `source_file`s, and unions the subgraphs. Shared
+`local_id`, repo-prefixes node source files and every primary/additional edge
+source site, and unions all subgraphs in one indexed pass. Shared
 **external** nodes (those with an empty `source_file`) are collapsed to one node
 across repos by a *typed* identity — its `_node_type` plus a canonical label (a
 route's normalized path, else the case-folded label) — so the federated graph
@@ -364,7 +371,9 @@ has one `serde`/`requests` node, an Express `/users/:id` route meets an axum
 over the composed graph (PyO3 module ↔ importer, subprocess command ↔ in-repo
 binary, code ↔ SQL table), each of which only ever has both sides present once
 the members are federated, and the merged graph is re-clustered at the workspace
-level.
+level. Edge dedup identity includes endpoints, relation, and optional context,
+so context-bearing boundaries such as GET and POST remain separate; exact
+duplicates retain every distinct extraction site.
 
 ## The global cross-repo store
 

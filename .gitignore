@@ -1,4 +1,6 @@
 /target
+/demo/
+/output/
 **/*.rs.bk
 # Generated graph artifacts (extract / workspace build / per-member AST cache).
 synaptic-out/
