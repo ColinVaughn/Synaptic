@@ -207,7 +207,7 @@ fn run_workspace_watch(
 ) -> Result<()> {
     use notify::{RecursiveMode, Watcher};
     use std::sync::mpsc::channel;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use synaptic_incremental::ChangeBatch;
     use synaptic_workspace::watch::{classify, member_for_path, resolve_watch_targets, WatchEvent};
 
@@ -346,14 +346,27 @@ fn run_workspace_watch(
                 &mut rescan,
                 &mut manifest_changed,
             );
-            while let Ok(ev) = rx.recv_timeout(Duration::from_millis(debounce)) {
-                record(
-                    ev,
-                    &mut batch,
-                    &mut touched,
-                    &mut rescan,
-                    &mut manifest_changed,
-                );
+            // Bound the whole batch window rather than restarting the timeout
+            // after every event. Otherwise a steady stream of ignored events
+            // (notably inotify activity from output writes) can starve both the
+            // rebuild and the periodic reconciliation indefinitely.
+            let batch_deadline = Instant::now() + Duration::from_millis(debounce);
+            loop {
+                let remaining = batch_deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                match rx.recv_timeout(remaining) {
+                    Ok(ev) => record(
+                        ev,
+                        &mut batch,
+                        &mut touched,
+                        &mut rescan,
+                        &mut manifest_changed,
+                    ),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
             }
 
             if manifest_changed {
