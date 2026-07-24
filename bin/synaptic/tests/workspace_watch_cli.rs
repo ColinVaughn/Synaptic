@@ -100,6 +100,8 @@ fn spawn_watch(root: &Path) -> Watcher {
                 "--debounce-ms",
                 "300",
             ])
+            // Exercise the dropped-event reconciliation path quickly in CI.
+            .env("SYNAPTIC_WATCH_RECONCILE_SECS", "1")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()

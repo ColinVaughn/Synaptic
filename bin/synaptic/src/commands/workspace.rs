@@ -218,6 +218,17 @@ fn run_workspace_watch(
                 .and_then(|v| v.trim().parse().ok())
         })
         .unwrap_or(synaptic_incremental::DEBOUNCE_MS);
+    // Filesystem notification backends can drop events without emitting a
+    // rescan marker (observed with inotify under CI load). Reconcile from the
+    // content hashes occasionally while idle so correctness never depends on
+    // receiving every OS event. The interval is intentionally much longer than
+    // the debounce window to keep idle scanning cheap.
+    let reconcile_interval = std::env::var("SYNAPTIC_WATCH_RECONCILE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|&secs| secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(30));
 
     // Each pass is one watcher generation; a manifest edit ends the inner loop
     // so the member set (and therefore the watch roots) is re-resolved.
@@ -265,10 +276,30 @@ fn run_workspace_watch(
         }
 
         // Block until the first change, then drain a quiet window to batch a
-        // burst. Ends when the watcher is dropped (channel closed) or the
-        // manifest changes (re-resolve).
+        // burst. An idle timeout reconciles content hashes as a safety net for
+        // dropped OS events. Ends when the watcher is dropped (channel closed)
+        // or the manifest changes (re-resolve).
         let mut manifest_changed = false;
-        while let Ok(first) = rx.recv() {
+        loop {
+            let first = match rx.recv_timeout(reconcile_interval) {
+                Ok(event) => event,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    match resolve_watch_targets(root) {
+                        Ok(refreshed) if refreshed != targets => {
+                            println!("\nWorkspace membership changed → re-resolving members…");
+                            manifest_changed = true;
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(e) => eprintln!("watch reconciliation failed: {e}"),
+                    }
+                    if let Err(e) = locked_update_cycle(root, opts, store, artifacts) {
+                        eprintln!("reconciliation rebuild failed: {e}");
+                    }
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            };
             let mut batch = ChangeBatch::new();
             let mut touched: std::collections::BTreeSet<String> = Default::default();
             let mut rescan = false;
