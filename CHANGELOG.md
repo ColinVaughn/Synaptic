@@ -8,6 +8,82 @@ All notable changes to Synaptic are documented here. The format is based on
 > **CodeGraph**, and reference the old `codegraph` command and crate names. They
 > are preserved verbatim as historical record.
 
+## [0.7.0] - 2026-07-23
+
+> **Upgrade note:** this release relicenses the project under FSL-1.1-ALv2, adds
+> a workspace-wide watch mode, hardens the sharded store against a tampered
+> manifest, and ships license notices with every release artifact. The graph
+> schema and the CLI remain compatible with 0.6.4.
+
+### Added
+
+- **`synaptic workspace build --watch` keeps a federated graph live across every
+  member repository.** Previously the only watcher was the single-repo `synaptic
+  watch`, which at a workspace root rebuilt the whole tree as one flat
+  repository and overwrote the federated `graph.json` with un-namespaced,
+  un-tagged nodes (duplicating every symbol and disabling cross-repo dedup). The
+  new mode watches the workspace tree plus each member checked out *outside* it
+  (`[[repos]] path = ...`), collapses overlapping roots so no event is handled
+  twice, debounces a burst of saves (`--debounce-ms`,
+  `SYNAPTIC_WATCH_DEBOUNCE_MS`), and drains each batch into the existing
+  `--changed` incremental federation. Event filtering reuses
+  `synaptic-incremental`'s ignore/extractable rules, so writing `graph.json` (or
+  a member's own `synaptic-out/cache`) cannot self-trigger. Output names the
+  member that changed and the members whose export surface moved; editing
+  `synaptic-workspace.toml` re-resolves members and re-registers watchers
+  without a restart; a member that cannot be read or watched is reported by tag
+  and the watcher keeps running. Each cycle takes the per-repo rebuild lock so a
+  concurrent `synaptic update` or git hook cannot interleave its write, and
+  workspace state is persisted only after artifacts land.
+- **Immutable hosted serving closes the initial-open and listener races.**
+  `serve --immutable-graph --expected-graph-sha256 <digest>` parses the exact
+  digest-verified bytes, while `--http 127.0.0.1:0 --ready-file <path>`
+  publishes the already-bound loopback endpoint through a protected atomic file.
+  The ready document is written as complete JSON via an atomic hard link, never
+  overwrites an existing path, and refuses a group- or world-writable parent
+  directory.
+- **Reproducible container images for the public engine.**
+  `docker/synaptic-engine.Dockerfile` builds the glibc engine on a non-root
+  distroless runtime; `docker/synaptic-engine-worker.Dockerfile` builds a
+  musl-linked engine on non-root Alpine for hosted workers. Both build only the
+  FSL-licensed Rust workspace from the repository root and never include
+  proprietary source; a root `.dockerignore` keeps unrelated trees out of the
+  build context.
+- **Contributor guidance and a Developer Certificate of Origin check.** New
+  `CONTRIBUTING.md` plus a `dco` workflow require a `Signed-off-by` line on
+  contributions, matching the source-available licensing model.
+- **Release artifacts now carry third-party license notices.** The release
+  workflow generates `THIRD_PARTY_LICENSES.html` with a pinned `cargo-about`
+  (`about.toml` / `about.hbs`) and ships it alongside `LICENSE` and a new
+  `NOTICE` in every distribution archive.
+
+### Changed
+
+- **Synaptic is relicensed under the Functional Source License 1.1 with an
+  Apache 2.0 Future License (`FSL-1.1-ALv2`).** This release begins the
+  source-available public-engine line: non-competing use is permitted, and each
+  version automatically becomes Apache-2.0 licensed two years after it is made
+  available. The private Synaptic Platform site and B2B control plane remain
+  proprietary. Existing copies and releases retain the licenses under which
+  they were received. The `cargo-deny` license allowlist follows, replacing
+  `AGPL-3.0-or-later` with `FSL-1.1-ALv2`.
+- **A federated build can write `graph.json` without the visual artifact suite.**
+  `workspace build --watch` re-federates on every save, where regenerating the
+  SVG/3D/HTML/GraphML suite dominates the cost and nobody reads it mid-edit, so
+  it is now opt-in via `--artifacts` — matching how `synaptic update`/`watch`
+  already gate the same suite. Every non-watch federated build (`build`,
+  `federate`, `discover`, `sync`) still writes the full suite as before.
+
+### Security
+
+- **A tampered store manifest can no longer read files outside the store root.**
+  Shard filenames from `manifest.json` were joined to the store root without
+  validation, so a crafted manifest could reference a parent path, an absolute
+  path, or a symlink and have the reader open an arbitrary file. Each shard
+  reference must now be a single relative filename that resolves, after
+  canonicalization, to a regular file directly inside the store root; symlinks,
+  directories, and traversal components are rejected with a manifest error.
+
 ## [0.6.4] - 2026-07-17
 
 > **Upgrade note:** this patch tightens MCP protocol conformance, makes live
