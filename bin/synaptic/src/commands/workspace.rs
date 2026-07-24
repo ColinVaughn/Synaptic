@@ -18,22 +18,37 @@ pub(crate) fn derive_repo_name(url: &str) -> String {
     last.trim_end_matches(".git").to_string()
 }
 
-/// Write a federated build's standard outputs + per-member export surfaces.
+/// Write a federated build's outputs + per-member export surfaces.
+///
+/// `artifacts` selects the full visual/export suite (HTML, SVG, GraphML, ...);
+/// with it off only `graph.json` is written. The watch loop re-federates on
+/// every save and nobody reads the visual suite mid-edit, so it opts out —
+/// matching why `synaptic update`/`watch` gate the same suite behind
+/// `--artifacts`.
 pub(crate) fn write_federated(
     build: &synaptic_workspace::workspace_build::WorkspaceBuild,
     root: &Path,
+    artifacts: bool,
 ) -> Result<()> {
     let out_dir = root.join("synaptic-out");
-    let analysis = analyze(&build.federated, &build.communities, &BTreeMap::new());
-    let extras = write_outputs(
-        &build.federated,
-        &analysis,
-        &build.communities,
-        &BTreeMap::new(),
-        &out_dir,
-        false,
-        false,
-    )?;
+    let extras = if artifacts {
+        let analysis = analyze(&build.federated, &build.communities, &BTreeMap::new());
+        write_outputs(
+            &build.federated,
+            &analysis,
+            &build.communities,
+            &BTreeMap::new(),
+            &out_dir,
+            false,
+            false,
+        )?
+    } else {
+        fs::create_dir_all(&out_dir).context("creating synaptic-out/")?;
+        let graph_path = out_dir.join("graph.json");
+        synaptic_output::to_json(&build.federated, &graph_path).context("writing graph.json")?;
+        crate::commands::common::warn_if_over_caps(&graph_path, build.federated.node_count());
+        String::from("graph.json")
+    };
     let surf_dir = out_dir.join("surfaces");
     fs::create_dir_all(&surf_dir).context("creating surfaces/")?;
     for s in &build.surfaces {
@@ -98,6 +113,245 @@ pub(crate) fn print_build_summary(build: &synaptic_workspace::workspace_build::W
             "  {} — {} nodes, {} edges",
             m.tag, m.node_count, m.edge_count
         );
+    }
+}
+
+/// One incremental federated rebuild: skip when no member changed, else build,
+/// write artifacts + surfaces (+ store), then persist state.
+///
+/// The write order is the durability contract `update_workspace` documents —
+/// state lands **after** the artifacts, so an interrupted cycle leaves the
+/// workspace reading as "changed" and the next run redoes it, rather than
+/// stamping "up to date" over outputs that never landed.
+///
+/// Returns `true` when a rebuild happened.
+fn workspace_update_cycle(
+    root: &Path,
+    opts: &synaptic_workspace::workspace_build::WorkspaceBuildOptions,
+    store: bool,
+    artifacts: bool,
+) -> Result<bool> {
+    let outcome = synaptic_workspace::state::update_workspace(root, opts)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let Some(build) = outcome.build else {
+        println!("No member changes — federated graph is up to date.");
+        return Ok(false);
+    };
+    if build.members.is_empty() {
+        println!("No members found — run `synaptic workspace init` first.");
+        return Ok(false);
+    }
+    write_federated(&build, root, artifacts)?;
+    maybe_write_store(store, &build, root)?;
+    // Persist state ONLY after artifacts are durably written.
+    if let Some(state) = &outcome.new_state {
+        synaptic_workspace::state::save_state(root, state).map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    print_build_summary(&build);
+    if !outcome.surface_changed.is_empty() {
+        println!("Surfaces changed: {}", outcome.surface_changed.join(", "));
+    }
+    Ok(true)
+}
+
+/// How long a watch cycle waits for a competing rebuild (a `synaptic update`, a
+/// git hook) to release the per-repo lock before giving up on this cycle.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run one watch cycle under the per-repo rebuild lock, so a concurrent
+/// `synaptic update` in the same workspace cannot interleave its write with
+/// ours. Skipping is safe: `update_workspace` derives what to rebuild from the
+/// persisted member hashes, not from our event batch, so a skipped cycle leaves
+/// the members still reading as changed and the next cycle covers them.
+fn locked_update_cycle(
+    root: &Path,
+    opts: &synaptic_workspace::workspace_build::WorkspaceBuildOptions,
+    store: bool,
+    artifacts: bool,
+) -> Result<bool> {
+    let out_dir = root.join("synaptic-out");
+    let deadline = std::time::Instant::now() + LOCK_WAIT;
+    loop {
+        match synaptic_incremental::try_acquire_lock(&out_dir).context("acquiring rebuild lock")? {
+            Some(_guard) => return workspace_update_cycle(root, opts, store, artifacts),
+            None if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            None => {
+                println!(
+                    "Another rebuild holds the lock; skipping this cycle (members stay marked changed and the next save retries)."
+                );
+                return Ok(false);
+            }
+        }
+    }
+}
+
+/// Watch every member repository of a workspace and re-federate on change.
+///
+/// Registers one recursive watcher per *minimal* watch root — the workspace tree
+/// plus each member checked out outside it — so a multi-repo workspace whose
+/// members are sibling checkouts is fully covered. Events are filtered by
+/// `synaptic_workspace::watch::classify` (detect's own noise rules + the
+/// extractable-file set, so writing `synaptic-out/graph.json` cannot
+/// self-trigger), batched over a settle window, and drained into one
+/// [`workspace_update_cycle`]. Editing `synaptic-workspace.toml` re-resolves the
+/// member set and re-registers the watchers, so adding or removing a repository
+/// takes effect without a restart.
+fn run_workspace_watch(
+    root: &Path,
+    opts: &synaptic_workspace::workspace_build::WorkspaceBuildOptions,
+    store: bool,
+    artifacts: bool,
+    debounce_ms: Option<u64>,
+) -> Result<()> {
+    use notify::{RecursiveMode, Watcher};
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+    use synaptic_incremental::ChangeBatch;
+    use synaptic_workspace::watch::{classify, member_for_path, resolve_watch_targets, WatchEvent};
+
+    let debounce = debounce_ms
+        .or_else(|| {
+            std::env::var("SYNAPTIC_WATCH_DEBOUNCE_MS")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+        })
+        .unwrap_or(synaptic_incremental::DEBOUNCE_MS);
+
+    // Catch up on edits made before the watcher started, before registering:
+    // the first post-registration cycle then only has to cover live events.
+    if let Err(e) = locked_update_cycle(root, opts, store, artifacts) {
+        eprintln!("startup catch-up failed: {e}");
+    }
+
+    // Each pass is one watcher generation; a manifest edit ends the inner loop
+    // so the member set (and therefore the watch roots) is re-resolved.
+    loop {
+        let targets = resolve_watch_targets(root).map_err(|e| anyhow::anyhow!("{e}"))?;
+        if targets.members.is_empty() {
+            println!("No members found — run `synaptic workspace init` first.");
+            return Ok(());
+        }
+        let (tx, rx) = channel();
+        let mut watcher = notify::recommended_watcher(move |res| {
+            let _ = tx.send(res);
+        })
+        .context("creating filesystem watcher")?;
+        // One unwatchable root (a permission-denied or racing-removed member
+        // checkout) must not take the whole watcher down: warn and carry on with
+        // the rest. That member still rebuilds, just not event-driven.
+        let mut watched: Vec<&PathBuf> = Vec::new();
+        for r in &targets.roots {
+            match watcher.watch(r, RecursiveMode::Recursive) {
+                Ok(()) => watched.push(r),
+                Err(e) => eprintln!("warning: not watching {} ({e})", r.display()),
+            }
+        }
+        if watched.is_empty() {
+            anyhow::bail!("no watchable member root; nothing to watch");
+        }
+        println!(
+            "Watching {} member(s) across {} root(s) (debounce {debounce}ms; Ctrl-C to stop):",
+            targets.members.len(),
+            watched.len()
+        );
+        for r in &watched {
+            println!("  {}", r.display());
+        }
+
+        // Block until the first change, then drain a quiet window to batch a
+        // burst. Ends when the watcher is dropped (channel closed) or the
+        // manifest changes (re-resolve).
+        let mut manifest_changed = false;
+        while let Ok(first) = rx.recv() {
+            let mut batch = ChangeBatch::new();
+            let mut touched: std::collections::BTreeSet<String> = Default::default();
+            let mut rescan = false;
+            let record = |res: notify::Result<notify::Event>,
+                          batch: &mut ChangeBatch,
+                          touched: &mut std::collections::BTreeSet<String>,
+                          rescan: &mut bool,
+                          manifest_changed: &mut bool| {
+                match res {
+                    Ok(ev) => {
+                        // A rescan notice means events were dropped (buffer
+                        // overflow on a huge change): fall back to a full
+                        // member-hash comparison rather than trusting the batch.
+                        if ev.need_rescan() {
+                            *rescan = true;
+                            return;
+                        }
+                        for p in ev.paths {
+                            // Classify against the watch root the path lies
+                            // under, so ignore rules apply to member-relative
+                            // paths (a checkout under /build/app stays watched).
+                            let Some(wr) = targets.roots.iter().find(|r| p.starts_with(r)) else {
+                                continue;
+                            };
+                            match classify(&p, wr) {
+                                Some(WatchEvent::Manifest) => *manifest_changed = true,
+                                Some(WatchEvent::Source(rel)) => {
+                                    if let Some(tag) = member_for_path(&p, &targets.members) {
+                                        touched.insert(tag.to_string());
+                                    }
+                                    batch.record(rel);
+                                }
+                                None => {}
+                            }
+                        }
+                    }
+                    Err(_) => *rescan = true,
+                }
+            };
+            record(
+                first,
+                &mut batch,
+                &mut touched,
+                &mut rescan,
+                &mut manifest_changed,
+            );
+            while let Ok(ev) = rx.recv_timeout(Duration::from_millis(debounce)) {
+                record(
+                    ev,
+                    &mut batch,
+                    &mut touched,
+                    &mut rescan,
+                    &mut manifest_changed,
+                );
+            }
+
+            if manifest_changed {
+                println!("\nWorkspace manifest changed → re-resolving members…");
+                break;
+            }
+            if rescan {
+                println!("\nWatcher lost events → re-checking every member…");
+            } else if batch.is_empty() {
+                continue; // burst was all ignored / non-extractable files
+            } else {
+                let who = if touched.is_empty() {
+                    "unattributed".to_string()
+                } else {
+                    touched.iter().cloned().collect::<Vec<_>>().join(", ")
+                };
+                println!(
+                    "\n{} changed file(s) in {} → re-federating…",
+                    batch.len(),
+                    who
+                );
+            }
+            // One member failing must not stop the watcher: `update_workspace`
+            // names the member in its error, so report and keep watching.
+            if let Err(e) = locked_update_cycle(root, opts, store, artifacts) {
+                eprintln!("rebuild failed: {e}");
+            }
+        }
+        if !manifest_changed {
+            // The channel closed (watcher dropped): nothing left to wait on.
+            println!("Watcher stopped.");
+            return Ok(());
+        }
     }
 }
 
@@ -227,6 +481,9 @@ pub(crate) fn run_workspace(action: WorkspaceAction) -> Result<()> {
         }
         WorkspaceAction::Build {
             changed,
+            watch,
+            debounce_ms,
+            artifacts,
             directed,
             store: _,
             no_store,
@@ -236,35 +493,20 @@ pub(crate) fn run_workspace(action: WorkspaceAction) -> Result<()> {
                 directed,
                 force: false,
             };
+            if watch {
+                // --watch implies --changed: every cycle is an incremental
+                // federated update.
+                return run_workspace_watch(&root, &opts, store, artifacts, debounce_ms);
+            }
             if changed {
-                let outcome = synaptic_workspace::state::update_workspace(&root, &opts)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                let Some(build) = outcome.build else {
-                    println!("No member changes — federated graph is up to date.");
-                    return Ok(());
-                };
-                if build.members.is_empty() {
-                    println!("No members found — run `synaptic workspace init` first.");
-                    return Ok(());
-                }
-                write_federated(&build, &root)?;
-                maybe_write_store(store, &build, &root)?;
-                // Persist state ONLY after artifacts are durably written.
-                if let Some(state) = &outcome.new_state {
-                    synaptic_workspace::state::save_state(&root, state)
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                }
-                print_build_summary(&build);
-                if !outcome.surface_changed.is_empty() {
-                    println!("Surfaces changed: {}", outcome.surface_changed.join(", "));
-                }
+                workspace_update_cycle(&root, &opts, store, true)?;
             } else {
                 let build = build_workspace(&root, &opts).map_err(|e| anyhow::anyhow!("{e}"))?;
                 if build.members.is_empty() {
                     println!("No members found — run `synaptic workspace init` first.");
                     return Ok(());
                 }
-                write_federated(&build, &root)?;
+                write_federated(&build, &root, true)?;
                 maybe_write_store(store, &build, &root)?;
                 synaptic_workspace::state::record_state(&root, &build)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -274,7 +516,7 @@ pub(crate) fn run_workspace(action: WorkspaceAction) -> Result<()> {
         }
         WorkspaceAction::Federate { dir } => {
             let build = federate_artifacts(&dir).map_err(|e| anyhow::anyhow!("{e}"))?;
-            write_federated(&build, &root)?;
+            write_federated(&build, &root, true)?;
             print_build_summary(&build);
             Ok(())
         }
@@ -303,7 +545,7 @@ pub(crate) fn run_workspace(action: WorkspaceAction) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("{e}"))?;
             match outcome.build {
                 Some(build) => {
-                    write_federated(&build, &root)?;
+                    write_federated(&build, &root, true)?;
                     if let Some(state) = &outcome.new_state {
                         synaptic_workspace::state::save_state(&root, state)
                             .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -412,7 +654,7 @@ pub(crate) fn run_workspace(action: WorkspaceAction) -> Result<()> {
             print_skipped(&res.skipped);
             let build = federate_repos(&root, &repos, &WorkspaceBuildOptions::default())
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            write_federated(&build, &root)?;
+            write_federated(&build, &root, true)?;
             print_build_summary(&build);
             Ok(())
         }

@@ -12,3 +12,7 @@ synaptic-out/
 /.claude/
 /.mcp.json
 /CLAUDE.md
+/.vscode/
+# Synaptic extension state: workspace.json carries the control-plane project and
+# workspace ids, which this public repository must never track.
+/.synaptic/

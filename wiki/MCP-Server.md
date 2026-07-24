@@ -14,6 +14,10 @@ event-driven: clean queries skip the manifest walk, while the first query after 
 relevant event performs the same bounded catch-up. If the watcher cannot start,
 serve falls back to the debounced check. See
 [Incremental-Updates → serve auto-freshen](Incremental-Updates#synaptic-serve-auto-freshen-on-query-catch-up).
+For a digest-pinned deployment, `serve --immutable-graph
+--expected-graph-sha256 <HEX>` verifies one owned byte buffer and parses that
+same buffer before serving it. It disables hot reload, source catch-up, and
+watching, closing both the initial-open and post-start replacement windows.
 Every node
 label, relation, and file path is sanitized before it reaches tool output (a
 security boundary on names derived from source). `get_source` is the one tool
@@ -59,7 +63,7 @@ edge confidence mean).
 ## Running the server
 
 ```
-synaptic serve [--graph <path>] [--http <addr>] [--api-key <key>] [--source-root <dir>] [--allow-exec] [--concise] [--watch]
+synaptic serve [--graph <path>] [--http <addr>] [--api-key <key>] [--source-root <dir>] [--allow-exec] [--concise] [--watch] [--immutable-graph] [--expected-graph-sha256 <hex>] [--ready-file <path>]
 ```
 
 - `--graph <path>` selects the `graph.json` to load. Default is the standard
@@ -80,6 +84,18 @@ synaptic serve [--graph <path>] [--http <addr>] [--api-key <key>] [--source-root
 - `--watch`: embed the event-driven source watcher described above. Equivalent
   to `SYNAPTIC_SERVE_WATCH=1`; watcher startup failure falls back safely to the
   debounced per-query staleness check.
+- `--immutable-graph`: pin the graph loaded at startup. This disables graph-file
+  hot reload, source catch-up, and filesystem watching for verified read-only
+  snapshot deployments.
+- `--expected-graph-sha256 <hex>`: verify the exact bytes loaded and parsed
+  against a 64-character SHA-256 digest. Requires `--immutable-graph` and
+  intentionally serves the verified JSON instead of an auto-selected shard
+  store.
+- `--ready-file <path>`: after an HTTP listener is bound, atomically publish
+  JSON containing `address` and `mcp_url`. This permits `--http
+  127.0.0.1:0` without a close-then-bind port race. The path is never
+  overwritten, its parent must already exist and be operator-protected, and the
+  file is mode `0600` on Unix. Requires `--http`.
 - `--concise`: token-lean output. Lowers the default list/budget sizes so tool
   results return less to the model (`query_graph` `token_budget` 800, list limits
   to 20, `dynamic_hazards` to 20, `get_community` to 40, `top_n` to 6,

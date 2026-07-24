@@ -279,6 +279,20 @@ pub(crate) enum Cmd {
         /// entirely. Equivalent to setting SYNAPTIC_SERVE_WATCH=1.
         #[arg(long)]
         watch: bool,
+        /// Pin the graph loaded at startup. Disable graph.json hot-reload,
+        /// source catch-up, and filesystem watching for immutable deployments.
+        #[arg(long)]
+        immutable_graph: bool,
+        /// Require graph.json to match this 64-character SHA-256 digest. The
+        /// exact bytes read for verification are also the bytes parsed, closing
+        /// the initial-open race. Requires --immutable-graph.
+        #[arg(long, value_name = "HEX", requires = "immutable_graph")]
+        expected_graph_sha256: Option<String>,
+        /// After the HTTP listener is bound, atomically publish its actual
+        /// address as a mode-0600 JSON file. Its parent directory must already
+        /// exist and be operator-protected. Requires --http.
+        #[arg(long, value_name = "PATH", requires = "http")]
+        ready_file: Option<PathBuf>,
     },
     /// Ingest an external source into the graph (cargo workspace, MCP config) or
     /// fetch a URL into synaptic-out/ingested/ for the next extract.
@@ -932,6 +946,19 @@ pub(crate) enum WorkspaceAction {
         /// Only rebuild when a member changed (incremental).
         #[arg(long)]
         changed: bool,
+        /// Watch every member repository and re-federate on change (debounced).
+        /// Implies --changed. Watches each member checked out outside the
+        /// workspace too, and re-resolves members when the manifest changes.
+        #[arg(long)]
+        watch: bool,
+        /// Settle window in ms for batching a burst of saves into one rebuild
+        /// (with --watch; default 3000, SYNAPTIC_WATCH_DEBOUNCE_MS also works).
+        #[arg(long, requires = "watch")]
+        debounce_ms: Option<u64>,
+        /// With --watch, also regenerate the visual/export artifacts on each
+        /// rebuild. Default writes graph.json + surfaces (+ store) only.
+        #[arg(long, requires = "watch")]
+        artifacts: bool,
         /// Produce a directed federated graph.
         #[arg(long)]
         directed: bool,

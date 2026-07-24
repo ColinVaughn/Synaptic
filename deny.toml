@@ -19,10 +19,10 @@ ignore = [
 [licenses]
 version = 2
 confidence-threshold = 0.8
-# Permissive licenses common in the Rust ecosystem, plus this project's own
-# AGPL-3.0-or-later. Tuned to the actual dependency set.
+# Licenses common in the Rust ecosystem, plus this project's FSL license.
+# Tuned to the actual dependency set.
 allow = [
-    "AGPL-3.0-or-later",
+    "FSL-1.1-ALv2",
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",

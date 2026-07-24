@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use synaptic_core::{Edge, GraphData};
 use synaptic_graph::KnowledgeGraph;
 
-use crate::manifest::{ShardEntry, ShardManifest};
+use crate::manifest::{validated_shard_path, ShardEntry, ShardManifest};
 use crate::{codec, sanitize_tag, shard, Scope, StoreError};
 
 /// Manifest tag recorded for the cross-repo bridge entry (stored apart from the
@@ -352,7 +352,7 @@ impl ShardStore {
             .manifest
             .entry(tag)
             .ok_or_else(|| StoreError::Manifest(format!("no shard for tag {tag:?}")))?;
-        Ok(self.root.join(&entry.file))
+        validated_shard_path(&self.root, &entry.file)
     }
 }
 

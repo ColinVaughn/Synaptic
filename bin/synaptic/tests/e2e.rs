@@ -18,7 +18,14 @@ fn serve_help_lists_mcp_behavior_flags() {
         .assert()
         .success();
     let stdout = String::from_utf8_lossy(&assertion.get_output().stdout);
-    for flag in ["--watch", "--concise", "--allow-exec"] {
+    for flag in [
+        "--watch",
+        "--concise",
+        "--allow-exec",
+        "--immutable-graph",
+        "--expected-graph-sha256",
+        "--ready-file",
+    ] {
         assert!(
             stdout.contains(flag),
             "serve help is missing {flag}: {stdout}"

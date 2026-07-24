@@ -89,6 +89,7 @@ to `synaptic-out/surfaces/<repo>.json`.
 synaptic workspace build
 synaptic workspace build --directed
 synaptic workspace build --changed
+synaptic workspace build --watch
 ```
 
 - `--directed`: produce a directed federated graph.
@@ -97,10 +98,79 @@ synaptic workspace build --changed
   `graph.json` already exists; otherwise does a full rebuild. After a rebuild it
   also reports which members' export *surface* changed (the dependents whose
   cross-repo edges may be affected).
+- `--watch`: keep running and re-federate whenever a member changes (implies
+  `--changed`). See [Watching a workspace](#watching-a-workspace).
 
 A full build records workspace incremental state; the incremental path persists
 state only after the artifacts are durably written. See
 [Incremental-Updates].
+
+### Watching a workspace
+
+`workspace build --watch` keeps a federated graph current while you work across
+several repositories at once.
+
+```
+synaptic workspace build --watch
+synaptic workspace build --watch --debounce-ms 1000
+synaptic workspace build --watch --artifacts
+```
+
+- **Watches every member, wherever it lives.** In-tree members are covered by one
+  recursive watcher on the workspace root; each member checked out *outside* the
+  workspace (`[[repos]] path = "../identity"`) gets its own root, so a multi-repo
+  workspace of sibling checkouts is fully covered. Overlapping roots are collapsed
+  so no event is processed twice.
+- **Reacts only to graph inputs.** Events are filtered by the same rules the
+  single-repo watcher uses: detect's noise rules (`synaptic-out`, `.git`,
+  `target`, `node_modules`, `dist`, virtualenvs, ...) applied to member-relative
+  paths, then the extractable set (code + `.md`/`.mdx`/`.qmd`). Writing the
+  federated `graph.json` therefore cannot self-trigger, and neither can a
+  member's own `synaptic-out/cache`.
+- **Debounces** a burst of saves into one re-federation; the settle window
+  defaults to 3000 ms (`--debounce-ms`, or `SYNAPTIC_WATCH_DEBOUNCE_MS`).
+- **Incremental at the member level.** Each cycle runs the same incremental
+  update as `--changed`: unchanged members are skipped by source hash, and the
+  members that did change re-extract through their own AST caches. Composition,
+  cross-repo resolution, and clustering are workspace-global by construction, so
+  they always re-run — a cross-repo edge cannot be resolved from one member alone.
+- **Skips the visual artifact suite** by default (`graph.json` + `surfaces/` +
+  the store only), because a watcher re-federates on every save. Pass
+  `--artifacts` to regenerate the SVG/3D/HTML suite each time.
+- **Adding or removing a repository takes effect live.** Editing
+  `synaptic-workspace.toml` re-resolves the member set and re-registers the
+  watchers without a restart.
+- **Survives a bad member.** A member that cannot be read or built is reported by
+  tag and the watcher keeps running; a member whose `path` does not exist is
+  skipped for watching and reported as an empty member by the build.
+- **Serializes with other rebuilds.** Each cycle takes the per-repo rebuild lock,
+  so a concurrent `synaptic update` or git hook in the same workspace cannot
+  interleave its write. If the lock is held, the cycle is skipped — safe, because
+  member change detection is driven by persisted source hashes, so the members
+  still read as changed and the next save retries.
+
+Stop with Ctrl-C. Workspace state is persisted only *after* the artifacts land,
+so an interrupted cycle leaves the workspace reading as changed and the next run
+redoes it — never an "up to date" marker over outputs that never landed.
+
+> Use `workspace build --watch`, not `synaptic watch`, at a workspace root.
+> `synaptic watch` is the single-repo watcher: it would rebuild the whole tree as
+> one flat repository and overwrite the federated graph with un-namespaced,
+> un-tagged nodes.
+
+Sample output:
+
+```
+Watching 3 member(s) across 2 root(s) (debounce 3000ms; Ctrl-C to stop):
+  /work/platform
+  /work/identity
+
+1 changed file(s) in identity → re-federating…
+Wrote /work/platform/synaptic-out/{graph.json} + surfaces/ (3 member surface(s))
+Federated graph: 812 nodes · 2104 edges · 24 communities · 3 member(s)
+Cross-repo links: 17 extracted, 4 inferred, 6 cross-language · 2 external package(s)
+Surfaces changed: identity
+```
 
 The build prints a summary: federated node/edge/community/member counts, the
 cross-repo report (`extracted`, `inferred`, `cross-language`, `external_package`),

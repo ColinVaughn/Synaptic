@@ -32,6 +32,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.96.0
         with:
           targets: ${{ matrix.target }}
+      - name: Install pinned license-notice generator
+        run: cargo install --locked --version 0.9.1 --features cli cargo-about
+      - name: Generate locked third-party license notices
+        shell: bash
+        run: cargo about generate about.hbs > THIRD_PARTY_LICENSES.html
       - run: cargo build --release --locked -p synaptic --target ${{ matrix.target }}
       - name: Package
         shell: bash
@@ -45,7 +50,7 @@ jobs:
             cp "target/${{ matrix.target }}/release/synaptic" "$dist/"
             cp "target/${{ matrix.target }}/release/syn" "$dist/"
           fi
-          cp README.md LICENSE CHANGELOG.md "$dist/"
+          cp README.md LICENSE NOTICE CHANGELOG.md THIRD_PARTY_LICENSES.html "$dist/"
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a "${dist}.zip" "$dist"
             certutil -hashfile "${dist}.zip" SHA256 | sed -n '2p' | tr -d ' \r' > "${dist}.zip.sha256"

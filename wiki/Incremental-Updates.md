@@ -76,6 +76,53 @@ Detected 2 changed code file(s) → rebuilding…
 
 Stop with Ctrl-C.
 
+`synaptic watch` is the **single-repo** watcher. At a workspace root use
+`synaptic workspace build --watch` instead (next section) — `watch` would rebuild
+every member as one flat repository and overwrite the federated graph with
+un-namespaced nodes.
+
+## `synaptic workspace build --watch`
+
+Watch every member of a federated workspace and re-federate on change.
+
+```
+synaptic workspace build --watch [--debounce-ms <n>] [--artifacts] [--directed] [--no-store]
+```
+
+Same event pipeline as `synaptic watch` — the ignore rules, the extractable-file
+set, and the debounce window are shared code, not a parallel implementation —
+with the workspace differences that matter:
+
+- **Watch roots are the members, not the working directory.** One recursive
+  watcher covers all in-tree members; every member checked out outside the
+  workspace (`[[repos]] path = ...`) gets its own root. `git =` members live under
+  the ignored `synaptic-out/workspace-repos/` (refresh them with `workspace
+  sync`), and `subgraph =` members have no source to watch.
+- **Each cycle is a `--changed` incremental update**: unchanged members are
+  skipped by source hash; changed members re-extract through their own AST
+  caches. Compose + cross-repo resolution + clustering are workspace-global and
+  always re-run.
+- **The output line names the member that changed**, so you can see which
+  repository triggered the rebuild, plus which members' export *surfaces* moved.
+- **Editing `synaptic-workspace.toml` re-resolves members live** (adding or
+  removing a repository needs no restart).
+- **Each cycle takes the per-repo rebuild lock**, so a concurrent `synaptic
+  update` or git hook cannot interleave its write.
+- **Artifacts are opt-in** (`--artifacts`); by default a cycle writes
+  `graph.json`, `surfaces/`, and the store.
+
+```
+Watching 3 member(s) across 2 root(s) (debounce 3000ms; Ctrl-C to stop):
+  /work/platform
+  /work/identity
+
+1 changed file(s) in identity → re-federating…
+```
+
+Stop with Ctrl-C. State is persisted only after artifacts land, so an interrupted
+cycle is redone rather than skipped. See
+[Workspaces-and-Federation](Workspaces-and-Federation).
+
 ## `synaptic serve` auto-freshen (on-query catch-up)
 
 The MCP server (`synaptic serve`) keeps its graph current by refreshing lazily, on the next query — or, with `--watch`, by reacting to filesystem events.

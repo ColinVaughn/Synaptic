@@ -27,7 +27,10 @@
 
 use std::collections::HashSet;
 use std::convert::Infallible;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::net::SocketAddr;
+use std::path::Path as FsPath;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
@@ -113,17 +116,132 @@ pub async fn serve_http(
     addr: SocketAddr,
     api_key: Option<String>,
 ) -> std::io::Result<()> {
+    serve_http_with_ready_file(server, addr, api_key, None).await
+}
+
+/// Serve HTTP and optionally publish the actual listener address after a
+/// successful bind. This is the race-free child-process startup path: callers
+/// may request `127.0.0.1:0` and learn the kernel-assigned port without first
+/// reserving and closing a separate probe socket.
+///
+/// The ready file is published as complete JSON through an atomic hard-link
+/// operation and is never overwritten. Its parent directory must already
+/// exist and, on Unix, must not be group/world-writable.
+pub async fn serve_http_with_ready_file(
+    server: Server,
+    addr: SocketAddr,
+    api_key: Option<String>,
+    ready_file: Option<&FsPath>,
+) -> std::io::Result<()> {
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let bound_addr = listener.local_addr()?;
     let api_key = api_key.filter(|k| !k.trim().is_empty());
     let state = HttpState {
         server: Arc::new(RwLock::new(server.with_resource_subscriptions(true))),
         api_key,
-        allowed_hosts: host_allowlist(&addr),
+        // Port zero is resolved above, so Host validation uses the address a
+        // client will actually send rather than the requested placeholder.
+        allowed_hosts: host_allowlist(&bound_addr),
         sessions: Arc::new(SessionStore::new()),
         stateless: false,
     };
     spawn_reaper(state.sessions.clone());
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    if let Some(path) = ready_file {
+        publish_ready_file(path, bound_addr)?;
+    }
     axum::serve(listener, router(state)).await
+}
+
+/// Publish a fully-written ready document without exposing partial bytes or
+/// replacing an existing path. A random sibling is written and synced first;
+/// hard-linking it to the final name is an atomic create-if-absent operation on
+/// the same filesystem. Removing the temporary name leaves one link behind.
+fn publish_ready_file(path: &FsPath, addr: SocketAddr) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| FsPath::new("."));
+    let parent_meta = fs::metadata(parent)?;
+    if !parent_meta.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ready-file parent is not a directory",
+        ));
+    }
+    if path.file_name().is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ready-file path must name a file",
+        ));
+    }
+    ensure_protected_ready_parent(&parent_meta)?;
+
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "ready file already exists",
+            ));
+        }
+    }
+
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce)
+        .map_err(|error| io::Error::other(format!("generating ready-file nonce: {error}")))?;
+    let suffix = nonce
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let name = path.file_name().expect("validated above").to_string_lossy();
+    let temporary = parent.join(format!(".{name}.{suffix}.tmp"));
+
+    let document = serde_json::to_vec(&json!({
+        "address": addr.to_string(),
+        "mcp_url": format!("http://{addr}/mcp"),
+    }))
+    .map_err(io::Error::other)?;
+    let write_result = write_private_file(&temporary, &document);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = fs::hard_link(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    fs::remove_file(&temporary)?;
+    Ok(())
+}
+
+fn write_private_file(path: &FsPath, bytes: &[u8]) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.write_all(b"\n")?;
+    file.sync_all()
+}
+
+#[cfg(unix)]
+fn ensure_protected_ready_parent(metadata: &fs::Metadata) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if metadata.permissions().mode() & 0o022 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "ready-file parent must not be group/world-writable",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_protected_ready_parent(_metadata: &fs::Metadata) -> io::Result<()> {
+    // Windows ACLs are inherited from the operator-created parent directory.
+    Ok(())
 }
 
 /// Periodically drop sessions idle longer than [`DEFAULT_SESSION_IDLE`].
@@ -717,6 +835,33 @@ mod tests {
         let mut st = test_state(None);
         st.allowed_hosts = host_allowlist(&"127.0.0.1:8080".parse().unwrap());
         st
+    }
+
+    #[test]
+    fn ready_file_is_complete_private_and_never_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready.json");
+        let addr: SocketAddr = "127.0.0.1:43123".parse().unwrap();
+
+        publish_ready_file(&ready, addr).unwrap();
+        let first = fs::read(&ready).unwrap();
+        let document: Value = serde_json::from_slice(&first).unwrap();
+        assert_eq!(document["address"], "127.0.0.1:43123");
+        assert_eq!(document["mcp_url"], "http://127.0.0.1:43123/mcp");
+
+        let error = publish_ready_file(&ready, "127.0.0.1:43124".parse().unwrap())
+            .expect_err("an existing ready file must never be replaced");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&ready).unwrap(), first);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&ready).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 
     fn init_body() -> Body {

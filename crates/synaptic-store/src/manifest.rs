@@ -2,7 +2,7 @@
 //! atomically (tmp + rename) and validated against what is actually on disk
 //! before the store is trusted.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +11,39 @@ use crate::StoreError;
 
 const MANIFEST_FILE: &str = "manifest.json";
 const MANIFEST_TMP: &str = "manifest.json.tmp";
+
+/// Resolve one manifest shard filename without allowing the manifest to escape
+/// its store root. Generated stores always place versioned shard files directly
+/// in the root; accepting directories, absolute paths, parent components, or
+/// symlinks would turn a tampered manifest into an arbitrary-file read.
+pub(crate) fn validated_shard_path(root: &Path, file: &str) -> Result<PathBuf, StoreError> {
+    let relative = Path::new(file);
+    let mut components = relative.components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return Err(StoreError::Manifest(
+            "shard file must be one relative filename inside the store root".to_string(),
+        ));
+    }
+    let candidate = root.join(relative);
+    let link_meta = std::fs::symlink_metadata(&candidate).map_err(|_| {
+        StoreError::Manifest(format!("manifest references missing shard file {file:?}"))
+    })?;
+    if link_meta.file_type().is_symlink() || !link_meta.is_file() {
+        return Err(StoreError::Manifest(format!(
+            "manifest shard file {file:?} must be a regular file, not a symlink or directory"
+        )));
+    }
+    let canonical_root = std::fs::canonicalize(root)
+        .map_err(|error| StoreError::Manifest(format!("could not resolve store root: {error}")))?;
+    let canonical_candidate = std::fs::canonicalize(&candidate)
+        .map_err(|_| StoreError::Manifest(format!("could not resolve shard file {file:?}")))?;
+    if canonical_candidate.parent() != Some(canonical_root.as_path()) {
+        return Err(StoreError::Manifest(
+            "shard file resolves outside the store root".to_string(),
+        ));
+    }
+    Ok(canonical_candidate)
+}
 
 /// One shard's bookkeeping. `file` is relative to the store root so the manifest
 /// stays portable if the directory moves.
@@ -112,12 +145,13 @@ impl ShardManifest {
             )));
         }
         for e in self.shards.iter().chain(self.bridge.iter()) {
-            let meta = std::fs::metadata(root.join(&e.file)).map_err(|_| {
+            let shard_path = validated_shard_path(root, &e.file).map_err(|_| {
                 StoreError::Manifest(format!(
-                    "shard {:?} references missing file {:?}",
+                    "shard {:?} references unsafe or missing file {:?}",
                     e.tag, e.file
                 ))
             })?;
+            let meta = std::fs::metadata(shard_path)?;
             if e.node_count > max_nodes {
                 return Err(StoreError::Manifest(format!(
                     "shard {:?} declares {} nodes, over the per-shard cap {} \n                     (set SYNAPTIC_MAX_SHARD_NODES to raise it; 0 = no cap)",
@@ -166,5 +200,36 @@ mod tests {
         assert!(m.validate_with(dir.path(), u64::MAX, 1).is_err());
         // generous caps -> the same shard passes
         assert!(m.validate_with(dir.path(), u64::MAX, u64::MAX).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_shard_paths_outside_store_root() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("store");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = parent.path().join("outside.shard");
+        std::fs::write(&outside, b"not a shard").unwrap();
+
+        for file in [
+            "../outside.shard".to_string(),
+            outside.to_string_lossy().into_owned(),
+        ] {
+            let manifest = ShardManifest {
+                schema_version: SCHEMA_VERSION,
+                shards: vec![ShardEntry {
+                    tag: "escaped".into(),
+                    file,
+                    source_hash: "h".into(),
+                    node_count: 1,
+                    edge_count: 0,
+                    directed: true,
+                }],
+                bridge: None,
+            };
+            assert!(
+                manifest.validate(&root).is_err(),
+                "manifest path outside the store root must be rejected"
+            );
+        }
     }
 }

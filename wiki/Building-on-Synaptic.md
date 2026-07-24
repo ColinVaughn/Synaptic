@@ -13,9 +13,14 @@ this page is the consumer's guide to using it.
 
 > **License note.** `graph.json` is a data artifact your copy of Synaptic
 > produces. Reading it imposes no licensing obligation on your code. (Linking the
-> Synaptic crates as a library is a different path and does carry Synaptic's
-> AGPL-3.0 copyleft -- not covered here.) Building on the graph file keeps your own
-> code entirely your own.
+> Synaptic crates as a library is licensed under `FSL-1.1-ALv2`.) Building on
+> the graph file keeps your own code entirely your own; using the crates is
+> permitted for any purpose other than a Competing Use as defined by the
+> license. Synaptic 0.7.0 is the first FSL source line, and each version becomes
+> Apache-2.0 licensed on the second anniversary of the date it was made
+> available. Copies and releases previously received under
+> AGPL-3.0-or-later retain those historical grants; the current relicensing
+> does not revoke them.
 
 ## Why the graph file is a good API surface
 
