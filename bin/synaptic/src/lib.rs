@@ -29,7 +29,7 @@ use commands::query::{
 use commands::refactor::run_refactor;
 use commands::search::run_search;
 use commands::self_update::run_self_update;
-use commands::serve::run_serve;
+use commands::serve::{run_serve, ServeArgs};
 use commands::skill::run_skill;
 use commands::speculate::run_speculate;
 use commands::update::run_update;
@@ -182,7 +182,10 @@ fn run() -> Result<()> {
             allow_exec,
             concise,
             watch,
-        } => run_serve(
+            immutable_graph,
+            expected_graph_sha256,
+            ready_file,
+        } => run_serve(ServeArgs {
             graph,
             http,
             api_key,
@@ -190,7 +193,10 @@ fn run() -> Result<()> {
             allow_exec,
             concise,
             watch,
-        ),
+            immutable_graph,
+            expected_graph_sha256,
+            ready_file,
+        }),
         Cmd::Prs {
             number,
             repo,

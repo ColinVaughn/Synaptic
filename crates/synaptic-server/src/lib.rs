@@ -35,7 +35,7 @@ mod provider;
 mod search;
 pub mod session;
 mod source;
-pub use http::serve_http;
+pub use http::{serve_http, serve_http_with_ready_file};
 pub use session::{SessionStore, DEFAULT_SESSION_IDLE};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -296,6 +296,10 @@ pub struct Server {
     graph_path: Option<PathBuf>,
     /// `(mtime_secs, size)` of the loaded graph.json, for the hot-reload check.
     reload_key: Option<(u64, u64)>,
+    /// Whether disk changes may replace the loaded graph snapshot. Hosted
+    /// runtimes disable this so a digest-pinned artifact stays immutable for
+    /// the lifetime of the process.
+    graph_reload: bool,
     /// Runs `gh`/`git` for the PR tools (injectable for tests).
     runner: Box<dyn CommandRunner>,
     /// JSONL query-log path (opt-in via `SYNAPTIC_QUERY_LOG`); `None` = off.
@@ -925,6 +929,7 @@ impl Server {
             provider,
             graph_path,
             reload_key,
+            graph_reload: true,
             runner: Box::new(SystemCommands),
             log_path: query_log_path(),
             source_root: None,
@@ -1039,7 +1044,10 @@ impl Server {
     /// Set the trusted source root for `get_source` (and other code-reading
     /// tools). Stored as-is; resolution canonicalizes per request.
     pub fn with_source_root(mut self, root: PathBuf) -> Server {
-        self.freshen = FreshenConfig::from_env(root.clone(), self.graph_path.as_deref());
+        self.freshen = self
+            .graph_reload
+            .then(|| FreshenConfig::from_env(root.clone(), self.graph_path.as_deref()))
+            .flatten();
         // A federated graph aggregates member repos; the catch-up's
         // single-root incremental rebuild would re-extract parent-root files
         // with non-member ids and corrupt the graph. Refresh members with
@@ -1064,6 +1072,17 @@ impl Server {
     /// that is acceptable for this deployment.
     pub fn with_allow_exec(mut self, allow: bool) -> Server {
         self.allow_exec = allow;
+        self
+    }
+
+    /// Control graph hot-reload and source catch-up. Disabling both pins the
+    /// already-loaded in-memory graph to the artifact verified by the caller.
+    pub fn with_graph_reload(mut self, enabled: bool) -> Server {
+        self.graph_reload = enabled;
+        if !enabled {
+            self.freshen = None;
+            self.watch_dirty = None;
+        }
         self
     }
 
@@ -1222,6 +1241,9 @@ impl Server {
     /// Best-effort: a missing/corrupt file keeps the current graph
     /// (serve-stale-on-error).
     fn maybe_reload(&mut self) {
+        if !self.graph_reload {
+            return;
+        }
         let Some(watch) = reload_watch_path(&self.provider, self.graph_path.as_deref()) else {
             return;
         };
@@ -4658,6 +4680,9 @@ Cross-repo: {} edge(s) span repositories{}",
     /// `false` when there's no path or the file vanished (serve-stale-on-error),
     /// matching `maybe_reload`'s own decision.
     pub fn is_stale(&self) -> bool {
+        if !self.graph_reload {
+            return false;
+        }
         let Some(watch) = reload_watch_path(&self.provider, self.graph_path.as_deref()) else {
             return false;
         };
@@ -11608,6 +11633,50 @@ mod tests {
         assert!(
             call_tool(&mut s, "graph_stats", json!({})).contains("2 nodes"),
             "tool call hot-reloads the changed graph"
+        );
+    }
+
+    #[test]
+    fn immutable_graph_mode_ignores_a_changed_graph_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.json");
+        let one = GraphData {
+            directed: false,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![node("a", "A", Some(0))],
+            links: vec![],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        std::fs::write(&path, serde_json::to_vec(&one).unwrap()).unwrap();
+        let mut server = Server::load(path.clone())
+            .unwrap()
+            .with_graph_reload(false)
+            .with_source_root(dir.path().to_path_buf());
+        assert!(
+            server.freshen.is_none(),
+            "adding a source root later must not re-enable immutable catch-up"
+        );
+
+        let replacement = GraphData {
+            directed: false,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![node("a", "A", Some(0)), node("b", "B", Some(0))],
+            links: vec![edge("a", "b", "calls")],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        std::fs::write(&path, serde_json::to_vec(&replacement).unwrap()).unwrap();
+
+        assert!(
+            !server.is_stale(),
+            "an immutable server never advertises disk drift"
+        );
+        assert!(
+            call_tool(&mut server, "graph_stats", json!({})).contains("1 nodes"),
+            "the in-memory promoted snapshot must remain pinned"
         );
     }
 

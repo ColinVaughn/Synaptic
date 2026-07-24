@@ -27,6 +27,7 @@ pub mod repo_scope;
 pub mod scan;
 pub mod state;
 mod tsconfig;
+pub mod watch;
 pub mod workspace_build;
 
 /// Current `export-surface.json` schema version. Bump on a breaking change.

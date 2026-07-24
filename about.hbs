@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Synaptic third-party licenses</title>
+</head>
+<body>
+  <main>
+    <h1>Synaptic third-party licenses</h1>
+    <p>This file is generated from the exact locked Rust dependency graph.</p>
+    {{#each licenses}}
+    <section>
+      <h2>{{name}}</h2>
+      <p>Used by:</p>
+      <ul>
+        {{#each used_by}}
+        <li>{{crate.name}} {{crate.version}}</li>
+        {{/each}}
+      </ul>
+      <pre>{{text}}</pre>
+    </section>
+    {{/each}}
+  </main>
+</body>
+</html>

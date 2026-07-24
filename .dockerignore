@@ -1,0 +1,14 @@
+.git
+.agents
+.codex
+.github
+target
+**/target
+node_modules
+**/node_modules
+documents
+synaptic-out
+coverage
+*.log
+.env
+.env.*

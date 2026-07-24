@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="https://discord.gg/ytX7R2PbNz"><img src="https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&logoColor=white&style=for-the-badge" alt="Join our Discord"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=for-the-badge" alt="License: AGPL-3.0"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-FSL--1.1--ALv2-orange?style=for-the-badge" alt="License: FSL-1.1-ALv2"></a>
   <a href="https://github.com/ColinVaughn/Synaptic/releases"><img src="https://img.shields.io/github/v/release/ColinVaughn/Synaptic?style=for-the-badge" alt="Latest release"></a>
 </p>
 
@@ -352,10 +352,10 @@ A code-only corpus runs fully offline; the optional LLM semantic pass over docs 
 | `sql <action>` | `audit` SQL for performance + security over the SQL-aware graph, or `advise --query "<sql>"` on a candidate query before writing it. Flags: `--severity`, `--explain --db-url` (live EXPLAIN, needs `--features live-explain`) |
 | `eval replay [from]` | Replay history to score forecast quality against git ground truth (CI-gateable). Flag: `--min-test-recall` |
 | `update [paths...]` | Incrementally rebuild after files change (`--full` for a full rebuild) |
-| `watch` | Rebuild automatically as files change |
+| `watch` | Rebuild automatically as files change (single repo; use `workspace build --watch` for a workspace) |
 | `serve` | Run the MCP server (stdio, or `--http <addr> --api-key <key>`) |
 | `prs [number]` | Graph-aware PR dashboard / detail. Flags: `--triage`, `--conflicts`, `--base`, `--repo` |
-| `workspace <action>` | Multi-repo / monorepo federation (`init`/`add`/`discover`/`build`/`federate`/`sync`/`status`/`list`) |
+| `workspace <action>` | Multi-repo / monorepo federation (`init`/`add`/`discover`/`build`/`federate`/`sync`/`status`/`list`). `build --watch` keeps a federated graph live across every member repo |
 | `global <action>` | The cross-repo global graph store (`~/.synaptic`) |
 | `merge-graphs <graphs...>` | Compose several `graph.json` files into one namespaced graph |
 | `ingest <source>` | Ingest an external source (cargo / mcp / scip / pg / url; `office` / `gws` / `media` behind feature flags) |
@@ -372,6 +372,9 @@ The full reference with every flag is in [Commands](https://github.com/ColinVaug
 ```sh
 synaptic serve                                                        # stdio MCP server
 synaptic serve --http 127.0.0.1:8765 --api-key "$SYNAPTIC_API_KEY"   # HTTP server
+synaptic serve --graph promoted/graph.json --immutable-graph \
+  --expected-graph-sha256 "$GRAPH_SHA256"                             # authenticate exact loaded bytes
+synaptic serve --http 127.0.0.1:0 --ready-file /run/synaptic/ready.json # race-free child startup
 ```
 
 The server exposes 30 read-only tools: graph navigation (`query_graph`, `get_node`,
@@ -384,6 +387,11 @@ It also serves MCP prompts, argument completions, resource templates and
 subscriptions, and a small REST surface (`/api/stats`, `/api/query`, ...) for non-MCP
 clients. Tool output is tuned to stay token-lean (terse defaults, capped lists); add
 `serve --concise` (or set `SYNAPTIC_CONCISE`) to lower the default sizes further.
+For digest-pinned or read-only deployments, `serve --immutable-graph
+--expected-graph-sha256 <HEX>` authenticates the exact byte buffer it parses
+and disables disk hot-reload, source catch-up, and filesystem watching.
+`--http 127.0.0.1:0 --ready-file <PATH>` binds before atomically publishing the
+kernel-assigned address, avoiding port reservation races in process supervisors.
 `synaptic install` wires the graph into a host assistant (a `PreToolUse` hook for
 Claude; a native MCP server for Codex, with `synaptic install codex --global` for the Codex
 desktop app). See [MCP Server](https://github.com/ColinVaughn/Synaptic/wiki/MCP-Server) and
@@ -440,7 +448,10 @@ Questions, ideas, or want to show what you built? Join us on
 
 ## License
 
-GNU Affero General Public License v3.0 or later (`AGPL-3.0-or-later`), see
-[LICENSE](LICENSE). If you run a modified version of Synaptic as a network service (for
-example the HTTP MCP server), the AGPL requires you to offer your modified source to its
-users.
+Functional Source License, Version 1.1, ALv2 Future License
+(`FSL-1.1-ALv2`), see [LICENSE](LICENSE) and [NOTICE](NOTICE). You may use,
+modify, and redistribute Synaptic for any purpose other than a Competing Use as
+defined by the license. Each version automatically becomes available under
+Apache License 2.0 on the second anniversary of the date that version was made
+available. The separately maintained private Synaptic Platform site and B2B
+control plane are proprietary and are not covered by this repository's license.

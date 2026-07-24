@@ -532,7 +532,7 @@ See [`affected`](#affected), [`diff`](#diff), [`speculate`](#speculate), and [MC
 
 ## speculate
 
-Speculatively execute a proposed change for real. Applies the change in a throwaway `git worktree`, runs the forecast's at-risk tests plus a build/type-check, and reports the actual pass/fail outcome — the ground-truth half of prediction (the graph narrows *what to check*, the sandbox *confirms* it). The worktree is disposable and your real working tree is never touched. This is an opt-in CLI command and is deliberately **not** an MCP tool (it runs commands, which would break the server's read-only invariant).
+Speculatively execute a proposed change for real. Applies the change in a throwaway `git worktree`, runs the forecast's at-risk tests plus a build/type-check, and reports the actual pass/fail outcome — the ground-truth half of prediction (the graph narrows *what to check*, the sandbox *confirms* it). The worktree is disposable and your real working tree is never touched. This is an opt-in CLI command. The MCP server exposes the same command-running tool only when its trusted operator explicitly starts `synaptic serve --allow-exec`; hosted B2B runtimes never enable it.
 
 Syntax:
 
@@ -814,7 +814,7 @@ Run the MCP server exposing read-only graph tools (and PR tools) to an AI assist
 Syntax:
 
 ```sh
-synaptic serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root <DIR>] [--allow-exec] [--concise] [--watch]
+synaptic serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root <DIR>] [--allow-exec] [--concise] [--watch] [--immutable-graph] [--expected-graph-sha256 <HEX>] [--ready-file <PATH>]
 ```
 
 | Name | Default | Description |
@@ -826,6 +826,9 @@ synaptic serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root
 | `--allow-exec` | off | Expose the command-running `speculate` tool. This makes the server no longer read-only, so enable it only for trusted clients. See [MCP Server](MCP-Server). |
 | `--concise` | off | Token-lean output: lower the default list/budget sizes so tool results return less to the model (or set `SYNAPTIC_CONCISE`). An explicit per-call argument always wins. |
 | `--watch` | off | Embed a filesystem watcher so the auto-freshen staleness check is event-driven — no walk or debounce window per query (or set `SYNAPTIC_SERVE_WATCH=1`). See [Incremental-Updates](Incremental-Updates). |
+| `--immutable-graph` | off | Pin the graph loaded at startup and disable graph-file hot reload, source catch-up, and filesystem watching. Use for verified read-only snapshots. |
+| `--expected-graph-sha256` | off | Require the exact graph bytes loaded and parsed at startup to match this 64-character SHA-256 digest. Requires `--immutable-graph` and bypasses shard-store auto-selection. |
+| `--ready-file` | off | After the HTTP listener is bound, atomically publish its actual address and MCP URL as a private JSON file. Requires `--http`; the parent directory must already exist and be operator-protected. |
 
 Defaults to stdio transport. The MCP server reports protocol `2025-11-25` and exposes 30 read-only tools (31 with `--allow-exec`, which adds the command-running `speculate` tool), prompts, completions, resource templates/subscriptions, and structured tool output. When serving HTTP on a wildcard address with no API key, it prints a warning.
 
@@ -834,6 +837,9 @@ Example:
 ```sh
 synaptic serve
 synaptic serve --http 127.0.0.1:8765 --api-key secret
+synaptic serve --graph /artifacts/snapshot/graph.json --immutable-graph \
+  --expected-graph-sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+synaptic serve --http 127.0.0.1:0 --ready-file /run/synaptic/ready.json
 ```
 
 See [MCP-Server](MCP-Server) and [Assistant-Integration](Assistant-Integration).
@@ -1002,7 +1008,7 @@ Actions:
 | `init` | `init [--scan-repos [DIR]] [--depth <N>] [--max <N>]` | Write `synaptic-workspace.toml`, auto-discovering members. `--scan-repos` also scans a parent dir for sibling git repos and appends `[[repos]]` entries (bare flag scans the parent of the current repo). `--depth` defaults to `3`, `--max` defaults to `50`. |
 | `add` | `add <TARGET>` | Add a member: an existing local path becomes a `members` entry, a git URL becomes a `[[repos]]` entry. |
 | `discover` | `discover [PATH] [--depth <N>] [--max <N>]` | Scan a parent dir for sibling git repos and federate them without writing a manifest. `PATH` defaults to the parent of the current repo; `--depth` defaults to `3`, `--max` to `50`. |
-| `build` | `build [--changed] [--directed]` | Build all members and federate into `synaptic-out/graph.json`. `--changed` only rebuilds members that changed; `--directed` produces a directed federated graph. |
+| `build` | `build [--changed] [--watch] [--debounce-ms <N>] [--artifacts] [--directed]` | Build all members and federate into `synaptic-out/graph.json`. `--changed` only rebuilds members that changed; `--watch` keeps running and re-federates on change (implies `--changed`); `--directed` produces a directed federated graph. |
 | `federate` | `federate <DIR>` | Compose from a directory of published `<member>/graph.json` artifacts. |
 | `sync` | `sync` | Pull remote git members, then rebuild deltas. |
 | `status` | `status` | Show each member's change status (no build). |
@@ -1010,11 +1016,24 @@ Actions:
 
 `build`, `federate`, `discover`, and `sync` write the federated graph artifacts plus a `surfaces/` directory of per-member export surfaces, and print a build summary (node/edge/community counts, cross-repo links, per-member sizes).
 
+`build --watch` options:
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--watch` | off | Watch every member repository and re-federate on change. Implies `--changed`. |
+| `--debounce-ms` | 3000 | Settle window for batching a burst of saves (also `SYNAPTIC_WATCH_DEBOUNCE_MS`). Requires `--watch`. |
+| `--artifacts` | off | Also regenerate the visual/export suite on each rebuild. Requires `--watch`. |
+
+Use `workspace build --watch` — **not** `synaptic watch` — at a workspace root: the
+single-repo watcher would rebuild the tree as one flat repo and overwrite the
+federated graph with un-namespaced nodes.
+
 Example:
 
 ```sh
 synaptic workspace init --scan-repos
 synaptic workspace build --directed
+synaptic workspace build --watch          # keep the federated graph live
 synaptic workspace status
 ```
 
