@@ -219,12 +219,6 @@ fn run_workspace_watch(
         })
         .unwrap_or(synaptic_incremental::DEBOUNCE_MS);
 
-    // Catch up on edits made before the watcher started, before registering:
-    // the first post-registration cycle then only has to cover live events.
-    if let Err(e) = locked_update_cycle(root, opts, store, artifacts) {
-        eprintln!("startup catch-up failed: {e}");
-    }
-
     // Each pass is one watcher generation; a manifest edit ends the inner loop
     // so the member set (and therefore the watch roots) is re-resolved.
     loop {
@@ -251,6 +245,16 @@ fn run_workspace_watch(
         if watched.is_empty() {
             anyhow::bail!("no watchable member root; nothing to watch");
         }
+
+        // Register first, then catch up. Publishing the initial graph before
+        // registration leaves a race where a save made immediately after
+        // startup can occur in the gap and never produce an event. Repeating
+        // the catch-up for each generation also covers members added by a
+        // manifest edit without opening the same gap while re-resolving.
+        if let Err(e) = locked_update_cycle(root, opts, store, artifacts) {
+            eprintln!("watch catch-up failed: {e}");
+        }
+
         println!(
             "Watching {} member(s) across {} root(s) (debounce {debounce}ms; Ctrl-C to stop):",
             targets.members.len(),
