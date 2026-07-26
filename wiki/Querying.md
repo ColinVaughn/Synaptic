@@ -38,7 +38,20 @@ How scoring works:
 - Labels and the query are tokenized into lowercased word tokens, splitting on
   both `snake_case` and `camelCase` boundaries and dropping tokens shorter than
   two characters. `run_analysis()` becomes `run`, `analysis`; `AuthService`
-  becomes `auth`, `service`.
+  becomes `auth`, `service`. Sentence-shaped natural-language questions discard
+  interrogative scaffolding such as `how`, `where`, and `is` when substantive
+  terms remain. Symbol-shaped queries (camelCase, snake_case, qualified names,
+  and punctuation-bearing identifiers) retain every token.
+- Natural-language inflections add conservative alternatives such as
+  `traveling` → `travel`, `teleported` → `teleport`, and `planets` → `planet`
+  only when the alternative already exists in the graph token index. The
+  original term remains present, and the alternative carries less weight than
+  an exact match.
+- Natural-language decision terms use one deliberately bounded implementation
+  alias: `choose`, `decide`, and `determine` (including common inflections) may
+  recall `resolve`. The alias is admitted only when `resolve` exists in the
+  graph, is weighted below exact evidence, and is not applied to direct
+  single-symbol queries.
 - A node's seed score is the sum of IDF weights of the query tokens it contains
   — IDF is `ln((N + 1) / (1 + df)) + 1`, with `N` the node count and `df` the
   number of nodes containing that token, so rarer tokens count for more —
@@ -48,8 +61,26 @@ How scoring works:
   retains the repository's full path vocabulary (including languages, targets,
   generated/test directories, and file extensions); extractor aliases are also
   lower weight.
+- For a multi-concept question, the score also rewards coverage: a node matching
+  `rocket` and `travel` receives more confidence than a similarly scored node
+  matching only `planet`. This is a bounded multiplier and is disabled for
+  one-concept queries, so exact symbol ranking does not change.
 - Nodes scoring above zero are ranked highest-first (ties broken by node id for
-  determinism). The top 8 become the seeds.
+  determinism). Up to 8 become seeds. In a multi-concept question, candidates
+  matching only one discriminative concept contribute at most two seeds, so a
+  generic token such as `handle` cannot hide every `rocket` or `planet` match;
+  repeated multi-concept evidence signatures contribute at most three. A direct
+  one-concept symbol query retains the full seed budget, and full exact
+  symbol-label matches never consume a diversity allowance.
+- A lower-weight intent candidate is promoted only when it is directly adjacent
+  to selected or otherwise scored evidence covering at least two substantive
+  query concepts. Alias-only symbols cannot enter through the normal seed path.
+  With a full seed budget the intent candidate may replace only a seed whose
+  concepts are represented elsewhere, and it inherits 75% of its strongest
+  supporting match's confidence. High-degree supporting hubs are penalized when
+  choosing among intent candidates. This makes a relationship such as
+  `load_graph_data()` → `resolve_backend()` visible without promoting unrelated
+  resolver helpers or weakening direct matches.
 
 Expansion uses the undirected adjacency of the graph (edge direction and
 self-loops are ignored), but it is **best-first**, not a plain breadth-first
@@ -58,6 +89,8 @@ budget is spent on the most relevant neighbourhood rather than on whatever a
 breadth-first sweep happened to reach first. Two refinements keep the result
 clean:
 
+- **Seed preservation.** Every selected seed settles before expanded neighbours,
+  so a tight hosted token budget cannot evict a lower-scored intent branch.
 - **Hub penalty.** A high-fan-out node (a registry, a `Builder`, a documentation
   index) is down-weighted in proportion to how far its degree exceeds the graph
   average, so it is expanded last and its many incidental neighbours rarely reach
@@ -68,6 +101,12 @@ clean:
   only when reached as a non-matching neighbor. Generic duplicates such as
   `render()` therefore sink below specific neighbors, while an exact query for
   that label still makes it a full-strength seed.
+- **Evidence-signature diversity.** In multi-concept questions, the best two
+  single-concept or three joint-concept results keep full strength; later
+  duplicates with the same query evidence receive a deterministic score
+  discount. The terse prefix therefore presents distinct intent branches instead
+  of many equivalent overloads. A full exact symbol-label match is exempt from
+  this discount even when the identifier contains multiple tokens.
 
 Every returned node keeps a final relevance score; nodes and edges are returned
 sorted by it (edges by the relevance of their weaker endpoint), so you can read
