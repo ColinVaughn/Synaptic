@@ -59,6 +59,27 @@ const CONTENT_ROOTS: &[&str] = &["assets", "data"];
 #[cfg(feature = "lang-json")]
 const MAX_REFS_PER_FILE: usize = 500;
 
+/// Localization files can contain thousands of keys. Keep enough identifiers to
+/// make message catalogs discoverable without creating one graph node per
+/// translation or allowing a generated catalog to dominate the query index.
+#[cfg(feature = "lang-json")]
+const MAX_SEARCH_TERMS_PER_FILE: usize = 500;
+
+/// Conventional localization directory names across web, mobile, desktop,
+/// backend, and game projects. Matching is segment-based and case-insensitive.
+#[cfg(feature = "lang-json")]
+const LOCALIZATION_DIRS: &[&str] = &[
+    "i18n",
+    "l10n",
+    "lang",
+    "langs",
+    "language",
+    "languages",
+    "locale",
+    "locales",
+    "translations",
+];
+
 /// Coarse, path-derived resource category label (`models`, `loot_tables`, ...),
 /// or `"data"` when the path has no recognizable `<root>/<namespace>/<category>/…`
 /// shape. Cosmetic only — never gates behavior.
@@ -91,6 +112,15 @@ pub fn extract_resource_source(path: &str, source: &[u8]) -> ExtractionResult {
         "resource_kind".to_string(),
         Value::String(resource_kind(path)),
     );
+    if is_localization_resource(path) {
+        let terms = scan_localization_keys(source);
+        if !terms.is_empty() {
+            file_extra.insert(
+                "_search_terms".to_string(),
+                Value::Array(terms.into_iter().map(Value::String).collect()),
+            );
+        }
+    }
     let mut nodes = vec![Node {
         id: file_id.clone(),
         label: resource_label(path),
@@ -167,6 +197,87 @@ fn scan_ref_strings(source: &[u8]) -> Vec<(String, usize)> {
     let mut out = Vec::new();
     walk_values(tree.root_node(), source, &mut out);
     out
+}
+
+/// True for JSON beneath a conventional localization directory. The directory
+/// can occur anywhere in the path, covering layouts such as
+/// `locales/en/checkout.json`, `assets/i18n/en.json`, and generated copies.
+#[cfg(feature = "lang-json")]
+fn is_localization_resource(path: &str) -> bool {
+    let p = path.replace('\\', "/").to_ascii_lowercase();
+    let segs: Vec<&str> = p.split('/').collect();
+    segs.last().is_some_and(|name| name.ends_with(".json"))
+        && segs[..segs.len().saturating_sub(1)]
+            .iter()
+            .any(|segment| LOCALIZATION_DIRS.contains(segment))
+}
+
+/// Collect bounded localization identifiers, preserving dotted ancestry for
+/// nested catalogs (`checkout.payment.declined`). Values remain excluded:
+/// translated prose must not bind to same-named code.
+#[cfg(feature = "lang-json")]
+fn scan_localization_keys(source: &[u8]) -> Vec<String> {
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_json::LANGUAGE.into())
+        .is_err()
+    {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return Vec::new();
+    };
+    let Some(object) = children(tree.root_node())
+        .into_iter()
+        .find(|n| n.kind() == "object")
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    collect_localization_keys(object, source, "", 0, &mut out, &mut seen);
+    out
+}
+
+#[cfg(feature = "lang-json")]
+fn collect_localization_keys(
+    object: TsNode,
+    source: &[u8],
+    prefix: &str,
+    depth: usize,
+    out: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    if depth >= 32 || out.len() >= MAX_SEARCH_TERMS_PER_FILE {
+        return;
+    }
+    for pair in children(object).into_iter().filter(|n| n.kind() == "pair") {
+        if out.len() >= MAX_SEARCH_TERMS_PER_FILE {
+            break;
+        }
+        let Some(key_node) = pair.child_by_field_name("key") else {
+            continue;
+        };
+        let Some(key) = string_value(key_node, source) else {
+            continue;
+        };
+        if key.is_empty() {
+            continue;
+        }
+        let qualified = if prefix.is_empty() {
+            key
+        } else {
+            format!("{prefix}.{key}")
+        };
+        if seen.insert(qualified.clone()) {
+            out.push(qualified.clone());
+        }
+        if let Some(value) = pair.child_by_field_name("value") {
+            if value.kind() == "object" {
+                collect_localization_keys(value, source, &qualified, depth + 1, out, seen);
+            }
+        }
+    }
 }
 
 /// Recurse structure, collecting string *values* (object values + array elements),
@@ -894,12 +1005,41 @@ mod tests {
 
     #[test]
     fn skips_freetext_value_strings() {
-        // A value with whitespace is prose, not a reference; the key is not scanned.
+        // A value with whitespace is prose, not a reference. The localization
+        // identifier is retained only as bounded search metadata on the file.
         let r = extract_resource_source(
-            "assets/mymod/lang/en_us.json",
-            br#"{"a.b.c":"Block of Stone"}"#,
+            "web/locales/en-US/checkout.json",
+            br#"{"checkout.payment.failed":"Payment could not be completed"}"#,
         );
         assert!(ref_targets(&r).is_empty(), "{:?}", ref_targets(&r));
+        assert_eq!(
+            r.nodes[0]
+                .extra
+                .get("_search_terms")
+                .and_then(Value::as_array)
+                .and_then(|v| v.first())
+                .and_then(Value::as_str),
+            Some("checkout.payment.failed")
+        );
+    }
+
+    #[test]
+    fn nested_localization_keys_keep_their_qualified_path() {
+        let r = extract_resource_source(
+            "mobile/i18n/en/account.json",
+            br#"{"account":{"security":{"password_expired":"Update your password"}}}"#,
+        );
+        let terms = r.nodes[0]
+            .extra
+            .get("_search_terms")
+            .and_then(Value::as_array)
+            .expect("i18n catalog carries search metadata");
+        assert!(
+            terms
+                .iter()
+                .any(|v| v.as_str() == Some("account.security.password_expired")),
+            "{terms:?}"
+        );
     }
 
     #[test]
@@ -908,6 +1048,35 @@ mod tests {
         let r =
             extract_resource_source("assets/mymod/x.json", br#"{"minecraft:foo":"hello world"}"#);
         assert!(ref_targets(&r).is_empty());
+    }
+
+    #[test]
+    fn ordinary_resource_keys_are_not_added_as_search_terms() {
+        let r = extract_resource_source(
+            "fixtures/api/response.json",
+            br#"{"checkout.payment.fake":"hello world"}"#,
+        );
+        assert!(r.nodes[0].extra.get("_search_terms").is_none());
+    }
+
+    #[test]
+    fn localization_search_terms_are_bounded() {
+        let mut obj = String::from("{");
+        for i in 0..600 {
+            if i > 0 {
+                obj.push(',');
+            }
+            obj.push_str(&format!("\"catalog.product_{i}\":\"Product {i}\""));
+        }
+        obj.push('}');
+        let r =
+            extract_resource_source("build/generated/locales/en-US/catalog.json", obj.as_bytes());
+        let terms = r.nodes[0]
+            .extra
+            .get("_search_terms")
+            .and_then(Value::as_array)
+            .expect("generated localization catalog carries search metadata");
+        assert_eq!(terms.len(), MAX_SEARCH_TERMS_PER_FILE);
     }
 
     #[test]

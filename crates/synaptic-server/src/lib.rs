@@ -164,6 +164,7 @@ struct ReposReport {
 
 struct NeighborReportRow {
     label: String,
+    qualified: String,
     relation: String,
     context: Option<String>,
     cross_repo: bool,
@@ -174,6 +175,7 @@ struct NeighborReportRow {
 enum NeighborReport {
     Resolved {
         seed: String,
+        seed_qualified: String,
         rows: Vec<NeighborReportRow>,
         by_relation: BTreeMap<String, usize>,
         total: usize,
@@ -1461,6 +1463,16 @@ impl Server {
             .unwrap_or_else(|| id.0.clone())
     }
 
+    /// A copy-ready identity for a graph node. Display labels are intentionally
+    /// compact and often duplicated (especially `.handle()`/`.tick()` methods);
+    /// path and impact tools must not collapse those distinct implementations.
+    fn qualified_label_of(&self, id: &NodeId) -> String {
+        self.provider
+            .node_cloned(id)
+            .map(|node| synaptic_query::qualified_ref(&node))
+            .unwrap_or_else(|| id.0.clone())
+    }
+
     fn degree(&self, id: &NodeId) -> usize {
         self.provider.degree_of(id)
     }
@@ -1736,6 +1748,7 @@ impl Server {
     ) -> String {
         let in_set: std::collections::HashSet<&NodeId> =
             keep.iter().map(|&i| &r.nodes[i]).collect();
+        let qualified = self.duplicate_query_refs(&r.nodes);
         let mode_str = match mode {
             TraversalMode::Bfs => "bfs",
             TraversalMode::Dfs => "dfs",
@@ -1743,7 +1756,13 @@ impl Server {
         let seeds: Vec<String> = r
             .seeds
             .iter()
-            .map(|s| sanitize_label(&self.label_of(s)))
+            .map(|s| {
+                qualified
+                    .get(s)
+                    .cloned()
+                    .unwrap_or_else(|| self.label_of(s))
+            })
+            .map(|s| sanitize_label(&s))
             .collect();
         let mut out = format!(
             "Traversal: {mode_str} | Start: [{}] | {} nodes found\n",
@@ -1790,14 +1809,19 @@ impl Server {
                 } else {
                     ""
                 };
+                let qualified_mark = qualified
+                    .get(&r.nodes[i])
+                    .map(|q| format!(" (qualified: {})", sanitize_label(q)))
+                    .unwrap_or_default();
                 out.push_str(&format!(
-                    "NODE [{:.2}]{} {} [{}] {}{}\n",
+                    "NODE [{:.2}]{} {} [{}] {}{}{}\n",
                     r.scores.get(i).copied().unwrap_or(0.0),
                     mark,
                     sanitize_label(&n.label),
                     file_type_str(&n.file_type),
                     sanitize_label(&n.source_file),
-                    stub_mark
+                    stub_mark,
+                    qualified_mark
                 ));
             }
         }
@@ -1811,9 +1835,21 @@ impl Server {
             if in_set.contains(&e.source) && in_set.contains(&e.target) {
                 out.push_str(&format!(
                     "EDGE {} --{}--> {}\n",
-                    sanitize_label(&self.label_of(&e.source)),
+                    sanitize_label(
+                        qualified
+                            .get(&e.source)
+                            .cloned()
+                            .unwrap_or_else(|| self.label_of(&e.source))
+                            .as_str(),
+                    ),
                     sanitize_label(&e.relation),
-                    sanitize_label(&self.label_of(&e.target))
+                    sanitize_label(
+                        qualified
+                            .get(&e.target)
+                            .cloned()
+                            .unwrap_or_else(|| self.label_of(&e.target))
+                            .as_str(),
+                    )
                 ));
                 edges_emitted += 1;
             }
@@ -2724,6 +2760,7 @@ impl Server {
             }
             rows.push(NeighborReportRow {
                 label: nb.label.clone(),
+                qualified: self.qualified_label_of(&nb.id),
                 relation: nb.relation.clone(),
                 context: nb.context.clone(),
                 cross_repo: nb.cross_repo,
@@ -2736,6 +2773,7 @@ impl Server {
         }
         NeighborReport::Resolved {
             seed: ex.label,
+            seed_qualified: self.qualified_label_of(&id),
             rows,
             by_relation,
             total,
@@ -2749,6 +2787,7 @@ impl Server {
     ) -> String {
         let NeighborReport::Resolved {
             seed,
+            seed_qualified,
             rows,
             by_relation,
             total,
@@ -2760,6 +2799,7 @@ impl Server {
             return text.clone();
         };
         let seed = sanitize_label(seed);
+        let seed_qualified = sanitize_label(seed_qualified);
         if *total == 0 {
             return match (relation_filter, by_relation.is_empty()) {
                 (Some(filter), false) => {
@@ -2769,11 +2809,11 @@ impl Server {
                         .collect::<Vec<_>>()
                         .join(", ");
                     format!(
-                        "Neighbors of {seed}:\n  (none with relation '{}'; this node has: {available})",
+                        "Neighbors of {seed} [qualified: {seed_qualified}]:\n  (none with relation '{}'; this node has: {available})",
                         sanitize_label(filter)
                     )
                 }
-                _ => format!("Neighbors of {seed}:\n  (none)"),
+                _ => format!("Neighbors of {seed} [qualified: {seed_qualified}]:\n  (none)"),
             };
         }
         let mut body = String::new();
@@ -2785,6 +2825,7 @@ impl Server {
                 sanitize_label(&row.label),
                 sanitize_label(&row.relation)
             ));
+            body.push_str(&format!(" (qualified: {})", sanitize_label(&row.qualified)));
             if let Some(context) = &row.context {
                 body.push_str(&format!(" ({})", sanitize_label(context)));
             }
@@ -2801,13 +2842,14 @@ impl Server {
                 total - rows.len()
             ));
         }
-        format!("Neighbors of {seed} ({total}):{body}")
+        format!("Neighbors of {seed} ({total}) [qualified: {seed_qualified}]:{body}")
     }
 
     /// Structured mirror rendered from the same explanation as the text path.
     fn render_neighbor_json(report: &NeighborReport) -> Value {
         let NeighborReport::Resolved {
             seed,
+            seed_qualified,
             rows,
             by_relation,
             total,
@@ -2820,6 +2862,7 @@ impl Server {
             .map(|row| {
                 json!({
                     "label": row.label,
+                    "qualified": row.qualified,
                     "relation": row.relation,
                     "context": row.context,
                     "cross_repo": row.cross_repo,
@@ -2829,6 +2872,7 @@ impl Server {
             .collect();
         json!({
             "seed": seed,
+            "seed_qualified": seed_qualified,
             "neighbors": neighbors,
             "by_relation": by_relation,
             "total": total,
@@ -3177,18 +3221,28 @@ Cross-repo: {} edge(s) span repositories{}",
         // Annotate each hop with its connecting relation so a path built
         // from low-signal `references` (type) edges is self-evident rather
         // than looking like an authoritative call chain.
-        let mut rendered = sanitize_label(&self.label_of(&path[0]));
+        let mut rendered = sanitize_label(&self.qualified_label_of(&path[0]));
         for pair in path.windows(2) {
-            let rel = self
+            let (rel, forward) = self
                 .relation_between(&pair[0], &pair[1])
-                .unwrap_or_else(|| "?".to_string());
-            rendered.push_str(&format!(
-                " -[{}]-> {}",
-                sanitize_label(&rel),
-                sanitize_label(&self.label_of(&pair[1]))
-            ));
+                .unwrap_or_else(|| ("?".to_string(), true));
+            if forward {
+                rendered.push_str(&format!(
+                    " -[{}]-> {}",
+                    sanitize_label(&rel),
+                    sanitize_label(&self.qualified_label_of(&pair[1]))
+                ));
+            } else {
+                rendered.push_str(&format!(
+                    " <-[{}]- {}",
+                    sanitize_label(&rel),
+                    sanitize_label(&self.qualified_label_of(&pair[1]))
+                ));
+            }
         }
-        format!("Shortest path ({hops} hops): {rendered}")
+        format!(
+            "Shortest undirected connection ({hops} hops; arrows preserve stored edge direction): {rendered}"
+        )
     }
 
     /// The best single-bridge-hop path from `from` (in shard `sh`) to `to` in
@@ -3240,7 +3294,7 @@ Cross-repo: {} edge(s) span repositories{}",
     /// meaningful one deterministically when several edges connect them: calls >
     /// inheritance > imports > uses/depends > references > other, ties broken
     /// lexicographically. Used to annotate `shortest_path` hops.
-    fn relation_between(&self, a: &NodeId, b: &NodeId) -> Option<String> {
+    fn relation_between(&self, a: &NodeId, b: &NodeId) -> Option<(String, bool)> {
         fn priority(rel: &str) -> u8 {
             let r = rel.to_lowercase();
             if r.contains("call") {
@@ -3257,14 +3311,26 @@ Cross-repo: {} edge(s) span repositories{}",
                 5
             }
         }
-        let sh = self.provider.owner_shard(a)?;
-        sh.kg
-            .incident_edges(a)
-            .filter(|e| (&e.source == a && &e.target == b) || (&e.source == b && &e.target == a))
-            .map(|e| e.relation.clone())
-            .min_by(|x, y| priority(x).cmp(&priority(y)).then_with(|| x.cmp(y)))
-            // A cross-shard hop's relation lives in the bridge, not any shard.
-            .or_else(|| self.provider.bridge_relation(a, b))
+        let best = |edges: Vec<synaptic_core::Edge>| {
+            edges
+                .into_iter()
+                .filter(|e| {
+                    (&e.source == a && &e.target == b) || (&e.source == b && &e.target == a)
+                })
+                .map(|e| {
+                    let forward = &e.source == a;
+                    (e.relation, forward)
+                })
+                .min_by(|(x, _), (y, _)| priority(x).cmp(&priority(y)).then_with(|| x.cmp(y)))
+        };
+        if let Some(sh) = self.provider.owner_shard(a) {
+            if let Some(hop) = best(sh.kg.incident_edges(a).cloned().collect()) {
+                return Some(hop);
+            }
+        }
+        // A cross-shard hop's relation and direction live in the bridge, not
+        // either shard.
+        best(self.provider.bridge_edges_of(a))
     }
 
     /// `find_callers` — who calls/uses this node (incoming call-like edges).
@@ -3602,9 +3668,12 @@ Cross-repo: {} edge(s) span repositories{}",
             };
         };
         let seed = sanitize_label(&self.label_of(id));
+        let seed_qualified = sanitize_label(&self.qualified_label_of(id));
         let note = self.class_fold_note(id, &seed, *member_count);
         if hits.is_empty() {
-            let mut msg = format!("{note}Nothing depends on {seed} within {depth} hops.");
+            let mut msg = format!(
+                "{note}Nothing depends on {seed} [qualified: {seed_qualified}] within {depth} hops."
+            );
             if let Some(c) = dynamic_caveat {
                 msg.push_str(&format!("\n  note: {}", c.message));
             }
@@ -3624,15 +3693,16 @@ Cross-repo: {} edge(s) span repositories{}",
         // Top-N by default (hits are ordered shallowest-first); verbose dumps all.
         let cap = if verbose { usize::MAX } else { limit.max(1) };
         let mut out = format!(
-            "{note}{} nodes depend on {seed} (<= {depth} hops) [{breakdown}]:",
+            "{note}{} nodes depend on {seed} [qualified: {seed_qualified}] (<= {depth} hops) [{breakdown}]:",
             hits.len()
         );
         for h in hits.iter().take(cap) {
             out.push_str(&format!(
-                "\n  [{}h via {}] {}",
+                "\n  [{}h via {}] {} (qualified: {})",
                 h.depth,
                 sanitize_label(&h.via_relation),
-                sanitize_label(&self.label_of(&h.node_id))
+                sanitize_label(&self.label_of(&h.node_id)),
+                sanitize_label(&self.qualified_label_of(&h.node_id))
             ));
         }
         if hits.len() > cap {
@@ -4347,6 +4417,7 @@ Cross-repo: {} edge(s) span repositories{}",
             .map(|h| {
                 json!({
                     "label": sanitize_label(&self.label_of(&h.node_id)),
+                    "qualified": sanitize_label(&self.qualified_label_of(&h.node_id)),
                     "depth": h.depth,
                     "via_relation": sanitize_label(&h.via_relation)
                 })
@@ -4354,6 +4425,10 @@ Cross-repo: {} edge(s) span repositories{}",
             .collect();
         let mut obj = serde_json::Map::new();
         obj.insert("seed".into(), json!(sanitize_label(&self.label_of(id))));
+        obj.insert(
+            "seed_qualified".into(),
+            json!(sanitize_label(&self.qualified_label_of(id))),
+        );
         obj.insert("resolved".into(), json!(true));
         obj.insert("affected".into(), Value::Array(arr));
         obj.insert("total".into(), json!(total));
@@ -4438,6 +4513,7 @@ Cross-repo: {} edge(s) span repositories{}",
     ) -> Value {
         let in_set: std::collections::HashSet<&NodeId> =
             keep.iter().map(|&i| &r.nodes[i]).collect();
+        let qualified = self.duplicate_query_refs(&r.nodes);
         let nodes: Vec<Value> = keep
             .iter()
             .filter_map(|&i| self.provider.node_cloned(&r.nodes[i]).map(|n| (i, n)))
@@ -4448,11 +4524,17 @@ Cross-repo: {} edge(s) span repositories{}",
                     "source_file": sanitize_label(&n.source_file),
                     // Relevance score (higher = more relevant); nodes are already
                     // ordered by it so a caller can triage signal from noise.
-                    "score": round2(r.scores.get(i).copied().unwrap_or(0.0)),
-                    // True when `since` was given and this node's file changed on the
-                    // current branch (its score was boosted accordingly).
-                    "changed": recency.is_some_and(|rr| rr.changed.contains(&r.nodes[i]))
+                    "score": round2(r.scores.get(i).copied().unwrap_or(0.0))
                 });
+                // `changed` is a statement relative to an explicit git baseline,
+                // not a generic graph-freshness flag. Omit it when no `since`
+                // baseline was requested instead of returning a misleading false.
+                if let Some(rr) = recency {
+                    obj["changed"] = json!(rr.changed.contains(&r.nodes[i]));
+                }
+                if let Some(reference) = qualified.get(&r.nodes[i]) {
+                    obj["qualified"] = json!(sanitize_label(reference));
+                }
                 // An external stub (unresolved import target / third-party package)
                 // has no source file and cannot be opened with get_source; flag it so
                 // it is not mistaken for a navigable symbol. Emitted only when true to
@@ -4472,13 +4554,39 @@ Cross-repo: {} edge(s) span repositories{}",
             .take(edge_cap)
             .map(|e| {
                 json!({
-                    "source": sanitize_label(&self.label_of(&e.source)),
+                    "source": sanitize_label(
+                        qualified.get(&e.source).cloned().unwrap_or_else(|| self.label_of(&e.source)).as_str()
+                    ),
                     "relation": sanitize_label(&e.relation),
-                    "target": sanitize_label(&self.label_of(&e.target))
+                    "target": sanitize_label(
+                        qualified.get(&e.target).cloned().unwrap_or_else(|| self.label_of(&e.target)).as_str()
+                    )
                 })
             })
             .collect();
         json!({ "nodes": nodes, "edges": edges })
+    }
+
+    /// Copy-ready references for labels repeated within one query result. The
+    /// path stays attached in seed and edge renders, so parallel implementations
+    /// remain distinguishable after the node rows scroll out of view.
+    fn duplicate_query_refs(&self, ids: &[NodeId]) -> std::collections::HashMap<NodeId, String> {
+        let nodes: Vec<_> = ids
+            .iter()
+            .filter_map(|id| self.provider.node_cloned(id))
+            .collect();
+        let mut counts = std::collections::HashMap::<String, usize>::new();
+        for node in &nodes {
+            *counts.entry(node.label.to_lowercase()).or_default() += 1;
+        }
+        nodes
+            .into_iter()
+            .filter(|node| counts.get(&node.label.to_lowercase()).copied().unwrap_or(0) > 1)
+            .map(|node| {
+                let id = node.id.clone();
+                (id, synaptic_query::qualified_ref(&node))
+            })
+            .collect()
     }
 
     // resources
@@ -6243,8 +6351,9 @@ fn build_tools_list(allow_exec: bool) -> Value {
             "outputSchema": { "type": "object", "properties": {
                 "nodes": { "type": "array", "description": "Ordered most- to least-relevant.", "items": { "type": "object", "properties": {
                     "label": {"type":"string"}, "file_type": {"type":"string"}, "source_file": {"type":"string"},
+                    "qualified": {"type":"string", "description":"Present when the label is duplicated in the result: a copy-ready label@path reference that resolves to this exact implementation."},
                     "score": {"type":"number", "description":"Relevance score (higher = more relevant); nodes are sorted by it. Use it to focus on the top results and ignore the low-scored tail."},
-                    "changed": {"type":"boolean", "description":"True when `since` was given and this node's file changed on the current branch (its score was boosted)."} } } },
+                    "changed": {"type":"boolean", "description":"Present only when `since` resolved to a git baseline; true when this node's file changed relative to it. Omitted means change status was not evaluated, not unchanged."} } } },
                 "edges": { "type": "array", "description": "Ordered by endpoint relevance.", "items": { "type": "object", "properties": {
                     "source": {"type":"string"}, "relation": {"type":"string"}, "target": {"type":"string"} } } }
             }, "required": ["nodes", "edges"] }
@@ -6274,8 +6383,11 @@ fn build_tools_list(allow_exec: bool) -> Value {
           "inputSchema": { "type": "object", "properties": { "label": { "type": "string", "description": "Node label, id, or bare name; qualify a shared name as 'name@file'." }, "relation_filter": { "type": "string", "description": "Keep only this edge relation (substring); e.g. calls, imports, inherits, implements, references, contains, depends_on. A non-match returns the node's actual relations." }, "show_sites": { "type": "boolean", "description": "Also show each edge's call/reference source line ('at file:line: <code>'). Default false." }, "limit": { "type": "integer", "description": "Max neighbors listed before a '+N more' summary (default 50). Ignored when verbose=true." }, "verbose": { "type": "boolean", "description": "List every neighbor instead of the capped top-N (default false). Use after a relation_filter on a hub." } }, "required": ["label"] },
           "outputSchema": { "type": "object", "properties": {
               "seed": {"type":"string"},
+              "seed_qualified": {"type":"string", "description":"Copy-ready seed identity."},
               "neighbors": { "type": "array", "items": { "type": "object", "properties": {
-                  "label": {"type":"string"}, "relation": {"type":"string"}, "direction": {"type":"string", "description": "'out' (seed -> neighbor) or 'in' (neighbor -> seed)."} } } },
+                  "label": {"type":"string"},
+                  "qualified": {"type":"string", "description":"Copy-ready node identity."},
+                  "relation": {"type":"string"}, "direction": {"type":"string", "description": "'out' (seed -> neighbor) or 'in' (neighbor -> seed)."} } } },
               "by_relation": { "type": "object", "description": "Count of all edges on the seed by relation, before any filter." },
               "total": {"type":"integer", "description": "Total neighbors matching the filter; may exceed the capped `neighbors` list."},
               "truncated": {"type":"boolean"}
@@ -6331,7 +6443,7 @@ fn build_tools_list(allow_exec: bool) -> Value {
           }, "required": ["repos"] } },
         { "name": "repo_stats", "description": "Node/edge counts for one federated member repo.",
           "inputSchema": { "type": "object", "properties": { "repo": { "type": "string", "description": "Repo tag, as listed by list_repos." } }, "required": ["repo"] } },
-        { "name": "shortest_path", "description": "Shortest path between two nodes, showing the chain of relations. Answers 'how does A reach B' or 'is X connected to Y'.",
+        { "name": "shortest_path", "description": "Shortest undirected connection. Uses label@file; arrows preserve edge direction.",
           "inputSchema": { "type": "object", "properties": { "source": { "type": "string", "description": "Start node: label, id, or bare name. Qualify a shared name as 'name@file'." }, "target": { "type": "string", "description": "End node: label, id, or bare name. Qualify a shared name as 'name@file'." }, "max_hops": { "type": "integer", "description": "Optional cap on path length in hops (default 8)." } }, "required": ["source", "target"] } },
         { "name": "affected", "description": "Reverse-impact of one SYMBOL: the nodes that transitively depend on it -- what could break if you change it. Walks the dependency edges backward including cross-language coupling, so the blast radius spans languages. A class/type folds in its members (labelled aggregated), so a class is never a false 'safe leaf'. A 0-dependent result may carry a `dynamic_caveat` (reflection/IPC/event-bus); see the server instructions / `dynamic_hazards`.",
           "inputSchema": { "type": "object", "properties": {
@@ -6343,14 +6455,18 @@ fn build_tools_list(allow_exec: bool) -> Value {
           }, "required": ["label"] },
           "outputSchema": { "type": "object", "properties": {
               "seed": {"type":"string"},
+              "seed_qualified": {"type":"string", "description":"Copy-ready seed identity."},
               "affected": { "type": "array", "items": { "type": "object", "properties": {
-                  "label": {"type":"string"}, "depth": {"type":"integer"}, "via_relation": {"type":"string"} } } },
+                  "label": {"type":"string"},
+                  "qualified": {"type":"string", "description":"Copy-ready node identity."},
+                  "depth": {"type":"integer"}, "via_relation": {"type":"string"} } } },
               "total": {"type":"integer"}, "truncated": {"type":"boolean"},
               "by_depth": { "type": "object", "additionalProperties": {"type":"integer"} },
               "resolved": {"type":"boolean", "description":"false when the name did not resolve to a single node; see ambiguous/candidates."},
               "ambiguous": {"type":"boolean"},
               "candidates": { "type": "array", "items": { "type": "object", "properties": {
-                  "id": {"type":"string"}, "file": {"type":"string"}, "degree": {"type":"integer"} } }, "description":"Disambiguation candidates when ambiguous." },
+                  "id": {"type":"string"}, "file": {"type":"string"}, "degree": {"type":"integer"},
+                  "qualified": {"type":"string", "description":"Copy-ready label@file reference that resolves to this candidate."} } }, "description":"Disambiguation candidates when ambiguous." },
               "aggregated_over_members": {"type":"integer", "description":"When the seed is a class/type, the number of members folded into the reverse-impact (impact attaches to a class's methods, not the bare symbol)."},
               "dynamic_caveat": { "type": "object", "description": "Present only when total=0 AND the symbol may be reached by dynamic dispatch -- so 0 dependents is not proof it is safe to change. Inspect the sites with dynamic_hazards.", "properties": { "opaque_sites_in_scope": {"type":"integer"}, "kinds": {"type":"array","items":{"type":"string"}}, "dynamically_referenced": {"type":"boolean"}, "message": {"type":"string"} } }
           }, "required": ["seed","affected"] } },
@@ -6603,6 +6719,14 @@ fn build_tools_list(allow_exec: bool) -> Value {
                 "idempotentHint": true,
                 "openWorldHint": open_world.contains(&name.as_str()),
             });
+        }
+        if name == "query_graph" {
+            // MCP hosts may expose tools lazily through semantic discovery. A
+            // distinctive title keeps the primary entry point ahead of metadata
+            // helpers even when every tool inherits the same server instructions.
+            let title = json!("Synaptic: Query This Codebase (Start Here)");
+            t["title"] = title.clone();
+            t["annotations"]["title"] = title;
         }
         // Discovery is injected into model context by many MCP hosts. Keep the
         // complete validation schemas, enums, required fields, and annotations,
@@ -7386,6 +7510,45 @@ mod tests {
     }
 
     #[test]
+    fn query_graph_qualifies_duplicate_symbols_across_applications() {
+        let mut web = node("web_user_service", "UserService", Some(0));
+        web.source_file = "apps/web/src/services/UserService.ts".into();
+        let mut api = node("api_user_service", "UserService", Some(0));
+        api.source_file = "services/api/src/users/UserService.ts".into();
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![web, api],
+            links: vec![],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let mut s = Server::from_graph_data(gd, None);
+        let result =
+            query_graph_structured(&mut s, json!({"question":"api user service","full":true}));
+        let nodes = result["structuredContent"]["nodes"].as_array().unwrap();
+        assert_eq!(
+            nodes[0]["source_file"],
+            json!("services/api/src/users/UserService.ts")
+        );
+        assert_eq!(
+            nodes[0]["qualified"],
+            json!("UserService@services/api/src/users/UserService.ts")
+        );
+        assert!(
+            nodes.iter().all(|n| n["qualified"].as_str().is_some()),
+            "both duplicate implementations are copy-ready: {nodes:?}"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("qualified: UserService@apps/web/"), "{text}");
+        assert!(
+            text.contains("qualified: UserService@services/api/"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn audit_sql_terse_one_line_default_verbose_adds_fix() {
         let mut s = Server::from_graph_data(sql_graph(), None);
         let terse = call_tool(&mut s, "audit_sql", json!({}));
@@ -7462,6 +7625,15 @@ mod tests {
             "class total must reflect folded members, got {sc}"
         );
         assert_eq!(sc["aggregated_over_members"], json!(2), "{sc}");
+        assert_eq!(sc["seed_qualified"], "MyClass@c.py", "{sc}");
+        assert!(
+            sc["affected"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|hit| hit["qualified"].as_str().is_some()),
+            "every impact hit carries a copy-ready identity: {sc}"
+        );
     }
 
     #[test]
@@ -8913,7 +9085,7 @@ mod tests {
             "shortest_path",
             json!({"source": "login_user", "target": "Database"}),
         );
-        assert!(path.contains("Shortest path"), "{path}");
+        assert!(path.contains("Shortest undirected connection"), "{path}");
         let q = call_tool(
             &mut s,
             "query_graph",
@@ -10170,6 +10342,10 @@ mod tests {
                 "structured nodes must be score-sorted: {scores:?}"
             );
         }
+        assert!(
+            nodes.iter().all(|n| n.get("changed").is_none()),
+            "without `since`, changed status must be unknown/omitted rather than false: {nodes:?}"
+        );
     }
 
     #[test]
@@ -10276,9 +10452,18 @@ mod tests {
             .unwrap();
         let sc = &resp["result"]["structuredContent"];
         assert_eq!(sc["seed"], "AuthService");
+        assert_eq!(sc["seed_qualified"], "AuthService@auth.py");
         assert!(
             !sc["neighbors"].as_array().unwrap().is_empty(),
             "neighbors present: {sc}"
+        );
+        assert!(
+            sc["neighbors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|neighbor| neighbor["qualified"].as_str().is_some()),
+            "every neighbor carries a copy-ready identity: {sc}"
         );
         assert!(sc["by_relation"].is_object(), "by_relation tally: {sc}");
 
@@ -10390,6 +10575,20 @@ mod tests {
                 "tool {name} openWorldHint"
             );
         }
+        let query = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "query_graph")
+            .unwrap();
+        assert_eq!(
+            query["annotations"]["title"],
+            json!("Synaptic: Query This Codebase (Start Here)")
+        );
+        assert_eq!(
+            query["title"],
+            json!("Synaptic: Query This Codebase (Start Here)")
+        );
     }
 
     #[test]
@@ -11260,10 +11459,11 @@ mod tests {
             !text.contains("Recency:"),
             "no recency header when git fails: {text}"
         );
-        // Nodes still returned, none flagged changed.
+        // Nodes still return, but the failed baseline does not manufacture an
+        // all-false change verdict.
         let nodes = res["structuredContent"]["nodes"].as_array().unwrap();
         assert!(!nodes.is_empty());
-        assert!(nodes.iter().all(|n| n["changed"] == json!(false)));
+        assert!(nodes.iter().all(|n| n.get("changed").is_none()));
     }
 
     /// A real symbol that imports an unresolved external target. The import
@@ -11367,11 +11567,19 @@ mod tests {
             "shortest_path",
             json!({"source": "login_user", "target": "Database"}),
         );
-        // login_user <-calls- AuthService -uses-> Database; the rendered path must
-        // surface the relation on each hop, not just the node labels.
-        assert!(path.starts_with("Shortest path"), "{path}");
-        assert!(path.contains("-[calls]->"), "calls hop shown: {path}");
+        // login_user <-calls- AuthService -uses-> Database. The traversal is
+        // intentionally undirected, but the render must not turn that first
+        // backward edge into a fictional forward call.
+        assert!(path.starts_with("Shortest undirected connection"), "{path}");
+        assert!(
+            path.contains("<-[calls]-"),
+            "backward calls hop shown honestly: {path}"
+        );
         assert!(path.contains("-[uses]->"), "uses hop shown: {path}");
+        assert!(
+            path.contains("login_user@login.py") && path.contains("AuthService@auth.py"),
+            "every hop carries a copy-ready identity: {path}"
+        );
     }
 
     #[test]
@@ -11940,7 +12148,7 @@ mod tests {
 
         // Path takes one bridge hop, relation-annotated from the bridge.
         let p = server.tool_shortest_path("format_invoice", "PaymentWidget", 5);
-        assert!(p.contains("Shortest path (2 hops)"), "{p}");
+        assert!(p.contains("Shortest undirected connection (2 hops"), "{p}");
         assert!(p.contains("PaymentWidget"), "{p}");
     }
 

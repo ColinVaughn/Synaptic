@@ -47,6 +47,7 @@ pub fn augment(path: &str, source: &[u8], result: &mut ExtractionResult) {
     scan_websocket(ext, path, text, result);
     scan_queues(ext, path, text, result);
     scan_ipc(ext, path, text, result);
+    scan_architectury_packets(ext, path, text, result);
     scan_event_bus(ext, path, text, result);
     scan_dotnet_events(ext, path, text, result);
     scan_sql(ext, path, text, result);
@@ -3559,6 +3560,101 @@ fn boundary_link(
             });
         }
     }
+}
+
+// --- Architectury/Minecraft custom payload boundaries ---
+//
+// A payload send crosses a physical client/server process boundary. The Java
+// call graph cannot connect `NetworkManager.sendToServer(new FooPayload(...))`
+// to `FooPayload.handle(...)` by an ordinary call edge, so model the payload
+// class as a channel exactly like Electron IPC and message queues:
+//
+//   sending method --calls_service--> packet #FooPayload
+//   packet #FooPayload --handled_by--> FooPayload.handle
+//
+// Keying on a class name ending in Payload/Packet and requiring NetworkManager
+// or a payload interface keeps this narrow enough for a best-effort inferred
+// cross-language pass.
+fn scan_architectury_packets(ext: &str, path: &str, text: &str, result: &mut ExtractionResult) {
+    if !matches!(ext, "java" | "kt") || !text.contains("NetworkManager") {
+        return;
+    }
+
+    static SEND_SERVER: OnceLock<Regex> = OnceLock::new();
+    let send_server = SEND_SERVER.get_or_init(|| {
+        Regex::new(
+            r"\bNetworkManager\s*\.\s*sendToServer\s*\(\s*(?:new\s+)?([A-Z][A-Za-z0-9_]*(?:Payload|Packet))\b",
+        )
+        .expect("valid regex")
+    });
+    for caps in send_server.captures_iter(text) {
+        let whole = caps.get(0).expect("group 0");
+        packet_message(
+            result,
+            path,
+            line_of(text, whole.start()),
+            &caps[1],
+            WsRole::Client,
+        );
+    }
+
+    static SEND_PLAYER: OnceLock<Regex> = OnceLock::new();
+    let send_player = SEND_PLAYER.get_or_init(|| {
+        Regex::new(
+            r"(?s)\bNetworkManager\s*\.\s*sendToPlayers?\s*\([\s\S]{0,512}?,\s*(?:new\s+)?([A-Z][A-Za-z0-9_]*(?:Payload|Packet))\b",
+        )
+        .expect("valid regex")
+    });
+    for caps in send_player.captures_iter(text) {
+        let whole = caps.get(0).expect("group 0");
+        packet_message(
+            result,
+            path,
+            line_of(text, whole.start()),
+            &caps[1],
+            WsRole::Client,
+        );
+    }
+
+    static PAYLOAD_DECL: OnceLock<Regex> = OnceLock::new();
+    let payload_decl = PAYLOAD_DECL.get_or_init(|| {
+        Regex::new(
+            r"(?s)\b(?:record|class)\s+([A-Z][A-Za-z0-9_]*(?:Payload|Packet))\b[^{]{0,1024}\bimplements\b[^{]{0,512}\b(?:C2SPayload|S2CPayload|CustomPacketPayload)\b",
+        )
+        .expect("valid regex")
+    });
+    static HANDLE: OnceLock<Regex> = OnceLock::new();
+    let handle = HANDLE.get_or_init(|| Regex::new(r"\bhandle\s*\(").expect("valid regex"));
+    for caps in payload_decl.captures_iter(text) {
+        let declaration = caps.get(0).expect("group 0");
+        let Some(handle_match) = handle.find(&text[declaration.end()..]) else {
+            continue;
+        };
+        packet_message(
+            result,
+            path,
+            line_of(text, declaration.end() + handle_match.start()),
+            &caps[1],
+            WsRole::Server,
+        );
+    }
+}
+
+fn packet_message(
+    result: &mut ExtractionResult,
+    path: &str,
+    line: u32,
+    payload: &str,
+    role: WsRole,
+) {
+    let node = boundary_node_id("packet", payload);
+    ensure_target(
+        result,
+        &node,
+        &format!("packet #{payload}"),
+        "packet_channel",
+    );
+    boundary_link(result, path, line, node, role, "architectury_packet");
 }
 
 /// Electron IPC detector. Senders (`ipcRenderer.invoke/send('ch')`,

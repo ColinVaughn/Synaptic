@@ -189,6 +189,29 @@ fn tokenize(s: &str) -> Vec<String> {
     tokens
 }
 
+/// Tokens from a node's source path. IDF and per-channel length normalization
+/// suppress ubiquitous layout segments naturally, while retaining meaningful
+/// language, package, target, generated, test, and feature-directory names.
+/// Keeping the vocabulary intact is important for polyglot and unconventional
+/// repositories where any path segment can distinguish parallel implementations.
+fn tokenize_path(s: &str) -> HashSet<String> {
+    tokenize(s).into_iter().collect()
+}
+
+/// Bounded extractor-provided aliases used only for search. Resource extractors
+/// use this for identifiers such as localization keys without minting hundreds
+/// of weak orphan nodes.
+fn search_tokens(node: &Node) -> HashSet<String> {
+    node.extra
+        .get("_search_terms")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .flat_map(tokenize)
+        .collect()
+}
+
 fn undirected_adjacency(kg: &KnowledgeGraph) -> HashMap<NodeId, Vec<NodeId>> {
     let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     for n in kg.nodes() {
@@ -281,6 +304,18 @@ pub struct QueryIndex {
     n: f64,
     /// Each node's set of label tokens.
     node_tokens: HashMap<NodeId, HashSet<String>>,
+    /// Architectural tokens from the node's source path. Kept separate so path
+    /// evidence can be weighted below direct symbol-name evidence.
+    #[serde(default)]
+    node_path_tokens: HashMap<NodeId, HashSet<String>>,
+    /// Extractor-provided search aliases (for example localization identifiers).
+    #[serde(default)]
+    node_search_tokens: HashMap<NodeId, HashSet<String>>,
+    /// Normalized exact label for each node. Retained so merged shard indexes
+    /// can recompute repeated-label priors over the full graph rather than
+    /// inheriting shard-local counts.
+    #[serde(default)]
+    node_label_keys: HashMap<NodeId, String>,
     /// How many nodes contain each token (document frequency).
     df: HashMap<String, usize>,
     /// Undirected adjacency (sorted, deduped) for subgraph expansion.
@@ -292,6 +327,12 @@ pub struct QueryIndex {
     /// serialized indexes from before this field existed) are neutral `1.0`.
     #[serde(default)]
     node_prior: HashMap<NodeId, f64>,
+    /// Query-independent penalty applied only when a node is reached as a
+    /// non-matching neighbour. Repeated labels such as `render()` should not
+    /// crowd out specific downstream nodes, but remain full-strength seeds when
+    /// the user asks for them directly.
+    #[serde(default)]
+    neighbor_prior: HashMap<NodeId, f64>,
 }
 
 /// Relevance decay applied per expansion hop: a node `k` hops from the seed that
@@ -306,6 +347,14 @@ const DECAY: f64 = 0.5;
 fn hub_penalty(degree: usize, avg_degree: f64) -> f64 {
     let avg = avg_degree.max(1.0);
     1.0 / (1.0 + (1.0 + degree as f64 / avg).ln())
+}
+
+fn repeated_label_neighbor_prior(count: usize) -> f64 {
+    if count <= 2 {
+        1.0
+    } else {
+        (2.0 / count as f64).sqrt().max(0.35)
+    }
 }
 
 fn node_prior(node: &Node) -> f64 {
@@ -350,16 +399,43 @@ impl QueryIndex {
     pub fn build(kg: &KnowledgeGraph) -> Self {
         let n = kg.node_count().max(1) as f64;
         let mut node_tokens: HashMap<NodeId, HashSet<String>> = HashMap::new();
+        let mut node_path_tokens: HashMap<NodeId, HashSet<String>> = HashMap::new();
+        let mut node_search_tokens: HashMap<NodeId, HashSet<String>> = HashMap::new();
+        let mut node_label_keys: HashMap<NodeId, String> = HashMap::new();
         let mut priors: HashMap<NodeId, f64> = HashMap::new();
         let mut df: HashMap<String, usize> = HashMap::new();
+        let mut label_counts: HashMap<String, usize> = HashMap::new();
+        for node in kg.nodes() {
+            *label_counts.entry(node.label.to_lowercase()).or_default() += 1;
+        }
         for node in kg.nodes() {
             let toks: HashSet<String> = tokenize(&node.label).into_iter().collect();
-            for t in &toks {
+            let path_toks = tokenize_path(&node.source_file);
+            let search_toks = search_tokens(node);
+            let all: HashSet<&String> = toks
+                .iter()
+                .chain(path_toks.iter())
+                .chain(search_toks.iter())
+                .collect();
+            for t in all {
                 *df.entry(t.clone()).or_insert(0) += 1;
             }
             priors.insert(node.id.clone(), node_prior(node));
+            node_label_keys.insert(node.id.clone(), node.label.to_lowercase());
+            node_path_tokens.insert(node.id.clone(), path_toks);
+            node_search_tokens.insert(node.id.clone(), search_toks);
             node_tokens.insert(node.id.clone(), toks);
         }
+        let neighbor_prior = kg
+            .nodes()
+            .map(|node| {
+                let count = label_counts
+                    .get(&node.label.to_lowercase())
+                    .copied()
+                    .unwrap_or(1);
+                (node.id.clone(), repeated_label_neighbor_prior(count))
+            })
+            .collect();
         let adjacency = undirected_adjacency(kg);
         let avg_degree = if adjacency.is_empty() {
             0.0
@@ -369,10 +445,14 @@ impl QueryIndex {
         QueryIndex {
             n,
             node_tokens,
+            node_path_tokens,
+            node_search_tokens,
+            node_label_keys,
             df,
             adjacency,
             avg_degree,
             node_prior: priors,
+            neighbor_prior,
         }
     }
 
@@ -429,10 +509,14 @@ impl QueryIndex {
         QueryIndex {
             n: 1.0,
             node_tokens: HashMap::new(),
+            node_path_tokens: HashMap::new(),
+            node_search_tokens: HashMap::new(),
+            node_label_keys: HashMap::new(),
             df: HashMap::new(),
             adjacency: HashMap::new(),
             avg_degree: 0.0,
             node_prior: HashMap::new(),
+            neighbor_prior: HashMap::new(),
         }
     }
 
@@ -443,8 +527,20 @@ impl QueryIndex {
         for (id, toks) in &part.node_tokens {
             self.node_tokens.insert(id.clone(), toks.clone());
         }
+        for (id, toks) in &part.node_path_tokens {
+            self.node_path_tokens.insert(id.clone(), toks.clone());
+        }
+        for (id, toks) in &part.node_search_tokens {
+            self.node_search_tokens.insert(id.clone(), toks.clone());
+        }
+        for (id, label) in &part.node_label_keys {
+            self.node_label_keys.insert(id.clone(), label.clone());
+        }
         for (id, prior) in &part.node_prior {
             self.node_prior.insert(id.clone(), *prior);
+        }
+        for (id, prior) in &part.neighbor_prior {
+            self.neighbor_prior.insert(id.clone(), *prior);
         }
         for (t, c) in &part.df {
             *self.df.entry(t.clone()).or_insert(0) += c;
@@ -484,6 +580,24 @@ impl QueryIndex {
             self.adjacency.values().map(|v| v.len()).sum::<usize>() as f64
                 / self.adjacency.len() as f64
         };
+        if !self.node_label_keys.is_empty() {
+            let mut counts = HashMap::<&str, usize>::new();
+            for label in self.node_label_keys.values() {
+                *counts.entry(label.as_str()).or_default() += 1;
+            }
+            self.neighbor_prior = self
+                .node_label_keys
+                .iter()
+                .map(|(id, label)| {
+                    (
+                        id.clone(),
+                        repeated_label_neighbor_prior(
+                            counts.get(label.as_str()).copied().unwrap_or(1),
+                        ),
+                    )
+                })
+                .collect();
+        }
     }
 
     /// Merge per-shard indexes into one global index, adding the cross-repo
@@ -520,26 +634,29 @@ impl QueryIndex {
 
         let q_tokens: HashSet<String> = tokenize(query_text).into_iter().collect();
 
-        // A node's own relevance to the query: sum of matched-token IDF, length-
-        // normalised so a long label can't out-score a tight match just by
-        // accumulating tokens (BM25-lite). 0.0 if nothing matches.
+        // A node's own relevance to the query: direct label evidence leads,
+        // architectural path evidence disambiguates parallel implementations,
+        // and bounded extractor aliases make resources discoverable. Each channel
+        // is length-normalised so a long path/key list cannot win by accumulation.
         let node_relevance = |id: &NodeId| -> f64 {
-            let Some(toks) = self.node_tokens.get(id) else {
-                return 0.0;
+            let channel = |tokens: Option<&HashSet<String>>, weight: f64| -> f64 {
+                let Some(tokens) = tokens else {
+                    return 0.0;
+                };
+                let sum: f64 = q_tokens
+                    .iter()
+                    .filter(|t| tokens.contains(*t))
+                    .map(|t| idf(t))
+                    .sum();
+                sum * weight / (tokens.len().max(1) as f64).sqrt()
             };
-            let sum: f64 = q_tokens
-                .iter()
-                .filter(|t| toks.contains(*t))
-                .map(|t| idf(t))
-                .sum();
-            if sum == 0.0 {
-                0.0
-            } else {
-                sum / (toks.len().max(1) as f64).sqrt()
-            }
+            channel(self.node_tokens.get(id), 1.0)
+                + channel(self.node_path_tokens.get(id), 0.35)
+                + channel(self.node_search_tokens.get(id), 0.55)
         };
         let degree = |id: &NodeId| self.adjacency.get(id).map_or(0, |v| v.len());
         let prior = |id: &NodeId| self.node_prior.get(id).copied().unwrap_or(1.0);
+        let neighbor_prior = |id: &NodeId| self.neighbor_prior.get(id).copied().unwrap_or(1.0);
         // Additive recency bonus (0.0 when no recency signal or node unchanged).
         // Added to a node's relevance before the hub penalty, so changed code both
         // ranks higher and is more likely to be pulled into the node budget.
@@ -614,8 +731,9 @@ impl QueryIndex {
                     if done.contains(nb) {
                         continue;
                     }
-                    let rel = node_relevance(nb).max(cur.rel * DECAY);
-                    let rel = rel * prior(nb);
+                    let own = node_relevance(nb);
+                    let inherited = cur.rel * DECAY * neighbor_prior(nb);
+                    let rel = own.max(inherited) * prior(nb);
                     let key = (rel + recency_bonus(nb)) * hub_penalty(degree(nb), self.avg_degree);
                     heap.push(Frontier {
                         key,
@@ -755,7 +873,45 @@ pub fn shortest_path(kg: &KnowledgeGraph, from: &NodeId, to: &NodeId) -> Option<
     if from == to {
         return Some(vec![from.clone()]);
     }
-    let adj = undirected_adjacency(kg);
+    let mut adj = undirected_adjacency(kg);
+    // A plain BFS may choose an arbitrary same-length route through a ubiquitous
+    // type/reference hub (for example `Override`) instead of an explicit
+    // calls_service -> handled_by packet boundary. Preserve hop count as the
+    // primary criterion, but visit higher-signal edge families first so the
+    // first discovered equal-length route is the one an agent can act on.
+    let mut pair_priority: HashMap<NodeId, HashMap<NodeId, u8>> = HashMap::new();
+    for edge in kg.edges() {
+        let priority = shortest_path_relation_priority(&edge.relation);
+        for key in [
+            (edge.source.clone(), edge.target.clone()),
+            (edge.target.clone(), edge.source.clone()),
+        ] {
+            pair_priority
+                .entry(key.0)
+                .or_default()
+                .entry(key.1)
+                .and_modify(|current| *current = (*current).min(priority))
+                .or_insert(priority);
+        }
+    }
+    for (node, neighbors) in &mut adj {
+        neighbors.sort_by(|left, right| {
+            let left_priority = pair_priority
+                .get(node)
+                .and_then(|priorities| priorities.get(left))
+                .copied()
+                .unwrap_or(u8::MAX);
+            let right_priority = pair_priority
+                .get(node)
+                .and_then(|priorities| priorities.get(right))
+                .copied()
+                .unwrap_or(u8::MAX);
+            left_priority
+                .cmp(&right_priority)
+                .then_with(|| kg.degree(left).cmp(&kg.degree(right)))
+                .then_with(|| left.cmp(right))
+        });
+    }
     let mut prev: HashMap<NodeId, NodeId> = HashMap::new();
     let mut seen: HashSet<NodeId> = HashSet::new();
     let mut queue: VecDeque<NodeId> = VecDeque::new();
@@ -783,6 +939,31 @@ pub fn shortest_path(kg: &KnowledgeGraph, from: &NodeId, to: &NodeId) -> Option<
         }
     }
     None
+}
+
+fn shortest_path_relation_priority(relation: &str) -> u8 {
+    let relation = relation.to_ascii_lowercase();
+    if relation.contains("call")
+        || matches!(
+            relation.as_str(),
+            "handled_by" | "invokes" | "binds_native" | "dynamic_ref"
+        )
+    {
+        0
+    } else if relation.contains("inherit")
+        || relation.contains("implement")
+        || relation.contains("extend")
+    {
+        1
+    } else if relation.contains("import") || relation == "re_exports" {
+        2
+    } else if relation.contains("use") || relation.contains("depend") {
+        3
+    } else if relation.contains("reference") {
+        4
+    } else {
+        5
+    }
 }
 
 /// Explain a node: its metadata + neighbours grouped by relation/direction.
@@ -1703,6 +1884,45 @@ mod tests {
     }
 
     #[test]
+    fn merged_shards_recompute_repeated_label_penalty_globally() {
+        let union = build(
+            &[
+                ("seed", "InvoiceService"),
+                ("render1", "render"),
+                ("render2", "render"),
+                ("render3", "render"),
+                ("render4", "render"),
+                ("render5", "render"),
+                ("render6", "render"),
+            ],
+            &[],
+        );
+        let shard1 = build(
+            &[
+                ("seed", "InvoiceService"),
+                ("render1", "render"),
+                ("render2", "render"),
+                ("render3", "render"),
+            ],
+            &[],
+        );
+        let shard2 = build(
+            &[
+                ("render4", "render"),
+                ("render5", "render"),
+                ("render6", "render"),
+            ],
+            &[],
+        );
+        let whole = QueryIndex::build(&union);
+        let merged = QueryIndex::merge_with_bridge(
+            [&QueryIndex::build(&shard1), &QueryIndex::build(&shard2)],
+            &[],
+        );
+        assert_eq!(merged.neighbor_prior, whole.neighbor_prior);
+    }
+
+    #[test]
     fn query_index_round_trips_via_bytes() {
         let kg = build(
             &[
@@ -1727,10 +1947,112 @@ mod tests {
         let idx = QueryIndex::build(&kg);
         let mut v = serde_json::to_value(&idx).unwrap();
         v.as_object_mut().unwrap().remove("node_prior");
+        v.as_object_mut().unwrap().remove("neighbor_prior");
+        v.as_object_mut().unwrap().remove("node_path_tokens");
+        v.as_object_mut().unwrap().remove("node_search_tokens");
+        v.as_object_mut().unwrap().remove("node_label_keys");
         let back: QueryIndex = serde_json::from_value(v).unwrap();
         assert!(back.node_prior.is_empty(), "old index has no priors");
+        assert!(
+            back.neighbor_prior.is_empty(),
+            "old index has no neighbour priors"
+        );
         let r = back.query(&kg, "portal", 10, TraversalMode::Bfs);
         assert_eq!(r.nodes.first(), Some(&NodeId("code".into())));
+    }
+
+    #[test]
+    fn source_path_disambiguates_polyglot_implementations() {
+        let mut python = Node {
+            id: NodeId("python".into()),
+            label: "PaymentProcessor".into(),
+            file_type: FileType::Code,
+            source_file: "services/python/src/payments/payment_processor.py".into(),
+            source_location: Some("L1".into()),
+            community: None,
+            repo: None,
+            extra: Map::new(),
+        };
+        python.set_kind(NodeKind::Class);
+        let mut rust = python.clone();
+        rust.id = NodeId("rust".into());
+        rust.source_file = "services/rust/src/payments/payment_processor.rs".into();
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![python, rust],
+            links: vec![],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let kg = KnowledgeGraph::from_graph_data(gd);
+        let r = QueryIndex::build(&kg).query(&kg, "rust payment processor", 10, TraversalMode::Bfs);
+        assert_eq!(
+            r.nodes.first(),
+            Some(&NodeId("rust".into())),
+            "{:?}",
+            r.nodes
+        );
+    }
+
+    #[test]
+    fn repeated_labels_do_not_crowd_out_specific_neighbours() {
+        let mut nodes = vec![("seed", "InvoiceService"), ("validator", "TaxValidator")];
+        let mut edges = vec![("seed", "validator", "calls")];
+        for i in 1..=5 {
+            let id: &'static str = Box::leak(format!("render{i}").into_boxed_str());
+            nodes.push((id, "render"));
+            edges.push(("seed", id, "calls"));
+        }
+        let kg = build(&nodes, &edges);
+        let r = query(&kg, "invoice service", 20);
+        let validator = pos(&r, "validator").expect("specific neighbour included");
+        for i in 1..=5 {
+            let id = format!("render{i}");
+            assert!(
+                validator < pos(&r, &id).expect("duplicate label included"),
+                "specific validator must outrank repeated {id}: {:?}",
+                r.nodes
+            );
+        }
+        let direct = query(&kg, "render", 20);
+        assert!(
+            direct.seeds.iter().any(|id| id.0.starts_with("render")),
+            "a direct query must still seed repeated labels: {:?}",
+            direct.seeds
+        );
+    }
+
+    #[test]
+    fn extractor_search_terms_make_localization_resources_queryable() {
+        let mut lang = Node {
+            id: NodeId("lang".into()),
+            label: "web/locales/en-US/checkout.json".into(),
+            file_type: FileType::Document,
+            source_file: "web/locales/en-US/checkout.json".into(),
+            source_location: Some("L1".into()),
+            community: None,
+            repo: None,
+            extra: Map::new(),
+        };
+        lang.extra.insert(
+            "_search_terms".into(),
+            serde_json::json!(["checkout.payment.card_declined"]),
+        );
+        let gd = GraphData {
+            directed: true,
+            multigraph: false,
+            graph: Map::new(),
+            nodes: vec![lang],
+            links: vec![],
+            hyperedges: vec![],
+            built_at_commit: None,
+        };
+        let kg = KnowledgeGraph::from_graph_data(gd);
+        let r = query(&kg, "payment card declined", 10);
+        assert_eq!(r.nodes, vec![NodeId("lang".into())]);
+        assert!(r.scores[0] > 0.0);
     }
 
     #[test]
@@ -2219,6 +2541,32 @@ mod tests {
             vec![NodeId("a".into()), NodeId("b".into()), NodeId("c".into())]
         );
         assert!(shortest_path(&kg, &NodeId("a".into()), &NodeId("missing".into())).is_none());
+    }
+
+    #[test]
+    fn shortest_path_prefers_boundary_flow_over_equal_length_reference_hub() {
+        let kg = build(
+            &[
+                ("sender", "send"),
+                ("packet", "packet #TeleportPayload"),
+                ("handler", "handle"),
+                ("generic", "Override"),
+            ],
+            &[
+                ("sender", "generic", "references"),
+                ("handler", "generic", "references"),
+                ("sender", "packet", "calls_service"),
+                ("packet", "handler", "handled_by"),
+            ],
+        );
+        assert_eq!(
+            shortest_path(&kg, &NodeId("sender".into()), &NodeId("handler".into())),
+            Some(vec![
+                NodeId("sender".into()),
+                NodeId("packet".into()),
+                NodeId("handler".into())
+            ])
+        );
     }
 
     #[test]
