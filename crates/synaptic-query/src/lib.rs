@@ -189,6 +189,171 @@ fn tokenize(s: &str) -> Vec<String> {
     tokens
 }
 
+/// Natural-language scaffolding that carries little code-search intent. These
+/// tokens are removed only when the query also contains a substantive token, so
+/// exact symbol searches such as `is` continue to work.
+fn is_query_scaffolding(token: &str) -> bool {
+    matches!(
+        token,
+        "and"
+            | "are"
+            | "at"
+            | "been"
+            | "being"
+            | "between"
+            | "by"
+            | "can"
+            | "could"
+            | "did"
+            | "do"
+            | "does"
+            | "for"
+            | "from"
+            | "how"
+            | "in"
+            | "is"
+            | "me"
+            | "of"
+            | "on"
+            | "or"
+            | "please"
+            | "should"
+            | "show"
+            | "that"
+            | "the"
+            | "these"
+            | "this"
+            | "those"
+            | "through"
+            | "to"
+            | "was"
+            | "were"
+            | "what"
+            | "when"
+            | "where"
+            | "which"
+            | "who"
+            | "why"
+            | "with"
+            | "work"
+            | "works"
+            | "would"
+    )
+}
+
+fn is_symbol_shaped_query(s: &str) -> bool {
+    if s.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let mut previous_lowercase = false;
+    let mut camel_boundary = false;
+    for ch in s.chars() {
+        if ch.is_uppercase() && previous_lowercase {
+            camel_boundary = true;
+        }
+        previous_lowercase = ch.is_lowercase();
+    }
+    camel_boundary
+        || s.chars().any(|ch| {
+            matches!(
+                ch,
+                '_' | '.' | '(' | ')' | ':' | '#' | '$' | '@' | '/' | '\\'
+            )
+        })
+}
+
+fn tokenize_query(s: &str) -> HashSet<String> {
+    let tokens: HashSet<String> = tokenize(s).into_iter().collect();
+    if is_symbol_shaped_query(s) {
+        return tokens;
+    }
+    let mut substantive: HashSet<String> = tokens
+        .iter()
+        .filter(|token| !is_query_scaffolding(token))
+        .cloned()
+        .collect();
+    let question_frame = tokens
+        .iter()
+        .any(|token| matches!(token.as_str(), "how" | "what" | "where" | "which" | "why"))
+        && tokens.iter().any(|token| {
+            matches!(
+                token.as_str(),
+                "are" | "can" | "could" | "did" | "do" | "does" | "is" | "was" | "were" | "would"
+            )
+        });
+    let explicit_symbol = s.contains('`') || s.contains("handle(");
+    if question_frame && !explicit_symbol && substantive.len() >= 3 {
+        substantive.remove("handle");
+    }
+    if substantive.is_empty() {
+        tokens
+    } else {
+        substantive
+    }
+}
+
+/// Conservative English inflection candidates for natural-language questions.
+/// Callers admit a candidate only when it is already present in the graph's
+/// token index, so this can improve recall without replacing the original term
+/// or inventing an unmatched stem.
+fn query_inflection_variants(token: &str) -> Vec<String> {
+    let mut variants = Vec::<String>::new();
+    let push = |variants: &mut Vec<String>, candidate: String| {
+        if candidate.chars().count() >= 3 && candidate != token {
+            variants.push(candidate);
+        }
+    };
+    let push_verb_stem = |variants: &mut Vec<String>, stem: &str| {
+        push(variants, stem.to_string());
+        push(variants, format!("{stem}e"));
+        let mut chars: Vec<char> = stem.chars().collect();
+        if chars.len() >= 2 && chars[chars.len() - 1] == chars[chars.len() - 2] {
+            chars.pop();
+            push(variants, chars.into_iter().collect());
+        }
+    };
+
+    if let Some(stem) = token.strip_suffix("ies") {
+        push(&mut variants, format!("{stem}y"));
+    }
+    if let Some(stem) = token.strip_suffix("ing") {
+        push_verb_stem(&mut variants, stem);
+    }
+    if let Some(stem) = token.strip_suffix("ed") {
+        push_verb_stem(&mut variants, stem);
+    }
+    if let Some(stem) = token.strip_suffix("es") {
+        push(&mut variants, stem.to_string());
+    }
+    if token.chars().count() > 4
+        && !token.ends_with("ss")
+        && !token.ends_with("us")
+        && !token.ends_with("is")
+    {
+        if let Some(stem) = token.strip_suffix('s') {
+            push(&mut variants, stem.to_string());
+        }
+    }
+
+    variants.sort();
+    variants.dedup();
+    variants
+}
+
+/// High-confidence implementation vocabulary for natural-language decision
+/// questions. These aliases are deliberately small and are admitted only when
+/// the target token exists in the graph. They complement morphology rather than
+/// turning query ranking into an open-ended synonym expansion.
+fn query_decision_variants(token: &str) -> &'static [&'static str] {
+    match token {
+        "choose" | "chooses" | "choosing" | "chose" | "chosen" | "decide" | "decides"
+        | "deciding" | "decided" | "determine" | "determines" | "determining" | "determined" => {
+            &["resolve"]
+        }
+        _ => &[],
+    }
+}
+
 /// Tokens from a node's source path. IDF and per-channel length normalization
 /// suppress ubiquitous layout segments naturally, while retaining meaningful
 /// language, package, target, generated, test, and feature-directory names.
@@ -339,6 +504,11 @@ pub struct QueryIndex {
 /// reaches it inherits `seed_score * DECAY^k`. Keeps far-flung neighbours from
 /// ranking as high as the seeds while still letting a long relevant chain survive.
 const DECAY: f64 = 0.5;
+
+/// A graph-confirmed natural-language intent seed inherits this fraction of its
+/// strongest adjacent lexical match's confidence. The supporting match remains
+/// stronger, while the intent stays visible in the terse prefix.
+const CONTEXTUAL_INTENT_WEIGHT: f64 = 0.75;
 
 /// Down-weight a node by how far its degree exceeds the graph average, so a
 /// high-fan-out hub (a registry, a `Builder`) is expanded last and its many
@@ -632,7 +802,98 @@ impl QueryIndex {
         let idf =
             |t: &str| ((self.n + 1.0) / (1.0 + *self.df.get(t).unwrap_or(&0) as f64)).ln() + 1.0;
 
-        let q_tokens: HashSet<String> = tokenize(query_text).into_iter().collect();
+        let mut original_query_tokens: Vec<String> =
+            tokenize_query(query_text).into_iter().collect();
+        original_query_tokens.sort();
+        let mut q_token_weights: HashMap<String, f64> = original_query_tokens
+            .iter()
+            .cloned()
+            .map(|token| (token, 1.0))
+            .collect();
+        let mut q_token_concepts: HashMap<String, String> = original_query_tokens
+            .iter()
+            .cloned()
+            .map(|token| (token.clone(), token))
+            .collect();
+        let natural_language_query = query_text.chars().any(char::is_whitespace);
+        let mut intent_variant_tokens = HashSet::<String>::new();
+        for token in &original_query_tokens {
+            for variant in query_inflection_variants(token) {
+                if self.df.contains_key(&variant) {
+                    q_token_weights.entry(variant.clone()).or_insert(0.65);
+                    q_token_concepts.entry(variant).or_insert(token.clone());
+                }
+            }
+            if natural_language_query {
+                for &variant in query_decision_variants(token) {
+                    if self.df.contains_key(variant) {
+                        q_token_weights.entry(variant.into()).or_insert(0.45);
+                        q_token_concepts
+                            .entry(variant.into())
+                            .or_insert(token.clone());
+                        intent_variant_tokens.insert(variant.into());
+                    }
+                }
+            }
+        }
+        let intent_query_concepts: HashSet<String> = intent_variant_tokens
+            .iter()
+            .filter_map(|token| q_token_concepts.get(token))
+            .cloned()
+            .collect();
+        let discriminative_query_concepts: HashSet<String> = q_token_weights
+            .iter()
+            .filter(|(token, _)| {
+                self.df
+                    .get(*token)
+                    .is_some_and(|count| *count > 0 && *count as f64 <= self.n * 0.5)
+            })
+            .filter_map(|(token, _)| q_token_concepts.get(token))
+            .cloned()
+            .collect();
+        let exact_symbol_label =
+            is_symbol_shaped_query(query_text).then(|| bare_name(query_text.trim()));
+        let is_full_exact_symbol_match = |id: &NodeId| {
+            exact_symbol_label.as_ref().is_some_and(|query_label| {
+                self.node_label_keys
+                    .get(id)
+                    .is_some_and(|node_label| bare_name(node_label) == *query_label)
+            })
+        };
+        let candidate_concepts = |id: &NodeId| -> Vec<String> {
+            let mut concepts = HashSet::<String>::new();
+            for token in q_token_weights.keys() {
+                let Some(count) = self.df.get(token) else {
+                    continue;
+                };
+                if *count == 0 || *count as f64 > self.n * 0.5 {
+                    continue;
+                }
+                let matched = self
+                    .node_tokens
+                    .get(id)
+                    .is_some_and(|tokens| tokens.contains(token))
+                    || self
+                        .node_path_tokens
+                        .get(id)
+                        .is_some_and(|tokens| tokens.contains(token))
+                    || self
+                        .node_search_tokens
+                        .get(id)
+                        .is_some_and(|tokens| tokens.contains(token));
+                if matched {
+                    concepts.insert(
+                        q_token_concepts
+                            .get(token)
+                            .cloned()
+                            .unwrap_or_else(|| token.clone()),
+                    );
+                }
+            }
+            let mut concepts: Vec<String> = concepts.into_iter().collect();
+            concepts.sort();
+            concepts
+        };
 
         // A node's own relevance to the query: direct label evidence leads,
         // architectural path evidence disambiguates parallel implementations,
@@ -643,16 +904,22 @@ impl QueryIndex {
                 let Some(tokens) = tokens else {
                     return 0.0;
                 };
-                let sum: f64 = q_tokens
+                let sum: f64 = q_token_weights
                     .iter()
-                    .filter(|t| tokens.contains(*t))
-                    .map(|t| idf(t))
+                    .filter(|(token, _)| tokens.contains(*token))
+                    .map(|(token, query_weight)| idf(token) * query_weight)
                     .sum();
                 sum * weight / (tokens.len().max(1) as f64).sqrt()
             };
-            channel(self.node_tokens.get(id), 1.0)
+            let channel_score = channel(self.node_tokens.get(id), 1.0)
                 + channel(self.node_path_tokens.get(id), 0.35)
-                + channel(self.node_search_tokens.get(id), 0.55)
+                + channel(self.node_search_tokens.get(id), 0.55);
+            if discriminative_query_concepts.len() <= 1 {
+                return channel_score;
+            }
+            let coverage =
+                candidate_concepts(id).len() as f64 / discriminative_query_concepts.len() as f64;
+            channel_score * (0.25 + 0.75 * coverage)
         };
         let degree = |id: &NodeId| self.adjacency.get(id).map_or(0, |v| v.len());
         let prior = |id: &NodeId| self.node_prior.get(id).copied().unwrap_or(1.0);
@@ -671,7 +938,196 @@ impl QueryIndex {
             .filter(|(_, s)| *s > 0.0)
             .collect();
         scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        let mut seeds: Vec<NodeId> = scored.iter().take(8).map(|(id, _)| id.clone()).collect();
+
+        // A natural-language question can contain both a generic implementation
+        // verb and specific domain concepts. Without diversity, repeated methods
+        // such as `handle()` can consume all eight seeds and hide every other
+        // concept. A single-concept signature may contribute at most two seeds
+        // when other graph-recognized concepts are available; a repeated
+        // multi-concept signature may contribute three. Distinct joint evidence
+        // is still high precision and receives its own allowance. A direct
+        // one-concept search therefore retains all overloads/implementations,
+        // and a full exact symbol-label match never consumes an allowance.
+        let diversify_seeds = discriminative_query_concepts.len() > 1;
+        let mut seed_key_counts = HashMap::<String, usize>::new();
+        let mut seeds = Vec::<NodeId>::new();
+        let mut selected_seeds = HashSet::<NodeId>::new();
+        let mut contextual_seed_support = HashMap::<NodeId, f64>::new();
+        for (id, _) in &scored {
+            if seeds.len() >= 8 {
+                break;
+            }
+            if is_full_exact_symbol_match(id) {
+                seeds.push(id.clone());
+                selected_seeds.insert(id.clone());
+                continue;
+            }
+            let intent_alias_candidate = self.node_tokens.get(id).is_some_and(|tokens| {
+                intent_variant_tokens
+                    .iter()
+                    .any(|token| tokens.contains(token))
+            });
+            let direct_non_intent_evidence = self.node_tokens.get(id).is_some_and(|tokens| {
+                tokens.iter().any(|token| {
+                    q_token_concepts.get(token).is_some_and(|concept| {
+                        q_token_weights.contains_key(token)
+                            && !intent_query_concepts.contains(concept)
+                    })
+                })
+            });
+            // The low-weight alias cannot consume an ordinary seed by itself.
+            // Alias-only symbols must earn admission in the one-hop contextual
+            // pass below; symbols with direct non-intent label evidence retain
+            // their normal lexical path.
+            if intent_alias_candidate && !direct_non_intent_evidence {
+                continue;
+            }
+            let concepts = candidate_concepts(id);
+            let (key, signature_limit) = if concepts.is_empty() {
+                (format!("candidate:{}", id.0), usize::MAX)
+            } else {
+                (
+                    format!("concepts:{}", concepts.join("\u{1f}")),
+                    if concepts.len() == 1 { 2 } else { 3 },
+                )
+            };
+            let count = seed_key_counts.entry(key).or_default();
+            if diversify_seeds && *count >= signature_limit {
+                continue;
+            }
+            *count += 1;
+            seeds.push(id.clone());
+            selected_seeds.insert(id.clone());
+        }
+
+        // A lower-weight natural-language intent alias is useful only when the
+        // graph confirms its context. Prefer an alias-bearing symbol directly
+        // adjacent to a selected seed, then to another scored lexical candidate.
+        // Anchors must carry at least two query concepts beyond the intent alias
+        // itself, and only a direct graph edge can provide support.
+        // This makes a relationship such as `load_graph_data -> resolve_backend`
+        // outrank unrelated resolver helpers without hard-coding repository
+        // vocabulary. When the seed budget is full, replace only a redundant
+        // non-exact seed, never a unique concept.
+        if !intent_variant_tokens.is_empty() && !seeds.is_empty() {
+            let score_by_id: HashMap<&NodeId, f64> =
+                scored.iter().map(|(id, score)| (id, *score)).collect();
+            let lexical_anchors: HashSet<&NodeId> = scored
+                .iter()
+                .filter(|(id, _)| {
+                    candidate_concepts(id)
+                        .iter()
+                        .filter(|concept| !intent_query_concepts.contains(*concept))
+                        .take(2)
+                        .count()
+                        >= 2
+                })
+                .map(|(id, _)| id)
+                .collect();
+            let mut best_intent: Option<(NodeId, usize, usize, f64, f64, f64)> = None;
+            for (id, own_score) in &scored {
+                if selected_seeds.contains(id)
+                    || !self.node_tokens.get(id).is_some_and(|tokens| {
+                        intent_variant_tokens
+                            .iter()
+                            .any(|token| tokens.contains(token))
+                    })
+                {
+                    continue;
+                }
+                let supporting: Vec<&NodeId> = self
+                    .adjacency
+                    .get(id)
+                    .into_iter()
+                    .flatten()
+                    .filter(|neighbor| lexical_anchors.contains(*neighbor))
+                    .collect();
+                if supporting.is_empty() {
+                    continue;
+                }
+                let selected_support_count = supporting
+                    .iter()
+                    .filter(|neighbor| selected_seeds.contains(**neighbor))
+                    .count();
+                let raw_support_score = supporting
+                    .iter()
+                    .filter_map(|neighbor| score_by_id.get(*neighbor))
+                    .copied()
+                    .max_by(f64::total_cmp)
+                    .unwrap_or(0.0);
+                let adjusted_support_score = supporting
+                    .iter()
+                    .filter_map(|neighbor| {
+                        score_by_id
+                            .get(*neighbor)
+                            .map(|score| *score * hub_penalty(degree(neighbor), self.avg_degree))
+                    })
+                    .max_by(f64::total_cmp)
+                    .unwrap_or(0.0);
+                let support_count = supporting.len();
+                let replace = best_intent.as_ref().is_none_or(
+                    |(best_id, best_selected, best_count, best_support, best_own, _)| {
+                        adjusted_support_score > *best_support
+                            || (adjusted_support_score == *best_support
+                                && (selected_support_count > *best_selected
+                                    || (selected_support_count == *best_selected
+                                        && (support_count > *best_count
+                                            || (support_count == *best_count
+                                                && (*own_score > *best_own
+                                                    || (*own_score == *best_own
+                                                        && id < best_id)))))))
+                    },
+                );
+                if replace {
+                    best_intent = Some((
+                        id.clone(),
+                        selected_support_count,
+                        support_count,
+                        adjusted_support_score,
+                        *own_score,
+                        raw_support_score,
+                    ));
+                }
+            }
+            if let Some((intent_id, _, _, _, _, raw_support_score)) = best_intent {
+                let mut inserted = false;
+                if seeds.len() < 8 {
+                    seeds.push(intent_id.clone());
+                    inserted = true;
+                } else {
+                    let mut concept_counts = HashMap::<String, usize>::new();
+                    for seed in &seeds {
+                        for concept in candidate_concepts(seed) {
+                            *concept_counts.entry(concept).or_default() += 1;
+                        }
+                    }
+                    let replace_index = seeds
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, seed)| !is_full_exact_symbol_match(seed))
+                        .filter(|(_, seed)| {
+                            let concepts = candidate_concepts(seed);
+                            !concepts.is_empty()
+                                && concepts.iter().all(|concept| {
+                                    concept_counts.get(concept).copied().unwrap_or(0) > 1
+                                })
+                        })
+                        .min_by(|(_, a), (_, b)| {
+                            let a_score = score_by_id.get(a).copied().unwrap_or(0.0);
+                            let b_score = score_by_id.get(b).copied().unwrap_or(0.0);
+                            a_score.total_cmp(&b_score).then_with(|| b.cmp(a))
+                        })
+                        .map(|(index, _)| index);
+                    if let Some(index) = replace_index {
+                        seeds[index] = intent_id.clone();
+                        inserted = true;
+                    }
+                }
+                if inserted {
+                    contextual_seed_support.insert(intent_id, raw_support_score);
+                }
+            }
+        }
 
         // Seed mode: inject changed nodes as seeds so the changed surface appears
         // even with zero query-token overlap. They enter the frontier with a base
@@ -702,9 +1158,13 @@ impl QueryIndex {
         let mut heap: std::collections::BinaryHeap<Frontier> = std::collections::BinaryHeap::new();
         let mut seq: u64 = 0;
         for s in &seeds {
-            let rel = node_relevance(s) * prior(s);
+            let direct_rel = node_relevance(s) * prior(s);
+            let contextual_rel =
+                contextual_seed_support.get(s).copied().unwrap_or(0.0) * CONTEXTUAL_INTENT_WEIGHT;
+            let rel = direct_rel.max(contextual_rel);
             let key = (rel + recency_bonus(s)) * hub_penalty(degree(s), self.avg_degree);
             heap.push(Frontier {
+                seed: true,
                 key,
                 rel,
                 seq,
@@ -736,6 +1196,7 @@ impl QueryIndex {
                     let rel = own.max(inherited) * prior(nb);
                     let key = (rel + recency_bonus(nb)) * hub_penalty(degree(nb), self.avg_degree);
                     heap.push(Frontier {
+                        seed: false,
                         key,
                         rel,
                         seq,
@@ -743,6 +1204,40 @@ impl QueryIndex {
                         id: nb.clone(),
                     });
                     seq += 1;
+                }
+            }
+        }
+
+        // The terse MCP response is a score-sorted prefix of this result. Apply
+        // the same evidence-signature allowances used for seed selection to that
+        // final ranking: keep the best two single-concept or three joint-concept
+        // matches at full strength, then deterministically discount later
+        // duplicates. Exact one-concept queries skip this entirely; full exact
+        // symbol-label matches are exempt even when the identifier has multiple
+        // tokens.
+        if diversify_seeds {
+            let mut raw_order: Vec<usize> = (0..included.len()).collect();
+            raw_order.sort_by(|&a, &b| {
+                scores[b]
+                    .total_cmp(&scores[a])
+                    .then_with(|| included[a].cmp(&included[b]))
+            });
+            let mut signature_counts = HashMap::<String, usize>::new();
+            for index in raw_order {
+                if is_full_exact_symbol_match(&included[index]) {
+                    continue;
+                }
+                let concepts = candidate_concepts(&included[index]);
+                if concepts.is_empty() {
+                    continue;
+                }
+                let allowance = if concepts.len() == 1 { 2 } else { 3 };
+                let ordinal = signature_counts
+                    .entry(concepts.join("\u{1f}"))
+                    .and_modify(|count| *count += 1)
+                    .or_insert(1);
+                if *ordinal > allowance {
+                    scores[index] /= (*ordinal - allowance + 1) as f64;
                 }
             }
         }
@@ -806,10 +1301,12 @@ pub fn rank_result_edges(
 }
 
 /// One entry on the best-first expansion frontier. `Ord` makes a `BinaryHeap`
-/// pop the highest-relevance node first; score ties are broken by traversal
-/// `bias` (bfs = earlier `seq` first, dfs = later first) then node id, so the
-/// whole expansion is deterministic.
+/// settle every selected seed before expansion, then pop the highest-relevance
+/// neighbour. Score ties are broken by traversal `bias` (bfs = earlier `seq`
+/// first, dfs = later first) then node id, so the whole expansion is
+/// deterministic.
 struct Frontier {
+    seed: bool,
     key: f64,
     rel: f64,
     seq: u64,
@@ -831,6 +1328,12 @@ impl PartialOrd for Frontier {
 impl Ord for Frontier {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         use std::cmp::Ordering;
+        // Selected seeds are the retrieval anchors and must survive a tight
+        // result budget before any expanded neighbor can consume it.
+        match self.seed.cmp(&other.seed) {
+            Ordering::Equal => {}
+            ord => return ord,
+        }
         // Primary: higher key is greater (popped first).
         match self.key.total_cmp(&other.key) {
             Ordering::Equal => {}
@@ -1815,6 +2318,478 @@ mod tests {
     fn tokenize_handles_camel_and_snake() {
         assert_eq!(tokenize("run_analysis()"), vec!["run", "analysis"]);
         assert_eq!(tokenize("AuthService"), vec!["auth", "service"]);
+    }
+
+    #[test]
+    fn natural_question_scaffolding_does_not_outrank_the_subject() {
+        let kg = build(&[("noise", "is"), ("subject", "PlayerTeleport")], &[]);
+
+        let question = query(&kg, "How is a player teleported?", 10);
+        assert_eq!(
+            question.nodes.first(),
+            Some(&NodeId("subject".into())),
+            "question scaffolding must not outrank its subject: {:?}",
+            question.nodes
+        );
+
+        let exact = query(&kg, "is", 10);
+        assert_eq!(
+            exact.nodes.first(),
+            Some(&NodeId("noise".into())),
+            "an exact symbol query must retain stopword-looking tokens"
+        );
+    }
+
+    #[test]
+    fn symbol_shaped_queries_keep_scaffolding_tokens() {
+        let kg = build(
+            &[
+                ("exact", "isSealedBetween"),
+                ("partial", "sealed"),
+                ("noise", "Unrelated"),
+            ],
+            &[],
+        );
+
+        let result = query(&kg, "isSealedBetween", 10);
+        assert_eq!(
+            result.nodes.first(),
+            Some(&NodeId("exact".into())),
+            "camelCase symbol queries must retain every identifier token: {:?}",
+            result.nodes
+        );
+    }
+
+    #[test]
+    fn exact_symbol_matches_are_not_diversity_penalized() {
+        let kg = build(
+            &[
+                ("a_method", "query_index()"),
+                ("b_method", "query_index()"),
+                ("c_stub", "QueryIndex"),
+                ("d_definition", "QueryIndex"),
+                ("filler_1", "UnrelatedAlpha"),
+                ("filler_2", "UnrelatedBeta"),
+                ("filler_3", "UnrelatedGamma"),
+                ("filler_4", "UnrelatedDelta"),
+                ("filler_5", "UnrelatedEpsilon"),
+                ("filler_6", "UnrelatedZeta"),
+            ],
+            &[],
+        );
+
+        let result = query(&kg, "QueryIndex", 10);
+        let score = |id: &str| {
+            let index = result
+                .nodes
+                .iter()
+                .position(|node| node == &NodeId(id.into()))
+                .expect("fixture node must be ranked");
+            result.scores[index]
+        };
+        assert_eq!(
+            score("c_stub"),
+            score("d_definition"),
+            "repeated partial evidence may be diversified, but full exact symbol matches must retain equal relevance: {:?}",
+            result.nodes
+        );
+    }
+
+    #[test]
+    fn natural_question_inflections_recall_existing_code_tokens() {
+        let kg = build(
+            &[
+                ("travel", "canTravel"),
+                ("planet", "PlanetTeleportPayload"),
+                ("noise", "Unrelated"),
+            ],
+            &[],
+        );
+
+        let question = query(&kg, "How does traveling between planets work?", 10);
+        assert!(
+            question.seeds.contains(&NodeId("travel".into())),
+            "`traveling` must recall an existing `travel` code token: {:?}",
+            question.seeds
+        );
+        assert!(
+            question.seeds.contains(&NodeId("planet".into())),
+            "`planets` must recall an existing `planet` code token: {:?}",
+            question.seeds
+        );
+    }
+
+    #[test]
+    fn inflection_recall_stays_below_exact_query_evidence() {
+        let kg = build(&[("a_calculate", "calculate"), ("z_oxygen", "oxygen")], &[]);
+
+        let question = query(&kg, "oxygen calculated", 10);
+        assert_eq!(
+            question.nodes.first(),
+            Some(&NodeId("z_oxygen".into())),
+            "an additive inflection must not tie or outrank exact query evidence: {:?}",
+            question.nodes
+        );
+        assert!(
+            question.nodes.contains(&NodeId("a_calculate".into())),
+            "the lower-confidence inflection must still improve recall"
+        );
+    }
+
+    #[test]
+    fn natural_decision_questions_recall_resolver_symbols() {
+        let kg = build(
+            &[
+                ("loader", "load_graph_data()"),
+                ("resolver", "resolve_backend()"),
+                ("store", "ShardStore"),
+                ("candidate_1", "GraphJsonLoader"),
+                ("candidate_2", "ShardedStoreLoader"),
+                ("candidate_3", "GraphStore"),
+                ("candidate_4", "JsonStore"),
+                ("candidate_5", "ShardedGraph"),
+                ("candidate_6", "LoadJson"),
+                ("candidate_7", "LoadStore"),
+                ("candidate_8", "GraphLoader"),
+                ("noise_1", "UnrelatedAlpha"),
+                ("noise_2", "UnrelatedBeta"),
+                ("noise_3", "UnrelatedGamma"),
+                ("noise_4", "UnrelatedDelta"),
+                ("noise_5", "UnrelatedEpsilon"),
+                ("noise_6", "UnrelatedZeta"),
+                ("noise_7", "UnrelatedEta"),
+                ("noise_8", "UnrelatedTheta"),
+                ("noise_9", "UnrelatedIota"),
+                ("noise_10", "UnrelatedKappa"),
+                ("noise_11", "UnrelatedLambda"),
+                ("noise_12", "UnrelatedMu"),
+            ],
+            &[("loader", "resolver", "calls")],
+        );
+
+        let question = query(
+            &kg,
+            "How does the system choose how to load graph data from the store?",
+            10,
+        );
+        assert!(
+            question.seeds.contains(&NodeId("resolver".into())),
+            "decision intent must make the graph-confirmed resolver a direct candidate instead of relying on late neighborhood expansion: {:?}",
+            question.seeds
+        );
+    }
+
+    #[test]
+    fn decision_aliases_do_not_weaken_exact_evidence_or_symbol_queries() {
+        let kg = build(
+            &[
+                ("exact_store", "GraphStore"),
+                ("exact_choose", "choose()"),
+                ("resolver", "resolve_backend()"),
+            ],
+            &[("exact_store", "resolver", "calls")],
+        );
+
+        let question = query(&kg, "Where is the graph store chosen?", 10);
+        assert_eq!(
+            question.nodes.first(),
+            Some(&NodeId("exact_store".into())),
+            "an exact natural-language token must outrank its lower-weight decision alias: {:?}",
+            question.nodes
+        );
+        assert!(
+            question.seeds.contains(&NodeId("resolver".into())),
+            "the decision alias must remain available as recall evidence"
+        );
+
+        let symbol = query(&kg, "choose", 10);
+        assert_eq!(
+            symbol.nodes,
+            vec![NodeId("exact_choose".into())],
+            "a direct symbol query must not expand through natural-language intent aliases"
+        );
+    }
+
+    #[test]
+    fn contextual_intent_seeds_replace_redundancy_and_stay_visible() {
+        let mut owned = Vec::<(String, String)>::new();
+        for concept in ["graph", "json", "load", "runtime", "sharded", "store"] {
+            owned.push((format!("{concept}_1"), concept.into()));
+            owned.push((format!("{concept}_2"), concept.into()));
+        }
+        // A fourth equivalent two-concept loader stays in the ranked lexical
+        // pool but is intentionally excluded by the three-per-signature cap.
+        for i in 1..=3 {
+            owned.push((format!("graph_load_{i}"), "GraphLoad".into()));
+        }
+        owned.push(("z_graph_load_support".into(), "GraphLoad".into()));
+        owned.push((
+            "joint_flow".into(),
+            "GraphJsonLoadRuntimeShardedStore".into(),
+        ));
+        owned.push(("resolve".into(), "resolve_backend()".into()));
+        owned.push(("wrong_resolve".into(), "resolve_json()".into()));
+        for i in 0..20 {
+            owned.push((format!("other_resolve_{i}"), format!("resolve_other_{i}()")));
+        }
+        for i in 0..20 {
+            owned.push((format!("hub_member_{i}"), format!("HelperMethod{i}")));
+        }
+        for i in 0..20 {
+            owned.push((format!("noise_{i}"), format!("Unrelated{i}")));
+        }
+        let nodes: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(id, label)| (id.as_str(), label.as_str()))
+            .collect();
+        let mut owned_edges: Vec<(String, String, String)> = vec![(
+            "z_graph_load_support".into(),
+            "resolve".into(),
+            "calls".into(),
+        )];
+        for i in 0..20 {
+            owned_edges.push(("store_1".into(), format!("hub_member_{i}"), "method".into()));
+        }
+        let edges: Vec<(&str, &str, &str)> = owned_edges
+            .iter()
+            .map(|(source, target, relation)| (source.as_str(), target.as_str(), relation.as_str()))
+            .collect();
+        let kg = build(&nodes, &edges);
+
+        let question = query(
+            &kg,
+            "How does the system choose graph json load runtime sharded store?",
+            20,
+        );
+        assert!(
+            !question
+                .seeds
+                .contains(&NodeId("z_graph_load_support".into())),
+            "the supporting lexical anchor must exercise the ranked-pool path rather than consume a seed: {:?}",
+            question.seeds
+        );
+        assert!(
+            question.seeds.contains(&NodeId("resolve".into())),
+            "a lower-weight intent concept must receive a seed while the eight-slot budget can represent every recognized concept: {:?}",
+            question.seeds
+        );
+        assert!(
+            question
+                .nodes
+                .iter()
+                .take(15)
+                .any(|id| id == &NodeId("resolve".into())),
+            "graph-confirmed intent must survive a high-degree neighborhood in the terse prefix: {:?}",
+            question.nodes
+        );
+        let score = |id: &str| {
+            let index = question
+                .nodes
+                .iter()
+                .position(|node| node == &NodeId(id.into()))
+                .expect("fixture node must be ranked");
+            question.scores[index]
+        };
+        assert!(
+            score("resolve") >= score("z_graph_load_support") * 0.4,
+            "a graph-confirmed intent seed must inherit enough hub-adjusted contextual confidence to remain visible: {:?} {:?}",
+            question.nodes,
+            question.scores,
+        );
+    }
+
+    #[test]
+    fn contextual_intent_rejects_single_concept_neighbors() {
+        let kg = build(
+            &[
+                ("oxygen", "playerOxygenConsumptionRate()"),
+                ("player", "PlayerMixin"),
+                ("resolver", "resolve()"),
+            ],
+            &[("player", "resolver", "references")],
+        );
+
+        let question = query(
+            &kg,
+            "How does oxygen equipment determine whether a player can breathe?",
+            20,
+        );
+        assert!(
+            !question.seeds.contains(&NodeId("resolver".into())),
+            "one generic neighboring concept is insufficient evidence for an intent alias: {:?}",
+            question.seeds
+        );
+    }
+
+    #[test]
+    fn multi_concept_coverage_beats_a_tighter_single_concept_match() {
+        let kg = build(
+            &[
+                ("a_single", "Planet"),
+                ("z_multi", "RocketTravelAlphaBetaGammaDelta"),
+            ],
+            &[],
+        );
+
+        let question = query(&kg, "rocket travel planet", 10);
+        assert_eq!(
+            question.nodes.first(),
+            Some(&NodeId("z_multi".into())),
+            "joint evidence from two query concepts must beat one short generic match: {:?}",
+            question.nodes
+        );
+
+        let exact = query(&kg, "planet", 10);
+        assert_eq!(
+            exact.nodes.first(),
+            Some(&NodeId("a_single".into())),
+            "single-concept exact ranking must remain unchanged"
+        );
+    }
+
+    #[test]
+    fn repeated_multi_concept_evidence_does_not_consume_every_seed() {
+        let mut owned = Vec::<(String, String)>::new();
+        for (i, suffix) in [
+            "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            owned.push((format!("travel{i}"), format!("RocketTravel{suffix}")));
+        }
+        owned.push((
+            "domain_planet".into(),
+            "PlanetAlphaBetaGammaDeltaEpsilonZetaEtaThetaIotaKappaLambda".into(),
+        ));
+        for i in 0..12 {
+            owned.push((format!("filler{i}"), format!("Unrelated{i}")));
+        }
+        let nodes: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(id, label)| (id.as_str(), label.as_str()))
+            .collect();
+        let owned_edges = [
+            ("travel0", "travel3", "calls"),
+            ("travel3", "travel4", "calls"),
+            ("travel4", "travel5", "calls"),
+            ("travel5", "travel6", "calls"),
+            ("travel6", "travel7", "calls"),
+            ("domain_planet", "filler0", "calls"),
+        ];
+        let kg = build(&nodes, &owned_edges);
+
+        let question = query(&kg, "rocket travel planet", 6);
+        assert!(
+            question.seeds.contains(&NodeId("domain_planet".into())),
+            "a different query concept must survive repeated joint matches: {:?}",
+            question.seeds
+        );
+        assert!(
+            question
+                .seeds
+                .iter()
+                .filter(|id| id.0.starts_with("travel"))
+                .count()
+                <= 3,
+            "one repeated concept signature must not consume every seed: {:?}",
+            question.seeds
+        );
+        assert!(
+            question
+                .nodes
+                .iter()
+                .take(4)
+                .any(|id| id == &NodeId("domain_planet".into())),
+            "terse ranking must surface a distinct concept before later duplicate evidence: {:?}",
+            question.nodes
+        );
+    }
+
+    #[test]
+    fn multi_concept_questions_diversify_repeated_label_seeds() {
+        let mut owned = Vec::<(String, String)>::new();
+        for i in 0..8 {
+            let label = if i % 2 == 0 { "handle()" } else { ".handle()" };
+            owned.push((format!("handle{i}"), label.into()));
+        }
+        let long_suffix =
+            "AlphaBetaGammaDeltaEpsilonZetaEtaThetaIotaKappaLambdaMuNuXiOmicronPiRhoSigmaTauUpsilonPhiChiPsiOmega";
+        owned.push(("domain_a".into(), format!("Rocket{long_suffix}")));
+        owned.push(("domain_b".into(), format!("Planet{long_suffix}")));
+        for i in 0..40 {
+            owned.push((format!("filler{i}"), format!("UnrelatedThing{i}")));
+        }
+        let nodes: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(id, label)| (id.as_str(), label.as_str()))
+            .collect();
+        let mut owned_edges = Vec::<(String, String, String)>::new();
+        for i in 2..8 {
+            let source = if i == 2 {
+                "handle0".into()
+            } else {
+                format!("handle{}", i - 1)
+            };
+            owned_edges.push((source, format!("handle{i}"), "calls".into()));
+        }
+        let edges: Vec<(&str, &str, &str)> = owned_edges
+            .iter()
+            .map(|(source, target, relation)| (source.as_str(), target.as_str(), relation.as_str()))
+            .collect();
+        let kg = build(&nodes, &edges);
+
+        let question = query(
+            &kg,
+            "How does the system handle rocket and planet travel?",
+            4,
+        );
+        assert!(
+            question.seeds.contains(&NodeId("domain_a".into())),
+            "rocket evidence must survive the seed budget: {:?}",
+            question.seeds
+        );
+        assert!(
+            question.seeds.contains(&NodeId("domain_b".into())),
+            "planet evidence must survive the seed budget: {:?}",
+            question.seeds
+        );
+        assert!(
+            question.nodes.contains(&NodeId("domain_a".into()))
+                && question.nodes.contains(&NodeId("domain_b".into())),
+            "selected concepts must survive tight-budget expansion: {:?}",
+            question.nodes
+        );
+        assert!(
+            question
+                .nodes
+                .iter()
+                .take(2)
+                .all(|id| id.0.starts_with("domain_")),
+            "question-frame verbs must not outrank the requested domain concepts: {:?}",
+            question.nodes
+        );
+        assert!(
+            question
+                .seeds
+                .iter()
+                .filter(|id| id.0.starts_with("handle"))
+                .count()
+                <= 2,
+            "equivalent repeated labels must not monopolize a multi-concept query: {:?}",
+            question.seeds
+        );
+
+        let exact = query(&kg, "handle", 20);
+        assert_eq!(
+            exact
+                .seeds
+                .iter()
+                .filter(|id| id.0.starts_with("handle"))
+                .count(),
+            8,
+            "a direct repeated-label query must retain the full seed budget"
+        );
     }
 
     #[test]

@@ -10,6 +10,28 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-07-26
+
+### Changed
+
+- **`query_graph` natural-language relevance is intent-aware without weakening
+  exact symbol searches.** Sentence-shaped questions drop interrogative
+  scaffolding only when substantive terms remain, graph-confirmed inflections
+  improve recall at lower weight than exact tokens, bounded decision intent
+  (`choose`/`decide`/`determine` → `resolve`) recalls graph-confirmed resolver
+  symbols, concept coverage rewards joint evidence, and repeated evidence
+  signatures can no longer consume the seed budget or terse result prefix.
+  An intent candidate is promoted only when it is directly adjacent to selected
+  or otherwise scored evidence covering at least two substantive query concepts,
+  may replace only a redundant seed, and inherits less confidence than its
+  supporting match. Alias-only symbols cannot consume the normal seed budget,
+  and high-degree supporting hubs are penalized when choosing among intent
+  candidates. Selected seeds settle before expansion.
+  CamelCase, snake_case, qualified, and punctuation-shaped symbol queries retain
+  every identifier token, and full exact symbol-label matches are never
+  diversity-penalized. The behavior is independent of the repository's
+  implementation language and requires no graph rebuild.
+
 ## [0.7.1] - 2026-07-26
 
 > **Upgrade note:** re-extract a repository to populate Architectury packet
@@ -1646,7 +1668,8 @@ parameters), and `graph.json` gains only additive edge keys.
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.0...v0.7.1
 [0.2.8]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.6...v0.2.7

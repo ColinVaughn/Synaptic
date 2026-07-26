@@ -260,10 +260,21 @@ tokens distinguish parallel implementations across applications, packages,
 languages, targets, and feature directories, and bounded extractor aliases make
 resources such as flat or nested localization keys searchable. Expansion is
 best-first (a priority frontier), high-fan-out hubs and repeated non-matching
-labels are down-weighted so they do not flood the result, and every node carries
-a relevance `score`. Nodes and edges come back sorted by it, so you can focus on
-the top results and ignore the low-scored tail. See [Querying#query] for the
-scoring details.
+labels are down-weighted so they do not flood the result, and natural-language
+questions remove non-substantive scaffolding, add lower-weight graph-confirmed
+inflections and bounded decision-intent aliases, reward multi-concept coverage,
+preserve every selected seed under tight budgets, and diversify repeated
+evidence signatures in both seeds and the terse prefix. An intent alias becomes
+a seed only when the graph connects it directly to selected or otherwise scored
+evidence covering at least two substantive query concepts; it can replace only
+redundant evidence and remains lower-confidence than that supporting match.
+Alias-only symbols cannot enter through the normal seed path, and high-degree
+supporting hubs are penalized when choosing among intent candidates.
+Symbol-shaped queries preserve all identifier tokens,
+and full exact symbol-label matches are never diversity-penalized. Every node
+carries a relevance `score`; nodes and edges come back sorted by it, so you can
+focus on the top results and ignore the low-scored tail. See [Querying#query] for
+the scoring details.
 
 Parameters:
 - `question` (string, required) -- the natural-language question.
