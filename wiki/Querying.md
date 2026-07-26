@@ -28,10 +28,10 @@ synaptic query "user authentication" --max-nodes 30
 ```
 
 `query` retrieves a subgraph relevant to free text. It scores every node by how
-well its label tokens overlap the query, picks the best-scoring nodes as seeds,
-then expands outward from those seeds — best-first, by relevance — until it has
-collected `--max-nodes` nodes. Results come back ranked, each with a relevance
-score.
+well its label, architectural source-path tokens, and bounded extractor search
+aliases overlap the query, picks the best-scoring nodes as seeds, then expands
+outward from those seeds — best-first, by relevance — until it has collected
+`--max-nodes` nodes. Results come back ranked, each with a relevance score.
 
 How scoring works:
 
@@ -41,9 +41,13 @@ How scoring works:
   becomes `auth`, `service`.
 - A node's seed score is the sum of IDF weights of the query tokens it contains
   — IDF is `ln((N + 1) / (1 + df)) + 1`, with `N` the node count and `df` the
-  number of nodes whose label contains that token, so rarer tokens count for more
-  — divided by the square root of the node's token count, so a long label can't
-  out-score a tight match just by accumulating tokens.
+  number of nodes containing that token, so rarer tokens count for more —
+  divided by the square root of each channel's token count, so a long label,
+  path, or extractor alias catalog cannot out-score a tight match by accumulation.
+  Direct label evidence has full weight; source-path evidence is lower weight and
+  retains the repository's full path vocabulary (including languages, targets,
+  generated/test directories, and file extensions); extractor aliases are also
+  lower weight.
 - Nodes scoring above zero are ranked highest-first (ties broken by node id for
   determinism). The top 8 become the seeds.
 
@@ -60,6 +64,10 @@ clean:
   the budget. This stops one hub from flooding the result with noise.
 - **Decay.** A neighbour inherits a fraction of the relevance of the node that
   reached it, so far-flung nodes fade while a genuinely relevant chain survives.
+- **Repeated-label penalty.** A label repeated more than twice is down-weighted
+  only when reached as a non-matching neighbor. Generic duplicates such as
+  `render()` therefore sink below specific neighbors, while an exact query for
+  that label still makes it a full-strength seed.
 
 Every returned node keeps a final relevance score; nodes and edges are returned
 sorted by it (edges by the relevance of their weaker endpoint), so you can read

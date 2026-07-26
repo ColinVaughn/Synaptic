@@ -41,6 +41,7 @@ const SERVICE_BOUNDARY_TYPES: &[&str] = &[
     "ws_message",
     "ipc_channel",
     "event_channel",
+    "packet_channel",
 ];
 
 /// A single-graph calibration of the cross-language edge layer.

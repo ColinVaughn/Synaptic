@@ -97,7 +97,9 @@ grepping or reading files.
   symbol they name — so `affected` and `query_graph` span code *and* resources. A generated
   resource that duplicates a hand-authored one at the same logical path gets a `shadows` edge
   (surfaced by `readiness_audit`). Framework-agnostic — a Minecraft `ResourceLocation` is just
-  one instance of the logical-id shape; `extract --no-resources` restores the code-only graph.
+  one instance of the logical-id shape. Localization JSON also contributes a bounded set of
+  key-only search aliases (never translated prose), so message catalogs are discoverable
+  without one graph node per translation. `extract --no-resources` restores the code-only graph.
 - **Port/readiness audit**: `synaptic audit readiness` ranks likely port blockers from graph,
   source, and config signals: framework sentinel returns, placeholders/stubs,
   generated-resource noise, and project metadata. The MCP `readiness_audit` tool exposes the

@@ -8,6 +8,105 @@
 use synaptic_core::Confidence;
 use synaptic_extract::extract_source;
 
+#[cfg(feature = "lang-java")]
+#[test]
+fn architectury_payload_send_and_handler_meet_on_one_packet_channel() {
+    let sender = br#"
+import dev.architectury.networking.NetworkManager;
+class Screen {
+    void choose() {
+        NetworkManager.sendToServer(new PlanetTeleportPayload(id));
+    }
+}
+"#;
+    let receiver = br#"
+import dev.architectury.networking.NetworkManager;
+public record PlanetTeleportPayload(String id) implements C2SPayload {
+    public void handle(NetworkManager.PacketContext context) {
+        teleport(context.getPlayer());
+    }
+}
+"#;
+    let sent = extract_source("Screen.java", sender).expect("Java sender extracts");
+    let handled =
+        extract_source("PlanetTeleportPayload.java", receiver).expect("Java payload extracts");
+
+    let send_edge = sent
+        .edges
+        .iter()
+        .find(|edge| {
+            edge.relation == "calls_service"
+                && edge.context.as_deref() == Some("architectury_packet")
+        })
+        .expect("payload send attaches to a packet channel");
+    let channel = sent
+        .nodes
+        .iter()
+        .find(|node| node.id == send_edge.target)
+        .expect("packet channel node");
+    assert_eq!(channel.label, "packet #PlanetTeleportPayload");
+    assert_eq!(
+        channel
+            .extra
+            .get("_node_type")
+            .and_then(|value| value.as_str()),
+        Some("packet_channel")
+    );
+
+    let handle_edge = handled
+        .edges
+        .iter()
+        .find(|edge| {
+            edge.relation == "handled_by" && edge.context.as_deref() == Some("architectury_packet")
+        })
+        .expect("packet channel reaches the payload handler");
+    assert_eq!(
+        send_edge.target, handle_edge.source,
+        "sender and receiver use the same class-keyed channel"
+    );
+    let handler = handled
+        .nodes
+        .iter()
+        .find(|node| node.id == handle_edge.target)
+        .expect("handler node");
+    assert!(
+        handler.label.contains("handle"),
+        "receiver edge targets handle(), got {}",
+        handler.label
+    );
+}
+
+#[cfg(feature = "lang-java")]
+#[test]
+fn architectury_send_to_player_handles_nested_recipient_calls_without_false_payloads() {
+    let src = br#"
+import dev.architectury.networking.NetworkManager;
+class Rocket {
+    void launch() {
+        NetworkManager.sendToPlayer(server.getPlayer(pos, false), new OpenCelestialScreenPayload(data));
+        NetworkManager.sendToPlayer(player, ServerStatistics.collect(server));
+    }
+}
+"#;
+    let result = extract_source("Rocket.java", src).expect("Java sender extracts");
+    let packets: Vec<&str> = result
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.extra
+                .get("_node_type")
+                .and_then(|value| value.as_str())
+                == Some("packet_channel")
+        })
+        .map(|node| node.label.as_str())
+        .collect();
+    assert_eq!(
+        packets,
+        vec!["packet #OpenCelestialScreenPayload"],
+        "only concrete Payload/Packet arguments create channels"
+    );
+}
+
 #[cfg(feature = "lang-python")]
 #[test]
 fn python_ctypes_emits_binds_native() {

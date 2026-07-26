@@ -8,6 +8,45 @@ All notable changes to Synaptic are documented here. The format is based on
 > **CodeGraph**, and reference the old `codegraph` command and crate names. They
 > are preserved verbatim as historical record.
 
+## [Unreleased]
+
+## [0.7.1] - 2026-07-26
+
+> **Upgrade note:** re-extract a repository to populate Architectury packet
+> channels and localization search aliases. Persisted query indexes use a new
+> cache key and rebuild automatically; the graph schema remains compatible with
+> 0.7.0.
+
+### Changed
+
+- **`query_graph` is path- and resource-aware.** Ranking now combines symbol
+  labels with lower-weight architectural source-path tokens and bounded
+  extractor search aliases. Parallel implementations in different applications,
+  packages, languages, targets, or feature directories can be selected by path
+  vocabulary, while flat or nested localization keys make generated and
+  hand-authored message catalogs discoverable without creating one node per key.
+  Repeated non-matching labels such as `render()` are down-weighted during
+  expansion so they do not crowd out specific neighbors.
+- **Duplicate and change-state output is self-explanatory.** Duplicate labels in
+  one query carry a copy-ready `label@path` `qualified` reference in structured
+  output and text. The per-node `changed` field is emitted only after an
+  explicit `since` baseline resolves; omission means change status was not
+  evaluated, rather than unchanged.
+- **MCP discovery marks the primary entry point.** `query_graph` advertises the
+  tool-annotation title `Synaptic: Query This Codebase (Start Here)` so lazy or
+  semantic tool pickers can distinguish it from metadata helpers.
+- **Path and impact output no longer collapses duplicate methods.**
+  `get_neighbors` and `affected` include copy-ready `label@path` identities, and
+  `shortest_path` renders every hop with those identities. Because shortest-path
+  search is intentionally undirected, its arrows now preserve the actual stored
+  edge direction instead of presenting a reverse call as a fictional forward
+  call chain.
+- **Architectury custom payloads cross the client/server boundary.** Java and
+  Kotlin `NetworkManager.sendToServer` / `sendToPlayer(s)` sites now meet
+  `C2SPayload` / `S2CPayload` handlers on a class-keyed packet channel. This
+  restores static routes such as a UI sending `PlanetTeleportPayload` to its
+  server-side `handle()` method.
+
 ## [0.7.0] - 2026-07-23
 
 > **Upgrade note:** this release relicenses the project under FSL-1.1-ALv2, adds
@@ -1607,7 +1646,8 @@ parameters), and `graph.json` gains only additive edge keys.
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.8...HEAD
+[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.0...v0.7.1
 [0.2.8]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.5...v0.2.6

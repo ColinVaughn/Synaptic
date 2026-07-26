@@ -26,7 +26,9 @@ pub use synaptic_core::limits::{DEFAULT_MAX_SHARD_BYTES, DEFAULT_MAX_SHARD_NODES
 
 /// Index-blob name for a shard's persisted `QueryIndex`. Shared so the writer
 /// (CLI `persist_shard_indexes`) and the reader (server `ShardProvider`) cannot drift.
-pub const QUERY_INDEX_BLOB: &str = "query_index";
+/// Persisted query-index schema. Bump the suffix whenever a new binary can
+/// deserialize an older index but would lose ranking evidence by doing so.
+pub const QUERY_INDEX_BLOB: &str = "query_index_v2";
 /// Index-blob name for a shard's persisted `ReverseImpactIndex`.
 pub const AFFECTED_INDEX_BLOB: &str = "affected_index";
 

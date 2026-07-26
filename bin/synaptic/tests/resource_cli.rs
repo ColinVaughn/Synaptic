@@ -58,6 +58,11 @@ fn scaffold(root: &Path) {
         "src/main/generated/assets/mymod/models/block/x.json",
         b"{}",
     );
+    write(
+        root,
+        "src/generated/locales/en-US/checkout.json",
+        br#"{"checkout":{"payment":{"card_declined":"Your card was declined"}}}"#,
+    );
 }
 
 fn resource_metrics(g: &Value) -> (usize, usize, usize) {
@@ -167,6 +172,41 @@ fn extract_indexes_resources_binds_refs_and_flags_shadows() {
             .iter()
             .any(|f| f["rule_id"] == "READY-RESOURCE-SHADOW"),
         "readiness reports the shadow: {report}"
+    );
+}
+
+#[test]
+fn query_finds_generated_localization_resource_by_translation_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    scaffold(root);
+
+    let ex = synaptic(&["extract", "."], root);
+    assert!(
+        ex.status.success(),
+        "extract stderr: {}",
+        String::from_utf8_lossy(&ex.stderr)
+    );
+    let query = synaptic(
+        &[
+            "query",
+            "payment card declined",
+            "--graph",
+            "synaptic-out/graph.json",
+            "--max-nodes",
+            "10",
+        ],
+        root,
+    );
+    assert!(
+        query.status.success(),
+        "query stderr: {}",
+        String::from_utf8_lossy(&query.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&query.stdout).replace('\\', "/");
+    assert!(
+        stdout.contains("src/generated/locales/en-US/checkout.json"),
+        "translation key should make the generated language resource queryable: {stdout}"
     );
 }
 

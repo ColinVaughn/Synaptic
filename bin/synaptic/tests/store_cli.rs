@@ -328,12 +328,20 @@ fn migrate_persists_usable_indexes() {
     let store = synaptic_store::ShardStore::open(&out.join("store")).unwrap();
     let entry = &store.list_shards()[0];
     let qi = store
-        .get_index_blob(&entry.tag, "query_index", &entry.source_hash)
+        .get_index_blob(
+            &entry.tag,
+            synaptic_store::QUERY_INDEX_BLOB,
+            &entry.source_hash,
+        )
         .unwrap()
         .expect("migrate should persist a query_index blob");
     synaptic_query::QueryIndex::from_bytes(&qi).expect("query_index blob deserializes");
     let ai = store
-        .get_index_blob(&entry.tag, "affected_index", &entry.source_hash)
+        .get_index_blob(
+            &entry.tag,
+            synaptic_store::AFFECTED_INDEX_BLOB,
+            &entry.source_hash,
+        )
         .unwrap()
         .expect("migrate should persist an affected_index blob");
     synaptic_query::ReverseImpactIndex::from_bytes(&ai).expect("affected_index blob deserializes");

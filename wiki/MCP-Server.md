@@ -255,11 +255,15 @@ output). Sixteen tools additionally declare an `outputSchema` and return a typed
 Primary entry point. Retrieve a relevant subgraph for a natural-language
 question.
 
-Results are ranked by relevance: expansion is best-first (a priority frontier),
-high-fan-out hub nodes are down-weighted so they do not flood the result, and
-every node carries a relevance `score`. Nodes and edges come back sorted by it, so
-you can focus on the top results and ignore the low-scored tail. See
-[Querying#query] for the scoring details.
+Results are ranked by relevance: symbol labels lead, lower-weight source-path
+tokens distinguish parallel implementations across applications, packages,
+languages, targets, and feature directories, and bounded extractor aliases make
+resources such as flat or nested localization keys searchable. Expansion is
+best-first (a priority frontier), high-fan-out hubs and repeated non-matching
+labels are down-weighted so they do not flood the result, and every node carries
+a relevance `score`. Nodes and edges come back sorted by it, so you can focus on
+the top results and ignore the low-scored tail. See [Querying#query] for the
+scoring details.
 
 Parameters:
 - `question` (string, required) -- the natural-language question.
@@ -292,10 +296,13 @@ Parameters:
 By default the response is terse: a header (`Traversal: <mode> | Start: [<seeds>]
 | <n> nodes found`, plus a `Recency:` line when `since` is used) followed by the
 top ranked `NODE` lines (`[score]`, an optional `(changed)` marker, label, file
-type, source file) and **no edges**, ending with a `(terse: top N of M matched
-nodes ...)` note when more matched. Pass `full=true` for the whole subgraph: all
+type, source file, and a copy-ready `qualified: label@path` marker when the label
+is duplicated) and **no edges**, ending with a `(terse: top N of M matched nodes
+...)` note when more matched. Pass `full=true` for the whole subgraph: all
 budget-bounded nodes plus `EDGE` lines (`source --relation--> target`). Either way
-a `structuredContent` mirror (see below) accompanies the text.
+a `structuredContent` mirror (see below) accompanies the text. Structured nodes
+include `changed` only when `since` resolved successfully; an absent field means
+change status was not evaluated, not that the file is unchanged.
 When the `SYNAPTIC_QUERY_LOG` environment variable points to a path, each query
 is appended to it as JSONL (disable with `SYNAPTIC_QUERY_LOG_DISABLE=1`).
 
@@ -467,14 +474,17 @@ Returns `Repo <repo>: <n> nodes, <n> edges`, or `No nodes for repo <repo>.`
 
 ### shortest_path
 
-Shortest path between two keyword-resolved nodes.
+Shortest undirected connection between two keyword-resolved nodes. Each node is
+rendered as a copy-ready `label@file` identity and every arrow preserves the
+stored edge direction. A backward arrow therefore means "connected through this
+edge", not a forward call/control-flow chain.
 
 Parameters:
 - `source` (string, required).
 - `target` (string, required).
 - `max_hops` (integer) -- hop limit. Default 8.
 
-Returns the path as `label -> label -> ...` with the hop count. Reports when the
+Returns the relation-annotated connection with the hop count. Reports when the
 endpoints do not resolve, resolve to the same node, exceed `max_hops`, or have no
 path.
 
@@ -930,12 +940,12 @@ formatted text:
 | `dynamic_hazards` | `{ total, truncated, sites: [{ repo?, file, line, kind, key?, host }] }` |
 | `get_node` | `{ found, id, label, source_file, file_type, degree, community?, kind?, visibility?, loc? }` (on an ambiguous name: `found:false` with `ambiguous`+`candidates`, matching `affected`/`describe_node`) |
 | `god_nodes` | `{ god_nodes: [{ label, degree, id, test_count }] }` (`degree` = total connections incl. members; centrality/size, not incoming-dependence) |
-| `affected` | `{ seed, resolved, affected: [{ label, depth, via_relation }], total, truncated, by_depth, aggregated_over_members? }` (on an unresolved name: `resolved:false` with `ambiguous`+`candidates` or `found:false`) |
-| `query_graph` | `{ nodes: [{ label, file_type, source_file, score, changed }], edges: [{ source, relation, target }] }` (nodes sorted by `score`; `changed` is true when `since` was given and the node's file changed; `edges` is empty unless `full=true`) |
+| `affected` | `{ seed, seed_qualified, resolved, affected: [{ label, qualified, depth, via_relation }], total, truncated, by_depth, aggregated_over_members? }` (on an unresolved name: `resolved:false` with `ambiguous`+`candidates` or `found:false`) |
+| `query_graph` | `{ nodes: [{ label, qualified?, file_type, source_file, score, changed? }], edges: [{ source, relation, target }] }` (nodes sorted by `score`; `qualified` disambiguates duplicate result labels; `changed` is present only when `since` resolved, and true when the node's file changed; `edges` is empty unless `full=true`) |
 | `structural_search` | `{ columns, results: [[{ id, label, kind, visibility, file, line, loc, signature }]] }` (or `groups` for aggregates) |
 | `search_text` | `{ pattern, total, truncated, files_scanned, hits: [{ repo, file, line, col, match, line_text, node? }] }` (`node` is the enclosing symbol `{ id, label, kind, community }`, or null when the hit is outside any captured span) |
 | `describe_node` | `{ found, id, label, kind, summary, callees, signature, members?, member_count? }` (`members` listed for a class/type; on an ambiguous name: `found:false` with `ambiguous`+`candidates`) |
-| `get_neighbors` | `{ seed, neighbors: [{ label, relation, direction }], by_relation: { <relation>: <count> }, total, truncated }` (`by_relation` tallies every edge before any filter; `total` is the full matched count, while `neighbors` is capped to `limit`) |
+| `get_neighbors` | `{ seed, seed_qualified, neighbors: [{ label, qualified, relation, direction }], by_relation: { <relation>: <count> }, total, truncated }` (`by_relation` tallies every edge before any filter; `total` is the full matched count, while `neighbors` is capped to `limit`) |
 | `list_repos` | `{ repos: [{ repo, nodes, edges, source_hash? }] }` (empty array for a single-repo graph; `source_hash` present when a `workspace-state.json` sibling exists) |
 | `predict_impact` | the full `ChangeForecast`: `{ summary, changed_files, changed_nodes, public_api_breaks, blast_radius, blast_radius_total, at_risk_tests, verify_checklist, risk }` (not truncated by `limit`, which caps only the text) |
 | `affected_tests` | `{ tests: [{ id, label, file, depth, via_relation }], total }` |
