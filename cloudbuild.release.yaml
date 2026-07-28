@@ -1,6 +1,8 @@
 steps:
   - id: build-glibc-engine
     name: gcr.io/cloud-builders/docker
+    env:
+      - DOCKER_BUILDKIT=1
     args:
       - build
       - --pull
@@ -11,6 +13,8 @@ steps:
       - .
   - id: build-musl-engine
     name: gcr.io/cloud-builders/docker
+    env:
+      - DOCKER_BUILDKIT=1
     args:
       - build
       - --pull
