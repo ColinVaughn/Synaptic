@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use synaptic_workspace::coordinate::{Coordinate, Ecosystem};
 use synaptic_workspace::manifest::{write_manifest, RepoMember, WorkspaceManifest, WorkspaceMeta};
 use synaptic_workspace::workspace_build::{build_workspace, MemberSource, WorkspaceBuildOptions};
 
@@ -75,6 +76,8 @@ fn git_member_is_cloned_built_and_federated() {
         &ws,
         &manifest_with(vec![RepoMember {
             name: "lib".into(),
+            tag: None,
+            coordinate: None,
             git: Some(fwd(&src)),
             rev: None,
             subgraph: None,
@@ -114,6 +117,8 @@ fn path_member_is_built_and_federated() {
         &ws,
         &manifest_with(vec![RepoMember {
             name: "ext".into(),
+            tag: None,
+            coordinate: None,
             git: None,
             rev: None,
             subgraph: None,
@@ -147,6 +152,8 @@ fn local_subgraph_member_is_federated() {
         &ws,
         &manifest_with(vec![RepoMember {
             name: "ui".into(),
+            tag: None,
+            coordinate: None,
             git: None,
             rev: None,
             subgraph: Some("published/graph.json".into()),
@@ -164,6 +171,85 @@ fn local_subgraph_member_is_federated() {
             .any(|n| n.id.0 == "ui::Widget" && n.repo.as_deref() == Some("ui")),
         "the published subgraph's nodes are namespaced + tagged"
     );
+}
+
+#[test]
+fn artifact_members_honor_pinned_tags_and_coordinates_for_cross_repo_resolution() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    write(
+        &ws,
+        "members/frontend/graph.json",
+        r#"{"directed":true,"multigraph":false,"graph":{},
+            "nodes":[
+              {"id":"App","label":"App","file_type":"code","source_file":"src/app.ts"},
+              {"id":"shared-package","label":"@acme/shared","file_type":"code","source_file":""}
+            ],
+            "links":[{
+              "source":"App","target":"shared-package","relation":"imports",
+              "confidence":"EXTRACTED","source_file":"src/app.ts"
+            }],
+            "hyperedges":[]}"#,
+    );
+    write(
+        &ws,
+        "members/shared-api/graph.json",
+        r#"{"directed":true,"multigraph":false,"graph":{},
+            "nodes":[{"id":"Widget","label":"Widget","file_type":"code","source_file":"src/widget.ts"}],
+            "links":[],"hyperedges":[]}"#,
+    );
+    write_manifest(
+        &ws,
+        &manifest_with(vec![
+            RepoMember {
+                name: "Frontend display name".into(),
+                tag: Some("frontend".into()),
+                coordinate: Some(Coordinate {
+                    ecosystem: Ecosystem::Npm,
+                    name: "@acme/frontend".into(),
+                }),
+                git: None,
+                rev: None,
+                subgraph: Some("members/frontend/graph.json".into()),
+                path: None,
+            },
+            RepoMember {
+                name: "Shared API display name".into(),
+                tag: Some("shared-api".into()),
+                coordinate: Some(Coordinate {
+                    ecosystem: Ecosystem::Npm,
+                    name: "@acme/shared".into(),
+                }),
+                git: None,
+                rev: None,
+                subgraph: Some("members/shared-api/graph.json".into()),
+                path: None,
+            },
+        ]),
+    )
+    .unwrap();
+
+    let build = build_workspace(&ws, &WorkspaceBuildOptions::default()).unwrap();
+
+    assert_eq!(
+        build
+            .members
+            .iter()
+            .map(|member| member.tag.as_str())
+            .collect::<Vec<_>>(),
+        vec!["frontend", "shared-api"]
+    );
+    let edge = build
+        .federated
+        .edges()
+        .find(|edge| edge.source.0 == "frontend::App" && edge.target.0 == "shared-api::Widget")
+        .expect("the pinned npm coordinate resolves the cross-repository import");
+    assert!(edge.cross_repo);
+    assert_eq!(edge.relation, "imports");
+    assert!(build.federated.nodes().any(
+        |node| node.id.0 == "shared-api::Widget" && node.repo.as_deref() == Some("shared-api")
+    ));
 }
 
 #[test]
@@ -193,6 +279,8 @@ fn cross_repo_parameterized_route_connects() {
         &manifest_with(vec![
             RepoMember {
                 name: "server".into(),
+                tag: None,
+                coordinate: None,
                 git: None,
                 rev: None,
                 subgraph: None,
@@ -200,6 +288,8 @@ fn cross_repo_parameterized_route_connects() {
             },
             RepoMember {
                 name: "client".into(),
+                tag: None,
+                coordinate: None,
                 git: None,
                 rev: None,
                 subgraph: None,
@@ -239,6 +329,8 @@ fn remote_subgraph_blocked_ip_is_rejected_by_the_ssrf_guard() {
         &ws,
         &manifest_with(vec![RepoMember {
             name: "ext".into(),
+            tag: None,
+            coordinate: None,
             git: None,
             rev: None,
             subgraph: Some("http://169.254.169.254/graph.json".into()),
@@ -269,6 +361,8 @@ fn remote_git_member_is_cloned_over_network() {
         &ws,
         &manifest_with(vec![RepoMember {
             name: "octocat-hello".into(),
+            tag: None,
+            coordinate: None,
             // tiny, stable public repo
             git: Some("https://github.com/octocat/Hello-World".into()),
             rev: None,
@@ -308,6 +402,8 @@ fn federated_pyo3_links_across_repos() {
         &manifest_with(vec![
             RepoMember {
                 name: "ext".into(),
+                tag: None,
+                coordinate: None,
                 git: None,
                 rev: None,
                 subgraph: None,
@@ -315,6 +411,8 @@ fn federated_pyo3_links_across_repos() {
             },
             RepoMember {
                 name: "app".into(),
+                tag: None,
+                coordinate: None,
                 git: None,
                 rev: None,
                 subgraph: None,
@@ -371,6 +469,8 @@ fn federated_command_resolves_across_repos() {
         &manifest_with(vec![
             RepoMember {
                 name: "caller".into(),
+                tag: None,
+                coordinate: None,
                 git: None,
                 rev: None,
                 subgraph: None,
@@ -378,6 +478,8 @@ fn federated_command_resolves_across_repos() {
             },
             RepoMember {
                 name: "tools".into(),
+                tag: None,
+                coordinate: None,
                 git: None,
                 rev: None,
                 subgraph: None,

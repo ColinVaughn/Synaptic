@@ -1,0 +1,48 @@
+steps:
+  - id: build-glibc-engine
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --pull
+      - --file
+      - docker/synaptic-engine.Dockerfile
+      - --tag
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/synaptic-engine:${_TAG}
+      - .
+  - id: build-musl-engine
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --pull
+      - --file
+      - docker/synaptic-engine-worker.Dockerfile
+      - --tag
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/synaptic-engine-worker:${_TAG}
+      - .
+  - id: record-engine-binary-digests
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -euo
+      - pipefail
+      - -c
+      - |
+        glibc_image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/synaptic-engine:${_TAG}"
+        musl_image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/synaptic-engine-worker:${_TAG}"
+        glibc_container="$(docker create "$${glibc_image}")"
+        musl_container="$(docker create "$${musl_image}")"
+        trap 'docker rm -f "$${glibc_container}" "$${musl_container}" >/dev/null 2>&1 || true' EXIT
+        docker cp "$${glibc_container}:/usr/local/bin/synaptic" /workspace/synaptic-glibc
+        docker cp "$${musl_container}:/usr/local/bin/synaptic" /workspace/synaptic-musl
+        sha256sum /workspace/synaptic-glibc /workspace/synaptic-musl
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/synaptic-engine:${_TAG}
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/synaptic-engine-worker:${_TAG}
+options:
+  requestedVerifyOption: VERIFIED
+  machineType: E2_HIGHCPU_8
+substitutions:
+  _REGION: us-east4
+  _REPOSITORY: synaptic
+  _TAG: v0.7.3
+timeout: 3600s

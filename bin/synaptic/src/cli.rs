@@ -973,6 +973,15 @@ pub(crate) enum WorkspaceAction {
     },
     /// Compose from a directory of published <member>/graph.json artifacts.
     Federate { dir: PathBuf },
+    /// Detect a repository's package coordinate from its source manifest.
+    Coordinate {
+        /// Repository root (default: current directory).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Emit a stable JSON object, or `null` when no package manifest exists.
+        #[arg(long)]
+        json: bool,
+    },
     /// Pull remote git members, then rebuild deltas.
     Sync,
     /// Show each member's change status (no build).

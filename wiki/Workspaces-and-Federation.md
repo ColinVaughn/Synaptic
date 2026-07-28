@@ -239,6 +239,25 @@ projects were discovered by manifest presence, it notes the discovery.
 synaptic workspace list
 ```
 
+### `workspace coordinate`
+
+Detects the package coordinate that a repository publishes for cross-repository
+import resolution. The path defaults to the current directory. `--json` emits
+the stable manifest shape, or `null` when no recognized package manifest
+exists, which lets hosted orchestrators freeze the coordinate beside an
+immutable graph artifact.
+
+```
+synaptic workspace coordinate
+synaptic workspace coordinate ../shared-api --json
+```
+
+Example JSON:
+
+```json
+{"ecosystem":"npm","name":"@acme/shared-api"}
+```
+
 ## The `synaptic-workspace.toml` manifest
 
 The manifest declares the workspace and its members. When the file is absent, a
@@ -257,8 +276,10 @@ git  = "https://github.com/acme/billing"
 rev  = "main"
 
 [[repos]]
-name = "identity"
+name = "@acme/identity"
+tag = "identity"
 subgraph = "https://artifacts.acme.com/identity/latest/graph.json"
+coordinate = { ecosystem = "npm", name = "@acme/identity" }
 
 [[repos]]
 name = "shared"
@@ -277,6 +298,16 @@ Each `[[repos]]` entry is a separate repository federated into the workspace.
 Exactly one of `path`, `git`, or `subgraph` drives how it is built:
 
 - `name` (string, required): the basis for the member tag.
+- `tag` (string, optional): an explicit stable graph namespace. When omitted,
+  the tag is derived from `name` for backward compatibility. An explicit tag
+  must already be canonical lowercase kebab case. It is used in namespaced node
+  IDs, repository filters, paths, cache directories, and export surfaces.
+- `coordinate` (table, optional): the published package identity used for
+  import resolution, with `ecosystem` and `name` fields. Supported ecosystems
+  are `cargo`, `npm`, `go`, `python`, `jvm`, `gradle`, `dotnet`, and `other`.
+  Local and Git members detect a coordinate from their package manifest when
+  this field is absent. Artifact-backed `subgraph` members should supply it
+  explicitly because their source manifest is not available.
 - `path` (string, optional): a local, already-checked-out repo (relative to the
   root). Built locally.
 - `git` (string, optional): a git URL to clone into
@@ -292,9 +323,11 @@ Exactly one of `path`, `git`, or `subgraph` drives how it is built:
 
 Declared `[[repos]]` members load on a dedicated pool of at most four workers.
 Results and the first reported error remain in manifest order. Repository names
-must sanitize to distinct tags: for example, two names that both become
+must resolve to distinct tags: for example, two names that both become
 `acme-billing` are rejected before any clone/build starts, because they would
-otherwise share one cache directory and graph namespace.
+otherwise share one cache directory and graph namespace. Explicit tags are
+validated rather than silently rewritten, so a persisted hosted namespace
+cannot drift.
 
 ## Member auto-discovery
 
@@ -349,8 +382,10 @@ Cargo to npm to Go to Python to Maven to Gradle to .NET:
 | `gradle` | `settings.gradle(.kts)` | `rootProject.name`, else the dir name |
 | `dotnet` | `*.csproj`/`*.fsproj`/`*.vbproj`, else a root `*.sln` | `AssemblyName`, else `RootNamespace`, else the project-file stem. With only a `.sln` at the root, the first project it references supplies the name (falling back to the `.sln` stem) |
 
-A member with no recognized manifest has no coordinate (and so contributes no
-export surface in co-located mode).
+A member with no recognized manifest and no explicit manifest `coordinate` has
+no detected coordinate (and so contributes no coordinate-based export surface
+in co-located mode). When `coordinate` is present on `[[repos]]`, it overrides
+detection for local, Git, and artifact-backed members.
 
 ## Cross-repo symbol resolution
 

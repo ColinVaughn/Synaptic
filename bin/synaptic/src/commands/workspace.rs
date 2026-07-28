@@ -475,6 +475,8 @@ pub(crate) fn run_workspace(action: WorkspaceAction) -> Result<()> {
                     }
                     manifest.repos.push(RepoMember {
                         name: c.name.clone(),
+                        tag: None,
+                        coordinate: None,
                         git: None,
                         rev: None,
                         subgraph: None,
@@ -515,6 +517,8 @@ pub(crate) fn run_workspace(action: WorkspaceAction) -> Result<()> {
                 println!("Added git member '{name}' ({target}).");
                 manifest.repos.push(RepoMember {
                     name,
+                    tag: None,
+                    coordinate: None,
                     git: Some(target),
                     rev: None,
                     subgraph: None,
@@ -568,13 +572,30 @@ pub(crate) fn run_workspace(action: WorkspaceAction) -> Result<()> {
             print_build_summary(&build);
             Ok(())
         }
+        WorkspaceAction::Coordinate { path, json } => {
+            let path = if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            };
+            let coordinate = synaptic_workspace::coordinate::package_coordinate(&path);
+            if json {
+                println!("{}", serde_json::to_string(&coordinate)?);
+            } else if let Some(coordinate) = coordinate {
+                println!("{:?} {}", coordinate.ecosystem, coordinate.name);
+            } else {
+                println!("No recognized package coordinate.");
+            }
+            Ok(())
+        }
         WorkspaceAction::Sync => {
             use synaptic_workspace::manifest::load_manifest;
             if let Some(m) = load_manifest(&root).map_err(|e| anyhow::anyhow!("{e}"))? {
                 let cache = root.join("synaptic-out").join("workspace-repos");
                 for repo in &m.repos {
                     if repo.git.is_some() {
-                        let clone = cache.join(synaptic_workspace::sanitize_tag(&repo.name));
+                        let clone =
+                            cache.join(repo.resolved_tag().map_err(|e| anyhow::anyhow!("{e}"))?);
                         if clone.is_dir() {
                             println!("Pulling {}...", repo.name);
                             let _ = std::process::Command::new("git")
@@ -685,6 +706,8 @@ pub(crate) fn run_workspace(action: WorkspaceAction) -> Result<()> {
                 .iter()
                 .map(|c| synaptic_workspace::manifest::RepoMember {
                     name: c.name.clone(),
+                    tag: None,
+                    coordinate: None,
                     git: None,
                     rev: None,
                     subgraph: None,

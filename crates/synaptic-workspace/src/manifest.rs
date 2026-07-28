@@ -7,7 +7,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Result, WorkspaceError};
+use crate::coordinate::Coordinate;
+use crate::{sanitize_tag, Result, WorkspaceError};
 
 /// The parsed `synaptic-workspace.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
@@ -50,6 +51,15 @@ fn default_branch() -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RepoMember {
     pub name: String,
+    /// Stable graph namespace. When omitted, it is derived from `name` for
+    /// backwards compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    /// Published package identity used to resolve imports into this repository.
+    /// Artifact-backed members cannot inspect a package manifest, so hosted
+    /// federation pins the coordinate in the workspace manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinate: Option<Coordinate>,
     /// Remote git URL to clone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<String>,
@@ -63,6 +73,24 @@ pub struct RepoMember {
     /// A local path to an already-checked-out repo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+}
+
+impl RepoMember {
+    /// The deterministic namespace used in composed node ids and repository
+    /// filters. Explicit tags must already be in canonical form.
+    pub fn resolved_tag(&self) -> Result<String> {
+        let raw = self.tag.as_deref().unwrap_or(&self.name);
+        let canonical = sanitize_tag(raw);
+        if self.tag.is_some() && canonical != raw {
+            return Err(WorkspaceError::Remote {
+                member: self.name.clone(),
+                reason: format!(
+                    "explicit repository tag `{raw}` is not canonical; use `{canonical}`"
+                ),
+            });
+        }
+        Ok(canonical)
+    }
 }
 
 /// The conventional manifest filename at a workspace root.
@@ -148,6 +176,35 @@ subgraph = "https://artifacts.acme.com/identity/latest/graph.json"
     }
 
     #[test]
+    fn artifact_member_can_pin_a_stable_tag_and_real_package_coordinate() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join(MANIFEST_NAME),
+            r#"
+[workspace]
+name = "customer-platform"
+
+[[repos]]
+name = "Shared API"
+tag = "shared-api"
+subgraph = "members/shared-api/graph.json"
+coordinate = { ecosystem = "npm", name = "@acme/shared" }
+"#,
+        )
+        .unwrap();
+        let manifest = load_manifest(d.path()).unwrap().unwrap();
+        let member = &manifest.repos[0];
+        assert_eq!(member.tag.as_deref(), Some("shared-api"));
+        assert_eq!(
+            member.coordinate,
+            Some(crate::coordinate::Coordinate {
+                ecosystem: crate::coordinate::Ecosystem::Npm,
+                name: "@acme/shared".into(),
+            })
+        );
+    }
+
+    #[test]
     fn absent_manifest_is_none() {
         let d = tempfile::tempdir().unwrap();
         assert!(load_manifest(d.path()).unwrap().is_none());
@@ -183,6 +240,8 @@ subgraph = "https://artifacts.acme.com/identity/latest/graph.json"
             },
             repos: vec![RepoMember {
                 name: "ext".into(),
+                tag: None,
+                coordinate: None,
                 git: Some("https://example.com/ext".into()),
                 rev: None,
                 subgraph: None,
