@@ -185,6 +185,8 @@ mod tests {
     fn path_repo(name: &str, path: &str) -> RepoMember {
         RepoMember {
             name: name.into(),
+            tag: None,
+            coordinate: None,
             git: None,
             rev: None,
             subgraph: None,
@@ -257,6 +259,8 @@ mod tests {
         let repos = vec![
             RepoMember {
                 name: "remote".into(),
+                tag: None,
+                coordinate: None,
                 git: Some("https://example.com/a/b".into()),
                 rev: None,
                 subgraph: None,
@@ -264,6 +268,8 @@ mod tests {
             },
             RepoMember {
                 name: "published".into(),
+                tag: None,
+                coordinate: None,
                 git: None,
                 rev: None,
                 subgraph: Some("https://example.com/graph.json".into()),

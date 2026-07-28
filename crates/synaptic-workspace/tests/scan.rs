@@ -45,6 +45,8 @@ fn scan_then_federate_carries_both_repo_tags() {
         .iter()
         .map(|c| RepoMember {
             name: c.name.clone(),
+            tag: None,
+            coordinate: None,
             git: None,
             rev: None,
             subgraph: None,

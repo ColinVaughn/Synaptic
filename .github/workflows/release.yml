@@ -11,6 +11,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   build:
@@ -77,6 +79,10 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Attest release archives and checksums
+        uses: actions/attest@v4
+        with:
+          subject-path: "dist/*"
       - uses: softprops/action-gh-release@v3
         with:
           files: dist/*

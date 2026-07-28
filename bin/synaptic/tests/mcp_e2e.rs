@@ -236,3 +236,142 @@ fn mcp_stdio_conformance_over_the_real_binary() {
     drop(stdin);
     let _ = child.wait();
 }
+
+#[test]
+fn one_mcp_connection_queries_and_traverses_a_federated_graph() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("synaptic-out")).unwrap();
+    std::fs::write(
+        root.join("synaptic-out/graph.json"),
+        serde_json::to_vec(&json!({
+            "directed": true,
+            "multigraph": false,
+            "graph": {},
+            "nodes": [
+                {
+                    "id": "frontend::render_dashboard",
+                    "label": "render_dashboard",
+                    "file_type": "code",
+                    "source_file": "frontend/src/dashboard.ts",
+                    "repo": "frontend",
+                    "kind": "function",
+                    "community": 0
+                },
+                {
+                    "id": "shared-api::Widget",
+                    "label": "Widget",
+                    "file_type": "code",
+                    "source_file": "shared-api/src/widget.ts",
+                    "repo": "shared-api",
+                    "kind": "class",
+                    "community": 1
+                }
+            ],
+            "links": [
+                {
+                    "source": "frontend::render_dashboard",
+                    "target": "shared-api::Widget",
+                    "relation": "references",
+                    "confidence": "EXTRACTED",
+                    "source_file": "frontend/src/dashboard.ts",
+                    "cross_repo": true
+                }
+            ],
+            "hyperedges": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut child: Child = Command::new(env!("CARGO_BIN_EXE_synaptic"))
+        .current_dir(root)
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc":"2.0",
+            "id":1,
+            "method":"initialize",
+            "params":{
+                "protocolVersion":"2025-11-25",
+                "capabilities":{},
+                "clientInfo":{"name":"federation-e2e","version":"1.0"}
+            }
+        }),
+    );
+    assert_eq!(recv(&mut out)["result"]["protocolVersion"], "2025-11-25");
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    );
+
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_repos","arguments":{}}}),
+    );
+    let repos = recv(&mut out);
+    let repo_names: Vec<&str> = repos["result"]["structuredContent"]["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|repo| repo["repo"].as_str())
+        .collect();
+    assert_eq!(repo_names, vec!["frontend", "shared-api"], "{repos}");
+
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"graph_stats","arguments":{}}}),
+    );
+    let stats = recv(&mut out);
+    assert_eq!(
+        stats["result"]["structuredContent"]["cross_repo"], 1,
+        "{stats}"
+    );
+
+    let references = call_text(
+        &mut stdin,
+        &mut out,
+        4,
+        "find_references",
+        json!({"label":"shared-api::Widget"}),
+    );
+    assert!(
+        references.contains("render_dashboard"),
+        "a traversal through the composed graph reaches the frontend: {references}"
+    );
+
+    let scoped = call_text(
+        &mut stdin,
+        &mut out,
+        5,
+        "repo_stats",
+        json!({"repo":"shared-api"}),
+    );
+    assert!(
+        scoped.contains("Repo shared-api: 1 nodes"),
+        "repository-scoped query: {scoped}"
+    );
+
+    let search = call_text(
+        &mut stdin,
+        &mut out,
+        6,
+        "query_graph",
+        json!({"question":"Widget","full":true}),
+    );
+    assert!(
+        search.contains("shared-api/src/widget.ts") || search.contains("shared-api::Widget"),
+        "unqualified search carries repository identity: {search}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}

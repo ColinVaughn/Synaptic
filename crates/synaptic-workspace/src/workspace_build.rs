@@ -180,7 +180,7 @@ fn validate_git_url(url: &str) -> Result<()> {
 /// An already-cloned member is reused as-is (`synaptic workspace sync` refreshes
 /// it). The network path (real remote URLs) is accepted-untested-offline.
 fn clone_repo(repo: &RepoMember, url: &str, cache: &Path) -> Result<PathBuf> {
-    let dest = cache.join(sanitize_tag(&repo.name));
+    let dest = cache.join(repo.resolved_tag()?);
     if dest.is_dir() {
         return Ok(dest); // already cloned; `sync` pulls updates
     }
@@ -258,7 +258,7 @@ fn load_repo_member(
     opts: &WorkspaceBuildOptions,
     cache: &Path,
 ) -> Result<LoadedRepo> {
-    let tag = sanitize_tag(&repo.name);
+    let tag = repo.resolved_tag()?;
 
     // Artifact federation: consume a prebuilt subgraph (local path or URL).
     if let Some(sub) = &repo.subgraph {
@@ -267,10 +267,10 @@ fn load_repo_member(
         } else {
             load_graph(&root.join(sub))?
         };
-        let coord = Coordinate {
+        let coord = repo.coordinate.clone().unwrap_or_else(|| Coordinate {
             ecosystem: Ecosystem::Other,
             name: repo.name.clone(),
-        };
+        });
         let surface = Some(build_export_surface(&tag, coord.clone(), &graph));
         return Ok(LoadedRepo {
             tag,
@@ -294,7 +294,10 @@ fn load_repo_member(
         });
     };
 
-    let coordinate = crate::coordinate::package_coordinate(&path);
+    let coordinate = repo
+        .coordinate
+        .clone()
+        .or_else(|| crate::coordinate::package_coordinate(&path));
     let root = path.clone();
     let member = Member {
         tag: tag.clone(),
@@ -335,7 +338,7 @@ static REPO_LOAD_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
 fn validate_unique_repo_tags(repos: &[RepoMember]) -> Result<()> {
     let mut names_by_tag = HashMap::with_capacity(repos.len());
     for repo in repos {
-        let tag = sanitize_tag(&repo.name);
+        let tag = repo.resolved_tag()?;
         if let Some(first_name) = names_by_tag.get(&tag) {
             return Err(WorkspaceError::Remote {
                 member: repo.name.clone(),
@@ -681,6 +684,8 @@ mod tests {
         let repos = vec![
             crate::manifest::RepoMember {
                 name: "alpha".into(),
+                tag: None,
+                coordinate: None,
                 git: None,
                 rev: None,
                 subgraph: None,
@@ -688,6 +693,8 @@ mod tests {
             },
             crate::manifest::RepoMember {
                 name: "beta".into(),
+                tag: None,
+                coordinate: None,
                 git: None,
                 rev: None,
                 subgraph: None,
@@ -722,6 +729,8 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let repo = RepoMember {
             name: "ext".into(),
+            tag: None,
+            coordinate: None,
             git: None,
             rev: None,
             subgraph: None,
@@ -741,6 +750,8 @@ mod tests {
     fn declared_repo(name: &str) -> RepoMember {
         RepoMember {
             name: name.into(),
+            tag: None,
+            coordinate: None,
             git: None,
             rev: None,
             subgraph: None,

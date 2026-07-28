@@ -10,6 +10,19 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-07-28
+
+### Added
+
+- **Hosted project federations can preserve stable repository identities.**
+  Workspace members may now declare an explicit canonical `tag` and package
+  `coordinate`, so immutable pre-extracted member graphs compose without
+  deriving identity from an ephemeral checkout path. The new
+  `synaptic workspace coordinate [path] --json` command exposes the engine's
+  detected package coordinate for ingestion pipelines. Cross-repository MCP
+  traversal remains available through the existing workspace graph tools and
+  repository filters.
+
 ## [0.7.2] - 2026-07-26
 
 ### Changed
@@ -1668,7 +1681,8 @@ parameters), and `graph.json` gains only additive edge keys.
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.0...v0.7.1
 [0.2.8]: https://github.com/ColinVaughn/CodeGraph/compare/v0.2.7...v0.2.8

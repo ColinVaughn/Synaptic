@@ -357,7 +357,7 @@ A code-only corpus runs fully offline; the optional LLM semantic pass over docs 
 | `watch` | Rebuild automatically as files change (single repo; use `workspace build --watch` for a workspace) |
 | `serve` | Run the MCP server (stdio, or `--http <addr> --api-key <key>`) |
 | `prs [number]` | Graph-aware PR dashboard / detail. Flags: `--triage`, `--conflicts`, `--base`, `--repo` |
-| `workspace <action>` | Multi-repo / monorepo federation (`init`/`add`/`discover`/`build`/`federate`/`sync`/`status`/`list`). `build --watch` keeps a federated graph live across every member repo |
+| `workspace <action>` | Multi-repo / monorepo federation (`init`/`add`/`discover`/`build`/`federate`/`coordinate`/`sync`/`status`/`list`). `build --watch` keeps a federated graph live across every member repo |
 | `global <action>` | The cross-repo global graph store (`~/.synaptic`) |
 | `merge-graphs <graphs...>` | Compose several `graph.json` files into one namespaced graph |
 | `ingest <source>` | Ingest an external source (cargo / mcp / scip / pg / url; `office` / `gws` / `media` behind feature flags) |
