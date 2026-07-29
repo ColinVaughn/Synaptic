@@ -104,7 +104,8 @@ grepping or reading files.
   source, and config signals: framework sentinel returns, placeholders/stubs,
   generated-resource noise, and project metadata. The MCP `readiness_audit` tool exposes the
   same structured report.
-- **MCP server** (protocol 2025-11-25) exposing 30 read-only tools over stdio or HTTP:
+- **MCP server** (stateless protocol 2026-07-28 with legacy compatibility through
+  2025-11-25) exposing 30 read-only tools over stdio or HTTP:
   subgraph search, source reading, reverse-impact, find-all-references, dynamic-dispatch hazards,
   PR/working-tree blast radius, change forecasting, predictive test selection, edit-impact prediction,
   structural search, time-travel diff, plan-only rename, and SQL audit/advise, plus prompts, completions,

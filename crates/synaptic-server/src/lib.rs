@@ -14,9 +14,10 @@
 //! `affected_tests`, `predict_edit`), advanced (`structural_search`, `describe_node`,
 //! `time_travel_diff`, plan-only `plan_rename`, `readiness_audit`), SQL (`audit_sql`, `advise_sql`),
 //! federation (`list_repos`, `repo_stats`), and PR (`list_prs`, `get_pr_impact`,
-//! `triage_prs`), plus six resources. The `initialize` reply
-//! returns server `instructions` orienting the agent, and each tool documents its
-//! parameters, so an assistant uses them correctly. Every label is run through
+//! `triage_prs`), plus six resources. Modern `server/discover` and legacy
+//! `initialize` responses return server `instructions` orienting the agent, and
+//! each tool documents its parameters, so an assistant uses them correctly.
+//! Every label is run through
 //! [`synaptic_core::sanitize_label`] before it reaches tool text (a security
 //! boundary on LLM/corpus-derived names).
 #![forbid(unsafe_code)]
@@ -69,7 +70,20 @@ use synaptic_sandbox::{
     render_markdown as render_speculate_md, speculate, Change, SpeculateOptions,
 };
 
+/// Protocol versions supported by the legacy `initialize` handshake.
 const SUPPORTED_PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+/// First stateless/per-request-metadata MCP revision.
+pub(crate) const MODERN_PROTOCOL: &str = "2026-07-28";
+/// Versions advertised by `server/discover`, newest first. Modern clients can
+/// select `2026-07-28`; dual-era clients may fall back to one of the legacy
+/// handshake revisions.
+pub(crate) const ADVERTISED_PROTOCOLS: &[&str] = &[
+    MODERN_PROTOCOL,
+    "2025-11-25",
+    "2025-06-18",
+    "2025-03-26",
+    "2024-11-05",
+];
 const STDIO_WORKERS: usize = 4;
 const STDIO_QUEUE_CAPACITY: usize = 32;
 
@@ -392,6 +406,23 @@ pub(crate) fn jsonrpc_error_response(id: Value, code: i64, message: impl Into<St
     })
 }
 
+pub(crate) fn jsonrpc_error_response_with_data(
+    id: Value,
+    code: i64,
+    message: impl Into<String>,
+    data: Value,
+) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": code,
+            "message": message.into(),
+            "data": data
+        }
+    })
+}
+
 pub(crate) fn jsonrpc_parse_error() -> Value {
     jsonrpc_error_response(Value::Null, -32700, "Parse error")
 }
@@ -424,6 +455,79 @@ pub(crate) fn validate_jsonrpc_request(req: &Value) -> Result<ValidatedRequest, 
         method: method.to_string(),
         params: object.get("params").cloned().unwrap_or(Value::Null),
     })
+}
+
+fn request_meta(req: &ValidatedRequest) -> Option<&serde_json::Map<String, Value>> {
+    req.params.get("_meta").and_then(Value::as_object)
+}
+
+/// A modern request declares its protocol revision in per-request metadata.
+/// `initialize` always selects legacy semantics, even if a legacy client
+/// happens to include an unrelated `_meta` extension in its parameters.
+pub(crate) fn is_modern_request(req: &ValidatedRequest) -> bool {
+    request_meta(req)
+        .and_then(|meta| meta.get("io.modelcontextprotocol/protocolVersion"))
+        .is_some()
+        && (req.method != "initialize" || req.params.get("protocolVersion").is_none())
+}
+
+/// Validate the required `2026-07-28` per-request metadata. This is called at
+/// each wire boundary (stdio and HTTP); dispatch can then remain transport
+/// independent.
+pub(crate) fn validate_modern_request(req: &ValidatedRequest) -> Result<(), Value> {
+    let id = req.id.clone().unwrap_or(Value::Null);
+    let Some(meta) = request_meta(req) else {
+        return Err(jsonrpc_error_response(
+            id,
+            -32602,
+            "Modern MCP requests require an object params._meta",
+        ));
+    };
+    let Some(requested) = meta
+        .get("io.modelcontextprotocol/protocolVersion")
+        .and_then(Value::as_str)
+    else {
+        return Err(jsonrpc_error_response(
+            id,
+            -32602,
+            "Request metadata requires string 'io.modelcontextprotocol/protocolVersion'",
+        ));
+    };
+    if requested != MODERN_PROTOCOL {
+        return Err(jsonrpc_error_response_with_data(
+            id,
+            -32022,
+            "Unsupported protocol version",
+            json!({
+                "supported": ADVERTISED_PROTOCOLS,
+                "requested": requested
+            }),
+        ));
+    }
+    if !meta
+        .get("io.modelcontextprotocol/clientCapabilities")
+        .is_some_and(Value::is_object)
+    {
+        return Err(jsonrpc_error_response(
+            id,
+            -32602,
+            "Request metadata requires object 'io.modelcontextprotocol/clientCapabilities'",
+        ));
+    }
+    if let Some(client_info) = meta.get("io.modelcontextprotocol/clientInfo") {
+        let valid = client_info.as_object().is_some_and(|info| {
+            info.get("name").is_some_and(Value::is_string)
+                && info.get("version").is_some_and(Value::is_string)
+        });
+        if !valid {
+            return Err(jsonrpc_error_response(
+                id,
+                -32602,
+                "'io.modelcontextprotocol/clientInfo' requires string name and version",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Client state negotiated by `initialize`, retained per stdio connection or
@@ -535,6 +639,22 @@ impl ConnectionLifecycle {
             ConnectionLifecycle::Closed => Err((-32002, "MCP connection is closed".to_string())),
         }
     }
+}
+
+/// Select modern stateless semantics or the legacy connection lifecycle for one
+/// request. Modern requests never mutate the legacy handshake state, so a
+/// dual-era stdio process can serve both eras concurrently.
+fn authorize_connection_request(
+    lifecycle: &mut ConnectionLifecycle,
+    req: &ValidatedRequest,
+) -> Result<bool, Value> {
+    if is_modern_request(req) {
+        validate_modern_request(req)?;
+        return Ok(true);
+    }
+    lifecycle.authorize(req).map_err(|(code, message)| {
+        jsonrpc_error_response(req.id.clone().unwrap_or(Value::Null), code, message)
+    })
 }
 
 /// Configuration for the serve catch-up path: detect files an agent
@@ -4669,6 +4789,11 @@ Cross-repo: {} edge(s) span repositories{}",
             Ok(req) => req,
             Err(error) => return Some(error),
         };
+        if is_modern_request(&req) {
+            if let Err(error) = validate_modern_request(&req) {
+                return Some(error);
+            }
+        }
         self.handle_validated_with_reload(&req)
     }
 
@@ -4680,6 +4805,14 @@ Cross-repo: {} edge(s) span repositories{}",
             }
         }
         self.dispatch_validated_request(req)
+    }
+
+    fn modern_discover_result(&self) -> Value {
+        json!({
+            "supportedVersions": ADVERTISED_PROTOCOLS,
+            "capabilities": server_capabilities(true, true),
+            "instructions": SERVER_INSTRUCTIONS
+        })
     }
 
     /// Stateful connection wrapper used by the real stdio transport. The public
@@ -4695,13 +4828,10 @@ Cross-repo: {} edge(s) span repositories{}",
             Ok(req) => req,
             Err(error) => return Some(error),
         };
-        match lifecycle.authorize(&req) {
+        match authorize_connection_request(lifecycle, &req) {
             Ok(true) => self.handle_validated_with_reload(&req),
             Ok(false) => None,
-            Err((code, message)) => req
-                .id
-                .clone()
-                .map(|id| jsonrpc_error_response(id, code, message)),
+            Err(error) => req.id.as_ref().map(|_| error),
         }
     }
 
@@ -4711,7 +4841,14 @@ Cross-repo: {} edge(s) span repositories{}",
     /// `None` for a notification (no `id`) that takes no reply.
     pub fn dispatch_request(&self, req: &Value) -> Option<Value> {
         match validate_jsonrpc_request(req) {
-            Ok(req) => self.dispatch_validated_request(&req),
+            Ok(req) => {
+                if is_modern_request(&req) {
+                    if let Err(error) = validate_modern_request(&req) {
+                        return Some(error);
+                    }
+                }
+                self.dispatch_validated_request(&req)
+            }
             Err(error) => Some(error),
         }
     }
@@ -4721,9 +4858,11 @@ Cross-repo: {} edge(s) span repositories{}",
         let id = req.id.clone()?;
         let method = req.method.as_str();
         let params = req.params.clone();
+        let modern = is_modern_request(req);
 
         let result = match method {
-            "initialize" => {
+            "server/discover" if modern => Ok(self.modern_discover_result()),
+            "initialize" if !modern => {
                 validate_initialize_params(&params).map(|negotiated| {
                     json!({
                         "protocolVersion": negotiated.protocol_version,
@@ -4743,7 +4882,7 @@ Cross-repo: {} edge(s) span repositories{}",
                     })
                 })
             }
-            "ping" => Ok(json!({})),
+            "ping" if !modern => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": tools_list(self.allow_exec) })),
             "prompts/list" => Ok(json!({ "prompts": prompts::prompts_list() })),
             "prompts/get" => {
@@ -4757,7 +4896,7 @@ Cross-repo: {} edge(s) span repositories{}",
             }
             "resources/list" => Ok(json!({ "resources": resources_list() })),
             "resources/templates/list" => Ok(json!({ "resourceTemplates": resource_templates() })),
-            "resources/subscribe" | "resources/unsubscribe" => {
+            "resources/subscribe" | "resources/unsubscribe" if !modern => {
                 if !self.resource_subscriptions {
                     Err((
                         -32601,
@@ -4769,7 +4908,7 @@ Cross-repo: {} edge(s) span repositories{}",
             }
             // Accept the client's minimum log level; we advertise `logging` so a
             // host can set it, and never emit below it.
-            "logging/setLevel" => Ok(json!({})),
+            "logging/setLevel" if !modern => Ok(json!({})),
             "completion/complete" => self.dispatch_completion(&params),
             "tools/call" => self
                 .dispatch_tool(&params)
@@ -4779,8 +4918,37 @@ Cross-repo: {} edge(s) span repositories{}",
         };
 
         Some(match result {
-            Ok(value) => json!({ "jsonrpc": "2.0", "id": id, "result": value }),
-            Err((code, message)) => jsonrpc_error_response(id, code, message),
+            Ok(value) => {
+                let value = if modern {
+                    decorate_modern_result(value, method)
+                } else {
+                    value
+                };
+                json!({ "jsonrpc": "2.0", "id": id, "result": value })
+            }
+            Err((code, message)) => {
+                // Resource lookup failures moved from the old MCP custom code to
+                // JSON-RPC Invalid Params in 2026-07-28. Preserve the old code on
+                // legacy connections for compatibility.
+                let code = if modern
+                    && code == -32002
+                    && matches!(method, "resources/read" | "resources/subscribe")
+                {
+                    -32602
+                } else {
+                    code
+                };
+                if modern
+                    && code == -32602
+                    && method == "resources/read"
+                    && message.starts_with("Resource not found:")
+                {
+                    let uri = params.get("uri").cloned().unwrap_or(Value::Null);
+                    jsonrpc_error_response_with_data(id, code, message, json!({ "uri": uri }))
+                } else {
+                    jsonrpc_error_response(id, code, message)
+                }
+            }
         })
     }
 
@@ -5976,6 +6144,7 @@ Cross-repo: {} edge(s) span repositories{}",
         let (jobs_tx, jobs_rx) = mpsc::sync_channel::<ValidatedRequest>(STDIO_QUEUE_CAPACITY);
         let jobs_rx = Arc::new(Mutex::new(jobs_rx));
         let (responses_tx, responses_rx) = mpsc::channel::<Value>();
+        let subscriptions = Arc::new(Mutex::new(Vec::<StdioSubscription>::new()));
 
         std::thread::scope(|scope| -> std::io::Result<()> {
             let writer = scope.spawn(move || -> std::io::Result<()> {
@@ -5991,6 +6160,7 @@ Cross-repo: {} edge(s) span repositories{}",
                 let server = server.clone();
                 let jobs = jobs_rx.clone();
                 let responses = responses_tx.clone();
+                let subscriptions = subscriptions.clone();
                 scope.spawn(move || loop {
                     let request = {
                         let receiver = jobs.lock().unwrap_or_else(|error| error.into_inner());
@@ -6004,7 +6174,12 @@ Cross-repo: {} edge(s) span repositories{}",
                         dispatch_shared_request(&server, &request)
                     }));
                     let response = match outcome {
-                        Ok(response) => response,
+                        Ok((reloaded, response)) => {
+                            if reloaded {
+                                send_stdio_resource_updates(&responses, &subscriptions);
+                            }
+                            response
+                        }
                         Err(_) => request_id.map(|id| {
                             jsonrpc_error_response(id, -32603, "Internal request worker failure")
                         }),
@@ -6035,15 +6210,50 @@ Cross-repo: {} edge(s) span repositories{}",
                         continue;
                     }
                 };
-                match lifecycle.authorize(&request) {
+                match authorize_connection_request(&mut lifecycle, &request) {
                     Ok(false) => continue,
-                    Err((code, message)) => {
-                        if let Some(id) = request.id.clone() {
-                            let _ = responses_tx.send(jsonrpc_error_response(id, code, message));
+                    Err(error) => {
+                        if request.id.is_some() {
+                            let _ = responses_tx.send(error);
                         }
                         continue;
                     }
                     Ok(true) => {}
+                }
+
+                if is_modern_request(&request) && request.method == "subscriptions/listen" {
+                    let resources = {
+                        let guard = server.read().unwrap_or_else(|error| error.into_inner());
+                        validate_subscription_filter(&guard, &request.params)
+                    };
+                    match resources {
+                        Ok(resources) => {
+                            let id = request.id.clone().expect("listen is a request");
+                            subscriptions
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner())
+                                .push(StdioSubscription {
+                                    id: id.clone(),
+                                    resources: resources.clone(),
+                                });
+                            let _ = responses_tx.send(subscription_acknowledged(&id, &resources));
+                        }
+                        Err((code, message)) => {
+                            let id = request.id.clone().unwrap_or(Value::Null);
+                            let _ = responses_tx.send(jsonrpc_error_response(id, code, message));
+                        }
+                    }
+                    continue;
+                }
+
+                if request.method == "notifications/cancelled" {
+                    if let Some(cancelled_id) = request.params.get("requestId") {
+                        subscriptions
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .retain(|subscription| subscription.id != *cancelled_id);
+                    }
+                    continue;
                 }
 
                 // Control messages stay on the reader path. Notifications have no
@@ -6052,8 +6262,12 @@ Cross-repo: {} edge(s) span repositories{}",
                 if request.id.is_none() {
                     continue;
                 }
-                if matches!(request.method.as_str(), "initialize" | "ping") {
-                    if let Some(response) = dispatch_shared_request(&server, &request) {
+                if matches!(
+                    request.method.as_str(),
+                    "initialize" | "ping" | "server/discover"
+                ) {
+                    let (_, response) = dispatch_shared_request(&server, &request);
+                    if let Some(response) = response {
                         let _ = responses_tx.send(response);
                     }
                     continue;
@@ -6092,17 +6306,129 @@ Cross-repo: {} edge(s) span repositories{}",
 
 /// Dispatch a request against a shared server snapshot, using the same
 /// reload/freshen/read-lock policy as Streamable HTTP.
-fn dispatch_shared_request(server: &RwLock<Server>, request: &ValidatedRequest) -> Option<Value> {
+fn dispatch_shared_request(
+    server: &RwLock<Server>,
+    request: &ValidatedRequest,
+) -> (bool, Option<Value>) {
     if request_needs_reload(&request.method) {
         return http::with_fresh_server(server, |server| {
             server.dispatch_validated_request(request)
-        })
-        .1;
+        });
     }
-    server
-        .read()
+    (
+        false,
+        server
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .dispatch_validated_request(request),
+    )
+}
+
+#[derive(Clone)]
+struct StdioSubscription {
+    id: Value,
+    resources: Vec<String>,
+}
+
+fn send_stdio_resource_updates(
+    responses: &std::sync::mpsc::Sender<Value>,
+    subscriptions: &Mutex<Vec<StdioSubscription>>,
+) {
+    let subscriptions = subscriptions
+        .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .dispatch_validated_request(request)
+        .clone();
+    for subscription in subscriptions {
+        for uri in &subscription.resources {
+            let _ = responses.send(resource_updated_notification(&subscription.id, uri));
+        }
+    }
+}
+
+/// Validate the subset of the subscription filter Synaptic can honor. Tool,
+/// prompt, and resource-list registries are static, so their list-change flags
+/// are intentionally omitted from the acknowledgment; individual resource
+/// updates are supported.
+pub(crate) fn validate_subscription_filter(
+    server: &Server,
+    params: &Value,
+) -> Result<Vec<String>, (i64, String)> {
+    let Some(notifications) = params.get("notifications").and_then(Value::as_object) else {
+        return Err((
+            -32602,
+            "subscriptions/listen requires object 'notifications'".to_string(),
+        ));
+    };
+    for field in [
+        "toolsListChanged",
+        "promptsListChanged",
+        "resourcesListChanged",
+    ] {
+        if notifications
+            .get(field)
+            .is_some_and(|value| !value.is_boolean())
+        {
+            return Err((
+                -32602,
+                format!("subscriptions/listen notifications.{field} must be boolean"),
+            ));
+        }
+    }
+
+    let mut resources = Vec::new();
+    if let Some(values) = notifications.get("resourceSubscriptions") {
+        let Some(values) = values.as_array() else {
+            return Err((
+                -32602,
+                "subscriptions/listen notifications.resourceSubscriptions must be an array"
+                    .to_string(),
+            ));
+        };
+        for value in values {
+            let Some(uri) = value.as_str() else {
+                return Err((
+                    -32602,
+                    "subscriptions/listen resource subscription URIs must be strings".to_string(),
+                ));
+            };
+            server.validate_subscription_uri(&json!({ "uri": uri }))?;
+            if !resources.iter().any(|existing| existing == uri) {
+                resources.push(uri.to_string());
+            }
+        }
+    }
+    Ok(resources)
+}
+
+pub(crate) fn subscription_acknowledged(subscription_id: &Value, resources: &[String]) -> Value {
+    let notifications = if resources.is_empty() {
+        json!({})
+    } else {
+        json!({ "resourceSubscriptions": resources })
+    };
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/subscriptions/acknowledged",
+        "params": {
+            "_meta": {
+                "io.modelcontextprotocol/subscriptionId": subscription_id
+            },
+            "notifications": notifications
+        }
+    })
+}
+
+pub(crate) fn resource_updated_notification(subscription_id: &Value, uri: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/resources/updated",
+        "params": {
+            "_meta": {
+                "io.modelcontextprotocol/subscriptionId": subscription_id
+            },
+            "uri": uri
+        }
+    })
 }
 
 /// Data requests that should pick up a rebuilt graph.json before answering.
@@ -6909,6 +7235,68 @@ fn resource_capabilities(subscriptions: bool) -> Value {
     }
 }
 
+fn server_capabilities(modern: bool, resource_subscriptions: bool) -> Value {
+    if modern {
+        json!({
+            "tools": {},
+            // `resources.subscribe` was removed in 2026-07-28. Modern change
+            // delivery is the core `subscriptions/listen` request instead.
+            "resources": {},
+            "prompts": {},
+            "completions": {}
+        })
+    } else {
+        json!({
+            "tools": {},
+            "resources": resource_capabilities(resource_subscriptions),
+            "prompts": {},
+            "completions": {},
+            "logging": {}
+        })
+    }
+}
+
+/// Add the result discriminator, server identity, and revision-required caching
+/// hints without changing legacy response shapes.
+fn decorate_modern_result(mut value: Value, method: &str) -> Value {
+    let Some(result) = value.as_object_mut() else {
+        debug_assert!(false, "MCP result for {method} must be an object");
+        return value;
+    };
+    result.insert(
+        "resultType".to_string(),
+        Value::String("complete".to_string()),
+    );
+
+    let meta = result
+        .entry("_meta".to_string())
+        .or_insert_with(|| json!({}));
+    if let Some(meta) = meta.as_object_mut() {
+        meta.insert(
+            "io.modelcontextprotocol/serverInfo".to_string(),
+            json!({
+                "name": "synaptic",
+                "version": env!("CARGO_PKG_VERSION"),
+                "description": "Read-only code knowledge graph: query, impact, and structural search."
+            }),
+        );
+    }
+
+    let cache = match method {
+        "server/discover" => Some((3_600_000_u64, "public")),
+        "tools/list" | "prompts/list" | "resources/list" | "resources/templates/list" => {
+            Some((300_000_u64, "public"))
+        }
+        "resources/read" => Some((5_000_u64, "private")),
+        _ => None,
+    };
+    if let Some((ttl_ms, scope)) = cache {
+        result.insert("ttlMs".to_string(), json!(ttl_ms));
+        result.insert("cacheScope".to_string(), json!(scope));
+    }
+    value
+}
+
 #[derive(Debug)]
 enum ResourceAddress {
     Static,
@@ -7161,6 +7549,22 @@ mod tests {
             "capabilities": {},
             "clientInfo": { "name": "synaptic-test", "version": "1.0" }
         })
+    }
+
+    fn modern_params(mut params: Value) -> Value {
+        let params = params.as_object_mut().expect("modern params object");
+        params.insert(
+            "_meta".to_string(),
+            json!({
+                "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL,
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "synaptic-modern-test",
+                    "version": "1.0"
+                },
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }),
+        );
+        Value::Object(params.clone())
     }
 
     fn server() -> Server {
@@ -8592,6 +8996,140 @@ mod tests {
             instr.contains("--allow-exec") && instr.contains("speculate"),
             "instructions should explain how to enable speculate: {instr}"
         );
+    }
+
+    #[test]
+    fn modern_discovery_and_requests_are_stateless_and_self_describing() {
+        let mut s = server();
+        let mut lifecycle = ConnectionLifecycle::New;
+        let discover = s
+            .handle_connection_request(
+                &json!({
+                    "jsonrpc":"2.0",
+                    "id":"discover-1",
+                    "method":"server/discover",
+                    "params":modern_params(json!({}))
+                }),
+                &mut lifecycle,
+            )
+            .unwrap();
+        assert_eq!(discover["result"]["resultType"], "complete", "{discover}");
+        assert_eq!(
+            discover["result"]["supportedVersions"][0], MODERN_PROTOCOL,
+            "{discover}"
+        );
+        assert_eq!(discover["result"]["cacheScope"], "public", "{discover}");
+        assert!(discover["result"]["ttlMs"].as_u64().unwrap() > 0);
+        assert!(
+            discover["result"]["capabilities"]["resources"]
+                .get("subscribe")
+                .is_none(),
+            "modern discovery must not expose the removed resources.subscribe capability: {discover}"
+        );
+        assert_eq!(
+            discover["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "synaptic"
+        );
+
+        // No initialize/initialized transition occurred, yet an ordinary modern
+        // request succeeds because all connection context is carried in `_meta`.
+        assert!(matches!(lifecycle, ConnectionLifecycle::New));
+        let tools = s
+            .handle_connection_request(
+                &json!({
+                    "jsonrpc":"2.0",
+                    "id":2,
+                    "method":"tools/list",
+                    "params":modern_params(json!({}))
+                }),
+                &mut lifecycle,
+            )
+            .unwrap();
+        assert_eq!(tools["result"]["resultType"], "complete", "{tools}");
+        assert_eq!(tools["result"]["cacheScope"], "public", "{tools}");
+        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 30);
+        assert!(matches!(lifecycle, ConnectionLifecycle::New));
+
+        // The final schema marks clientInfo as SHOULD/optional. Clients that
+        // intentionally omit it still carry version and capabilities.
+        let mut anonymous_params = modern_params(json!({}));
+        anonymous_params["_meta"]
+            .as_object_mut()
+            .unwrap()
+            .remove("io.modelcontextprotocol/clientInfo");
+        let anonymous = s
+            .handle_connection_request(
+                &json!({
+                    "jsonrpc":"2.0",
+                    "id":3,
+                    "method":"resources/list",
+                    "params":anonymous_params
+                }),
+                &mut lifecycle,
+            )
+            .unwrap();
+        assert_eq!(anonymous["result"]["resultType"], "complete", "{anonymous}");
+    }
+
+    #[test]
+    fn modern_protocol_rejects_wrong_version_and_uses_new_resource_error_code() {
+        let mut s = server();
+        let mut lifecycle = ConnectionLifecycle::New;
+        let mut params = modern_params(json!({}));
+        params["_meta"]["io.modelcontextprotocol/protocolVersion"] = json!("2099-01-01");
+        let unsupported = s
+            .handle_connection_request(
+                &json!({
+                    "jsonrpc":"2.0",
+                    "id":1,
+                    "method":"server/discover",
+                    "params":params
+                }),
+                &mut lifecycle,
+            )
+            .unwrap();
+        assert_eq!(unsupported["error"]["code"], -32022, "{unsupported}");
+        assert_eq!(
+            unsupported["error"]["data"]["supported"][0],
+            MODERN_PROTOCOL
+        );
+
+        let missing = s
+            .handle_connection_request(
+                &json!({
+                    "jsonrpc":"2.0",
+                    "id":2,
+                    "method":"resources/read",
+                    "params":modern_params(json!({"uri":"synaptic://node/not-here"}))
+                }),
+                &mut lifecycle,
+            )
+            .unwrap();
+        assert_eq!(missing["error"]["code"], -32602, "{missing}");
+    }
+
+    #[test]
+    fn modern_subscription_filter_acknowledges_only_supported_resource_updates() {
+        let s = server();
+        let resources = validate_subscription_filter(
+            &s,
+            &modern_params(json!({
+                "notifications": {
+                    "toolsListChanged": true,
+                    "resourceSubscriptions": ["synaptic://stats", "synaptic://stats"]
+                }
+            })),
+        )
+        .unwrap();
+        assert_eq!(resources, vec!["synaptic://stats"]);
+        let ack = subscription_acknowledged(&json!("listen-1"), &resources);
+        assert_eq!(
+            ack["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"],
+            "listen-1"
+        );
+        assert!(ack["params"]["notifications"]
+            .get("toolsListChanged")
+            .is_none());
     }
 
     #[test]

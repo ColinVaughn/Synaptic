@@ -10,6 +10,17 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-29
+
+### Added
+
+- **MCP 2026-07-28 dual-era transport support.** Modern clients can use
+  stateless per-request metadata, `server/discover`, required HTTP routing
+  headers, typed/cacheable results, final resource error semantics, and
+  filterable `subscriptions/listen` streams over HTTP or stdio. The existing
+  initialize/session flow remains available for MCP 2025-11-25 and earlier
+  clients.
+
 ## [0.7.3] - 2026-07-28
 
 ### Added
@@ -1681,7 +1692,8 @@ parameters), and `graph.json` gains only additive edge keys.
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.0...v0.7.1

@@ -48,7 +48,7 @@ is the fallback. A "--" in a column means that side has no direct equivalent.
 | Graph-aware PR review (needs `gh`) | -- | `list_prs` / `get_pr_impact` / `triage_prs` |
 
 Reference MCP tools with your client's prefix (Claude Code:
-`mcp__synaptic__query_graph`); the server's `initialize` reply orients you and each
+`mcp__synaptic__query_graph`); the server's discovery response orients you and each
 tool documents its own parameters. If the server is not connected, start it with
 `synaptic serve`.
 
@@ -59,7 +59,7 @@ Pin a name shared by several files with a `name@file` qualifier (e.g.
 degree. Impact crosses language boundaries (PyO3/FFI, HTTP/gRPC, subprocess, event
 buses, Electron IPC are all graph edges), and a 0-dependent symbol reached only by
 reflection or dynamic dispatch is flagged, not assumed safe -- see the server's
-`initialize` instructions and the `affected` / `dynamic_hazards` tool docs. Before
+discovery instructions and the `affected` / `dynamic_hazards` tool docs. Before
 editing a symbol other code depends on, run `predict_impact` (or `synaptic
 predict`) and the checks it lists.
 

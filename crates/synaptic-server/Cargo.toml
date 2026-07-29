@@ -8,6 +8,7 @@ description = "MCP server for Synaptic: read-only graph query/analysis + PR tool
 
 [dependencies]
 serde_json = { workspace = true }
+base64 = { workspace = true }
 synaptic-core = { workspace = true }
 synaptic-graph = { workspace = true }
 synaptic-query = { workspace = true }
