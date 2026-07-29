@@ -830,7 +830,12 @@ synaptic serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root
 | `--expected-graph-sha256` | off | Require the exact graph bytes loaded and parsed at startup to match this 64-character SHA-256 digest. Requires `--immutable-graph` and bypasses shard-store auto-selection. |
 | `--ready-file` | off | After the HTTP listener is bound, atomically publish its actual address and MCP URL as a private JSON file. Requires `--http`; the parent directory must already exist and be operator-protected. |
 
-Defaults to stdio transport. The MCP server reports protocol `2025-11-25` and exposes 30 read-only tools (31 with `--allow-exec`, which adds the command-running `speculate` tool), prompts, completions, resource templates/subscriptions, and structured tool output. When serving HTTP on a wildcard address with no API key, it prints a warning.
+Defaults to stdio transport. The MCP server supports stateless MCP `2026-07-28`
+and retains initialize/session compatibility for `2025-11-25`, `2025-06-18`,
+`2025-03-26`, and `2024-11-05`. It exposes 30 read-only tools (31 with
+`--allow-exec`, which adds the command-running `speculate` tool), prompts,
+completions, resource templates/subscriptions, and structured tool output. When
+serving HTTP on a wildcard address with no API key, it prints a warning.
 
 Example:
 

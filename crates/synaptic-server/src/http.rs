@@ -2,21 +2,20 @@
 //!
 //! Streamable-HTTP over `/mcp`:
 //!   - `POST` — one JSON-RPC request → its JSON response (a notification → 202).
-//!     Stateful by default: an `initialize` mints an `Mcp-Session-Id` (returned
-//!     as a response header); later requests carry it (unknown ⇒ 404 ⇒ the
-//!     client re-initializes). A missing id on a non-initialize request is
-//!     tolerated, so simple request/response clients keep working.
-//!   - `GET` (`Accept: text/event-stream`) — opens a keep-alive SSE stream (the
-//!     server-initiated channel; we have no pushes yet, so it's a heartbeat).
-//!   - `DELETE` — terminates a session.
+//!     MCP 2026-07-28 requests are stateless and carry connection metadata on
+//!     every request. Legacy `initialize` requests still mint an
+//!     `Mcp-Session-Id` for backwards compatibility.
+//!   - Modern `subscriptions/listen` POST requests return a long-lived SSE
+//!     response after an acknowledgement event; resource changes are filtered
+//!     and pushed on that stream.
+//!   - Legacy `GET` (`Accept: text/event-stream`) opens the session's SSE stream.
+//!   - Legacy `DELETE` terminates a session.
 //!
-//! On every `/mcp` request after initialization, a present-but-unsupported
-//! `MCP-Protocol-Version` header is rejected with 400 (per the 2025-11-25
-//! transport); an absent header is tolerated (assume `2025-03-26`), and the
-//! `initialize` request is exempt (its version comes from negotiation).
+//! Modern HTTP requests require `MCP-Protocol-Version`, `Mcp-Method`, and, for
+//! named operations, `Mcp-Name`; the headers must agree with the JSON body.
+//! Legacy requests retain the historical header and session behavior.
 //!
-//! An idle reaper drops sessions after [`DEFAULT_SESSION_IDLE`]. This realizes
-//! the MCP Streamable-HTTP transport (see [`crate::session`]).
+//! An idle reaper drops legacy sessions after [`DEFAULT_SESSION_IDLE`].
 //!
 //! A read-only **REST** surface (`/api/*`, C3d) wraps the same engine calls the
 //! MCP tools use, for non-MCP clients / a future web explorer.
@@ -25,7 +24,7 @@
 //! or `Authorization: Bearer`, scheme case-insensitive; blank key disables auth)
 //! and a **DNS-rebinding Host allowlist** for specific/loopback binds.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::convert::Infallible;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -37,7 +36,7 @@ use std::time::{Duration, Instant};
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
@@ -45,13 +44,16 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use base64::Engine as _;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 use crate::session::{SessionStore, DEFAULT_SESSION_IDLE};
 use crate::{
-    jsonrpc_error_response, jsonrpc_parse_error, request_needs_reload, validate_initialize_params,
-    validate_jsonrpc_request, NegotiatedClient, Server,
+    is_modern_request, jsonrpc_error_response, jsonrpc_parse_error, request_needs_reload,
+    resource_updated_notification, subscription_acknowledged, validate_initialize_params,
+    validate_jsonrpc_request, validate_modern_request, validate_subscription_filter,
+    NegotiatedClient, Server, MODERN_PROTOCOL,
 };
 
 /// Acquire the engine read lock, recovering from poisoning. A poisoned lock left
@@ -104,6 +106,10 @@ struct HttpState {
     allowed_hosts: Option<HashSet<String>>,
     /// Live MCP sessions (id → last activity).
     sessions: Arc<SessionStore>,
+    /// Stateless `subscriptions/listen` streams receive a signal whenever graph
+    /// content changes, then emit updates for the resource URIs in their own
+    /// request-local filters.
+    modern_updates: broadcast::Sender<()>,
     /// When true, skip all session bookkeeping (`--stateless`).
     stateless: bool,
 }
@@ -136,6 +142,7 @@ pub async fn serve_http_with_ready_file(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound_addr = listener.local_addr()?;
     let api_key = api_key.filter(|k| !k.trim().is_empty());
+    let (modern_updates, _) = broadcast::channel(64);
     let state = HttpState {
         server: Arc::new(RwLock::new(server.with_resource_subscriptions(true))),
         api_key,
@@ -143,6 +150,7 @@ pub async fn serve_http_with_ready_file(
         // client will actually send rather than the requested placeholder.
         allowed_hosts: host_allowlist(&bound_addr),
         sessions: Arc::new(SessionStore::new()),
+        modern_updates,
         stateless: false,
     };
     spawn_reaper(state.sessions.clone());
@@ -349,6 +357,153 @@ fn protocol_version_rejection(headers: &HeaderMap) -> Option<Response> {
     }
 }
 
+fn body_protocol_version(req: &crate::ValidatedRequest) -> Option<&str> {
+    req.params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("io.modelcontextprotocol/protocolVersion"))
+        .and_then(Value::as_str)
+}
+
+/// HTTP era selection is driven primarily by the request body. A modern
+/// protocol header also selects the modern path so a missing body `_meta`
+/// produces the required header-mismatch diagnostic rather than accidentally
+/// entering the legacy session lifecycle.
+fn is_modern_http_request(headers: &HeaderMap, req: &crate::ValidatedRequest) -> bool {
+    is_modern_request(req)
+        || headers
+            .get("mcp-protocol-version")
+            .and_then(|value| value.to_str().ok())
+            == Some(MODERN_PROTOCOL)
+}
+
+fn header_mismatch(req: &crate::ValidatedRequest, message: impl Into<String>) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(jsonrpc_error_response(
+            req.id.clone().unwrap_or(Value::Null),
+            -32020,
+            message,
+        )),
+    )
+        .into_response()
+}
+
+fn decode_mcp_header(headers: &HeaderMap, name: &str) -> Result<String, String> {
+    let value = headers
+        .get(name)
+        .ok_or_else(|| format!("Header mismatch: missing {name} header"))?
+        .to_str()
+        .map_err(|_| format!("Header mismatch: malformed {name} header"))?;
+    if let Some(encoded) = value
+        .strip_prefix("=?base64?")
+        .and_then(|value| value.strip_suffix("?="))
+    {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|_| format!("Header mismatch: invalid Base64 in {name} header"))?;
+        return String::from_utf8(bytes)
+            .map_err(|_| format!("Header mismatch: {name} header is not UTF-8"));
+    }
+    if value.starts_with(char::is_whitespace)
+        || value.ends_with(char::is_whitespace)
+        || !value
+            .bytes()
+            .all(|byte| byte == b'\t' || (0x20..=0x7e).contains(&byte))
+    {
+        return Err(format!(
+            "Header mismatch: {name} must use MCP Base64 sentinel encoding"
+        ));
+    }
+    Ok(value.to_string())
+}
+
+/// Validate the 2026-07-28 HTTP routing headers against the body, then validate
+/// the body metadata itself. Header/body agreement is checked first so an
+/// omitted or inconsistent metadata version is reported as `HeaderMismatch`.
+fn validate_modern_http_request(
+    headers: &HeaderMap,
+    req: &crate::ValidatedRequest,
+) -> Result<(), Box<Response>> {
+    // Structural metadata errors are JSON-RPC Invalid Params. Defer only an
+    // unsupported-version error until after header/body agreement is checked,
+    // so a version mismatch remains HeaderMismatch.
+    let modern_validation = validate_modern_request(req);
+    if let Err(error) = &modern_validation {
+        if error["error"]["code"] != -32022 {
+            return Err(Box::new(
+                (StatusCode::BAD_REQUEST, Json(error.clone())).into_response(),
+            ));
+        }
+    }
+
+    let header_version = headers
+        .get("mcp-protocol-version")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            Box::new(header_mismatch(
+                req,
+                "Header mismatch: missing MCP-Protocol-Version",
+            ))
+        })?;
+    let body_version = body_protocol_version(req).ok_or_else(|| {
+        Box::new(header_mismatch(
+            req,
+            "Header mismatch: request body is missing protocolVersion metadata",
+        ))
+    })?;
+    if header_version != body_version {
+        return Err(Box::new(header_mismatch(
+            req,
+            format!(
+                "Header mismatch: MCP-Protocol-Version '{header_version}' does not match body '{body_version}'"
+            ),
+        )));
+    }
+
+    let method = decode_mcp_header(headers, "mcp-method")
+        .map_err(|message| Box::new(header_mismatch(req, message)))?;
+    if method != req.method {
+        return Err(Box::new(header_mismatch(
+            req,
+            format!(
+                "Header mismatch: Mcp-Method '{method}' does not match body '{}'",
+                req.method
+            ),
+        )));
+    }
+
+    let body_name = match req.method.as_str() {
+        "tools/call" | "prompts/get" => req.params.get("name").and_then(Value::as_str),
+        "resources/read" => req.params.get("uri").and_then(Value::as_str),
+        _ => None,
+    };
+    if matches!(
+        req.method.as_str(),
+        "tools/call" | "prompts/get" | "resources/read"
+    ) {
+        let header_name = decode_mcp_header(headers, "mcp-name")
+            .map_err(|message| Box::new(header_mismatch(req, message)))?;
+        let Some(body_name) = body_name else {
+            return Err(Box::new(header_mismatch(
+                req,
+                "Header mismatch: request body is missing the Mcp-Name source field",
+            )));
+        };
+        if header_name != body_name {
+            return Err(Box::new(header_mismatch(
+                req,
+                format!(
+                    "Header mismatch: Mcp-Name '{header_name}' does not match body '{body_name}'"
+                ),
+            )));
+        }
+    }
+
+    modern_validation
+        .map_err(|error| Box::new((StatusCode::BAD_REQUEST, Json(error)).into_response()))
+}
+
 fn session_header(headers: &HeaderMap) -> Option<String> {
     headers
         .get("mcp-session-id")
@@ -370,11 +525,15 @@ async fn handle_post(State(st): State<HttpState>, headers: HeaderMap, body: Byte
         Err(error) => return (StatusCode::OK, Json(error)).into_response(),
     };
     let method = req.method.as_str();
+    let modern = is_modern_http_request(&headers, &req);
 
-    // MCP-Protocol-Version header (2025-11-25): a present-but-unsupported value
-    // MUST get 400 on any post-initialization request. `initialize` is exempt
-    // (its version comes from negotiation); an absent header is tolerated.
-    if method != "initialize" {
+    if modern {
+        if let Err(response) = validate_modern_http_request(&headers, &req) {
+            return *response;
+        }
+    } else if method != "initialize" {
+        // Legacy Streamable HTTP: a present-but-unsupported version is rejected,
+        // while an absent header is tolerated for pre-2025-06-18 clients.
         if let Some(resp) = protocol_version_rejection(&headers) {
             return resp;
         }
@@ -382,7 +541,7 @@ async fn handle_post(State(st): State<HttpState>, headers: HeaderMap, body: Byte
 
     let mut initialize_negotiated: Option<NegotiatedClient> = None;
     let mut active_session: Option<String> = None;
-    if !st.stateless {
+    if !modern && !st.stateless {
         let supplied_session = session_header(&headers);
         if method == "initialize" {
             if let Some(id) = supplied_session {
@@ -458,7 +617,7 @@ async fn handle_post(State(st): State<HttpState>, headers: HeaderMap, body: Byte
         }
     }
 
-    if matches!(method, "resources/subscribe" | "resources/unsubscribe") {
+    if !modern && matches!(method, "resources/subscribe" | "resources/unsubscribe") {
         let Some(session_id) = active_session.as_deref() else {
             let error = jsonrpc_error_response(
                 req.id.clone().unwrap_or(Value::Null),
@@ -480,6 +639,18 @@ async fn handle_post(State(st): State<HttpState>, headers: HeaderMap, body: Byte
         } else {
             st.sessions.unsubscribe_resource(session_id, uri);
         }
+    }
+
+    if modern && method == "subscriptions/listen" {
+        let resources = match validate_subscription_filter(&read_server(&st.server), &req.params) {
+            Ok(resources) => resources,
+            Err((code, message)) => {
+                let error =
+                    jsonrpc_error_response(req.id.clone().unwrap_or(Value::Null), code, message);
+                return (StatusCode::OK, Json(error)).into_response();
+            }
+        };
+        return modern_subscription_response(&st, req.id.clone().unwrap_or(Value::Null), resources);
     }
 
     // Dispatch off the async executor (blocking PR tools must not stall the
@@ -504,13 +675,15 @@ async fn handle_post(State(st): State<HttpState>, headers: HeaderMap, body: Byte
     };
     // The graph (and thus every resource's content) changed: push to subscribers.
     if reloaded {
-        st.sessions.notify_resource_changed("synaptic://stats");
+        notify_resource_reload(&st);
     }
     match resp {
         Some(v) => {
             if let Some(negotiated) = initialize_negotiated {
                 let id = st.sessions.create_initializing(negotiated);
                 (StatusCode::OK, [("mcp-session-id", id)], Json(v)).into_response()
+            } else if modern && v["error"]["code"] == -32601 {
+                (StatusCode::NOT_FOUND, Json(v)).into_response()
             } else {
                 (StatusCode::OK, Json(v)).into_response()
             }
@@ -522,9 +695,74 @@ async fn handle_post(State(st): State<HttpState>, headers: HeaderMap, body: Byte
 /// `GET /mcp` — open the server→client SSE stream: keep-alive heartbeat plus
 /// `notifications/resources/updated` pushes when the graph reloads (a tracked
 /// session subscribes to its broadcast channel).
+fn notify_resource_reload(st: &HttpState) {
+    // Legacy clients retain the representative stats subscription behavior.
+    st.sessions.notify_resource_changed("synaptic://stats");
+    // Modern listeners carry their own URI filters and expand this one
+    // stateless signal into the exact notifications they requested.
+    let _ = st.modern_updates.send(());
+}
+
+fn modern_subscription_response(
+    st: &HttpState,
+    subscription_id: Value,
+    resources: Vec<String>,
+) -> Response {
+    let receiver = st.modern_updates.subscribe();
+    let first =
+        Event::default().data(subscription_acknowledged(&subscription_id, &resources).to_string());
+    let resources = Arc::new(resources);
+    let stream = futures_util::stream::unfold(
+        (Some(first), receiver, VecDeque::<String>::new()),
+        move |(mut first, mut receiver, mut pending)| {
+            let resources = resources.clone();
+            let subscription_id = subscription_id.clone();
+            async move {
+                loop {
+                    if let Some(event) = first.take() {
+                        return Some((Ok::<_, Infallible>(event), (first, receiver, pending)));
+                    }
+                    if let Some(uri) = pending.pop_front() {
+                        let event = Event::default().data(
+                            resource_updated_notification(&subscription_id, &uri).to_string(),
+                        );
+                        return Some((Ok::<_, Infallible>(event), (first, receiver, pending)));
+                    }
+                    match receiver.recv().await {
+                        Ok(()) => pending.extend(resources.iter().cloned()),
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            return Some((
+                                Ok::<_, Infallible>(
+                                    Event::default().comment("resource-updates-lagged"),
+                                ),
+                                (first, receiver, pending),
+                            ));
+                        }
+                        Err(broadcast::error::RecvError::Closed) => return None,
+                    }
+                }
+            }
+        },
+    );
+    let mut response = Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response();
+    response
+        .headers_mut()
+        .insert("x-accel-buffering", HeaderValue::from_static("no"));
+    response
+}
+
 async fn handle_sse(State(st): State<HttpState>, headers: HeaderMap) -> Response {
     if let Some(resp) = guard(&headers, &st) {
         return resp;
+    }
+    if headers
+        .get("mcp-protocol-version")
+        .and_then(|value| value.to_str().ok())
+        == Some(MODERN_PROTOCOL)
+    {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
     if let Some(resp) = protocol_version_rejection(&headers) {
         return resp;
@@ -611,6 +849,13 @@ async fn handle_delete(State(st): State<HttpState>, headers: HeaderMap) -> Respo
     if let Some(resp) = guard(&headers, &st) {
         return resp;
     }
+    if headers
+        .get("mcp-protocol-version")
+        .and_then(|value| value.to_str().ok())
+        == Some(MODERN_PROTOCOL)
+    {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
     if let Some(resp) = protocol_version_rejection(&headers) {
         return resp;
     }
@@ -641,7 +886,7 @@ async fn rest_stats(State(st): State<HttpState>, headers: HeaderMap) -> Response
         return internal_error();
     };
     if reloaded {
-        st.sessions.notify_resource_changed("synaptic://stats");
+        notify_resource_reload(&st);
     }
     text_json(text)
 }
@@ -667,7 +912,7 @@ async fn rest_god_nodes(
         return internal_error();
     };
     if reloaded {
-        st.sessions.notify_resource_changed("synaptic://stats");
+        notify_resource_reload(&st);
     }
     text_json(text)
 }
@@ -694,7 +939,7 @@ async fn rest_repos(
         return internal_error();
     };
     if reloaded {
-        st.sessions.notify_resource_changed("synaptic://stats");
+        notify_resource_reload(&st);
     }
     text_json(text)
 }
@@ -716,7 +961,7 @@ async fn rest_node(
         return internal_error();
     };
     if reloaded {
-        st.sessions.notify_resource_changed("synaptic://stats");
+        notify_resource_reload(&st);
     }
     text_json(text)
 }
@@ -754,7 +999,7 @@ async fn rest_query(
         return internal_error();
     };
     if reloaded {
-        st.sessions.notify_resource_changed("synaptic://stats");
+        notify_resource_reload(&st);
     }
     text_json(text)
 }
@@ -817,6 +1062,7 @@ mod tests {
             api_key: api_key.map(str::to_string),
             allowed_hosts: None, // wildcard: no host check in tests
             sessions: Arc::new(SessionStore::new()),
+            modern_updates: broadcast::channel(64).0,
             stateless: false,
         }
     }
@@ -827,6 +1073,7 @@ mod tests {
             api_key: None,
             allowed_hosts: None, // wildcard: no host check in tests
             sessions: Arc::new(SessionStore::new()),
+            modern_updates: broadcast::channel(64).0,
             stateless: false,
         }
     }
@@ -867,6 +1114,29 @@ mod tests {
     fn init_body() -> Body {
         Body::from(
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"http-test","version":"1.0"}}}"#,
+        )
+    }
+
+    fn modern_body(id: Value, method: &str, mut params: Value) -> Body {
+        params.as_object_mut().unwrap().insert(
+            "_meta".to_string(),
+            json!({
+                "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL,
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "http-modern-test",
+                    "version": "1.0"
+                },
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }),
+        );
+        Body::from(
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": params
+            })
+            .to_string(),
         )
     }
 
@@ -1802,6 +2072,139 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn modern_http_discovery_and_list_requests_need_no_session() {
+        let app = router(test_state(None));
+        let discovery = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .header("accept", "application/json, text/event-stream")
+                    .header("mcp-protocol-version", MODERN_PROTOCOL)
+                    .header("mcp-method", "server/discover")
+                    .body(modern_body(
+                        json!("discover-http"),
+                        "server/discover",
+                        json!({}),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(discovery.status(), StatusCode::OK);
+        assert!(discovery.headers().get("mcp-session-id").is_none());
+        let body = to_bytes(discovery.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["result"]["supportedVersions"][0], MODERN_PROTOCOL);
+        assert_eq!(value["result"]["resultType"], "complete");
+
+        let tools = app
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .header("accept", "application/json, text/event-stream")
+                    .header("mcp-protocol-version", MODERN_PROTOCOL)
+                    .header("mcp-method", "tools/list")
+                    .body(modern_body(json!(2), "tools/list", json!({})))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tools.status(), StatusCode::OK);
+        let body = to_bytes(tools.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["result"]["cacheScope"], "public");
+        assert!(value["result"]["ttlMs"].as_u64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn modern_http_validates_routing_headers_and_status_codes() {
+        let app = router(test_state(None));
+        let missing_method = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .header("mcp-protocol-version", MODERN_PROTOCOL)
+                    .body(modern_body(json!(1), "tools/list", json!({})))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_method.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(missing_method.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], -32020, "{value}");
+
+        let not_found = app
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .header("mcp-protocol-version", MODERN_PROTOCOL)
+                    .header("mcp-method", "ping")
+                    .body(modern_body(json!(2), "ping", json!({})))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(not_found.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], -32601, "{value}");
+    }
+
+    #[tokio::test]
+    async fn modern_http_subscription_acknowledges_then_pushes_filtered_updates() {
+        use futures_util::StreamExt;
+
+        let state = test_state(None);
+        let updates = state.modern_updates.clone();
+        let response = router(state)
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .header("accept", "application/json, text/event-stream")
+                    .header("mcp-protocol-version", MODERN_PROTOCOL)
+                    .header("mcp-method", "subscriptions/listen")
+                    .body(modern_body(
+                        json!("listen-http"),
+                        "subscriptions/listen",
+                        json!({
+                            "notifications": {
+                                "resourceSubscriptions": ["synaptic://stats"]
+                            }
+                        }),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get("x-accel-buffering").unwrap(), "no");
+        let mut stream = response.into_body().into_data_stream();
+        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let first = String::from_utf8_lossy(&first);
+        assert!(first.contains("notifications/subscriptions/acknowledged"));
+        assert!(first.contains("listen-http"));
+
+        let _ = updates.send(());
+        let second = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let second = String::from_utf8_lossy(&second);
+        assert!(second.contains("notifications/resources/updated"));
+        assert!(second.contains("synaptic://stats"));
     }
 
     #[tokio::test]

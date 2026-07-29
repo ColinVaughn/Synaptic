@@ -1,6 +1,7 @@
-//! In-memory MCP session store for the stateful Streamable-HTTP transport.
+//! In-memory legacy MCP session store for the stateful Streamable-HTTP transport.
 //!
-//! This realizes the MCP Streamable-HTTP session model: an `initialize`
+//! MCP 2026-07-28 is stateless and does not use this store. For older clients,
+//! an `initialize`
 //! mints an opaque `Mcp-Session-Id`, later requests carry it (an unknown id ⇒
 //! 404 ⇒ re-initialize), and an idle reaper drops sessions after a timeout
 //! (`session_idle_timeout`, default 1h).

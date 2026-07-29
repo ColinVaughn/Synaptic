@@ -27,38 +27,59 @@ the agent asked for.
 
 ## Protocol version
 
-A valid `initialize` request includes string `protocolVersion`, object
-`capabilities`, and `clientInfo` with string `name` and `version`. If the client
-requests a supported version (`2025-11-25`, `2025-06-18`, `2025-03-26`, or
-`2024-11-05`) the server echoes it; otherwise it negotiates its latest,
-`2025-11-25`. Missing or malformed required fields return JSON-RPC invalid params
-(`-32602`). Server info is `{ "name": "synaptic", "version": <crate version>, "description": <one-line summary> }`.
+Synaptic is a **dual-era server**:
 
-Over HTTP, requests sent after initialization carry an `MCP-Protocol-Version`
-header. A present-but-unsupported value is rejected with `400 Bad Request`; an
-absent header is tolerated (assumed `2025-03-26`, for backwards compatibility),
-and the `initialize` request itself is exempt because its version is set by the
-negotiation above.
+- MCP `2026-07-28` uses the stateless, per-request connection model. Every
+  request includes string
+  `params._meta["io.modelcontextprotocol/protocolVersion"]` and object
+  `params._meta["io.modelcontextprotocol/clientCapabilities"]`. `clientInfo`
+  is recommended and, when present, must contain string `name` and `version`.
+- MCP `2025-11-25`, `2025-06-18`, `2025-03-26`, and `2024-11-05` retain the
+  legacy `initialize` / `notifications/initialized` negotiation and optional
+  HTTP session.
 
-The HTTP `initialize` reply advertises capabilities including subscriptions:
+Modern clients may call `server/discover`. The result advertises all supported
+versions, capabilities, server info, instructions, and cache hints. Ordinary
+modern results include `resultType: "complete"` and server identity in result
+metadata. List and resource results also include `ttlMs` and `cacheScope`.
+Requests for another modern version fail with `-32022` and return the supported
+versions in `error.data`.
 
 ```json
 {
-  "tools": {},
-  "resources": { "subscribe": true },
-  "prompts": {},
-  "completions": {},
-  "logging": {}
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "server/discover",
+  "params": {
+    "_meta": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientCapabilities": {},
+      "io.modelcontextprotocol/clientInfo": {
+        "name": "example-client",
+        "version": "1.0"
+      }
+    }
+  }
 }
 ```
 
-Stdio advertises the same capabilities except `resources.subscribe`: stdio has
-no asynchronous server-to-client update channel. Both transports require the
-client's `notifications/initialized` notification before ordinary operations.
+For HTTP, each modern request must also carry:
 
-and carries a server-level `instructions` string that orients an assistant to
-the whole toolset (the recommended flow, and what "god node", "community", and
-edge confidence mean).
+- `MCP-Protocol-Version: 2026-07-28`
+- `Mcp-Method: <JSON-RPC method>`
+- `Mcp-Name: <tool/resource/prompt name>` for `tools/call`,
+  `resources/read`, and `prompts/get`
+
+The headers must agree with the JSON body. A mismatch returns JSON-RPC
+`-32020` with HTTP 400. Modern requests never use `Mcp-Session-Id`;
+`GET /mcp` and `DELETE /mcp` are not part of the modern transport. Legacy
+headers, version negotiation, and sessions remain unchanged for older clients.
+
+Modern discovery advertises tools, resources, prompts, and completions. It
+does not advertise extensions or tasks because Synaptic currently makes no
+server-to-client requests and has no task-backed operations. Legacy discovery
+continues to advertise logging and HTTP resource subscriptions where those
+older protocols define them.
 
 ## Running the server
 
@@ -135,24 +156,28 @@ synaptic serve --http 127.0.0.1:8765 --api-key s3cret
 
 Streamable-HTTP on the `/mcp` route:
 
-- `POST /mcp` -- one JSON-RPC request, returns its JSON response. A notification
-  returns HTTP 202 with no body. An invalid JSON body returns 400.
-- `GET /mcp` (with `Accept: text/event-stream`) -- opens the server-to-client SSE
-  stream. It emits keep-alive heartbeats, and, for a subscribed session, pushes a
-  `notifications/resources/updated` event when the graph hot-reloads (see
-  [Resource subscriptions](#resource-subscriptions)). The stream is bounded (it
-  ends when the session is reaped or after a hard cap near the idle timeout).
-- `DELETE /mcp` -- terminates a session (204 if it existed, 404 if unknown, 400
-  if no session id header).
+- `POST /mcp` -- one JSON-RPC request. Modern requests are stateless; ordinary
+  responses are JSON. A modern `subscriptions/listen` request returns an SSE
+  stream whose first event acknowledges the subscription. A notification
+  returns HTTP 202 with no body. Invalid JSON returns 400.
+- `GET /mcp` -- legacy-only server-to-client SSE for a negotiated session. It
+  emits heartbeats and resource updates. A modern-version GET returns 405.
+- `DELETE /mcp` -- legacy-only session termination (204 if it existed, 404 if
+  unknown, 400 if no session id header). A modern-version DELETE returns 405.
+
+For a modern POST, an unknown JSON-RPC method maps to HTTP 404, while malformed
+parameters and routing headers map to HTTP 400. Successful non-streaming calls
+remain HTTP 200.
 
 A startup line is printed to stderr: `[synaptic] MCP server on
 http://<addr>/mcp`.
 
-#### Sessions
+#### Legacy sessions
 
-Stateful by default. An `initialize` POST mints an opaque 128-bit session id,
-returned in the `Mcp-Session-Id` response header. Later requests should carry it
-in the `Mcp-Session-Id` request header:
+MCP `2026-07-28` is stateless and does not create or consult a session. For
+older protocols, an `initialize` POST mints an opaque 128-bit session id,
+returned in the `Mcp-Session-Id` response header. Later legacy requests should
+carry it in the `Mcp-Session-Id` request header:
 
 - Unknown or expired id on a non-initialize request: 404 (the client should
   re-initialize).
@@ -1042,13 +1067,18 @@ addressable as a resource by URI:
 
 ### Resource subscriptions
 
-The server advertises `resources.subscribe`. `resources/subscribe` and
-`resources/unsubscribe` are accepted and acknowledged. Over the HTTP transport, a
-session that has opened the `GET /mcp` SSE stream receives a
-`notifications/resources/updated` event (with `params.uri` =
-`synaptic://stats`) when the graph hot-reloads on disk, signaling that resource
-contents have changed and should be re-read. (The stdio transport is
-request/response only and does not push.)
+For MCP `2026-07-28`, `subscriptions/listen` replaces both
+`resources/subscribe` / `resources/unsubscribe` and the transport-level GET
+stream. A listen request supplies resource URI filters and receives an
+acknowledgement before any updates. HTTP keeps the POST response open as SSE;
+stdio keeps the request active and writes subsequent JSON-RPC notifications.
+When the graph hot-reloads, matching listeners receive
+`notifications/resources/updated` with the subscription id in metadata. A
+cancelled request stops the listener.
+
+Legacy HTTP clients keep the older flow: call `resources/subscribe`, then open
+the session's `GET /mcp` SSE stream. `resources/unsubscribe` removes the URI.
+Legacy stdio does not advertise resource subscription support.
 
 ## MCP prompts
 
@@ -1079,9 +1109,11 @@ hasMore } }` capped at 100 values:
 
 ## Logging
 
-The server advertises the `logging` capability and accepts `logging/setLevel`
-(acknowledged with an empty result). It does not currently emit
-`notifications/message` log records.
+MCP `2026-07-28` removed `logging/setLevel`; Synaptic therefore does not
+advertise modern logging and returns method-not-found if a modern client calls
+it. Modern clients can send the standard per-request log-level metadata, though
+the server currently emits no log records. Legacy discovery still advertises
+`logging`, accepts `logging/setLevel`, and acknowledges it with an empty result.
 
 ## REST API
 
@@ -1106,7 +1138,17 @@ Example:
 curl -H "X-API-Key: s3cret" "http://127.0.0.1:8765/api/query?q=authentication&token_budget=800"
 ```
 
-## Example: a raw JSON-RPC session over stdio
+## Example: stateless MCP 2026-07-28 over stdio
+
+Each line below is a complete JSON-RPC request. The connection metadata is
+repeated on every call; there is no initialize notification.
+
+```
+{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/connection":{"protocolVersion":"2026-07-28","clientCapabilities":{},"clientInfo":{"name":"example-client","version":"1.0"}}}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_graph","arguments":{"question":"how does login work","mode":"bfs"},"_meta":{"io.modelcontextprotocol/connection":{"protocolVersion":"2026-07-28","clientCapabilities":{},"clientInfo":{"name":"example-client","version":"1.0"}}}}}
+```
+
+## Example: legacy JSON-RPC session over stdio
 
 ```
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"example-client","version":"1.0"}}}
