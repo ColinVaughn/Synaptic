@@ -752,7 +752,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2120,7 +2120,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2461,7 +2461,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3026,6 +3026,7 @@ dependencies = [
  "synaptic-incremental",
  "synaptic-ingest",
  "synaptic-llm",
+ "synaptic-memory",
  "synaptic-output",
  "synaptic-predict",
  "synaptic-prs",
@@ -3098,6 +3099,7 @@ dependencies = [
  "blake3",
  "criterion",
  "proptest",
+ "rayon",
  "regex",
  "rmp-serde",
  "roxmltree",
@@ -3128,6 +3130,7 @@ dependencies = [
  "tree-sitter-php",
  "tree-sitter-powershell",
  "tree-sitter-python",
+ "tree-sitter-ql",
  "tree-sitter-ruby",
  "tree-sitter-rust",
  "tree-sitter-scala",
@@ -3224,6 +3227,19 @@ dependencies = [
  "tiktoken-rs",
  "tokio",
  "wiremock",
+]
+
+[[package]]
+name = "synaptic-memory"
+version = "0.8.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+ "synaptic-core",
+ "synaptic-graph",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -3355,6 +3371,7 @@ dependencies = [
  "synaptic-graph",
  "synaptic-history",
  "synaptic-incremental",
+ "synaptic-memory",
  "synaptic-predict",
  "synaptic-prs",
  "synaptic-query",
@@ -3511,7 +3528,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4027,6 +4044,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-ql"
+version = "0.23.1"
+source = "git+https://github.com/tree-sitter/tree-sitter-ql.git?rev=5b8ee9adaa1f2a1ea958064b61f8feb0a5a886c0#5b8ee9adaa1f2a1ea958064b61f8feb0a5a886c0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-ruby"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4427,7 +4453,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

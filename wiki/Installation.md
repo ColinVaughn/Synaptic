@@ -69,7 +69,7 @@ clear error telling you which feature to rebuild with. See [Ingestion](Ingestion
 
 ## Languages
 
-All language extractors are compiled into the default build (38 `lang-*` features on by
+All language extractors are compiled into the default build (39 `lang-*` features on by
 default). You do not need to enable anything per language to extract a mixed-language repo.
 See [Languages](Languages) for the full list and [Development](Development) for building a
 single language in isolation.

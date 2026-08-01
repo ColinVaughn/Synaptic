@@ -15,6 +15,12 @@ pub(crate) struct ServeArgs {
     pub(crate) api_key: Option<String>,
     pub(crate) source_root: Option<PathBuf>,
     pub(crate) allow_exec: bool,
+    pub(crate) allow_memory_write: bool,
+    pub(crate) memory_peers: Vec<PathBuf>,
+    pub(crate) memory_principal: Option<String>,
+    pub(crate) memory_repository_claims: Vec<String>,
+    pub(crate) memory_workspace_claims: Vec<String>,
+    pub(crate) memory_allow_private: bool,
     pub(crate) concise: bool,
     pub(crate) watch: bool,
     pub(crate) immutable_graph: bool,
@@ -29,6 +35,12 @@ pub(crate) fn run_serve(args: ServeArgs) -> Result<()> {
         api_key,
         source_root,
         allow_exec,
+        allow_memory_write,
+        memory_peers,
+        memory_principal,
+        memory_repository_claims,
+        memory_workspace_claims,
+        memory_allow_private,
         concise,
         watch,
         immutable_graph,
@@ -51,9 +63,29 @@ pub(crate) fn run_serve(args: ServeArgs) -> Result<()> {
     }
     .with_context(|| format!("loading {} (run `synaptic extract` first?)", path.display()))?;
     let root = source_root.unwrap_or_else(|| default_source_root(&path));
+    let memory_store = synaptic_memory::MemoryStore::open_federated(
+        root.join(".synaptic").join("memory"),
+        memory_peers,
+    );
+    let memory_principal = if let Some(id) = memory_principal {
+        let mut principal =
+            synaptic_memory::MemoryPrincipal::restricted(id).with_all_private(memory_allow_private);
+        for repository in memory_repository_claims {
+            principal = principal.with_repository(repository);
+        }
+        for workspace in memory_workspace_claims {
+            principal = principal.with_workspace(workspace);
+        }
+        principal
+    } else {
+        synaptic_memory::MemoryPrincipal::operator()
+    };
     server = server
         .with_source_root(root.clone())
         .with_allow_exec(allow_exec)
+        .with_memory_store(memory_store)
+        .with_memory_principal(memory_principal)
+        .with_allow_memory_write(allow_memory_write)
         .with_concise(concise)
         .with_graph_reload(!immutable_graph);
     // Event-driven staleness (`--watch` / SYNAPTIC_SERVE_WATCH): a background
@@ -93,6 +125,12 @@ pub(crate) fn run_serve(args: ServeArgs) -> Result<()> {
     if allow_exec {
         eprintln!(
             "[synaptic] WARNING: --allow-exec enabled; the `speculate` tool can run this project's test/build commands"
+        );
+    }
+    if allow_memory_write {
+        eprintln!(
+            "[synaptic] memory writes enabled; records append under {}",
+            root.join(".synaptic").join("memory").display()
         );
     }
     match http {

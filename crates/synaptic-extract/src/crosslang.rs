@@ -27,6 +27,43 @@ pub fn augment(path: &str, source: &[u8], result: &mut ExtractionResult) {
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("");
+    // Every detector below is extension-gated. Return before comment masking,
+    // string-constant collection, and route-prefix scans for languages with no
+    // cross-language detector (notably QL, where packs contain thousands of
+    // files).
+    if !matches!(
+        ext,
+        "py" | "js"
+            | "jsx"
+            | "mjs"
+            | "cjs"
+            | "ts"
+            | "tsx"
+            | "mts"
+            | "cts"
+            | "go"
+            | "rs"
+            | "rb"
+            | "php"
+            | "cs"
+            | "java"
+            | "kt"
+            | "c"
+            | "h"
+            | "cpp"
+            | "cc"
+            | "cxx"
+            | "hpp"
+            | "hh"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "vue"
+            | "svelte"
+            | "astro"
+    ) {
+        return;
+    }
     // Vue/Svelte/Astro components hold their service calls in <script> blocks
     // (or Astro frontmatter). Blank everything else -- offsets preserved so line
     // attribution still matches the delegated AST nodes -- and scan as TS

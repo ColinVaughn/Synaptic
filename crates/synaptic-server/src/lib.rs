@@ -1,13 +1,14 @@
 //! MCP server for Synaptic.
 //!
-//! C3a — the read-only tool surface over **stdio**: an AI assistant drives the
+//! C3a — the MCP tool surface over **stdio**: an AI assistant drives the
 //! graph via MCP. Rather than depend on `rmcp` (whose API churns), we speak the
 //! MCP stdio transport directly — newline-delimited JSON-RPC 2.0 — through a
 //! pure [`Server::handle_request`] dispatcher, which makes the whole protocol
 //! unit-testable without an async runtime.
 //!
-//! 30 read-only tools by default (31 with `--allow-exec`, which adds the
-//! command-running `speculate`), over a graph loaded at startup: graph navigation
+//! 30 core tools over a graph loaded at startup, plus five read-only repository
+//! memory tools. `--allow-exec` adds the command-running `speculate`;
+//! `--allow-memory-write` adds the idempotent `record_change_outcome`. Graph navigation
 //! (`query_graph`, `get_node`, `get_source`, `get_neighbors`, `get_community`,
 //! `god_nodes`, `graph_stats`, `shortest_path`, `find_callers`, `find_callees`),
 //! impact and forecasting (`affected`, `working_changes_impact`, `predict_impact`,
@@ -30,6 +31,7 @@
 #[allow(dead_code)]
 mod aggregate;
 mod http;
+mod memory_tools;
 mod prompts;
 #[allow(dead_code)]
 mod provider;
@@ -308,6 +310,15 @@ pub struct Server {
     /// rather than touching a single graph directly, so a federated serve never
     /// holds the union in RAM.
     provider: provider::GraphProvider,
+    /// Optional durable repository-memory overlay. It remains physically
+    /// separate from graph.json and joins through symbol anchors at query time.
+    pub(crate) memory: Option<synaptic_memory::MemoryStore>,
+    /// Authorization context fixed by server configuration, never supplied by
+    /// an MCP tool argument.
+    pub(crate) memory_principal: synaptic_memory::MemoryPrincipal,
+    /// Expose the single mutating memory tool. Read tools remain available
+    /// whenever `memory` is configured.
+    pub(crate) allow_memory_write: bool,
     /// Path the graph was loaded from (its parent dir holds `GRAPH_REPORT.md`).
     graph_path: Option<PathBuf>,
     /// `(mtime_secs, size)` of the loaded graph.json, for the hot-reload check.
@@ -1049,6 +1060,9 @@ impl Server {
         let repo_hashes = read_repo_hashes(graph_path.as_deref());
         Server {
             provider,
+            memory: None,
+            memory_principal: synaptic_memory::MemoryPrincipal::operator(),
+            allow_memory_write: false,
             graph_path,
             reload_key,
             graph_reload: true,
@@ -1194,6 +1208,24 @@ impl Server {
     /// that is acceptable for this deployment.
     pub fn with_allow_exec(mut self, allow: bool) -> Server {
         self.allow_exec = allow;
+        self
+    }
+
+    /// Attach a durable temporal repository-memory store.
+    pub fn with_memory_store(mut self, store: synaptic_memory::MemoryStore) -> Server {
+        self.memory = Some(store);
+        self
+    }
+
+    /// Restrict repository-memory reads and writes to a configured principal.
+    pub fn with_memory_principal(mut self, principal: synaptic_memory::MemoryPrincipal) -> Server {
+        self.memory_principal = principal;
+        self
+    }
+
+    /// Opt in to the source-grounded, idempotent `record_change_outcome` tool.
+    pub fn with_allow_memory_write(mut self, allow: bool) -> Server {
+        self.allow_memory_write = allow;
         self
     }
 
@@ -3864,6 +3896,17 @@ Cross-repo: {} edge(s) span repositories{}",
         verbose: bool,
         code_only: bool,
     ) -> String {
+        self.working_changes_impact_result(base, limit, verbose, code_only)
+            .0
+    }
+
+    fn working_changes_impact_result(
+        &self,
+        base: Option<&str>,
+        limit: usize,
+        verbose: bool,
+        code_only: bool,
+    ) -> (String, Vec<String>) {
         let base = self.resolve_base(base, None);
         // Probe for a usable repo first so a missing/failed git (e.g. the
         // top-level dir of a federated workspace is not itself a repo) reads as a
@@ -3875,7 +3918,10 @@ Cross-repo: {} edge(s) span repositories{}",
             .map(|s| s.trim() == "true")
             .unwrap_or(false);
         if !in_repo {
-            return "git unavailable or not a git repository (in a federated workspace the top-level dir is not a repo; run inside a member repo). Graph audit continues offline.".to_string();
+            return (
+                "git unavailable or not a git repository (in a federated workspace the top-level dir is not a repo; run inside a member repo). Graph audit continues offline.".to_string(),
+                Vec::new(),
+            );
         }
         let diff = self.runner.run("git", &["diff", "--name-only", &base]);
         let files: Vec<String> = diff
@@ -3885,7 +3931,7 @@ Cross-repo: {} edge(s) span repositories{}",
             .map(str::to_string)
             .collect();
         if files.is_empty() {
-            return format!("No changes vs {base}.");
+            return (format!("No changes vs {base}."), Vec::new());
         }
         let (comms, nodes) = self.graph_impact(&files, code_only);
         let scope = if code_only { " code" } else { "" };
@@ -3903,7 +3949,7 @@ Cross-repo: {} edge(s) span repositories{}",
         if verbose {
             self.append_working_impact_detail(&mut out, &files, limit, code_only);
         }
-        out
+        (out, files)
     }
 
     /// Append `Top nodes` (touched nodes ranked by edge degree) and
@@ -4371,18 +4417,29 @@ Cross-repo: {} edge(s) span repositories{}",
 
     /// `get_pr_impact` — one PR's detail + graph blast radius.
     pub fn tool_get_pr_impact(&self, number: u64, repo: Option<&str>) -> String {
+        self.pr_impact_result(number, repo).0
+    }
+
+    fn pr_impact_result(&self, number: u64, repo: Option<&str>) -> (String, Vec<String>) {
         let resolved = self.resolve_base(None, repo);
         let Some(mut pr) = fetch_pr(&*self.runner, number, repo, &resolved) else {
-            return format!("PR #{number} not found (gh unavailable, unauthenticated, or no such PR). Graph audit continues offline.");
+            return (
+                format!("PR #{number} not found (gh unavailable, unauthenticated, or no such PR). Graph audit continues offline."),
+                Vec::new(),
+            );
         };
         pr.files_changed = fetch_pr_files(&*self.runner, number, repo);
         if pr.files_changed.is_empty() {
-            return format!("PR #{number}: no changed files found (may require gh auth). Graph audit continues offline.");
+            return (
+                format!("PR #{number}: no changed files found (may require gh auth). Graph audit continues offline."),
+                Vec::new(),
+            );
         }
         let (comms, nodes) = self.graph_impact(&pr.files_changed, false);
         pr.communities_touched = comms;
         pr.nodes_affected = nodes;
-        format_pr_detail(&pr, today_epoch_days(), 20)
+        let files = pr.files_changed.clone();
+        (format_pr_detail(&pr, today_epoch_days(), 20), files)
     }
 
     /// `triage_prs` — actionable PRs ranked by status, with blast radius. Returns
@@ -4883,7 +4940,13 @@ Cross-repo: {} edge(s) span repositories{}",
                 })
             }
             "ping" if !modern => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tools_list(self.allow_exec) })),
+            "tools/list" => Ok(json!({
+                "tools": tools_list_for(
+                    self.allow_exec,
+                    self.memory.is_some(),
+                    self.allow_memory_write
+                )
+            })),
             "prompts/list" => Ok(json!({ "prompts": prompts::prompts_list() })),
             "prompts/get" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
@@ -5491,7 +5554,11 @@ Cross-repo: {} edge(s) span repositories{}",
             ));
         }
 
-        let Some(tool) = registered_tool(self.allow_exec, name) else {
+        let memory_schema = self
+            .memory
+            .as_ref()
+            .and_then(|_| memory_tools::schema_for(name, self.allow_memory_write));
+        let Some(tool) = registered_tool(self.allow_exec, name).or(memory_schema.as_ref()) else {
             return Err((-32602, format!("Unknown tool: {name}")));
         };
         let args = params
@@ -5518,6 +5585,10 @@ Cross-repo: {} edge(s) span repositories{}",
         // Concise mode lowers a knob's DEFAULT only; an explicit argument always
         // wins because `u(k, d)` reads the argument before falling back to `d`.
         let cdef = |normal: u64, concise: u64| if self.concise { concise } else { normal };
+
+        if memory_tools::is_memory_tool(name) {
+            return Ok(self.dispatch_memory_tool(name, &args));
+        }
 
         // query_graph renders both text and structuredContent from a SINGLE
         // retrieval. The index query is O(graph); rendering both shapes from one
@@ -5568,11 +5639,12 @@ Cross-repo: {} edge(s) span repositories{}",
             // Log the "<n> nodes found" count from the header.
             self.log_query(&question, nodes_found(&text));
             let structured = self.render_query_json(&r, view, recency.as_ref(), edge_cap);
-            return Ok(json!({
+            let result = json!({
                 "content": [{ "type": "text", "text": text }],
                 "structuredContent": structured,
                 "isError": false
-            }));
+            });
+            return Ok(result);
         }
 
         // search_text renders text + structuredContent from a SINGLE content
@@ -5599,11 +5671,12 @@ Cross-repo: {} edge(s) span repositories{}",
                 opt("target"),
                 u("max_results", cdef(30, 20)) as usize,
             );
-            return Ok(json!({
+            let result = json!({
                 "content": [{ "type": "text", "text": text }],
                 "structuredContent": structured,
                 "isError": false
-            }));
+            });
+            return Ok(result);
         }
 
         // The only command-running tool. Gated: it is advertised in tools/list and
@@ -5756,11 +5829,22 @@ Cross-repo: {} edge(s) span repositories{}",
                     json!({ "tests": [], "total": 0 }),
                 ),
             };
-            return Ok(json!({
+            let mut result = json!({
                 "content": [{ "type": "text", "text": text }],
                 "structuredContent": structured,
                 "isError": false
-            }));
+            });
+            if name == "predict_impact" {
+                let subjects = result["structuredContent"]["changed_files"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                self.append_memory_evidence_for_subjects(&mut result, &subjects);
+            }
+            return Ok(result);
         }
 
         // `affected` resolves and traverses once, then renders that report to the
@@ -5781,11 +5865,46 @@ Cross-repo: {} edge(s) span repositories{}",
             let verbose = b("verbose");
             let text = self.render_affected_text(&report, limit, verbose);
             let structured = self.render_affected_json(&report, limit, verbose);
-            return Ok(json!({
+            let mut result = json!({
                 "content": [{ "type": "text", "text": text }],
                 "structuredContent": structured,
                 "isError": false
-            }));
+            });
+            self.append_memory_evidence(&mut result, &s("label"));
+            return Ok(result);
+        }
+
+        if name == "get_pr_impact" {
+            let (text, changed_files) = self.pr_impact_result(u("pr_number", 0), opt("repo"));
+            let mut result = json!({
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": {
+                    "changed_files": changed_files,
+                    "total": changed_files.len()
+                },
+                "isError": false
+            });
+            self.append_memory_evidence_for_subjects(&mut result, &changed_files);
+            return Ok(result);
+        }
+
+        if name == "working_changes_impact" {
+            let (text, changed_files) = self.working_changes_impact_result(
+                opt("base"),
+                u("limit", cdef(20, 12)) as usize,
+                b("verbose"),
+                b("code_only"),
+            );
+            let mut result = json!({
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": {
+                    "changed_files": changed_files,
+                    "total": changed_files.len()
+                },
+                "isError": false
+            });
+            self.append_memory_evidence_for_subjects(&mut result, &changed_files);
+            return Ok(result);
         }
 
         // These graph-summary tools previously ran their graph walk/explanation
@@ -5879,7 +5998,11 @@ Cross-repo: {} edge(s) span repositories{}",
             _ => None,
         };
         if let Some(outcome) = fallible {
-            return Ok(tool_execution_result(outcome));
+            let mut result = tool_execution_result(outcome);
+            if name == "predict_edit" {
+                self.append_memory_evidence(&mut result, &s("symbol"));
+            }
+            return Ok(result);
         }
 
         let text = match name {
@@ -5948,6 +6071,9 @@ Cross-repo: {} edge(s) span repositories{}",
         // attaching an empty `structuredContent: null` to the result.
         if let Some(sc) = structured.filter(|v| !v.is_null()) {
             result["structuredContent"] = sc;
+        }
+        if name == "get_node" {
+            self.append_memory_evidence(&mut result, &s("label"));
         }
         Ok(result)
     }
@@ -6612,8 +6738,10 @@ fn truncate_to_tokens(text: String, token_budget: usize) -> String {
 const SERVER_INSTRUCTIONS: &str = "\
 This server exposes a Synaptic knowledge graph of THIS repo's code: symbols (functions, \
 classes, files) as nodes and relationships (calls, imports, inheritance) as edges, \
-clustered into communities. All tools are read-only. Query the graph before grepping or \
-reading files broadly.\n\
+clustered into communities, plus a source-grounded temporal repository-memory overlay. \
+Graph and memory-query tools are read-only. The optional record_change_outcome tool is \
+available only when the operator enables --allow-memory-write. Query the graph before \
+grepping or reading files broadly.\n\
 \n\
 Flow: graph_stats or god_nodes to orient; query_graph for a question (terse ranked nodes \
 by default, full=true for the subgraph + edges); get_source to read a symbol's code (or a \
@@ -6621,6 +6749,14 @@ by default, full=true for the subgraph + edges); get_source to read a symbol's c
 find_callees / find_references / shortest_path to navigate (find_callers = calls, \
 find_references = all uses incl. imports/inheritance; show_sites=true prints the call-site line); \
 get_node / describe_node for detail.\n\
+\n\
+Repository memory: search_memory finds previous changes, incidents, review findings, \
+decisions, procedures, and failed attempts; explain_history follows one symbol/file over \
+time; known_pitfalls checks negative memory before a change; find_similar_change retrieves \
+prior outcomes; explain_decision cites active ADRs/invariants/conventions. Memory results \
+retain their source artifact, revision, verification, confidence, lifecycle, and symbol \
+anchors. Superseded/retracted memory is hidden by default. After a verified change, call \
+record_change_outcome when it is advertised, using a stable idempotency key and source URI.\n\
 \n\
 Change impact -- pick by input: affected = one SYMBOL now; working_changes_impact = your \
 git diff now; predict_impact = forecast a set of changed FILES (blast radius + public-API \
@@ -7135,6 +7271,17 @@ fn tool_registry(allow_exec: bool) -> &'static Value {
 
 fn tools_list(allow_exec: bool) -> Value {
     tool_registry(allow_exec).clone()
+}
+
+fn tools_list_for(allow_exec: bool, memory: bool, allow_memory_write: bool) -> Value {
+    let mut tools = tools_list(allow_exec);
+    if memory {
+        tools
+            .as_array_mut()
+            .expect("tool registry is an array")
+            .extend(memory_tools::schemas(allow_memory_write));
+    }
+    tools
 }
 
 fn registered_tool(allow_exec: bool, name: &str) -> Option<&'static Value> {

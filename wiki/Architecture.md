@@ -1,6 +1,6 @@
 # Architecture
 
-Synaptic is a Rust workspace: **25 library crates** under `crates/*` plus the `synaptic`
+Synaptic is a Rust workspace: **26 library crates** under `crates/*` plus the `synaptic`
 CLI under `bin/`. The workspace uses edition 2021 and a pinned Rust 1.96 toolchain, with
 dependencies centralized in the root `Cargo.toml`.
 
@@ -30,6 +30,10 @@ concept nodes and to break ties during dedup. See [Semantic Analysis](Semantic-A
 Querying and serving read `graph.json` back; they do not re-extract. See [Querying](Querying)
 and [MCP Server](MCP-Server).
 
+Repository memory is a separate temporal overlay under `.synaptic/memory`.
+It survives graph rebuilds and joins back to current graph nodes with
+revision-aware symbol anchors. See [Repository Memory](Repository-Memory).
+
 ## Crates
 
 | Crate | Responsibility |
@@ -51,6 +55,7 @@ and [MCP Server](MCP-Server).
 | `synaptic-skillgen` | Generates and installs the host-assistant integration: the Claude skill file + `.claude/settings.json` hooks, the always-on instruction blocks (`AGENTS.md`/`GEMINI.md`/etc.), and the Codex MCP server + `SessionStart` hook config (project `.codex/` or global `~/.codex/`) |
 | `synaptic-synql` | The SYNQL query engine: a small Cypher-inspired language over the graph (kind/visibility/loc/fan-in-out, variable-length paths, `count(...)`), used by `synaptic search` and the `structural_search` tool |
 | `synaptic-history` | Time-travel diff: builds the graph at a git revision in a throwaway worktree (cached per commit) and diffs two revisions (`synaptic diff`, `time_travel_diff`) |
+| `synaptic-memory` | Durable, source-grounded repository memory: Git/file/symbol lineage; document, external-artifact, and semantic refresh; principal authorization; deterministic indexed retrieval; verified compaction; federation/team bundles; and retrieval evaluation |
 | `synaptic-refactor` | Safe-refactor plans (rename/move/extract) for an agent to apply, plus post-edit graph-invariant verification |
 | `synaptic-predict` | Change forecasting: blast radius, at-risk tests, public-API risk, change-risk score, co-change, and the analytic edit forecast (`synaptic predict`) |
 | `synaptic-sandbox` | Speculative execution: apply a change in a throwaway worktree and run the at-risk tests + a build/type-check (`synaptic speculate`) |

@@ -21,6 +21,7 @@ use crate::graph::KnowledgeGraph;
 /// Source-file extensions whose file-node labels must never be call targets.
 const SOURCE_EXTS: &[&str] = &[
     ".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".go", ".rs", ".java",
+    ".ql", ".qll",
 ];
 
 /// Normalize a node label into the lookup key: `foo()`→`foo`, `.bar()`→`bar`,
@@ -208,6 +209,230 @@ fn resolve_bash_sources(
     out
 }
 
+fn parse_ql_call(callee: &str) -> Option<(Option<&str>, &str, usize)> {
+    let encoded = callee.strip_prefix("ql:")?;
+    let (name_with_qualifier, arity) = encoded.rsplit_once('/')?;
+    let arity = arity.parse().ok()?;
+    let (qualifier, name) = match name_with_qualifier.rsplit_once("::") {
+        Some((qualifier, name)) => (Some(qualifier), name),
+        None => (None, name_with_qualifier),
+    };
+    (!name.is_empty()).then_some((qualifier, name, arity))
+}
+
+fn ql_import_suffix(spec: &str) -> String {
+    let compact: String = spec.chars().filter(|c| !c.is_whitespace()).collect();
+    let base = compact.split("::").next().unwrap_or(&compact);
+    let base = base.split('<').next().unwrap_or(base);
+    base.replace('.', "/")
+}
+
+fn ql_common_path_prefix_len(a: &str, b: &str) -> usize {
+    a.split('/')
+        .zip(b.split('/'))
+        .take_while(|(left, right)| left.eq_ignore_ascii_case(right))
+        .count()
+}
+
+type QlModuleSourceIndex = HashMap<String, Vec<String>>;
+
+fn ql_path_suffixes(path: &str) -> Vec<String> {
+    let normalized = path.replace('\\', "/");
+    let without_ext = normalized
+        .strip_suffix(".qll")
+        .or_else(|| normalized.strip_suffix(".ql"))
+        .unwrap_or(&normalized);
+    let parts: Vec<&str> = without_ext.split('/').collect();
+    (0..parts.len())
+        .map(|start| parts[start..].join("/").to_ascii_lowercase())
+        .collect()
+}
+
+fn build_ql_module_source_index(source_files: &HashSet<String>) -> QlModuleSourceIndex {
+    let mut index = HashMap::new();
+    for source in source_files {
+        for suffix in ql_path_suffixes(source) {
+            index
+                .entry(suffix)
+                .or_insert_with(Vec::new)
+                .push(source.clone());
+        }
+    }
+    index
+}
+
+fn ql_module_sources<'a>(
+    spec: &str,
+    importer: &str,
+    source_index: &'a QlModuleSourceIndex,
+) -> Vec<&'a str> {
+    let suffix = ql_import_suffix(spec).to_ascii_lowercase();
+    if suffix.is_empty() {
+        return Vec::new();
+    }
+    let mut candidates: Vec<&str> = source_index
+        .get(&suffix)
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .collect();
+    if candidates.len() <= 1 {
+        return candidates;
+    }
+
+    let importer = importer.replace('\\', "/");
+    let best = candidates
+        .iter()
+        .map(|path| ql_common_path_prefix_len(&importer, path))
+        .max()
+        .unwrap_or(0);
+    candidates.retain(|path| ql_common_path_prefix_len(&importer, path) == best);
+    candidates
+}
+
+/// Resolve QL predicate calls with arity and module-import evidence. QL permits
+/// overloads, so the generic label-only pass is insufficient: `flow/2` and
+/// `flow/3` intentionally share the display label `flow()`.
+fn resolve_ql_calls(
+    kg: &KnowledgeGraph,
+    raw_calls: &[RawCall],
+    imports: &[ImportRecord],
+    known: &mut HashSet<(NodeId, NodeId, String)>,
+) -> Vec<Edge> {
+    let mut by_source: HashMap<(String, String, usize), Vec<NodeId>> = HashMap::new();
+    let mut global: HashMap<(String, usize), Vec<NodeId>> = HashMap::new();
+    let mut source_files = HashSet::new();
+    for node in kg.nodes() {
+        if node.extra.get("_language").and_then(|v| v.as_str()) != Some("ql") {
+            continue;
+        }
+        let Some(arity) = node.extra.get("ql_arity").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        if !matches!(
+            node.kind(),
+            Some(synaptic_core::NodeKind::Function | synaptic_core::NodeKind::Constructor)
+        ) {
+            continue;
+        }
+        let name = normalize_label(&node.label);
+        if name.is_empty() || node.source_file.is_empty() {
+            continue;
+        }
+        let source = node.source_file.replace('\\', "/");
+        source_files.insert(source.clone());
+        by_source
+            .entry((source, name.clone(), arity as usize))
+            .or_default()
+            .push(node.id.clone());
+        global
+            .entry((name, arity as usize))
+            .or_default()
+            .push(node.id.clone());
+    }
+    if by_source.is_empty() {
+        return Vec::new();
+    }
+    let module_source_index = build_ql_module_source_index(&source_files);
+
+    let mut module_imports: HashMap<&str, Vec<&ImportRecord>> = HashMap::new();
+    for import in imports.iter().filter(|import| import.imported_name == "*") {
+        module_imports
+            .entry(import.source_file.as_str())
+            .or_default()
+            .push(import);
+    }
+
+    let mut out = Vec::new();
+    for call in raw_calls {
+        if call.is_member_call {
+            continue;
+        }
+        let Some((qualifier, name, arity)) = parse_ql_call(&call.callee) else {
+            continue;
+        };
+        let normalized_name = name.to_ascii_lowercase();
+        let imports = module_imports
+            .get(call.source_file.as_str())
+            .cloned()
+            .unwrap_or_default();
+        let selected: Vec<&ImportRecord> = match qualifier {
+            Some(qualifier) => {
+                let root = qualifier.split("::").next().unwrap_or(qualifier);
+                imports
+                    .into_iter()
+                    .filter(|import| import.local_name.eq_ignore_ascii_case(root))
+                    .collect()
+            }
+            None => imports,
+        };
+
+        let mut candidates = Vec::new();
+        for import in selected {
+            for source in
+                ql_module_sources(&import.module_stem, &call.source_file, &module_source_index)
+            {
+                if let Some(matches) =
+                    by_source.get(&(source.to_string(), normalized_name.clone(), arity))
+                {
+                    candidates.extend(matches.iter().cloned());
+                }
+            }
+        }
+        candidates.sort();
+        candidates.dedup();
+
+        let (target, confidence, score, context) = if candidates.len() == 1 {
+            (
+                candidates.remove(0),
+                Confidence::Extracted,
+                1.0,
+                "ql_import_call",
+            )
+        } else if candidates.is_empty() {
+            let Some(matches) = global.get(&(normalized_name, arity)) else {
+                continue;
+            };
+            if matches.len() != 1 {
+                continue;
+            }
+            (
+                matches[0].clone(),
+                Confidence::Inferred,
+                0.8,
+                "ql_unique_call",
+            )
+        } else {
+            continue;
+        };
+        if target == call.caller
+            || !known.insert((call.caller.clone(), target.clone(), "calls".to_string()))
+        {
+            continue;
+        }
+        let mut edge = calls_edge(
+            call.caller.clone(),
+            target,
+            confidence,
+            score,
+            context,
+            call.source_file.clone(),
+            call.source_location.clone(),
+        );
+        edge.extra.insert(
+            "metadata".to_string(),
+            json!({
+                "resolver": context,
+                "ql_name": name,
+                "ql_arity": arity,
+                "ql_qualifier": qualifier,
+            }),
+        );
+        out.push(edge);
+    }
+    out
+}
+
 /// Resolve `raw_calls` against the built graph, returning the new `calls` edges
 /// (bash sourced-calls + import-guided EXTRACTED, then single-candidate cross-file
 /// INFERRED). Endpoints are canonical node ids; the caller adds them to the graph
@@ -235,18 +460,22 @@ pub fn resolve_symbols(
     // Runs first so its EXTRACTED edges win and dedup blocks a weaker INFERRED
     // duplicate from the generic cross-file pass.
     let mut out: Vec<Edge> = resolve_bash_sources(kg, raw_calls, &bash_sourced, &mut known);
+    out.extend(resolve_ql_calls(kg, raw_calls, imports, &mut known));
 
     // Pass 1: import-guided (EXTRACTED, 1.0)
     let symbol_index = build_symbol_index(kg);
     let mut aliases_by_file: HashMap<&str, HashMap<&str, &ImportRecord>> = HashMap::new();
     for imp in imports {
+        if imp.imported_name == "*" {
+            continue;
+        }
         aliases_by_file
             .entry(imp.source_file.as_str())
             .or_default()
             .insert(imp.local_name.as_str(), imp);
     }
     for rc in raw_calls {
-        if rc.is_member_call {
+        if rc.is_member_call || rc.callee.starts_with("ql:") {
             continue;
         }
         let callee = rc.callee.trim();
@@ -307,7 +536,7 @@ pub fn resolve_symbols(
     // Pass 2: cross-file single-candidate (INFERRED, 0.8)
     let label_index = build_label_index(kg);
     for rc in raw_calls {
-        if rc.is_member_call {
+        if rc.is_member_call || rc.callee.starts_with("ql:") {
             continue;
         }
         let callee = rc.callee.trim();
@@ -392,6 +621,14 @@ mod tests {
         }
     }
 
+    fn ql_predicate(id: &str, label: &str, sf: &str, arity: usize) -> Node {
+        let mut n = node(id, label, sf);
+        n.set_kind(synaptic_core::NodeKind::Function);
+        n.extra.insert("_language".into(), json!("ql"));
+        n.extra.insert("ql_arity".into(), json!(arity));
+        n
+    }
+
     #[test]
     fn import_guided_resolves_extracted() {
         // a.py: `from helper import transform`; caller calls transform().
@@ -419,6 +656,70 @@ mod tests {
         assert_eq!(meta["resolver"], "python_import_guided");
         assert_eq!(meta["imported_name"], "transform");
         assert_eq!(meta["module_stem"], "helper");
+    }
+
+    #[test]
+    fn ql_import_alias_and_arity_resolve_exactly() {
+        let g = kg(
+            vec![
+                ql_predicate("query", "query()", "java/ql/src/Query.ql", 0),
+                ql_predicate(
+                    "java_flow_2",
+                    "flow()",
+                    "java/ql/lib/semmle/code/java/DataFlow.qll",
+                    2,
+                ),
+                ql_predicate(
+                    "java_flow_3",
+                    "flow()",
+                    "java/ql/lib/semmle/code/java/DataFlow.qll",
+                    3,
+                ),
+                ql_predicate(
+                    "cpp_flow_2",
+                    "flow()",
+                    "cpp/ql/lib/semmle/code/cpp/DataFlow.qll",
+                    2,
+                ),
+            ],
+            vec![],
+        );
+        let edges = resolve_symbols(
+            &g,
+            &[raw("query", "ql:DF::flow/2", false, "java/ql/src/Query.ql")],
+            &[imp(
+                "DF",
+                "*",
+                "semmle.code.java.DataFlow",
+                "java/ql/src/Query.ql",
+            )],
+        );
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        assert_eq!(edges[0].target, NodeId("java_flow_2".into()));
+        assert_eq!(edges[0].confidence, Confidence::Extracted);
+        assert_eq!(edges[0].context.as_deref(), Some("ql_import_call"));
+        assert_eq!(edges[0].extra["metadata"]["ql_arity"], json!(2));
+    }
+
+    #[test]
+    fn ql_unique_fallback_is_arity_aware() {
+        let g = kg(
+            vec![
+                ql_predicate("query", "query()", "queries/Query.ql", 0),
+                ql_predicate("target_1", "helper()", "lib/Helpers.qll", 1),
+                ql_predicate("target_2", "helper()", "lib/Helpers.qll", 2),
+            ],
+            vec![],
+        );
+        let edges = resolve_symbols(
+            &g,
+            &[raw("query", "ql:helper/2", false, "queries/Query.ql")],
+            &[],
+        );
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        assert_eq!(edges[0].target, NodeId("target_2".into()));
+        assert_eq!(edges[0].confidence, Confidence::Inferred);
+        assert_eq!(edges[0].context.as_deref(), Some("ql_unique_call"));
     }
 
     fn imports_from_edge(src: &str, tgt: &str, sf: &str) -> Edge {

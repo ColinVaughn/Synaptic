@@ -27,7 +27,7 @@ Two non-language features are **on by default** and can be turned off with
 | `cross-language` | Post-extraction passes that infer cross-language edges (FFI, subprocess, HTTP/RPC, WebSocket, message queue, IPC/event bus, code->SQL). |
 | `cache-binary` | Stores the per-file AST cache as MessagePack instead of JSON — faster to decode and smaller, which helps most on column-heavy SQL schemas. |
 
-Language support is controlled by 38 `lang-*` features, all on by default. To compile a
+Language support is controlled by 39 `lang-*` features, all on by default. To compile a
 single language (used in CI), build with `--no-default-features --features lang-<name>`. See
 [Languages](Languages) and [Development](Development).
 

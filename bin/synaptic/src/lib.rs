@@ -19,6 +19,7 @@ use commands::global::run_global;
 use commands::hook::run_hook;
 use commands::ingest::run_ingest;
 use commands::install::{run_install, run_uninstall};
+use commands::memory::run_memory;
 use commands::merge::run_merge_graphs;
 use commands::migrate::run_migrate;
 use commands::predict::run_predict;
@@ -180,6 +181,12 @@ fn run() -> Result<()> {
             api_key,
             source_root,
             allow_exec,
+            allow_memory_write,
+            memory_peers,
+            memory_principal,
+            memory_repository_claims,
+            memory_workspace_claims,
+            memory_allow_private,
             concise,
             watch,
             immutable_graph,
@@ -191,6 +198,12 @@ fn run() -> Result<()> {
             api_key,
             source_root,
             allow_exec,
+            allow_memory_write,
+            memory_peers,
+            memory_principal,
+            memory_repository_claims,
+            memory_workspace_claims,
+            memory_allow_private,
             concise,
             watch,
             immutable_graph,
@@ -208,6 +221,7 @@ fn run() -> Result<()> {
         Cmd::Skill { action } => run_skill(action),
         Cmd::Workspace { action } => run_workspace(action),
         Cmd::Global { action } => run_global(action),
+        Cmd::Memory { action } => run_memory(action),
         Cmd::MergeGraphs { graphs, out } => run_merge_graphs(graphs, out),
         Cmd::Cache { action } => run_cache(action),
         Cmd::Diff {

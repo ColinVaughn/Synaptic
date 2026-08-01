@@ -192,10 +192,12 @@ done
 CHANGED=$({changed_cmd} 2>/dev/null)
 REAL=$(printf '%s\n' "$CHANGED" | grep -v '^synaptic-out/' || true)
 [ -z "$REAL" ] && exit 0
+SYNAPTIC_COMMIT=$(git rev-parse HEAD 2>/dev/null) || exit 0
 # Pass changed files via an env var (newline-delimited), never as argv, so paths
 # with spaces or shell-glob characters aren't word-split / glob-expanded.
 export SYNAPTIC_CHANGED="$REAL"
-( "{bin}" update >synaptic-out/.rebuild.log 2>&1 & )
+export SYNAPTIC_COMMIT
+( "{bin}" update && "{bin}" memory ingest "$SYNAPTIC_COMMIT" && "{bin}" memory refresh ) >synaptic-out/.rebuild.log 2>&1 &
 {MARKER_END}"#
     )
 }
@@ -217,8 +219,10 @@ done
 CHANGED=$(git diff --name-only ORIG_HEAD HEAD 2>/dev/null)
 REAL=$(printf '%s\n' "$CHANGED" | grep -v '^synaptic-out/' || true)
 [ -z "$REAL" ] && exit 0
+SYNAPTIC_COMMIT=$(git rev-parse HEAD 2>/dev/null) || exit 0
 export SYNAPTIC_CHANGED="$REAL"
-( "{bin}" update >synaptic-out/.rebuild.log 2>&1 & )
+export SYNAPTIC_COMMIT
+( "{bin}" update && "{bin}" memory ingest "$SYNAPTIC_COMMIT" && "{bin}" memory refresh ) >synaptic-out/.rebuild.log 2>&1 &
 {MARKER_END}"#
     )
 }
@@ -580,6 +584,25 @@ mod tests {
             script.contains("SYNAPTIC_CHANGED"),
             "changed files passed via env, not argv: {script}"
         );
+    }
+
+    #[test]
+    fn commit_hooks_capture_exact_revision_and_ingest_memory_after_update() {
+        for hook in ["post-commit", "post-merge"] {
+            let script = script_for(hook, "synaptic");
+            assert!(
+                script.contains("SYNAPTIC_COMMIT"),
+                "{hook} captures the exact revision before backgrounding: {script}"
+            );
+            assert!(
+                script.contains("memory ingest \"$SYNAPTIC_COMMIT\""),
+                "{hook} records the episode after its graph update: {script}"
+            );
+            assert!(
+                script.contains("memory refresh"),
+                "{hook} refreshes semantic and procedural memory after the graph update: {script}"
+            );
+        }
     }
 
     #[test]

@@ -62,6 +62,7 @@ synaptic-sqlaudit = { workspace = true }
 synaptic-readiness = { workspace = true }
 synaptic-upgrade = { workspace = true }
 synaptic-store = { workspace = true }
+synaptic-memory = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 rayon = { workspace = true }

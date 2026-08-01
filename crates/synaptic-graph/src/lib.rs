@@ -21,8 +21,8 @@ pub use analyze::{
 };
 pub use build::{build_from_parts, guard_shrink, BuildOptions};
 pub use cluster::{
-    apply_communities, cluster, cohesion_score, remap_communities_to_previous, Algorithm,
-    ClusterOptions,
+    apply_communities, cluster, cohesion_score, partition_cohesion_scores,
+    remap_communities_to_previous, Algorithm, ClusterOptions,
 };
 pub use cross_language::{
     mark_cross_repo_edges, resolve_command_invocations, resolve_parameterized_routes,

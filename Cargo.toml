@@ -45,6 +45,7 @@ synaptic-sqlaudit = { path = "crates/synaptic-sqlaudit" }
 synaptic-readiness = { path = "crates/synaptic-readiness" }
 synaptic-upgrade = { path = "crates/synaptic-upgrade" }
 synaptic-store = { path = "crates/synaptic-store" }
+synaptic-memory = { path = "crates/synaptic-memory" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 rayon = "1"
@@ -87,6 +88,10 @@ tree-sitter-groovy = "0.1"
 tree-sitter-objc = "3.0"
 tree-sitter-verilog = "1.0"
 tree-sitter-fortran = "0.6"
+# The published 0.23.1 archive contains an older generated parser. Pin the
+# upstream regeneration so anonymous `module;` declarations used by current
+# CodeQL overlays parse according to the repository's grammar.
+tree-sitter-ql = { git = "https://github.com/tree-sitter/tree-sitter-ql.git", rev = "5b8ee9adaa1f2a1ea958064b61f8feb0a5a886c0" }
 petgraph = "0.8"
 # msgpack codec for shard node/edge/index values. Already used by the AST cache
 # (synaptic-extract `cache-binary`); reused here so we add no new codec.

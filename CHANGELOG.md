@@ -10,6 +10,48 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **CodeQL QL is a first-class source language.** `.ql` queries and `.qll`
+  libraries now produce modules, classes and type aliases, newtypes, fields,
+  predicates, member and characteristic predicates, typed signatures,
+  visibility, overload-aware calls, imports, inheritance, module-signature
+  implementations, and contextual type references. QL imports bind to real
+  source files across CodeQL packs, and cross-file predicate calls use module
+  aliases plus arity before a lower-confidence unique fallback. A comment-aware
+  recovery pass preserves `signature class/module/predicate` declarations not
+  represented by the published tree-sitter grammar. The dependency pins the
+  upstream regenerated parser (the identically versioned crate archive is
+  older), while byte-preserving normalization supports current
+  `overlay[...]` annotations and retains their modes as file metadata. This is
+  structural source support for graph reasoning, not CodeQL query evaluation
+  or data-flow analysis.
+- **Large-repository extraction is stack-safe and report generation scales with
+  the graph.** Parallel parsing now runs in a dedicated worker pool with an
+  explicit stack budget, removing the environment-variable workaround found by
+  the CodeQL stress test. QL import lookup is suffix-indexed, irrelevant
+  cross-language scans are skipped, and community cohesion for reports is
+  computed for the whole partition in one edge pass.
+- **Source-grounded repository memory overlay.** The new `synaptic-memory`
+  crate persists versioned episodes, decisions, procedures, failed attempts,
+  regressions, verification outcomes, temporal symbol anchors, source
+  artifacts, lifecycle, scope, and typed links under `.synaptic/memory`.
+  `synaptic memory ingest/ingest-docs/import-artifacts/refresh/search/record/compact/export/sync/eval/status`
+  provide the local workflow; post-commit and post-merge hooks capture the
+  exact triggering SHA and refresh repository knowledge. MCP adds
+  five read-only retrieval tools and the separately gated, idempotent
+  `record_change_outcome` writer (`serve --allow-memory-write`). Git episodes
+  retain file and conservative symbol-rename lineage; document and external
+  artifact adapters hash and supersede ADRs, procedures, issues, PRs, reviews,
+  CI, incidents, releases, and agent tasks. Community summaries refresh from
+  the graph. Principal enforcement covers private ownership and
+  repository/workspace claims without count or supersession leakage.
+  Single-symbol, file-set, working-tree, and PR tools attach bounded,
+  deduplicated cited evidence. Cached inverted indexes detect external appends;
+  verified compact snapshots, collision-safe peer federation, checksummed team
+  bundles, and recall/MRR/selectivity benchmark gates complete the durable
+  retrieval workflow.
+
 ## [0.8.0] - 2026-07-29
 
 ### Added

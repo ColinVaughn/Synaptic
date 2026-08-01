@@ -1,0 +1,21 @@
+{
+  "schema": "synaptic.memory-benchmark/v1",
+  "cases": [
+    {
+      "name": "localize temporal-overlay architecture decision",
+      "query": "temporal overlay existing graph",
+      "symbol": "MemoryStore",
+      "expected_sources": [
+        "file:docs/adr/001-repository-memory-overlay.md"
+      ]
+    },
+    {
+      "name": "localize repository-memory release procedure",
+      "query": "release validation build MCP",
+      "symbol": "MemoryStore",
+      "expected_sources": [
+        "file:docs/procedures/repository-memory-validation.md"
+      ]
+    }
+  ]
+}

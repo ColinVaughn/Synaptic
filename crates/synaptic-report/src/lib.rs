@@ -9,7 +9,7 @@ use std::io;
 use std::path::Path;
 
 use synaptic_core::{Confidence, NodeId};
-use synaptic_graph::{cohesion_score, AnalysisResult, KnowledgeGraph};
+use synaptic_graph::{partition_cohesion_scores, AnalysisResult, KnowledgeGraph};
 
 /// Communities smaller than this are omitted from the per-community listing and
 /// counted as a knowledge gap.
@@ -210,11 +210,15 @@ pub fn graph_report(
                 String::new()
             }
         );
-        for (cid, members) in communities {
+        let cohesion = partition_cohesion_scores(
+            kg,
+            communities.values().map(Vec::as_slice),
+            THIN_COMMUNITY_SIZE,
+        );
+        for ((cid, members), coh) in communities.iter().zip(cohesion) {
             if members.len() < THIN_COMMUNITY_SIZE {
                 continue;
             }
-            let coh = cohesion_score(kg, members);
             let sample: Vec<String> = members.iter().take(5).map(|id| label_of(kg, id)).collect();
             let name = community_labels
                 .get(cid)

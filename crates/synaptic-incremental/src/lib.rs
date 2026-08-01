@@ -486,20 +486,22 @@ pub fn rebuild_with_detect(
     // file exists but is momentarily unreadable (editor/AV lock), and treating
     // it as deleted would silently evict its symbols.
     let cache_dir = out_dir.join("cache");
-    let extracted: Vec<(Option<_>, bool)> = targets
-        .par_iter()
-        .map(|file| {
-            let rel = file.strip_prefix(root).unwrap_or(file);
-            let rel_str = rel.to_string_lossy();
-            match std::fs::read(file) {
-                Ok(bytes) => (
-                    cached_extract_source(Some(&cache_dir), rel_str.as_ref(), &bytes),
-                    false,
-                ),
-                Err(_) => (None, true),
-            }
-        })
-        .collect();
+    let extracted: Vec<(Option<_>, bool)> = synaptic_extract::with_extraction_pool(|| {
+        targets
+            .par_iter()
+            .map(|file| {
+                let rel = file.strip_prefix(root).unwrap_or(file);
+                let rel_str = rel.to_string_lossy();
+                match std::fs::read(file) {
+                    Ok(bytes) => (
+                        cached_extract_source(Some(&cache_dir), rel_str.as_ref(), &bytes),
+                        false,
+                    ),
+                    Err(_) => (None, true),
+                }
+            })
+            .collect()
+    });
     // Per-file called-name sidecar: rebuilt whole on a full rebuild, otherwise
     // advanced for this round's extractions and deletions (an unreadable file
     // keeps its prior entry, like its nodes). Saved only when something
@@ -593,15 +595,17 @@ pub fn rebuild_with_detect(
                 // Rebuild the OS-separator rel path the original extraction
                 // used: the path string feeds both the AST-cache key and the
                 // extractor's node ids, so it must match exactly.
-                let rippled: Vec<_> = candidates
-                    .par_iter()
-                    .filter_map(|key| {
-                        let rel_os = key.replace('/', std::path::MAIN_SEPARATOR_STR);
-                        let abs = root.join(&rel_os);
-                        let bytes = std::fs::read(&abs).ok()?;
-                        cached_extract_source(Some(&cache_dir), &rel_os, &bytes)
-                    })
-                    .collect();
+                let rippled: Vec<_> = synaptic_extract::with_extraction_pool(|| {
+                    candidates
+                        .par_iter()
+                        .filter_map(|key| {
+                            let rel_os = key.replace('/', std::path::MAIN_SEPARATOR_STR);
+                            let abs = root.join(&rel_os);
+                            let bytes = std::fs::read(&abs).ok()?;
+                            cached_extract_source(Some(&cache_dir), &rel_os, &bytes)
+                        })
+                        .collect()
+                });
                 for r in rippled {
                     raw_calls.extend(r.raw_calls);
                     imports.extend(r.imports);

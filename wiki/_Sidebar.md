@@ -8,6 +8,7 @@
 
 **Concepts**
 - [Architecture](Architecture)
+- [Repository Memory](Repository-Memory)
 - [Languages](Languages)
 - [Synaptic vs Other Tools](Synaptic-vs-Other-Tools)
 

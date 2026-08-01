@@ -32,6 +32,7 @@ Most read commands operate on `synaptic-out/graph.json` by default; build it fir
 | [`skill`](#skill) | Maintain the generated skill artifacts (dev/CI). |
 | [`workspace`](#workspace) | Multi-repo / monorepo federation. |
 | [`global`](#global) | Manage the cross-repo global graph store (`~/.synaptic`). |
+| [`memory`](#memory) | Ingest, record, search, and inspect durable repository memory. |
 | [`merge-graphs`](#merge-graphs) | Compose several `graph.json` files into one namespaced graph. |
 | [`cache`](#cache) | Maintain the on-disk extraction cache. |
 | [`self-update`](#self-update) | Update the binary from the latest GitHub release (opt-in). |
@@ -807,14 +808,66 @@ synaptic hook status
 
 See [Incremental-Updates](Incremental-Updates).
 
-## serve
+## memory
 
-Run the MCP server exposing read-only graph tools (and PR tools) to an AI assistant.
+Manage the source-grounded temporal overlay stored at
+`<ROOT>/.synaptic/memory`.
 
 Syntax:
 
 ```sh
-synaptic serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root <DIR>] [--allow-exec] [--concise] [--watch] [--immutable-graph] [--expected-graph-sha256 <HEX>] [--ready-file <PATH>]
+synaptic memory ingest [REVISION] [--root <PATH>] [--graph <PATH>]
+synaptic memory ingest-docs [--root <PATH>] [--graph <PATH>]
+synaptic memory import-artifacts --file <JSON> [--root <PATH>] [--graph <PATH>]
+synaptic memory refresh [--root <PATH>] [--graph <PATH>]
+synaptic memory search [QUERY] [--root <PATH>] [--peer <STORE>]... [--symbol <NAME>] [--kind <KIND>]... [PRINCIPAL OPTIONS] [--json]
+synaptic memory record --idempotency-key <KEY> --title <TEXT> --summary <TEXT> --outcome <OUTCOME> --source-uri <URI> [OPTIONS]
+synaptic memory compact [--root <PATH>] [--json]
+synaptic memory export --output <BUNDLE> [--root <PATH>] [PRINCIPAL OPTIONS]
+synaptic memory sync --bundle <BUNDLE> [--root <PATH>] [PRINCIPAL OPTIONS]
+synaptic memory eval --manifest <JSON> [--root <PATH>] [QUALITY GATES] [PRINCIPAL OPTIONS] [--json]
+synaptic memory status [--root <PATH>] [--json]
+```
+
+- `ingest` records exactly one Git commit (default `HEAD`) as an idempotent
+  change episode. When a graph is available, symbols in changed files become
+  temporal anchors; Git renames/copies retain old/new path lineage and
+  conservative declaration matching retains renamed symbol identities.
+- `ingest-docs` scans explicit ADR/decision and
+  procedure/runbook/playbook directories, hashes and cites each Markdown file,
+  resolves optional `Synaptic-Symbols:` metadata, and supersedes changed source
+  revisions.
+- `import-artifacts` accepts the checksummed canonical envelope for issues, PRs,
+  reviews, CI runs, incidents, releases, customer reports, and agent tasks.
+- `refresh` combines document/convention extraction with graph-community
+  semantic summaries. Commit/merge hooks run it after updating and ingesting.
+- `search` combines lexical matching with an optional symbol/path filter and
+  kind filters. `--peer` federates another store; divergent duplicate IDs fail
+  closed. Superseded and retracted records are hidden by default.
+- `record` persists a source-grounded change outcome. Outcomes are `succeeded`,
+  `failed`, `partial`, `rolled_back`, or `regressed`; verification status is
+  `unknown`, `passed`, `failed`, or `partial`.
+- `compact` writes a fingerprint- and checksum-verified startup snapshot while
+  preserving immutable record files.
+- `export` and `sync` exchange checksummed, scope-preserving team bundles.
+- `eval` reports recall@1/@5, MRR, candidate fraction, and misses. Quality gates
+  are `--min-recall-at-5`, `--min-mrr`, and
+  `--max-candidate-fraction`.
+- `status` reports the store path and counts by kind.
+
+Principal options are `--principal <ID>`, repeated
+`--repository-claim <REPO>` and `--workspace-claim <WORKSPACE>`, and
+`--allow-private`. Omitting them keeps trusted local-operator behavior.
+
+## serve
+
+Run the MCP server exposing read-only graph, PR, and repository-memory query
+tools to an AI assistant.
+
+Syntax:
+
+```sh
+synaptic serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root <DIR>] [--allow-exec] [--allow-memory-write] [--memory-peer <STORE>]... [MEMORY PRINCIPAL OPTIONS] [--concise] [--watch] [--immutable-graph] [--expected-graph-sha256 <HEX>] [--ready-file <PATH>]
 ```
 
 | Name | Default | Description |
@@ -824,6 +877,12 @@ synaptic serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root
 | `--api-key` | none | Require this API key for HTTP requests (or set `SYNAPTIC_API_KEY`). |
 | `--source-root` | dir above `synaptic-out/` | Trusted root for resolving a node's source file in the `get_source` tool (path-traversal jailed). |
 | `--allow-exec` | off | Expose the command-running `speculate` tool. This makes the server no longer read-only, so enable it only for trusted clients. See [MCP Server](MCP-Server). |
+| `--allow-memory-write` | off | Expose the idempotent `record_change_outcome` tool. The five memory query tools are available without it. |
+| `--memory-peer` | none | Add another repository-memory store to collision-safe federated reads. Repeatable. |
+| `--memory-principal` | operator | Restrict memory reads/writes to a fixed server principal. |
+| `--memory-repository-claim` | none | Grant the configured principal access to one repository scope. Repeatable. |
+| `--memory-workspace-claim` | none | Grant the configured principal access to one workspace scope. Repeatable. |
+| `--memory-allow-private` | off | Let the configured principal read/write all private records instead of only records it owns. |
 | `--concise` | off | Token-lean output: lower the default list/budget sizes so tool results return less to the model (or set `SYNAPTIC_CONCISE`). An explicit per-call argument always wins. |
 | `--watch` | off | Embed a filesystem watcher so the auto-freshen staleness check is event-driven — no walk or debounce window per query (or set `SYNAPTIC_SERVE_WATCH=1`). See [Incremental-Updates](Incremental-Updates). |
 | `--immutable-graph` | off | Pin the graph loaded at startup and disable graph-file hot reload, source catch-up, and filesystem watching. Use for verified read-only snapshots. |
@@ -832,8 +891,9 @@ synaptic serve [--graph <PATH>] [--http <ADDR>] [--api-key <KEY>] [--source-root
 
 Defaults to stdio transport. The MCP server supports stateless MCP `2026-07-28`
 and retains initialize/session compatibility for `2025-11-25`, `2025-06-18`,
-`2025-03-26`, and `2024-11-05`. It exposes 30 read-only tools (31 with
-`--allow-exec`, which adds the command-running `speculate` tool), prompts,
+`2025-03-26`, and `2024-11-05`. It exposes the 30 core read-only tools plus five
+read-only repository-memory tools (`record_change_outcome` is an additional
+opt-in tool), prompts,
 completions, resource templates/subscriptions, and structured tool output. When
 serving HTTP on a wildcard address with no API key, it prints a warning.
 

@@ -249,7 +249,7 @@ pub(crate) enum Cmd {
         #[arg(long)]
         store: Option<PathBuf>,
     },
-    /// Run the MCP server (read-only graph tools + PR tools for an AI assistant).
+    /// Run the MCP server (graph, PR, and repository-memory tools for an AI assistant).
     /// Defaults to stdio; `--http <addr>` serves over HTTP instead.
     Serve {
         #[arg(long)]
@@ -269,6 +269,23 @@ pub(crate) enum Cmd {
         /// the server no longer read-only, so enable it only for trusted clients.
         #[arg(long)]
         allow_exec: bool,
+        /// Expose the idempotent `record_change_outcome` memory tool. Memory
+        /// search tools are read-only and do not require this flag.
+        #[arg(long)]
+        allow_memory_write: bool,
+        /// Additional repository-memory store roots to query as a federation.
+        #[arg(long = "memory-peer")]
+        memory_peers: Vec<PathBuf>,
+        /// Restrict all memory tools to this server principal. Omit for trusted
+        /// local operator access.
+        #[arg(long)]
+        memory_principal: Option<String>,
+        #[arg(long = "memory-repository-claim", requires = "memory_principal")]
+        memory_repository_claims: Vec<String>,
+        #[arg(long = "memory-workspace-claim", requires = "memory_principal")]
+        memory_workspace_claims: Vec<String>,
+        #[arg(long, requires = "memory_principal")]
+        memory_allow_private: bool,
         /// Token-lean output: lower the default list/budget sizes so tool results
         /// return less to the model (an explicit per-call argument still wins).
         /// Equivalent to setting SYNAPTIC_CONCISE=1.
@@ -364,6 +381,11 @@ pub(crate) enum Cmd {
     Global {
         #[command(subcommand)]
         action: GlobalAction,
+    },
+    /// Search, ingest, and record source-grounded temporal repository memory.
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
     },
     /// Compose several `graph.json` files into one namespaced graph.
     MergeGraphs {
@@ -1005,6 +1027,190 @@ pub(crate) enum GlobalAction {
     List,
     /// Print the global graph path.
     Path,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum MemoryAction {
+    /// Ingest one Git commit as a change episode (idempotent).
+    Ingest {
+        /// Commit-ish to ingest.
+        #[arg(default_value = "HEAD")]
+        revision: String,
+        /// Repository root.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Optional current graph used to anchor changed symbols.
+        #[arg(long)]
+        graph: Option<PathBuf>,
+    },
+    /// Ingest repository ADRs/decisions and procedures/runbooks (idempotent).
+    IngestDocs {
+        /// Repository root.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Optional current graph used to resolve `Synaptic-Symbols:` anchors.
+        #[arg(long)]
+        graph: Option<PathBuf>,
+    },
+    /// Import source-grounded issue, PR, review, CI, incident, release, and
+    /// agent-task artifacts from a canonical JSON envelope.
+    ImportArtifacts {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        graph: Option<PathBuf>,
+    },
+    /// Refresh repository documents, conventions, and graph-community
+    /// semantic summaries.
+    Refresh {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        graph: Option<PathBuf>,
+    },
+    /// Search repository memory.
+    Search {
+        /// Free-text memory query. May be empty when --symbol is present.
+        #[arg(default_value = "")]
+        query: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Restrict to memories attached to this symbol, id, or source path.
+        #[arg(long)]
+        symbol: Option<String>,
+        /// Restrict to memory kinds (repeatable, e.g. failed_attempt).
+        #[arg(long = "kind")]
+        kinds: Vec<String>,
+        #[arg(long)]
+        include_superseded: bool,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+        /// Additional memory-store roots to federate into this read.
+        #[arg(long = "peer")]
+        peers: Vec<PathBuf>,
+        /// Restrict this command to a named principal. Omit for trusted local
+        /// operator access.
+        #[arg(long)]
+        principal: Option<String>,
+        #[arg(long = "repository-claim")]
+        repository_claims: Vec<String>,
+        #[arg(long = "workspace-claim")]
+        workspace_claims: Vec<String>,
+        #[arg(long)]
+        allow_private: bool,
+    },
+    /// Persist one source-grounded change outcome.
+    Record {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        idempotency_key: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        summary: String,
+        /// succeeded | failed | partial | rolled_back | regressed.
+        #[arg(long)]
+        outcome: String,
+        #[arg(long)]
+        source_uri: String,
+        #[arg(long)]
+        commit: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
+        /// Affected symbol/id/path (repeatable).
+        #[arg(long = "symbol")]
+        symbols: Vec<String>,
+        /// unknown | passed | failed | partial.
+        #[arg(long, default_value = "unknown")]
+        verification_status: String,
+        #[arg(long = "verification-command")]
+        verification_commands: Vec<String>,
+        #[arg(long, default_value_t = 1.0)]
+        confidence: f32,
+        /// private | repository.
+        #[arg(long, default_value = "private")]
+        scope: String,
+        #[arg(long)]
+        principal: Option<String>,
+        #[arg(long = "repository-claim")]
+        repository_claims: Vec<String>,
+        #[arg(long = "workspace-claim")]
+        workspace_claims: Vec<String>,
+        #[arg(long)]
+        allow_private: bool,
+    },
+    /// Write a verified compact snapshot for fast process startup.
+    Compact {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export a checksummed, principal-filtered team-memory bundle.
+    Export {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        principal: Option<String>,
+        #[arg(long = "repository-claim")]
+        repository_claims: Vec<String>,
+        #[arg(long = "workspace-claim")]
+        workspace_claims: Vec<String>,
+        #[arg(long)]
+        allow_private: bool,
+    },
+    /// Merge a checksummed team-memory bundle into this repository.
+    Sync {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        bundle: PathBuf,
+        #[arg(long)]
+        principal: Option<String>,
+        #[arg(long = "repository-claim")]
+        repository_claims: Vec<String>,
+        #[arg(long = "workspace-claim")]
+        workspace_claims: Vec<String>,
+        #[arg(long)]
+        allow_private: bool,
+    },
+    /// Evaluate source localization and enforce optional retrieval quality gates.
+    Eval {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        principal: Option<String>,
+        #[arg(long = "repository-claim")]
+        repository_claims: Vec<String>,
+        #[arg(long = "workspace-claim")]
+        workspace_claims: Vec<String>,
+        #[arg(long)]
+        allow_private: bool,
+        #[arg(long, default_value_t = 0.0)]
+        min_recall_at_5: f64,
+        #[arg(long, default_value_t = 0.0)]
+        min_mrr: f64,
+        #[arg(long, default_value_t = 1.0)]
+        max_candidate_fraction: f64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show record counts and the durable store path.
+    Status {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]

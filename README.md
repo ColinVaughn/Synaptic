@@ -105,12 +105,20 @@ grepping or reading files.
   generated-resource noise, and project metadata. The MCP `readiness_audit` tool exposes the
   same structured report.
 - **MCP server** (stateless protocol 2026-07-28 with legacy compatibility through
-  2025-11-25) exposing 30 read-only tools over stdio or HTTP:
+  2025-11-25) exposing 30 core tools plus five read-only repository-memory tools over stdio or HTTP:
   subgraph search, source reading, reverse-impact, find-all-references, dynamic-dispatch hazards,
   PR/working-tree blast radius, change forecasting, predictive test selection, edit-impact prediction,
   structural search, time-travel diff, plan-only rename, and SQL audit/advise, plus prompts, completions,
   resource subscriptions, and structured tool output. See
   [MCP Server](https://github.com/ColinVaughn/Synaptic/wiki/MCP-Server).
+- **Source-grounded repository memory**: a temporal overlay for previous
+  changes, failed attempts, regressions, decisions, procedures, verification,
+  external issue/PR/CI/incident artifacts, semantic community summaries, and
+  revision-aware file/symbol lineage. Git hooks capture exact commits and
+  refresh knowledge; principal policy, compact/federated stores, checksummed
+  team bundles, retrieval benchmarks, and aggregate impact evidence are built
+  into the CLI and MCP surface.
+  See [Repository Memory](https://github.com/ColinVaughn/Synaptic/wiki/Repository-Memory).
 - **Incremental rebuilds**, file watching, and git hooks keep the graph current. See
   [Incremental Updates](https://github.com/ColinVaughn/Synaptic/wiki/Incremental-Updates).
 - **Graph-aware PR dashboard** with blast radius and merge-order conflict detection. See
@@ -375,17 +383,24 @@ The full reference with every flag is in [Commands](https://github.com/ColinVaug
 ```sh
 synaptic serve                                                        # stdio MCP server
 synaptic serve --http 127.0.0.1:8765 --api-key "$SYNAPTIC_API_KEY"   # HTTP server
+synaptic serve --allow-memory-write                                   # opt-in outcome recording
+synaptic serve --memory-principal reviewer \
+  --memory-repository-claim owner/repo                                # scope-filtered memory
 synaptic serve --graph promoted/graph.json --immutable-graph \
   --expected-graph-sha256 "$GRAPH_SHA256"                             # authenticate exact loaded bytes
 synaptic serve --http 127.0.0.1:0 --ready-file /run/synaptic/ready.json # race-free child startup
 ```
 
-The server exposes 30 read-only tools: graph navigation (`query_graph`, `get_node`,
+The server exposes 30 core tools plus five read-only repository-memory tools:
+graph navigation (`query_graph`, `get_node`,
 `get_source`, `get_neighbors`, `get_community`, `god_nodes`, `graph_stats`, `shortest_path`),
 impact analysis (`affected`, `find_callers`, `find_callees`, `find_references`, `dynamic_hazards`,
 `predict_impact`, `affected_tests`, `predict_edit`), federation (`list_repos`, `repo_stats`), change/PR review (`working_changes_impact`,
 `list_prs`, `get_pr_impact`, `triage_prs`), the advanced trio (`structural_search`,
 `time_travel_diff`, plan-only `plan_rename`), port/readiness audit (`readiness_audit`), and SQL auditing (`audit_sql`, `advise_sql`).
+Memory retrieval adds `search_memory`, `explain_history`,
+`find_similar_change`, `known_pitfalls`, and `explain_decision`;
+`record_change_outcome` is advertised only with `--allow-memory-write`.
 It also serves MCP prompts, argument completions, resource templates and
 subscriptions, and a small REST surface (`/api/stats`, `/api/query`, ...) for non-MCP
 clients. Tool output is tuned to stay token-lean (terse defaults, capped lists); add
@@ -405,7 +420,7 @@ desktop app). See [MCP Server](https://github.com/ColinVaughn/Synaptic/wiki/MCP-
 30+ languages via tree-sitter, each built and tested in isolation in CI: Python,
 JavaScript/TypeScript (+ JSX/TSX, Vue/Svelte/Astro), Go, Rust, Java, C#, Kotlin, Swift, C,
 C++, Objective-C, Ruby, PHP, Scala, Groovy, Lua, Dart, Elixir, Julia, Zig, Bash, PowerShell,
-Verilog, Fortran, and regex/delegation extractors for Classic ASP, Salesforce Apex,
+Verilog, Fortran, CodeQL QL, and regex/delegation extractors for Classic ASP, Salesforce Apex,
 Pascal/Delphi, and Razor/Blazor. Plus data and project formats: SQL, JSON, YAML,
 HCL/Terraform, .NET project files (`.csproj`/`.sln`/`.slnx`), and Markdown structure.
 Framework-aware edges for PHP/Laravel and Dart/Flutter. Full breakdown in

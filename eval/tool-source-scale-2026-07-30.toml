@@ -1,0 +1,39 @@
+# Six source-available developer tools used as real-world Synaptic extraction
+# workloads. Each repository is pinned to the HEAD resolved on 2026-07-30;
+# benchmark results are meaningful only for these exact revisions.
+
+[[repo]]
+url = "https://github.com/sourcegraph/sourcegraph-public-snapshot"
+sha = "c864f15af264f0f456a6d8a83290b5c940715349"
+family = "mixed-go-typescript"
+tier = "large-sourcegraph"
+
+[[repo]]
+url = "https://github.com/sourcegraph/cody-public-snapshot"
+sha = "8e20ac6c1460c08b0db581c0204658112a246eda"
+family = "web-typescript"
+tier = "large-cody"
+
+[[repo]]
+url = "https://github.com/github/codeql"
+sha = "7bb0034f4328613ae34acde826c4c5ceafbef5ee"
+family = "mixed-codeql"
+tier = "large-codeql"
+
+[[repo]]
+url = "https://github.com/joernio/joern"
+sha = "80ef1868dbe0ab23566f99dba279026a286c2019"
+family = "jvm-scala"
+tier = "large-joern"
+
+[[repo]]
+url = "https://github.com/Aider-AI/aider"
+sha = "5dc9490bb35f9729ef2c95d00a19ccd30c26339c"
+family = "scripting-python"
+tier = "medium-aider"
+
+[[repo]]
+url = "https://github.com/safishamsi/graphify"
+sha = "4fe11092ccbe9f543608f140c790f68d5d83cae4"
+family = "scripting-python"
+tier = "medium-graphify"

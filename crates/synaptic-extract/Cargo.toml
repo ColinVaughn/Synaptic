@@ -25,7 +25,7 @@ cache-binary = ["dep:rmp-serde"]
 # source, so it needs the regex dep. On by default; turn off to drop the extra
 # inferred edges (and the regex build cost on single-language builds).
 cross-language = ["dep:regex"]
-default = ["cache-binary", "cross-language", "lang-python", "lang-javascript", "lang-typescript", "lang-go", "lang-rust", "lang-java", "lang-csharp", "lang-kotlin", "lang-swift", "lang-c", "lang-cpp", "lang-json", "lang-yaml", "lang-hcl", "lang-sql", "lang-ruby", "lang-php", "lang-lua", "lang-bash", "lang-powershell", "lang-scala", "lang-dart", "lang-elixir", "lang-julia", "lang-zig", "lang-asp", "lang-groovy", "lang-objc", "lang-verilog", "lang-fortran", "lang-vue", "lang-svelte", "lang-astro", "lang-dotnet", "lang-markdown", "lang-apex", "lang-pascal", "lang-razor"]
+default = ["cache-binary", "cross-language", "lang-python", "lang-javascript", "lang-typescript", "lang-go", "lang-rust", "lang-java", "lang-csharp", "lang-kotlin", "lang-swift", "lang-c", "lang-cpp", "lang-json", "lang-yaml", "lang-hcl", "lang-sql", "lang-ruby", "lang-php", "lang-lua", "lang-bash", "lang-powershell", "lang-scala", "lang-dart", "lang-elixir", "lang-julia", "lang-zig", "lang-asp", "lang-groovy", "lang-objc", "lang-verilog", "lang-fortran", "lang-ql", "lang-vue", "lang-svelte", "lang-astro", "lang-dotnet", "lang-markdown", "lang-apex", "lang-pascal", "lang-razor"]
 lang-python = ["dep:tree-sitter-python"]
 lang-javascript = ["dep:tree-sitter-javascript"]
 lang-typescript = ["dep:tree-sitter-typescript"]
@@ -56,6 +56,7 @@ lang-groovy = ["dep:tree-sitter-groovy"]
 lang-objc = ["dep:tree-sitter-objc"]
 lang-verilog = ["dep:tree-sitter-verilog"]
 lang-fortran = ["dep:tree-sitter-fortran"]
+lang-ql = ["dep:tree-sitter-ql", "dep:regex"]
 lang-vue = ["lang-typescript", "lang-javascript"]
 lang-svelte = ["lang-typescript", "lang-javascript"]
 lang-astro = ["lang-typescript", "lang-javascript"]
@@ -82,6 +83,7 @@ rmp-serde = { version = "1", optional = true }
 regex = { workspace = true, optional = true }
 roxmltree = { workspace = true, optional = true }
 tree-sitter = { workspace = true }
+rayon = { workspace = true }
 tree-sitter-python = { workspace = true, optional = true }
 tree-sitter-javascript = { workspace = true, optional = true }
 tree-sitter-typescript = { workspace = true, optional = true }
@@ -111,6 +113,7 @@ tree-sitter-groovy = { workspace = true, optional = true }
 tree-sitter-objc = { workspace = true, optional = true }
 tree-sitter-verilog = { workspace = true, optional = true }
 tree-sitter-fortran = { workspace = true, optional = true }
+tree-sitter-ql = { workspace = true, optional = true }
 sqlparser = { workspace = true, optional = true }
 
 [dev-dependencies]

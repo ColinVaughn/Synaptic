@@ -6,8 +6,12 @@
 synaptic-out/
 # Local design notes (not tracked).
 /design/
-# Local planning notes (not tracked).
-/docs/
+# Local planning notes (not tracked), except repository-memory source artifacts.
+/docs/*
+!/docs/adr/
+!/docs/adr/*.md
+!/docs/procedures/
+!/docs/procedures/*.md
 # Local agent/editor integration for Synaptic (skill, hooks, MCP config). Not tracked.
 /.claude/
 /.mcp.json

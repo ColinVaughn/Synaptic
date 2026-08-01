@@ -1,5 +1,6 @@
-//! Cross-file pass: bind JS/TS imports to real nodes now that the full file set
-//! is known (the per-file extractor only emits specifier-labeled stubs).
+//! Cross-file pass: bind JS/TS and QL imports to real nodes now that the full
+//! file set is known (the per-file extractor only emits specifier-labeled
+//! stubs).
 //!
 //! Three kinds of import are handled:
 //! - **relative code** (`./foo`, `../bar`) → bound to the in-corpus file node,
@@ -35,6 +36,8 @@ pub struct ResolveStats {
     pub assets: usize,
     /// Distinct asset nodes minted.
     pub asset_nodes: usize,
+    /// QL module imports bound to a real `.qll`/`.ql` file node.
+    pub ql_bound: usize,
 }
 
 /// Strip a known JS/TS extension, returning the extensionless path.
@@ -130,6 +133,99 @@ fn build_code_index(nodes: &[Node]) -> HashMap<String, NodeId> {
     by_key
 }
 
+type QlFileIndex = HashMap<String, Vec<(String, NodeId)>>;
+
+fn ql_path_suffixes(path: &str) -> Vec<String> {
+    let normalized = path.replace('\\', "/");
+    let without_ext = normalized
+        .strip_suffix(".qll")
+        .or_else(|| normalized.strip_suffix(".ql"))
+        .unwrap_or(&normalized);
+    let parts: Vec<&str> = without_ext.split('/').collect();
+    (0..parts.len())
+        .map(|start| parts[start..].join("/").to_ascii_lowercase())
+        .collect()
+}
+
+/// Module suffix -> QL source file(s). Precomputing every path suffix makes
+/// resolution O(imports) rather than O(imports x all QL files), which matters
+/// for CodeQL's tens of thousands of import edges.
+fn build_ql_file_index(nodes: &[Node]) -> QlFileIndex {
+    let mut index = HashMap::new();
+    for node in nodes {
+        if node.source_file.is_empty()
+            || file_node_id(&node.source_file) != node.id
+            || !matches!(
+                std::path::Path::new(&node.source_file)
+                    .extension()
+                    .and_then(|ext| ext.to_str()),
+                Some("ql" | "qll")
+            )
+        {
+            continue;
+        }
+        let path = node.source_file.replace('\\', "/");
+        for suffix in ql_path_suffixes(&path) {
+            index
+                .entry(suffix)
+                .or_insert_with(Vec::new)
+                .push((path.clone(), node.id.clone()));
+        }
+    }
+    index
+}
+
+/// Filesystem suffix represented by a QL import. A module instantiation such as
+/// `DataFlow::Global<Config>` is defined by the file for its first component.
+fn ql_import_suffix(spec: &str) -> String {
+    let compact: String = spec.chars().filter(|c| !c.is_whitespace()).collect();
+    let base = compact.split("::").next().unwrap_or(&compact);
+    let base = base.split('<').next().unwrap_or(base);
+    base.replace('.', "/")
+}
+
+fn common_path_prefix_len(a: &str, b: &str) -> usize {
+    a.split('/')
+        .zip(b.split('/'))
+        .take_while(|(left, right)| left.eq_ignore_ascii_case(right))
+        .count()
+}
+
+/// Resolve a QL module path to one source file. Exact suffixes are required. If
+/// several packs contain that suffix, a same-pack candidate wins only when its
+/// shared importer prefix is strictly longest.
+fn resolve_ql_module(spec: &str, importer: &str, files: &QlFileIndex) -> Option<NodeId> {
+    let suffix = ql_import_suffix(spec).to_ascii_lowercase();
+    if suffix.is_empty() {
+        return None;
+    }
+    let mut candidates: Vec<(&str, &NodeId)> = files
+        .get(&suffix)?
+        .iter()
+        .map(|(path, id)| (path.as_str(), id))
+        .collect();
+    if candidates.len() == 1 {
+        return candidates.pop().map(|(_, id)| id.clone());
+    }
+
+    let importer = importer.replace('\\', "/");
+    let mut ranked: Vec<(usize, &NodeId)> = candidates
+        .into_iter()
+        .map(|(path, id)| (common_path_prefix_len(&importer, path), id))
+        .collect();
+    ranked.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
+    match ranked.as_slice() {
+        [(score, id), rest @ ..]
+            if rest
+                .first()
+                .is_none_or(|(next_score, _)| next_score < score) =>
+        {
+            Some((*id).clone())
+        }
+        _ => None,
+    }
+}
+
 /// Build an asset file node for a canonical path. Real (non-empty `source_file`)
 /// so it is locatable and survives the orphan-stub cleanup.
 fn make_asset_node(canonical: &str, kind: &'static str) -> Node {
@@ -182,6 +278,7 @@ pub fn resolve_imports(
     aliases: &AliasResolver,
 ) -> ResolveStats {
     let by_key = build_code_index(nodes);
+    let ql_files = build_ql_file_index(nodes);
     let mut existing: HashSet<NodeId> = nodes.iter().map(|n| n.id.clone()).collect();
     let label_of: HashMap<NodeId, String> = nodes
         .iter()
@@ -193,6 +290,19 @@ pub fn resolve_imports(
     let mut stats = ResolveStats::default();
 
     for e in edges.iter_mut() {
+        if e.context.as_deref() == Some("ql_import") {
+            let Some(spec) = label_of.get(&e.target) else {
+                continue;
+            };
+            if let Some(id) = resolve_ql_module(spec, &e.source_file, &ql_files) {
+                if id != e.source {
+                    rewired_from.insert(e.target.clone());
+                    e.target = id;
+                    stats.ql_bound += 1;
+                }
+            }
+            continue;
+        }
         if e.context.as_deref() != Some("import") {
             continue;
         }
@@ -265,7 +375,7 @@ pub fn resolve_imports(
     // Drop specifier stubs (relative-labeled, or any we rewired away from) that
     // are no longer referenced by an edge. Bare-package stubs (`react`) keep
     // their import edge, so they survive.
-    if stats.relative_bound + stats.alias_bound + stats.assets > 0 {
+    if stats.relative_bound + stats.alias_bound + stats.assets + stats.ql_bound > 0 {
         let referenced: HashSet<&NodeId> =
             edges.iter().flat_map(|e| [&e.source, &e.target]).collect();
         nodes.retain(|n| {
@@ -275,6 +385,68 @@ pub fn resolve_imports(
         });
     }
     stats
+}
+
+#[cfg(all(test, feature = "lang-ql"))]
+mod ql_tests {
+    use super::*;
+    use crate::ql::extract_ql_source;
+    use crate::result::ExtractionResult;
+
+    fn aggregate(results: Vec<ExtractionResult>) -> (Vec<Node>, Vec<Edge>) {
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        for result in results {
+            nodes.extend(result.nodes);
+            edges.extend(result.edges);
+        }
+        (nodes, edges)
+    }
+
+    #[test]
+    fn ql_import_binds_to_library_file() {
+        let query = extract_ql_source(
+            "java/ql/src/Security/Query.ql",
+            b"import semmle.code.java.DataFlow\nfrom int x select x\n",
+        );
+        let library = extract_ql_source(
+            "java/ql/lib/semmle/code/java/DataFlow.qll",
+            b"predicate flow(int x, int y) { x = y }\n",
+        );
+        let (mut nodes, mut edges) = aggregate(vec![query, library]);
+        let stats = resolve_imports(&mut nodes, &mut edges, &AliasResolver::default());
+        assert_eq!(stats.ql_bound, 1);
+        assert!(edges.iter().any(|edge| {
+            edge.context.as_deref() == Some("ql_import")
+                && edge.target == file_node_id("java/ql/lib/semmle/code/java/DataFlow.qll")
+        }));
+        assert!(
+            !nodes.iter().any(|node| {
+                node.source_file.is_empty() && node.label == "semmle.code.java.DataFlow"
+            }),
+            "rewired QL module stub should be removed"
+        );
+    }
+
+    #[test]
+    fn ambiguous_ql_module_prefers_importers_pack() {
+        let query = extract_ql_source("java/ql/src/Query.ql", b"import shared.Utils\nselect 1\n");
+        let java = extract_ql_source(
+            "java/ql/lib/shared/Utils.qll",
+            b"predicate javaOnly() { any() }",
+        );
+        let cpp = extract_ql_source(
+            "cpp/ql/lib/shared/Utils.qll",
+            b"predicate cppOnly() { any() }",
+        );
+        let (mut nodes, mut edges) = aggregate(vec![query, java, cpp]);
+        let stats = resolve_imports(&mut nodes, &mut edges, &AliasResolver::default());
+        assert_eq!(stats.ql_bound, 1);
+        assert!(edges.iter().any(|edge| {
+            edge.context.as_deref() == Some("ql_import")
+                && edge.target == file_node_id("java/ql/lib/shared/Utils.qll")
+        }));
+    }
 }
 
 #[cfg(all(test, feature = "lang-typescript"))]

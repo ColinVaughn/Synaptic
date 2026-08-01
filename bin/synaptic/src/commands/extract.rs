@@ -112,20 +112,22 @@ pub(crate) fn run_extract(
     // `collect` preserves the (path-sorted) input order, so the merge, and thus
     // graph.json, is deterministic regardless of thread scheduling. The AST
     // cache lets an unchanged file skip re-parsing on a rebuild.
-    let results: Vec<Option<ExtractionResult>> = code_files
-        .par_iter()
-        .map(|file| {
-            let rel = file.strip_prefix(&root).unwrap_or(file);
-            let rel_str = rel.to_string_lossy();
-            match std::fs::read(file) {
-                Ok(bytes) => cached_extract_source(Some(&cache_dir), rel_str.as_ref(), &bytes),
-                Err(e) => {
-                    eprintln!("warning: failed to read {}: {e}", file.display());
-                    None
+    let results: Vec<Option<ExtractionResult>> = synaptic_extract::with_extraction_pool(|| {
+        code_files
+            .par_iter()
+            .map(|file| {
+                let rel = file.strip_prefix(&root).unwrap_or(file);
+                let rel_str = rel.to_string_lossy();
+                match std::fs::read(file) {
+                    Ok(bytes) => cached_extract_source(Some(&cache_dir), rel_str.as_ref(), &bytes),
+                    Err(e) => {
+                        eprintln!("warning: failed to read {}: {e}", file.display());
+                        None
+                    }
                 }
-            }
-        })
-        .collect();
+            })
+            .collect()
+    });
 
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
@@ -147,11 +149,12 @@ pub(crate) fn run_extract(
     let stats = resolve_imports(&mut nodes, &mut edges, &aliases);
     println!(
         "Extracted {extracted} code files → {} nodes, {} edges (pre-build); \
-         {} relative, {} alias, {} asset import(s) resolved ({} asset nodes)",
+         {} relative, {} alias, {} QL module, {} asset import(s) resolved ({} asset nodes)",
         nodes.len(),
         edges.len(),
         stats.relative_bound,
         stats.alias_bound,
+        stats.ql_bound,
         stats.assets,
         stats.asset_nodes,
     );
@@ -183,22 +186,27 @@ pub(crate) fn run_extract(
             .cloned()
             .collect();
         if !md_files.is_empty() {
-            let md_results: Vec<Option<ExtractionResult>> = md_files
-                .par_iter()
-                .map(|file| {
-                    let rel = file.strip_prefix(&root).unwrap_or(file);
-                    let rel_str = rel.to_string_lossy();
-                    match std::fs::read(file) {
-                        Ok(bytes) => {
-                            cached_extract_source(Some(&cache_dir), rel_str.as_ref(), &bytes)
-                        }
-                        Err(e) => {
-                            eprintln!("warning: failed to read {}: {e}", file.display());
-                            None
-                        }
-                    }
-                })
-                .collect();
+            let md_results: Vec<Option<ExtractionResult>> =
+                synaptic_extract::with_extraction_pool(|| {
+                    md_files
+                        .par_iter()
+                        .map(|file| {
+                            let rel = file.strip_prefix(&root).unwrap_or(file);
+                            let rel_str = rel.to_string_lossy();
+                            match std::fs::read(file) {
+                                Ok(bytes) => cached_extract_source(
+                                    Some(&cache_dir),
+                                    rel_str.as_ref(),
+                                    &bytes,
+                                ),
+                                Err(e) => {
+                                    eprintln!("warning: failed to read {}: {e}", file.display());
+                                    None
+                                }
+                            }
+                        })
+                        .collect()
+                });
             let mut md_nodes = 0usize;
             for res in md_results.into_iter().flatten() {
                 md_nodes += res.nodes.len();

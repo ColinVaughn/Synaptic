@@ -79,17 +79,18 @@ pub fn cohesion_score(kg: &KnowledgeGraph, nodes: &[NodeId]) -> f64 {
 /// Compute cohesion for a node partition with one pass over the graph's edges.
 /// `groups` is a partition produced by the clustering pipeline, so each node is
 /// expected to occur in at most one group.
-fn partition_cohesion_scores(
+pub fn partition_cohesion_scores<'a>(
     kg: &KnowledgeGraph,
-    groups: &[Vec<NodeId>],
+    groups: impl IntoIterator<Item = &'a [NodeId]>,
     minimum_size: usize,
 ) -> Vec<f64> {
+    let groups: Vec<&[NodeId]> = groups.into_iter().collect();
     let mut owner: HashMap<&NodeId, usize> = HashMap::new();
     for (group_index, group) in groups.iter().enumerate() {
         if group.len() < minimum_size {
             continue;
         }
-        for id in group {
+        for id in group.iter() {
             debug_assert!(
                 owner.insert(id, group_index).is_none(),
                 "cluster partition contains node {id} more than once"
@@ -299,7 +300,11 @@ pub fn cluster(kg: &KnowledgeGraph, opts: &ClusterOptions) -> BTreeMap<u32, Vec<
 
     // Re-split low-cohesion communities. Cohesion is calculated for the whole
     // partition in one edge pass instead of rescanning every edge per group.
-    let cohesion_scores = partition_cohesion_scores(kg, &after_size, COHESION_SPLIT_MIN_SIZE);
+    let cohesion_scores = partition_cohesion_scores(
+        kg,
+        after_size.iter().map(Vec::as_slice),
+        COHESION_SPLIT_MIN_SIZE,
+    );
     let mut after_coh: Vec<Vec<NodeId>> = Vec::new();
     for (grp, cohesion) in after_size.into_iter().zip(cohesion_scores) {
         if grp.len() >= COHESION_SPLIT_MIN_SIZE && cohesion < COHESION_SPLIT_THRESHOLD {
@@ -532,8 +537,8 @@ mod tests {
                 ("e", "f"),
             ],
         );
-        let groups = vec![ids(&["a", "b", "c"]), ids(&["d"]), ids(&["e", "f"])];
-        let actual = partition_cohesion_scores(&kg, &groups, 0);
+        let groups = [ids(&["a", "b", "c"]), ids(&["d"]), ids(&["e", "f"])];
+        let actual = partition_cohesion_scores(&kg, groups.iter().map(Vec::as_slice), 0);
         let expected: Vec<f64> = groups
             .iter()
             .map(|group| cohesion_score(&kg, group))

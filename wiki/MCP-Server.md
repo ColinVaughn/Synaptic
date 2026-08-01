@@ -3,7 +3,9 @@
 `synaptic serve` exposes a loaded graph to an AI assistant over the Model
 Context Protocol. It speaks JSON-RPC 2.0 directly (no external MCP runtime
 dependency). The server is read-only over the graph; the PR and working-changes
-tools shell out to `gh`/`git` to read state but never write.
+tools shell out to `gh`/`git` to read state but never write. It also opens the
+source root's durable repository-memory overlay. Memory queries are read-only;
+the sole writer is absent unless the operator enables `--allow-memory-write`.
 
 The graph is loaded once at startup from a `graph.json` and hot-reloads when that
 file changes on disk. It also keeps itself current as you edit source. By default,
@@ -84,7 +86,7 @@ older protocols define them.
 ## Running the server
 
 ```
-synaptic serve [--graph <path>] [--http <addr>] [--api-key <key>] [--source-root <dir>] [--allow-exec] [--concise] [--watch] [--immutable-graph] [--expected-graph-sha256 <hex>] [--ready-file <path>]
+synaptic serve [--graph <path>] [--http <addr>] [--api-key <key>] [--source-root <dir>] [--allow-exec] [--allow-memory-write] [--memory-peer <store>]... [--memory-principal <id> MEMORY-CLAIMS] [--concise] [--watch] [--immutable-graph] [--expected-graph-sha256 <hex>] [--ready-file <path>]
 ```
 
 - `--graph <path>` selects the `graph.json` to load. Default is the standard
@@ -102,6 +104,16 @@ synaptic serve [--graph <path>] [--http <addr>] [--api-key <key>] [--source-root
   This makes the server **no longer read-only** — `speculate` executes the
   project's test/build commands in a throwaway worktree — so enable it only for
   trusted clients. Without it the tool is neither advertised nor runnable.
+- `--allow-memory-write`: expose the idempotent `record_change_outcome` tool.
+  The five source-grounded memory query tools are available without this flag.
+  This gate is independent of `--allow-exec`.
+- `--memory-peer <store>`: add another immutable-record store to federated
+  memory reads. Identical replicas deduplicate; divergent IDs fail closed.
+- `--memory-principal <id>`: replace trusted operator access with a fixed
+  principal. Repeated `--memory-repository-claim` and
+  `--memory-workspace-claim` grant scopes; `--memory-allow-private` grants all
+  private records, otherwise only records owned by the principal are visible.
+  These are server settings, never MCP tool arguments.
 - `--watch`: embed the event-driven source watcher described above. Equivalent
   to `SYNAPTIC_SERVE_WATCH=1`; watcher startup failure falls back safely to the
   debounced per-query staleness check.
@@ -249,15 +261,17 @@ size.
 
 ## MCP tools
 
-`tools/list` reports 30 tools by default (31 with `--allow-exec`, which adds
-`speculate`). Every tool documents its parameters in its input schema, and every
-tool carries annotations so a host knows how safe it is to run:
+`tools/list` reports the 30 core tools plus five repository-memory query tools by
+default. `--allow-exec` adds `speculate`; `--allow-memory-write` adds
+`record_change_outcome`. Every tool documents its parameters in its input
+schema, and every tool carries annotations so a host knows how safe it is to
+run:
 
 ```json
 "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": <bool> }
 ```
 
-All 30 default tools are `readOnlyHint: true`. `openWorldHint` is `true` only for
+All default tools are `readOnlyHint: true`. `openWorldHint` is `true` only for
 the tools that reach outside the graph by shelling out (`list_prs`,
 `get_pr_impact`, `triage_prs`, `working_changes_impact`, `predict_impact`,
 `affected_tests`, and `time_travel_diff`); it is `false` for the rest, including
@@ -269,6 +283,37 @@ server is started with `--allow-exec`. It runs the project's test/build commands
 in a throwaway worktree (the empirical counterpart to `predict_impact`), so it is
 annotated honestly as `readOnlyHint: false, openWorldHint: true`. The default
 server never advertises or runs it, preserving the strictly read-only surface.
+
+The other opt-in mutation is **`record_change_outcome`**, present only with
+`--allow-memory-write`. It creates one source-grounded, idempotent local memory
+record and is annotated `readOnlyHint: false`, `destructiveHint: false`,
+`idempotentHint: true`, and `openWorldHint: false`.
+
+### Repository memory
+
+The memory overlay contributes:
+
+- `search_memory`
+- `explain_history`
+- `find_similar_change`
+- `known_pitfalls`
+- `explain_decision`
+- `record_change_outcome` (only with `--allow-memory-write`)
+
+Results cite their source artifact and retain revision, verification,
+confidence, lifecycle, access scope, owner, links, affected-symbol anchors, and
+symbol-rename lineage in
+`structuredContent`. Superseded/retracted records are hidden unless explicitly
+requested. Principal authorization is applied before counts, candidate
+diagnostics, supersession, rendering, or writes. See
+[Repository Memory](Repository-Memory) for the data model and capture flow.
+
+`get_node`, `affected`, and `predict_edit` automatically add bounded memory
+evidence for their subject. Negative memories sort first, then governing
+decisions and ordinary history. `predict_impact`, `working_changes_impact`, and
+`get_pr_impact` aggregate evidence over their changed files, deduplicate records,
+and retain matched subjects. Typed responses expose counts and compact cited
+records under `structuredContent.memory_evidence`.
 
 Each tool returns a text content block (the load-bearing, purpose-formatted
 output). Sixteen tools additionally declare an `outputSchema` and return a typed
@@ -636,7 +681,8 @@ Parameters:
 ### get_pr_impact
 
 One PR's detail plus its graph blast radius (communities and nodes touched).
-Requires `gh`.
+Requires `gh`. The response includes `changed_files` and bounded repository
+memory evidence aggregated across those files.
 
 Parameters:
 - `pr_number` (integer, required).
@@ -674,7 +720,8 @@ Parameters:
   blast radius.
 
 Returns `Working changes vs <base>: <n> files, <n> graph nodes, <n> communities
-touched` and the changed files. With `code_only`, the count reads `<n> code graph
+touched`, the changed files, and aggregate repository-memory evidence. With
+`code_only`, the count reads `<n> code graph
 nodes`. The two empty outcomes are reported distinctly: a real clean tree gives
 `No changes vs <base>.`, while a missing/failed git or a directory that is not a
 git repository (e.g. the top-level directory of a federated workspace) gives a
@@ -698,6 +745,9 @@ Parameters:
 - `base` (string) -- base branch to diff against when `files` is omitted; defaults
   to the detected default branch.
 - `depth` (integer) -- reverse-impact hop bound. Default 3, max 16.
+
+The structured forecast includes deduplicated repository-memory evidence for
+the complete `changed_files` set, with each record's `matched_subjects`.
 
 Returns the forecast summary, a heuristic change-risk score (low/medium/high
 with its drivers), the changed nodes, the public APIs at risk, the tests at risk,

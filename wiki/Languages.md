@@ -185,6 +185,32 @@ procedure nodes; `contains` and `method` edges. No call graph.
 Modules, programs, and submodules; subroutines and functions; `imports_from` for
 `use`; `calls` (intrinsics like `print` / `write` / `read` are filtered).
 
+### CodeQL QL (`.ql`, `.qll`)
+
+Queries and libraries are parsed as QL source. Synaptic extracts modules,
+classes and type aliases, newtypes and their branches, fields, predicates,
+member predicates, characteristic predicates, and top-level `select` bodies.
+Predicate nodes carry typed signatures and `ql_arity`, so overloads have
+distinct identities and calls resolve by name plus arity. QL `private`
+annotations populate visibility. Current `overlay[...]` declarations are parsed
+with byte-preserving source normalization; the directive count and modes remain
+on the file node as `ql_overlay_directives` and `ql_overlay_modes`.
+
+Imports become `imports_from` edges and bind to the corresponding `.qll` or
+`.ql` file, including aliased imports and duplicate module names in different
+CodeQL packs. Module signatures become `implements`; class `extends`,
+`instanceof`, parameter, return, and field types become `inherits` or
+context-tagged `references`. Predicate calls resolve within a file and across
+imported modules; a unique corpus-wide fallback is retained as lower-confidence
+inference.
+
+The upstream tree-sitter grammar does not currently expose QL
+`signature class`, `signature module`, or `signature predicate` declarations,
+so a comment-aware recovery pass records those declarations. This support
+models QL source structure for navigation, impact analysis, and repository
+reasoning. It does not compile or evaluate queries, create CodeQL databases,
+perform QL type checking, or reproduce CodeQL's data-flow and taint semantics.
+
 ## Config and data formats (tree-sitter)
 
 ### JSON (`.json`)
@@ -321,6 +347,7 @@ feature names follow the language: `lang-python`, `lang-typescript`,
 `lang-swift`, `lang-c`, `lang-cpp`, `lang-ruby`, `lang-php`, `lang-lua`,
 `lang-bash`, `lang-powershell`, `lang-scala`, `lang-elixir`, `lang-julia`,
 `lang-zig`, `lang-dart`, `lang-objc`, `lang-verilog`, `lang-fortran`, `lang-groovy`,
+`lang-ql`,
 `lang-json`, `lang-yaml`, `lang-hcl`, `lang-sql`, `lang-asp`, `lang-apex`,
 `lang-pascal`, `lang-markdown`, `lang-dotnet`, `lang-razor`, `lang-vue`,
 `lang-svelte`, `lang-astro`, and the JavaScript pair `lang-javascript` /

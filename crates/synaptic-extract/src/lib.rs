@@ -3,6 +3,26 @@
 //! features so a build only compiles the grammars it needs.
 
 use std::path::Path;
+use std::sync::LazyLock;
+
+/// Parser walks are depth-bounded, but generated fixtures in very large
+/// repositories can still require more than Rayon's small platform-default
+/// worker stack. This mirrors the CLI's 64 MiB worker and, unlike
+/// `RUST_MIN_STACK`, applies deterministically without requiring user setup.
+const EXTRACTION_STACK_BYTES: usize = 64 * 1024 * 1024;
+
+static EXTRACTION_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
+    rayon::ThreadPoolBuilder::new()
+        .stack_size(EXTRACTION_STACK_BYTES)
+        .thread_name(|index| format!("synaptic-extract-{index}"))
+        .build()
+        .expect("build Synaptic extraction thread pool")
+});
+
+/// Run parallel file extraction on workers with parser-safe stacks.
+pub fn with_extraction_pool<R: Send>(operation: impl FnOnce() -> R + Send) -> R {
+    EXTRACTION_POOL.install(operation)
+}
 
 pub mod cache;
 pub mod config;
@@ -45,6 +65,7 @@ pub mod c;
     feature = "lang-objc",
     feature = "lang-verilog",
     feature = "lang-fortran",
+    feature = "lang-ql",
     feature = "lang-dotnet",
     feature = "lang-markdown",
     feature = "lang-apex",
@@ -92,6 +113,8 @@ pub mod pascal;
 pub mod php;
 #[cfg(feature = "lang-powershell")]
 pub mod powershell;
+#[cfg(feature = "lang-ql")]
+pub mod ql;
 #[cfg(feature = "lang-razor")]
 pub mod razor;
 #[cfg(feature = "lang-json")]
@@ -217,6 +240,8 @@ pub fn extract_source(path: &str, source: &[u8]) -> Option<ExtractionResult> {
         "f90" | "f95" | "f03" | "f08" | "f" | "for" => {
             Some(fortran::extract_fortran_source(path, source))
         }
+        #[cfg(feature = "lang-ql")]
+        "ql" | "qll" => Some(ql::extract_ql_source(path, source)),
         #[cfg(feature = "lang-verilog")]
         "v" | "sv" | "vh" | "svh" => Some(verilog::extract_verilog_source(path, source)),
         #[cfg(feature = "lang-vue")]
@@ -303,6 +328,11 @@ mod tests {
     fn dispatch_ignores_unknown_extension() {
         assert!(extract_source("a/b.zzz", b"x").is_none());
         assert!(extract_source("noext", b"x").is_none());
+    }
+
+    #[test]
+    fn extraction_pool_executes_work() {
+        assert_eq!(with_extraction_pool(|| 6 * 7), 42);
     }
 
     #[cfg(feature = "lang-json")]
