@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use synaptic_api::{
     build_coordination_plan, credential_scope_for_stage, execute_worker_attempt, BoundedJobQueue,
     CancellationToken, CredentialScope, HostedApiJob, JobStage, QueueError, RepositoryImpact,
@@ -123,17 +121,18 @@ fn credentials_and_workspaces_are_scoped_to_one_stage_and_repository() {
         }
     );
 
+    let worker_root = std::env::current_dir()
+        .expect("test process should have an absolute working directory")
+        .join("workers");
+    let assigned_root = worker_root.join("tenant-a").join("org-payments");
+    let assigned_run = assigned_root.join("run-1");
+    let other_repository = worker_root.join("tenant-b").join("org-billing");
+
     assert!(job
-        .validate_workspace(
-            Path::new("C:/workers/tenant-a/org-payments"),
-            Path::new("C:/workers/tenant-a/org-payments/run-1"),
-        )
+        .validate_workspace(&assigned_root, &assigned_run)
         .is_ok());
     assert!(job
-        .validate_workspace(
-            Path::new("C:/workers/tenant-a/org-payments"),
-            Path::new("C:/workers/tenant-b/org-billing"),
-        )
+        .validate_workspace(&assigned_root, &other_repository)
         .is_err());
 }
 

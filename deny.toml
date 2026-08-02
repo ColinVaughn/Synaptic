@@ -45,3 +45,9 @@ wildcards = "allow"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+required-git-spec = "rev"
+allow-git = [
+    # The crates.io archive predates the regenerated parser required for
+    # anonymous CodeQL modules. Keep this exception exact and revision-pinned.
+    "https://github.com/tree-sitter/tree-sitter-ql.git",
+]
