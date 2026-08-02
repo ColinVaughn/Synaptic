@@ -28,7 +28,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.5
         with:
           tool: clippy-sarif,sarif-fmt
       # Collect clippy findings as SARIF for the GitHub Security tab. This does not
