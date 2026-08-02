@@ -100,6 +100,24 @@ pub fn ingest_repository_documents(
             .replace('\\', "/");
         let source_uri = format!("file:{relative}");
         let digest = blake3::hash(&bytes).to_hex().to_string();
+        let idempotency_key = format!("document:{relative}:{digest}");
+        // The document bytes define this immutable observation. Branch/commit
+        // metadata, graph-resolved anchors, and supersession links are contextual
+        // enrichment and can legitimately change between retries (for example,
+        // when an unchanged working-tree ADR is committed before the next
+        // refresh). Preserve the first record when its source identity matches,
+        // while still letting the store reject a reused key whose source does not.
+        if existing.iter().any(|candidate| {
+            candidate.repository == repository
+                && candidate.idempotency_key == idempotency_key
+                && candidate.kind == kind
+                && candidate.sources.iter().any(|source| {
+                    source.uri == source_uri && source.digest.as_deref() == Some(digest.as_str())
+                })
+        }) {
+            report.already_present += 1;
+            continue;
+        }
         let metadata = document_revision(repo_root, &relative).unwrap_or_else(|| {
             let occurred_at = std::fs::metadata(&path)
                 .and_then(|metadata| metadata.modified())
@@ -117,7 +135,7 @@ pub fn ingest_repository_documents(
         let summary = first_prose_paragraph(&text)
             .unwrap_or_else(|| format!("Repository {} documented in {relative}.", kind.as_str()));
         let mut record = MemoryRecord::new(
-            format!("document:{relative}:{digest}"),
+            idempotency_key,
             kind,
             title,
             summary,

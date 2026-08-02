@@ -1,0 +1,7 @@
+version = 1
+[[package]]
+name = "stripe"
+version = "11.2.0"
+[[package]]
+name = "requests"
+version = "2.32.0"

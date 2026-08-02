@@ -1,0 +1,4 @@
+version = 1
+[[package]]
+name = "stripe"
+version = "15.0.0"

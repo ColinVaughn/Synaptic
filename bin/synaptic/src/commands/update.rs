@@ -178,6 +178,16 @@ pub(crate) fn run_update(
         reextracted,
         evicted
     );
+    let coverage =
+        super::api::refresh_coverage_artifact(&root, &out_dir, &outcome.kg.to_graph_data())?;
+    if !coverage.observations.is_empty() || !coverage.development_dependencies.is_empty() {
+        println!(
+            "API coverage: {} observation(s), {} unresolved gap(s), {} development negative control(s)",
+            coverage.observations.len(),
+            coverage.gaps.len(),
+            coverage.development_dependencies.len()
+        );
+    }
     // Keep an existing sharded store fresh so redb-backed reads never answer
     // from a stale shard (no store dir means the user opted out at extract
     // time). Unchanged shards are hash-skipped, so this is cheap. On failure

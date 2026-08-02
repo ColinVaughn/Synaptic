@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synaptic.dev/schemas/api-change-event-v1.json",
+  "title": "Synaptic API change event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "id", "vendor", "occurred_at", "source", "changes"],
+  "properties": {
+    "version": {"const": 1},
+    "id": {"type": "string", "minLength": 1},
+    "vendor": {"type": "string", "minLength": 1},
+    "release": {"type": "string"},
+    "occurred_at": {"type": "integer"},
+    "source": {"$ref": "#/$defs/source"},
+    "changes": {"type": "array", "items": {"$ref": "#/$defs/change"}}
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uri", "revision", "content_digest", "fetched_at", "adapter_version", "evidence_kind"],
+      "properties": {
+        "uri": {"type": "string"}, "revision": {"type": "string"},
+        "etag": {"type": "string"}, "last_modified": {"type": "string"},
+        "content_digest": {"type": "string"}, "fetched_at": {"type": "integer"},
+        "adapter_version": {"type": "integer", "minimum": 1}, "evidence_kind": {"type": "string"}
+      }
+    },
+    "operation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "vendor", "protocol", "method", "canonical_path"],
+      "properties": {"id": {"type": "string"}, "vendor": {"type": "string"}, "protocol": {"type": "string"}, "method": {"type": "string"}, "canonical_path": {"type": "string"}}
+    },
+    "symbol": {
+      "type": "object", "additionalProperties": false, "required": ["package", "member"],
+      "properties": {"package": {"type": "string"}, "member": {"type": "string"}, "signature": {"type": "string"}}
+    },
+    "evidence": {
+      "type": "object", "additionalProperties": false, "required": ["source_uri", "pointer", "summary", "digest"],
+      "properties": {"source_uri": {"type": "string"}, "pointer": {"type": "string"}, "summary": {"type": "string"}, "digest": {"type": "string"}}
+    },
+    "change": {
+      "type": "object", "additionalProperties": false,
+      "required": ["change_id", "kind", "affected_versions", "old_sdk_symbols", "new_sdk_symbols", "migration_summary", "evidence", "confidence"],
+      "properties": {
+        "change_id": {"type": "string"},
+        "kind": {"enum": ["operation_removed", "operation_renamed", "path_or_method_changed", "required_request_field_added", "request_field_removed", "request_field_renamed", "request_field_type_changed", "request_enum_narrowed", "response_field_removed", "response_field_renamed", "response_field_type_changed", "response_enum_changed", "authentication_or_version_behavior_changed", "webhook_changed", "sdk_export_removed", "sdk_signature_changed", "minimum_supported_version_raised"]},
+        "affected_versions": {"type": "object", "required": ["requirement"], "properties": {"requirement": {"type": "string"}}},
+        "old_operation": {"$ref": "#/$defs/operation"}, "new_operation": {"$ref": "#/$defs/operation"},
+        "old_sdk_symbols": {"type": "array", "items": {"$ref": "#/$defs/symbol"}},
+        "new_sdk_symbols": {"type": "array", "items": {"$ref": "#/$defs/symbol"}},
+        "migration_summary": {"type": "string"}, "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    }
+  }
+}

@@ -14,6 +14,7 @@
 
 **Using Synaptic**
 - [Commands](Commands)
+- [API Maintenance](Commands#api)
 - [Extraction](Extraction)
 - [Querying](Querying)
 - [Cross-Language Edges](Cross-Language-Edges)

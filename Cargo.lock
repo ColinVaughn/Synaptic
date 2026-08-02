@@ -2600,6 +2600,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_norway"
+version = "0.9.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e408f29489b5fd500fab51ff1484fc859bb655f32c671f307dcd733b72e8168c"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml-norway",
+]
+
+[[package]]
 name = "serde_path_to_error"
 version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3008,15 +3021,18 @@ dependencies = [
 
 [[package]]
 name = "synaptic"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "blake3",
  "clap",
  "notify",
  "rayon",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
+ "synaptic-api",
  "synaptic-core",
  "synaptic-detect",
  "synaptic-eval",
@@ -3048,8 +3064,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "synaptic-api"
+version = "0.9.0"
+dependencies = [
+ "blake3",
+ "criterion",
+ "regex",
+ "roxmltree",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "synaptic-core",
+ "synaptic-detect",
+ "synaptic-graph",
+ "synaptic-ingest",
+ "synaptic-query",
+ "tempfile",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "synaptic-core"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "caseless",
  "regex",
@@ -3062,7 +3100,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-detect"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -3076,7 +3114,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-eval"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "criterion",
  "serde",
@@ -3094,7 +3132,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-extract"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -3144,7 +3182,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-graph"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -3160,7 +3198,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-history"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "criterion",
  "serde",
@@ -3174,12 +3212,13 @@ dependencies = [
 
 [[package]]
 name = "synaptic-incremental"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "criterion",
  "rayon",
  "serde",
  "serde_json",
+ "synaptic-api",
  "synaptic-core",
  "synaptic-detect",
  "synaptic-extract",
@@ -3190,7 +3229,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-ingest"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "blake3",
  "glob",
@@ -3210,7 +3249,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-llm"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -3231,7 +3270,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-memory"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "blake3",
  "serde",
@@ -3244,7 +3283,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-output"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "criterion",
  "redis",
@@ -3256,7 +3295,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-predict"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "criterion",
  "serde",
@@ -3270,7 +3309,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-prs"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "criterion",
  "serde_json",
@@ -3279,7 +3318,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-query"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "criterion",
  "serde",
@@ -3290,7 +3329,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-readiness"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "regex",
  "serde",
@@ -3303,7 +3342,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-refactor"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "criterion",
  "regex",
@@ -3320,7 +3359,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-report"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "serde_json",
  "synaptic-core",
@@ -3330,7 +3369,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-sandbox"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "criterion",
  "serde",
@@ -3342,7 +3381,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-semantic"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "serde_json",
@@ -3355,7 +3394,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-server"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "axum",
  "base64",
@@ -3389,7 +3428,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-skillgen"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3401,7 +3440,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-sqlaudit"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "regex",
  "serde",
@@ -3418,7 +3457,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-store"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -3436,7 +3475,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-synql"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "criterion",
  "regex",
@@ -3449,7 +3488,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-upgrade"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -3468,7 +3507,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-workspace"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -4192,6 +4231,12 @@ name = "unicode-properties"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
+
+[[package]]
+name = "unsafe-libyaml-norway"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b39abd59bf32521c7f2301b52d05a6a2c975b6003521cbd0c6dc1582f0a22104"
 
 [[package]]
 name = "untrusted"

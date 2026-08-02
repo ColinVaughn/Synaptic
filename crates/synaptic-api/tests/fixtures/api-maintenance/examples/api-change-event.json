@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "id": "api_event_fixture_001",
+  "vendor": "stripe",
+  "release": "2026-07-31",
+  "occurred_at": 1785542400,
+  "source": {
+    "uri": "fixture://contracts/payments-after.yaml",
+    "revision": "2026-07-31",
+    "content_digest": "fixture-contract-digest",
+    "fetched_at": 1785542400,
+    "adapter_version": 1,
+    "evidence_kind": "openapi"
+  },
+  "changes": [
+    {
+      "change_id": "change_fixture_001",
+      "kind": "path_or_method_changed",
+      "affected_versions": {"requirement": ">=10.0.0,<20.0.0"},
+      "old_operation": {
+        "id": "api_operation:stripe:https:post:v1_customers:fixtureold",
+        "vendor": "stripe",
+        "protocol": "https",
+        "method": "POST",
+        "canonical_path": "/v1/customers"
+      },
+      "new_operation": {
+        "id": "api_operation:stripe:https:post:v2_customers:fixturenew",
+        "vendor": "stripe",
+        "protocol": "https",
+        "method": "POST",
+        "canonical_path": "/v2/customers"
+      },
+      "old_sdk_symbols": [{"package": "npm:stripe", "member": "customers.create"}],
+      "new_sdk_symbols": [{"package": "npm:stripe", "member": "customers.createV2"}],
+      "migration_summary": "Move customer creation to /v2/customers.",
+      "evidence": [{
+        "source_uri": "fixture://contracts/payments-after.yaml",
+        "pointer": "/paths/~1v2~1customers/post",
+        "summary": "The operation retained its ID at a new path.",
+        "digest": "fixture-evidence-digest"
+      }],
+      "confidence": 1.0
+    }
+  ]
+}

@@ -1,11 +1,16 @@
-//! Microbench for the deterministic, CPU-bound parts of a speculative run:
-//! command detection and Markdown rendering. The worktree/process execution
-//! itself is IO-bound and not a meaningful criterion target.
+//! Benchmarks for the deterministic parts of a speculative run. The recursive
+//! command planner intentionally includes a warm filesystem walk; worktree and
+//! child-process execution remain outside Criterion because their cost belongs to
+//! Git and the repository's own toolchain.
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use std::time::Duration;
+
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use synaptic_sandbox::{
-    detect_commands, render_markdown, CommandResult, CommandStatus, Outcome, SpeculateReport,
+    detect_command_plan, detect_commands, render_markdown, CommandResult, CommandStatus, Outcome,
+    SpeculateReport,
 };
+use tempfile::TempDir;
 
 fn big_report() -> SpeculateReport {
     let tests: Vec<CommandResult> = (0..200)
@@ -56,6 +61,59 @@ fn bench(c: &mut Criterion) {
     c.bench_function("detect_commands", |b| {
         b.iter(|| detect_commands(std::hint::black_box(&markers)))
     });
+
+    bench_recursive_command_plan(c);
+}
+
+fn command_plan_fixture(directories: usize, project_stride: usize) -> TempDir {
+    let fixture = tempfile::tempdir().expect("create command-plan benchmark fixture");
+    for index in 0..directories {
+        let directory = fixture.path().join(format!("project-{index:05}"));
+        std::fs::create_dir(&directory).expect("create fixture directory");
+        if index % project_stride == 0 {
+            std::fs::write(
+                directory.join("go.mod"),
+                format!("module benchmark.test/project{index}\n"),
+            )
+            .expect("write fixture manifest");
+            std::fs::write(directory.join("main.go"), "package main\n")
+                .expect("write fixture source");
+        } else {
+            std::fs::write(directory.join("README.md"), "benchmark fixture\n")
+                .expect("write fixture filler");
+        }
+    }
+    fixture
+}
+
+fn bench_recursive_command_plan(c: &mut Criterion) {
+    let fixtures = [
+        (100_usize, command_plan_fixture(100, 10)),
+        (1_000, command_plan_fixture(1_000, 10)),
+        (5_000, command_plan_fixture(5_000, 10)),
+    ];
+    let mut group = c.benchmark_group("command_plan/scaling");
+    group.sample_size(20);
+    group.measurement_time(Duration::from_secs(5));
+
+    for (directories, fixture) in &fixtures {
+        let plan = detect_command_plan(fixture.path()).expect("detect fixture command plan");
+        assert_eq!(plan.projects.len(), directories / 10);
+        assert!(plan.gaps.is_empty());
+        assert!(!plan.truncated);
+        group.throughput(Throughput::Elements(plan.directories_scanned as u64));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(directories),
+            fixture,
+            |bencher, fixture| {
+                bencher.iter(|| {
+                    detect_command_plan(std::hint::black_box(fixture.path()))
+                        .expect("detect fixture command plan")
+                });
+            },
+        );
+    }
+    group.finish();
 }
 
 criterion_group!(benches, bench);

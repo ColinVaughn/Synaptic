@@ -348,6 +348,12 @@ pub enum IncrementalError {
     /// The rebuild would shrink the graph without an explicit deletion or `force`.
     #[error(transparent)]
     Graph(#[from] synaptic_graph::GraphError),
+    /// An opted-in API maintenance configuration could not be loaded safely.
+    #[error(transparent)]
+    ApiConfig(#[from] synaptic_api::ConfigLoadError),
+    /// Dependency manifests or lockfiles could not be inventoried safely.
+    #[error(transparent)]
+    ApiInventory(Box<synaptic_api::InventoryError>),
 }
 
 /// Run a changed-files (or full) rebuild against `existing` (the prior
@@ -666,7 +672,25 @@ pub fn rebuild_with_detect(
     let (n, e) = resolve_pyo3_modules(n, e);
     let (n, e) = resolve_pyo3_imports(n, e);
     let (n, e) = link_dynamic_refs(n, e);
-    let (n, e) = deduplicate_entities(n, e, &HashMap::new());
+    let (mut n, mut e) = deduplicate_entities(n, e, &HashMap::new());
+    let registry = synaptic_api::load_optional_registry(root)?;
+    let (dependencies, sbom) = synaptic_api::scan_dependencies_and_sbom_evidence(root)
+        .map_err(|error| IncrementalError::ApiInventory(Box::new(error)))?;
+    if let Some(registry) = registry.as_ref() {
+        synaptic_api::bind_repository_api_usages_with_dependencies(
+            &mut n,
+            &mut e,
+            registry,
+            &dependencies,
+        );
+    }
+    synaptic_api::attach_api_coverage_with_evidence(
+        &mut n,
+        &mut e,
+        &dependencies,
+        registry.as_ref(),
+        &sbom,
+    );
     kg = build_from_parts(n, e, parts.hyperedges, &build_opts);
 
     // Refuse a silent shrink (unless forced or an explicit deletion happened).

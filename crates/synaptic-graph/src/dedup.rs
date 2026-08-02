@@ -515,6 +515,81 @@ pub fn deterministic_tiebreak(nodes: &[Node], pairs: &[(NodeId, NodeId)]) -> Vec
         .collect()
 }
 
+/// Indexed default-path equivalent of `deterministic_tiebreak(nodes,
+/// ambiguous_concept_pairs(nodes, communities))`.
+///
+/// The deterministic rule can only accept labels with the same normalized token
+/// multiset, so grouping by that key avoids materializing every fuzzy pair. The
+/// exhaustive all-pairs function remains available for an explicitly requested
+/// model/human review.
+pub fn deterministic_tiebreak_candidates(
+    nodes: &[Node],
+    communities: &HashMap<NodeId, u32>,
+) -> Vec<(NodeId, NodeId)> {
+    let mut groups: std::collections::BTreeMap<Vec<String>, Vec<(&Node, String)>> =
+        std::collections::BTreeMap::new();
+    let mut seen_norms = HashSet::new();
+    for node in nodes {
+        if is_code(node) || is_resource(node) || entropy(&node.label) < ENTROPY_THRESHOLD {
+            continue;
+        }
+        let normalized = norm(&node.label);
+        if normalized.is_empty() || !seen_norms.insert(normalized.clone()) {
+            continue;
+        }
+        let mut tokens = normalized
+            .split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        tokens.sort();
+        if !tokens.is_empty() {
+            groups.entry(tokens).or_default().push((node, normalized));
+        }
+    }
+
+    let mut confirmed = Vec::new();
+    for group in groups.values().filter(|group| group.len() > 1) {
+        for index in 0..group.len() {
+            for other in (index + 1)..group.len() {
+                let (left, left_norm) = &group[index];
+                let (right, right_norm) = &group[other];
+                let mut score = jaro_winkler(left_norm, right_norm) * 100.0;
+                if is_variant_pair(left_norm, right_norm)
+                    || short_label_blocked(left_norm, right_norm, score)
+                {
+                    continue;
+                }
+                let (shorter, longer) = if clen(left_norm) <= clen(right_norm) {
+                    (left_norm, right_norm)
+                } else {
+                    (right_norm, left_norm)
+                };
+                if longer.starts_with(shorter.as_str()) && longer != shorter {
+                    continue;
+                }
+                if let (Some(&left_community), Some(&right_community)) =
+                    (communities.get(&left.id), communities.get(&right.id))
+                {
+                    if left_community == right_community
+                        && clen(left_norm).min(clen(right_norm)) >= 12
+                    {
+                        score += COMMUNITY_BOOST;
+                    }
+                }
+                if (TIEBREAK_LOW..MERGE_THRESHOLD).contains(&score) {
+                    confirmed.push(if left.id <= right.id {
+                        (left.id.clone(), right.id.clone())
+                    } else {
+                        (right.id.clone(), left.id.clone())
+                    });
+                }
+            }
+        }
+    }
+    confirmed.sort();
+    confirmed
+}
+
 /// Apply confirmed merges (e.g. an LLM tiebreaker's "yes" pairs): union each
 /// pair, then drop merged-away nodes and rewire edges onto the survivor.
 pub fn merge_pairs(
@@ -687,6 +762,24 @@ mod tests {
         let pairs = vec![(NodeId("c1".into()), NodeId("c2".into()))];
         let confirmed = deterministic_tiebreak(&nodes, &pairs);
         assert_eq!(confirmed, pairs, "word-reordering is a safe merge");
+    }
+
+    #[test]
+    fn indexed_deterministic_candidates_match_the_exhaustive_pipeline() {
+        let nodes = vec![
+            n("c1", "User Authentication Flow", FileType::Concept, ""),
+            n("c2", "Authentication User Flow", FileType::Concept, ""),
+            n("c3", "Data Pipeline Stage", FileType::Concept, ""),
+            n("c4", "Data Processing Stage", FileType::Concept, ""),
+        ];
+        let exhaustive =
+            deterministic_tiebreak(&nodes, &ambiguous_concept_pairs(&nodes, &HashMap::new()));
+        let indexed = deterministic_tiebreak_candidates(&nodes, &HashMap::new());
+        assert_eq!(indexed, exhaustive);
+        assert!(
+            !indexed.is_empty(),
+            "fixture must exercise a confirmed pair"
+        );
     }
 
     #[test]

@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "id": "api_run_fixture_001",
+  "repository_identity": "fixture/payments",
+  "base_sha": "0123456789abcdef",
+  "event": {
+    "version": 1,
+    "id": "api_event_fixture_001",
+    "vendor": "stripe",
+    "release": "2026-07-31",
+    "occurred_at": 1785542400,
+    "source": {
+      "uri": "fixture://contracts/payments-after.yaml",
+      "revision": "2026-07-31",
+      "content_digest": "fixture-contract-digest",
+      "fetched_at": 1785542400,
+      "adapter_version": 1,
+      "evidence_kind": "openapi"
+    },
+    "changes": [{
+      "change_id": "change_fixture_001",
+      "kind": "path_or_method_changed",
+      "affected_versions": {"requirement": ">=10.0.0,<20.0.0"},
+      "old_operation": {"id": "api_operation:stripe:https:post:v1_customers:fixtureold", "vendor": "stripe", "protocol": "https", "method": "POST", "canonical_path": "/v1/customers"},
+      "new_operation": {"id": "api_operation:stripe:https:post:v2_customers:fixturenew", "vendor": "stripe", "protocol": "https", "method": "POST", "canonical_path": "/v2/customers"},
+      "old_sdk_symbols": [],
+      "new_sdk_symbols": [],
+      "migration_summary": "Move customer creation to /v2/customers.",
+      "evidence": [],
+      "confidence": 1.0
+    }]
+  },
+  "applicability": {
+    "version": 1,
+    "event_id": "api_event_fixture_001",
+    "vendor": "stripe",
+    "state": "applicable",
+    "reasons": ["applicable"],
+    "matched_change_ids": ["change_fixture_001"],
+    "bindings": [{
+      "vendor": "stripe",
+      "operation_node_id": "api_operation:stripe:https:post:v1_customers:fixtureold",
+      "caller_node_id": "fn:create_customer",
+      "source_file": "src/payments.ts",
+      "sdk_package": "npm:stripe",
+      "sdk_member": "customers.create",
+      "sdk_version": "18.2.1",
+      "basis": "sdk_symbol",
+      "confidence": 1.0
+    }],
+    "seed_node_ids": ["api_operation:stripe:https:post:v1_customers:fixtureold"],
+    "observed_versions": ["18.2.1"]
+  },
+  "usage_bindings": [{
+    "vendor": "stripe",
+    "operation_node_id": "api_operation:stripe:https:post:v1_customers:fixtureold",
+    "caller_node_id": "fn:create_customer",
+    "source_file": "src/payments.ts",
+    "sdk_package": "npm:stripe",
+    "sdk_member": "customers.create",
+    "sdk_version": "18.2.1",
+    "basis": "sdk_symbol",
+    "confidence": 1.0
+  }],
+  "impact": {
+    "version": 1,
+    "seed_node_ids": ["api_operation:stripe:https:post:v1_customers:fixtureold"],
+    "blast_radius": [{"id": "fn:create_customer", "label": "createCustomer", "file": "src/payments.ts", "depth": 1, "via_relation": "uses_api"}],
+    "blast_radius_total": 2,
+    "at_risk_tests": [{"id": "test:customer", "label": "customer test", "file": "tests/payments.test.ts", "depth": 3, "via_relation": "calls"}]
+  },
+  "official_evidence": [],
+  "source_slices": [{"file": "src/payments.ts", "start_line": 1, "end_line": 8, "content": "fixture source", "digest": "fixture-source-digest"}],
+  "memory": [],
+  "dynamic_hazards": [],
+  "allowed_files": ["src/payments.ts", "tests/payments.test.ts"],
+  "required_tests": ["tests/payments.test.ts"],
+  "verification": [{"gate": "patch_integrity", "required": true, "description": "Patch must stay in scope."}]
+}

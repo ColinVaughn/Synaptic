@@ -113,3 +113,24 @@ fn a_changed_document_supersedes_the_previous_source_revision() {
         .unwrap();
     assert_eq!(all.len(), 2);
 }
+
+#[test]
+fn unchanged_document_is_idempotent_across_anchor_enrichment() {
+    let repo = tempfile::tempdir().unwrap();
+    let adr_dir = repo.path().join("docs/adr");
+    std::fs::create_dir_all(&adr_dir).unwrap();
+    std::fs::write(
+        adr_dir.join("ADR-014.md"),
+        "# Keep refresh public\nSynaptic-Symbols: refresh_token\n\nStable rationale.\n",
+    )
+    .unwrap();
+    let store = MemoryStore::open(repo.path().join(".synaptic/memory"));
+
+    let first = ingest_repository_documents(&store, repo.path(), None).unwrap();
+    assert_eq!(first.created, 1);
+
+    let retry = ingest_repository_documents(&store, repo.path(), Some(&graph())).unwrap();
+    assert_eq!(retry.created, 0);
+    assert_eq!(retry.already_present, 1);
+    assert_eq!(store.all().unwrap().len(), 1);
+}

@@ -66,6 +66,11 @@ get the binary.
   commit from its parent state, and scores the prediction against git ground
   truth (co-edited tests, removed APIs) so forecast quality is regression-testable
   and CI-gateable ([Commands](Commands)).
+- Source-grounded repository memory for prior changes, decisions, failures,
+  verification, and revision-aware symbol lineage ([Repository Memory](Repository-Memory)).
+- Vendor-neutral API maintenance that discovers contracts, measures evidence gaps,
+  localizes breaking changes, and prepares fail-closed verified draft repairs
+  (`synaptic api`; [Commands](Commands#api)).
 - An MCP server (30 core tools plus five read-only repository-memory tools) and one-command assistant integration
   ([MCP Server](MCP-Server), [Assistant Integration](Assistant-Integration)).
 - Multi-repo federation with real cross-repo edge resolution

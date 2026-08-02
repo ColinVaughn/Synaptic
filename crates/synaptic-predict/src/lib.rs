@@ -20,9 +20,10 @@ pub use cochange::{co_change, CoChange, CoChangeOptions};
 pub use edit::{assess_edit, EditDependent, EditImpact, EditKind};
 pub use editforecast::{forecast_edit, EditForecast};
 pub use forecast::{
-    fold_diff_report, forecast_changes, forecast_changes_with_index, refine_risk, refresh_summary,
-    ChangeForecast, DepEdge, DependencyDelta, ForecastFold, ForecastOptions, ImpactHit, NodeRef,
-    VerifyStep, FORECAST_VERSION,
+    fold_diff_report, forecast_changes, forecast_changes_with_index, forecast_nodes,
+    forecast_nodes_with_index, refine_risk, refresh_summary, ChangeForecast, DepEdge,
+    DependencyDelta, ForecastFold, ForecastOptions, ImpactHit, NodeRef, VerifyStep,
+    FORECAST_VERSION,
 };
 pub use render::{render_edit_markdown, render_markdown};
 pub use risk::{assess_risk, RiskFactors, RiskScore};

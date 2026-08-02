@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod access;
+mod api_maintenance;
 pub mod artifact;
 pub mod benchmark;
 pub mod document;
@@ -16,6 +17,9 @@ pub mod store;
 pub mod sync;
 
 pub use access::MemoryPrincipal;
+pub use api_maintenance::{
+    record_api_maintenance_memory, ApiMaintenanceMemory, ApiMaintenanceMemoryError,
+};
 pub use artifact::{ingest_artifact_file, ArtifactIngestError, ArtifactIngestReport};
 pub use benchmark::{
     enforce_benchmark_gate, run_benchmark_file, BenchmarkCaseResult, BenchmarkError, BenchmarkGate,

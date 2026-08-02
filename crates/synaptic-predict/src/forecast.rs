@@ -145,6 +145,74 @@ pub fn forecast_changes(
     assemble_forecast(kg, changed_files, opts, changed_nodes, hits)
 }
 
+/// Forecast from arbitrary graph node IDs, including external API-operation
+/// anchors that have no source file. This is the entry point for overlays and
+/// other non-file change sources.
+pub fn forecast_nodes(
+    kg: &KnowledgeGraph,
+    seed_ids: &[NodeId],
+    opts: &ForecastOptions,
+) -> ChangeForecast {
+    let mut seeds = seed_ids
+        .iter()
+        .filter(|id| kg.contains_node(id))
+        .cloned()
+        .collect::<Vec<_>>();
+    seeds.sort();
+    seeds.dedup();
+    let mut changed_nodes = seeds
+        .iter()
+        .filter_map(|id| kg.node(id))
+        .map(node_ref)
+        .collect::<Vec<_>>();
+    sort_node_refs(&mut changed_nodes);
+    let mut changed_files = changed_nodes
+        .iter()
+        .filter(|node| !node.file.is_empty())
+        .map(|node| node.file.clone())
+        .collect::<Vec<_>>();
+    changed_files.sort();
+    changed_files.dedup();
+    let relations = opts
+        .relations
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let hits = affected_nodes_multi(kg, &seeds, &relations, opts.depth);
+    assemble_forecast(kg, &changed_files, opts, changed_nodes, hits)
+}
+
+/// Indexed variant of [`forecast_nodes`] for long-lived workers.
+pub fn forecast_nodes_with_index(
+    kg: &KnowledgeGraph,
+    index: &ReverseImpactIndex,
+    seed_ids: &[NodeId],
+    opts: &ForecastOptions,
+) -> ChangeForecast {
+    let mut seeds = seed_ids
+        .iter()
+        .filter(|id| kg.contains_node(id))
+        .cloned()
+        .collect::<Vec<_>>();
+    seeds.sort();
+    seeds.dedup();
+    let mut changed_nodes = seeds
+        .iter()
+        .filter_map(|id| kg.node(id))
+        .map(node_ref)
+        .collect::<Vec<_>>();
+    sort_node_refs(&mut changed_nodes);
+    let mut changed_files = changed_nodes
+        .iter()
+        .filter(|node| !node.file.is_empty())
+        .map(|node| node.file.clone())
+        .collect::<Vec<_>>();
+    changed_files.sort();
+    changed_files.dedup();
+    let hits = index.affected_multi(kg, &seeds, opts.depth);
+    assemble_forecast(kg, &changed_files, opts, changed_nodes, hits)
+}
+
 /// Like [`forecast_changes`] but reusing a prebuilt [`ReverseImpactIndex`]
 /// instead of rebuilding the reverse adjacency on every call -- for a long-lived
 /// server that forecasts many changes against one static graph (build the index

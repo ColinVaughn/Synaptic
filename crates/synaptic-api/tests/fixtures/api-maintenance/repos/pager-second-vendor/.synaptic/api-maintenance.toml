@@ -1,0 +1,10 @@
+schema = 1
+[[vendors]]
+id = "pager"
+packages = ["npm:pager-sdk"]
+hosts = ["events.pager.example"]
+[[vendors.sdk_bindings]]
+package = "npm:pager-sdk"
+member = "incidents.trigger"
+method = "POST"
+path = "/incidents"

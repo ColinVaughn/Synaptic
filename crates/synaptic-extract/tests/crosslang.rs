@@ -375,6 +375,636 @@ fn python_requests_client_links_route_by_path() {
         Some("GET svc"),
         "authority rides as context"
     );
+    let edge = r
+        .edges
+        .iter()
+        .find(|edge| edge.relation == "calls_service")
+        .unwrap();
+    assert_eq!(edge.extra.get("http_method").unwrap(), "GET");
+    assert_eq!(edge.extra.get("http_scheme").unwrap(), "http");
+    assert_eq!(edge.extra.get("http_authority").unwrap(), "svc");
+    assert_eq!(edge.extra.get("http_path").unwrap(), "/api/users");
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn javascript_sdk_member_chain_candidates_keep_package_and_call_site() {
+    let src = br#"
+import Stripe from "stripe";
+import { Client as PayClient } from "@acme/payments";
+const stripe = new Stripe("key");
+const pay = new PayClient();
+export function charge() { return stripe.customers.create({}); }
+export function refund() { return pay.refunds.submit({}); }
+"#;
+    let result = extract_source("client.ts", src).unwrap();
+    let candidates = result
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == "calls_sdk")
+        .collect::<Vec<_>>();
+    assert!(candidates.iter().any(|edge| {
+        edge.extra
+            .get("sdk_package")
+            .and_then(|value| value.as_str())
+            == Some("npm:stripe")
+            && edge
+                .extra
+                .get("sdk_member_chain")
+                .and_then(|value| value.as_str())
+                == Some("customers.create")
+            && edge.source_location.as_deref() == Some("L6")
+    }));
+    assert!(candidates.iter().any(|edge| {
+        edge.extra
+            .get("sdk_package")
+            .and_then(|value| value.as_str())
+            == Some("npm:@acme/payments")
+            && edge
+                .extra
+                .get("sdk_member_chain")
+                .and_then(|value| value.as_str())
+                == Some("refunds.submit")
+    }));
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn javascript_named_sdk_function_call_is_a_candidate_but_comments_are_not() {
+    let src = br#"
+import { loadStripe } from "@stripe/stripe-js";
+// const ignored = loadStripe("commented");
+export function initialize() { return loadStripe("publishable-key"); }
+"#;
+    let result = extract_source("checkout.ts", src).unwrap();
+    let candidates = result
+        .edges
+        .iter()
+        .filter(|edge| {
+            edge.relation == "calls_sdk"
+                && edge
+                    .extra
+                    .get("sdk_package")
+                    .and_then(|value| value.as_str())
+                    == Some("npm:@stripe/stripe-js")
+                && edge
+                    .extra
+                    .get("sdk_member_chain")
+                    .and_then(|value| value.as_str())
+                    == Some("loadStripe")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].source_location.as_deref(), Some("L4"));
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn javascript_default_sdk_constructor_is_an_alias_independent_candidate() {
+    let src = br#"
+import IORedis from "ioredis";
+// const ignored = new IORedis("redis://commented");
+export function connection() { return new IORedis("redis://localhost"); }
+"#;
+    let result = extract_source("queue.ts", src).unwrap();
+    let candidates = result
+        .edges
+        .iter()
+        .filter(|edge| {
+            edge.relation == "calls_sdk"
+                && edge
+                    .extra
+                    .get("sdk_package")
+                    .and_then(|value| value.as_str())
+                    == Some("npm:ioredis")
+                && edge
+                    .extra
+                    .get("sdk_member_chain")
+                    .and_then(|value| value.as_str())
+                    == Some("default")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].source_location.as_deref(), Some("L4"));
+}
+
+#[cfg(feature = "lang-go")]
+#[test]
+fn go_sdk_candidates_resolve_imports_instances_parameters_and_fields() {
+    let src = br#"
+package api
+
+import (
+    "context"
+    gogithub "github.com/google/go-github/v89/github"
+    "github.com/shurcooL/githubv4"
+)
+
+type service struct { restClient *gogithub.Client }
+
+func build(ctx context.Context) {
+    client, err := gogithub.NewClient()
+    if err != nil { return }
+    client.Repositories.Get(ctx, "owner", "repo")
+}
+
+func load(ctx context.Context, client *gogithub.Client) {
+    client.Issues.Get(ctx, "owner", "repo", 1)
+}
+
+func (s *service) pull(ctx context.Context) {
+    s.restClient.PullRequests.Get(ctx, "owner", "repo", 1)
+}
+
+func standardLibraryCall() { context.Background() }
+
+func graphql() { githubv4.NewEnterpriseClient("https://example.test/graphql", nil) }
+"#;
+    let result = extract_source("client.go", src).unwrap();
+    let candidates = result
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == "calls_sdk")
+        .map(|edge| {
+            (
+                edge.extra["sdk_package"].as_str().unwrap(),
+                edge.extra["sdk_member_chain"].as_str().unwrap(),
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    for expected in [
+        ("go:github.com/google/go-github/v89/github", "NewClient"),
+        (
+            "go:github.com/google/go-github/v89/github",
+            "Repositories.Get",
+        ),
+        ("go:github.com/google/go-github/v89/github", "Issues.Get"),
+        (
+            "go:github.com/google/go-github/v89/github",
+            "PullRequests.Get",
+        ),
+        ("go:github.com/shurcooL/githubv4", "NewEnterpriseClient"),
+    ] {
+        assert!(candidates.contains(&expected), "missing {expected:?}");
+    }
+    assert!(
+        candidates
+            .iter()
+            .all(|(package, _)| *package != "go:context"),
+        "Go standard-library imports must not become SDK candidates"
+    );
+}
+
+#[cfg(feature = "lang-rust")]
+#[test]
+fn rust_sdk_candidates_resolve_use_paths_globs_instances_and_parameters() {
+    let src = br#"
+use std::sync::Arc;
+use serenity::model::channel::Message as DiscordMessage;
+use serenity::prelude::*;
+use teloxide::prelude::Bot;
+
+mod db;
+
+async fn discord(msg: DiscordMessage) {
+    let client = Client::builder("token", GatewayIntents::empty());
+    msg.channel_id.say(&client.http, "hello").await;
+}
+
+async fn telegram(bot: &Bot) {
+    bot.send_message(1, "hello").await;
+    teloxide::Bot::new("token");
+    Arc::new(1);
+    Vec::new();
+    std::thread::spawn(|| {});
+    crate::helper::Thing::new();
+    db::load();
+}
+"#;
+    let result = extract_source("channels.rs", src).unwrap();
+    let candidates = result
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == "calls_sdk")
+        .map(|edge| {
+            (
+                edge.extra["sdk_package"].as_str().unwrap(),
+                edge.extra["sdk_member_chain"].as_str().unwrap(),
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    for expected in [
+        ("cargo:serenity", "prelude.Client.builder"),
+        ("cargo:serenity", "model.channel.Message.channel_id.say"),
+        ("cargo:teloxide", "prelude.Bot.send_message"),
+        ("cargo:teloxide", "Bot.new"),
+    ] {
+        assert!(candidates.contains(&expected), "missing {expected:?}");
+    }
+    assert!(
+        candidates.iter().all(|(package, member)| {
+            !matches!(*package, "cargo:std" | "cargo:crate" | "cargo:db")
+                && !matches!(*member, "prelude.Arc.new" | "prelude.Vec.new")
+        }),
+        "Rust standard-library and local modules must not become SDK candidates"
+    );
+}
+
+#[cfg(feature = "lang-python")]
+#[test]
+fn python_sdk_member_chain_candidate_resolves_import_alias() {
+    let src = b"import stripe as payments\n\ndef create():\n    return payments.Customer.create(email='a@example.test')\n";
+    let result = extract_source("client.py", src).unwrap();
+    let edge = result
+        .edges
+        .iter()
+        .find(|edge| {
+            edge.relation == "calls_sdk"
+                && edge
+                    .extra
+                    .get("sdk_package")
+                    .and_then(|value| value.as_str())
+                    == Some("pypi:stripe")
+        })
+        .expect("SDK call candidate");
+    assert_eq!(edge.extra["sdk_member_chain"], "Customer.create");
+    assert_eq!(edge.source_location.as_deref(), Some("L4"));
+}
+
+#[cfg(feature = "lang-python")]
+#[test]
+fn python_named_sdk_function_call_keeps_original_export_name() {
+    let src = b"from acmepay import charge as create_charge\n\ndef create():\n    return create_charge(amount=100)\n";
+    let result = extract_source("client.py", src).unwrap();
+    let edge = result
+        .edges
+        .iter()
+        .find(|edge| {
+            edge.relation == "calls_sdk"
+                && edge
+                    .extra
+                    .get("sdk_package")
+                    .and_then(|value| value.as_str())
+                    == Some("pypi:acmepay")
+        })
+        .expect("named SDK function call candidate");
+    assert_eq!(edge.extra["sdk_member_chain"], "charge");
+    assert_eq!(edge.source_location.as_deref(), Some("L4"));
+}
+
+#[test]
+fn sdk_namespace_candidates_cover_every_applicable_missing_syntax_family() {
+    let cases: &[(&str, &[u8], &str, &str, &str)] = &[
+        (
+            "Client.java",
+            b"import com.stripe.StripeClient; class Client { void run() { StripeClient.builder(); } }",
+            "maven",
+            "com.stripe.StripeClient",
+            "StripeClient.builder",
+        ),
+        (
+            "Client.kt",
+            b"import com.stripe.StripeClient\nfun run() { StripeClient.builder() }",
+            "maven",
+            "com.stripe.StripeClient",
+            "StripeClient.builder",
+        ),
+        (
+            "Client.groovy",
+            b"import com.stripe.StripeClient\nStripeClient.builder()",
+            "maven",
+            "com.stripe.StripeClient",
+            "StripeClient.builder",
+        ),
+        (
+            "Client.scala",
+            b"import com.stripe.StripeClient\nobject Client { StripeClient.builder() }",
+            "maven",
+            "com.stripe.StripeClient",
+            "StripeClient.builder",
+        ),
+        (
+            "Client.cs",
+            b"using Stripe; class Client { void Run() { StripeClient.Create(); } }",
+            "nuget",
+            "Stripe",
+            "StripeClient.Create",
+        ),
+        (
+            "Client.razor",
+            b"@using Stripe\n@code { void Run() { StripeClient.Create(); } }",
+            "nuget",
+            "Stripe",
+            "StripeClient.Create",
+        ),
+        (
+            "client.php",
+            b"<?php use Stripe\\StripeClient; StripeClient::create();",
+            "composer",
+            "Stripe\\StripeClient",
+            "StripeClient.create",
+        ),
+        (
+            "client.rb",
+            b"require 'stripe'\nStripe::Customer.create()",
+            "gem",
+            "stripe",
+            "Customer.create",
+        ),
+        (
+            "Client.swift",
+            b"import StripePaymentSheet\nPaymentSheet.create()",
+            "swift",
+            "StripePaymentSheet",
+            "PaymentSheet.create",
+        ),
+        (
+            "client.dart",
+            b"import 'package:stripe_sdk/stripe_sdk.dart';\nvoid run() { Stripe.create(); }",
+            "pub",
+            "stripe_sdk",
+            "Stripe.create",
+        ),
+        (
+            "client.ex",
+            b"defmodule Client do\n  alias Stripe.Customer\n  def run, do: Customer.create(%{})\nend",
+            "hex",
+            "Stripe.Customer",
+            "Stripe.Customer.create",
+        ),
+        (
+            "client.lua",
+            b"local stripe = require('stripe')\nstripe.customers.create()",
+            "luarocks",
+            "stripe",
+            "customers.create",
+        ),
+        (
+            "client.jl",
+            b"using Stripe\nStripe.create_customer()",
+            "julia",
+            "Stripe",
+            "create_customer",
+        ),
+        (
+            "client.zig",
+            b"const stripe = @import(\"stripe\");\npub fn run() void { stripe.Client.init(); }",
+            "zig",
+            "stripe",
+            "Client.init",
+        ),
+        (
+            "client.ps1",
+            b"Import-Module Stripe\nNew-StripeCustomer",
+            "powershell",
+            "Stripe",
+            "New-StripeCustomer",
+        ),
+        (
+            "client.cpp",
+            b"#include <stripe/stripe.h>\nvoid run() { stripe::Client::create(); }",
+            "conan",
+            "stripe",
+            "Client.create",
+        ),
+        (
+            "client.c",
+            b"#include <stripe/stripe.h>\nvoid run() { stripe_customer_create(); }",
+            "conan",
+            "stripe",
+            "stripe_customer_create",
+        ),
+        (
+            "Client.m",
+            b"@import Stripe;\nvoid run() { [STPAPIClient sharedClient]; }",
+            "cocoapods",
+            "Stripe",
+            "STPAPIClient.sharedClient",
+        ),
+        (
+            "Client.cls",
+            b"import stripe.Client; public class Example { void run() { Client.create(); } }",
+            "salesforce",
+            "stripe.Client",
+            "Client.create",
+        ),
+        (
+            "client.pas",
+            b"uses Stripe; begin StripeClient.Create(); end.",
+            "nuget",
+            "Stripe",
+            "StripeClient.Create",
+        ),
+        (
+            "client.f90",
+            b"program client\nuse stripe\ncall stripe_create_customer()\nend program",
+            "fpm",
+            "stripe",
+            "stripe_create_customer",
+        ),
+        (
+            "client.asp",
+            b"<% Set client = Server.CreateObject(\"Stripe.Client\")\nclient.CreateCustomer %>",
+            "com",
+            "Stripe.Client",
+            "Client.CreateCustomer",
+        ),
+    ];
+
+    for (path, source, ecosystem, import, member) in cases {
+        let result = extract_source(path, source)
+            .unwrap_or_else(|| panic!("{path} must remain a supported extractor"));
+        assert!(
+            result.edges.iter().any(|edge| {
+                edge.relation == "calls_sdk"
+                    && edge.extra["sdk_ecosystem"] == *ecosystem
+                    && edge.extra["sdk_import"] == *import
+                    && edge.extra["sdk_member_chain"] == *member
+            }),
+            "missing {ecosystem}:{import}#{member} for {path}; candidates={:?}",
+            result
+                .edges
+                .iter()
+                .filter(|edge| edge.relation == "calls_sdk")
+                .map(|edge| &edge.extra)
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn elixir_fully_qualified_sdk_modules_are_candidates_without_aliases() {
+    let result = extract_source(
+        "billing.ex",
+        b"defmodule Billing do\n  def customer, do: Stripe.Customer.create(%{})\n  def portal, do: Stripe.BillingPortal.Session.create(%{})\nend\n",
+    )
+    .expect("Elixir extraction");
+    let members = result
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == "calls_sdk")
+        .map(|edge| {
+            (
+                edge.extra["sdk_import"].as_str().unwrap_or_default(),
+                edge.extra["sdk_member_chain"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        members.contains(&("Stripe.Customer", "Stripe.Customer.create")),
+        "{members:?}"
+    );
+    assert!(
+        members.contains(&(
+            "Stripe.BillingPortal.Session",
+            "Stripe.BillingPortal.Session.create"
+        )),
+        "{members:?}"
+    );
+}
+
+#[test]
+fn php_fully_qualified_static_calls_are_sdk_candidates() {
+    let result = extract_source(
+        "checkout.php",
+        br#"<?php
+require '../vendor/autoload.php';
+\Stripe\Stripe::setApiKey($key);
+$session = \Stripe\Checkout\Session::create([]);
+"#,
+    )
+    .expect("PHP extraction");
+    let members = result
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == "calls_sdk")
+        .map(|edge| {
+            (
+                edge.extra["sdk_import"].as_str().unwrap_or_default(),
+                edge.extra["sdk_member_chain"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        members.contains(&("Stripe\\Stripe", "Stripe.setApiKey")),
+        "{members:?}"
+    );
+    assert!(
+        members.contains(&("Stripe\\Checkout\\Session", "Session.create")),
+        "{members:?}"
+    );
+}
+
+#[test]
+fn dotnet_nested_vendor_namespaces_resolve_constructed_services() {
+    let result = extract_source(
+        "Program.cs",
+        br#"using Microsoft.Extensions.Options;
+using Stripe;
+using Stripe.Checkout;
+var service = new SessionService();
+var session = await service.CreateAsync(options);
+"#,
+    )
+    .expect("C# extraction");
+
+    assert!(
+        result.edges.iter().any(|edge| {
+            edge.relation == "calls_sdk"
+                && edge.extra["sdk_import"]
+                    .as_str()
+                    .is_some_and(|import| import == "Stripe" || import == "Stripe.Checkout")
+                && edge.extra["sdk_member_chain"] == "SessionService.CreateAsync"
+        }),
+        "candidates={:?}",
+        result
+            .edges
+            .iter()
+            .filter(|edge| edge.relation == "calls_sdk")
+            .map(|edge| &edge.extra)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn sdk_namespace_candidates_follow_typed_constructed_and_fluent_clients() {
+    let cases: &[(&str, &[u8], &str, &str)] = &[
+        (
+            "Client.java",
+            br#"import com.stripe.StripeClient;
+class Client {
+  void typed(StripeClient client) { client.v1().customers().create(); }
+  void built() { StripeClient client = new StripeClient(); client.v1().refunds().create(); }
+}"#,
+            "StripeClient.v1.customers.create",
+            "StripeClient.v1.refunds.create",
+        ),
+        (
+            "Client.cs",
+            br#"using Stripe;
+class Client {
+  void Run() { var client = new StripeClient(); client.V1.Customers.Create(); }
+}"#,
+            "StripeClient.V1.Customers.Create",
+            "StripeClient.V1.Customers.Create",
+        ),
+        (
+            "client.php",
+            br#"<?php
+use Stripe\StripeClient;
+$client = new StripeClient();
+$client->customers->create();"#,
+            "StripeClient.customers.create",
+            "StripeClient.customers.create",
+        ),
+    ];
+    for (path, source, first, second) in cases {
+        let result = extract_source(path, source).unwrap();
+        let members = result
+            .edges
+            .iter()
+            .filter(|edge| edge.relation == "calls_sdk")
+            .filter_map(|edge| edge.extra["sdk_member_chain"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            members.contains(first),
+            "{path} missing {first}: {members:?}"
+        );
+        assert!(
+            members.contains(second),
+            "{path} missing {second}: {members:?}"
+        );
+    }
+}
+
+#[test]
+fn dart_and_swift_select_the_matching_sdk_among_multiple_imports() {
+    let dart = extract_source(
+        "checkout.dart",
+        br#"import 'package:flutter/material.dart';
+import 'package:http/http.dart';
+import 'package:flutter_stripe/flutter_stripe.dart';
+Future<void> pay() async { await Stripe.instance.confirmPayment(); }"#,
+    )
+    .unwrap();
+    assert!(dart.edges.iter().any(|edge| {
+        edge.relation == "calls_sdk"
+            && edge.extra["sdk_package"] == "pub:flutter_stripe"
+            && edge.extra["sdk_member_chain"] == "Stripe.instance.confirmPayment"
+    }));
+
+    let swift = extract_source(
+        "Checkout.swift",
+        b"import Foundation\nimport StripeCore\nimport StripePaymentSheet\nfunc pay() { PaymentSheet.create() }",
+    )
+    .unwrap();
+    assert!(swift.edges.iter().any(|edge| {
+        edge.relation == "calls_sdk"
+            && edge.extra["sdk_import"] == "StripePaymentSheet"
+            && edge.extra["sdk_member_chain"] == "PaymentSheet.create"
+    }));
 }
 
 #[cfg(feature = "lang-typescript")]
@@ -3200,4 +3830,46 @@ fn non_ascii_near_matches_does_not_panic() {
 
     let rs = "use axum::{routing::get, Router};\nfn app() -> Router {\n    Router::new().route(\"/x\", get(h)\n}\nstatic S: &str = \"caf\u{e9}".as_bytes();
     let _ = extract_source("na.rs", rs).unwrap();
+}
+
+/// SDK calls require an executable-language import/module context. Structural,
+/// query, hardware-description, project metadata, and prose files must not
+/// fabricate SDK usage even when their text resembles a qualified call.
+#[test]
+fn non_executable_formats_do_not_emit_sdk_calls() {
+    let cases: &[(&str, &[u8])] = &[
+        ("config.json", br#"{"Stripe":"Checkout.Session.create"}"#),
+        ("config.yaml", b"stripe: Stripe.Checkout.Session.create\n"),
+        (
+            "main.tf",
+            b"locals { sdk = \"Stripe.Checkout.Session.create\" }\n",
+        ),
+        ("query.sql", b"SELECT 'Stripe.Checkout.Session.create';\n"),
+        (
+            "module.v",
+            b"module Stripe(); endmodule // Checkout.Session.create\n",
+        ),
+        (
+            "query.ql",
+            b"from string s where s = \"Stripe.create\" select s\n",
+        ),
+        (
+            "sample.csproj",
+            b"<Project><ItemGroup><Stripe.create /></ItemGroup></Project>",
+        ),
+        ("sample.sln", b"Project(\"Stripe.create\") = \"sample\"\n"),
+        (
+            "README.md",
+            b"Example: `Stripe.Checkout.Session.create()`\n",
+        ),
+    ];
+
+    for (path, source) in cases {
+        let result = extract_source(path, source).unwrap();
+        assert!(
+            result.edges.iter().all(|edge| edge.relation != "calls_sdk"),
+            "{path} fabricated an SDK edge: {:?}",
+            result.edges
+        );
+    }
 }

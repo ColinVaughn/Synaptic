@@ -15,6 +15,7 @@ synaptic-core = { workspace = true }
 synaptic-detect = { workspace = true }
 synaptic-extract = { workspace = true }
 synaptic-graph = { workspace = true }
+synaptic-api = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -9,6 +9,8 @@
 //! (`scripts.build`, `compilerOptions.strict`) is visible.
 
 #[cfg(feature = "lang-json")]
+use serde_json::json;
+#[cfg(feature = "lang-json")]
 use synaptic_core::{make_id, NodeId};
 #[cfg(feature = "lang-json")]
 use tree_sitter::{Node as TsNode, Parser};
@@ -126,6 +128,19 @@ pub fn extract_json_source(path: &str, source: &[u8]) -> ExtractionResult {
                     let tgt = NodeId(make_id(&["npm", &pkg]));
                     b.add_external_node(tgt.clone(), pkg);
                     b.add_edge(file_nid.clone(), tgt, "imports", line, Some("dependency"));
+                    if let Some(edge) = b.edges.last_mut() {
+                        edge.extra.insert(
+                            "package".into(),
+                            json!(format!("npm:{}", ex.key_text(dep).unwrap_or_default())),
+                        );
+                        if let Some(requirement) = dep
+                            .child_by_field_name("value")
+                            .and_then(|value| ex.string_value(value))
+                        {
+                            edge.extra
+                                .insert("declared_requirement".into(), json!(requirement));
+                        }
+                    }
                 }
             }
         } else if key == "extends" {
@@ -287,6 +302,18 @@ mod tests {
         let imps = rels(&r, "imports");
         assert!(imps.contains(&"lodash".to_string()), "{imps:?}");
         assert!(imps.contains(&"react".to_string()));
+        let lodash = r
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.relation == "imports"
+                    && r.nodes
+                        .iter()
+                        .any(|node| node.id == edge.target && node.label == "lodash")
+            })
+            .unwrap();
+        assert_eq!(lodash.extra["declared_requirement"], "^4.0.0");
+        assert_eq!(lodash.extra["package"], "npm:lodash");
     }
 
     #[test]

@@ -11,7 +11,7 @@ use synaptic_extract::{
 };
 use synaptic_graph::{
     ambiguous_concept_pairs, analyze, apply_communities, build_from_parts, cluster,
-    deduplicate_entities, deterministic_tiebreak, link_dynamic_refs, merge_pairs,
+    deduplicate_entities, deterministic_tiebreak_candidates, link_dynamic_refs, merge_pairs,
     resolve_command_invocations, resolve_parameterized_routes, resolve_pyo3_imports,
     resolve_pyo3_modules, resolve_route_handlers, resolve_sql_queries, resolve_symbols,
     BuildOptions, ClusterOptions, KnowledgeGraph,
@@ -353,10 +353,45 @@ pub(crate) fn run_extract(
     // ready for the semantic layer (B5). Community boost is off here (no
     // communities yet).
     let before = n.len();
-    let (n, e) = deduplicate_entities(n, e, &std::collections::HashMap::new());
+    let (mut n, mut e) = deduplicate_entities(n, e, &std::collections::HashMap::new());
     if n.len() < before {
         println!("Deduplicated {} node(s)", before - n.len());
     }
+
+    // Overlay vendor-scoped API operation anchors after route normalization and
+    // entity dedup. Missing config is an opt-out; malformed opted-in config is a
+    // hard error. The incremental pipeline calls the same pure binder here.
+    let registry = synaptic_api::load_optional_registry(&root)?;
+    let (dependencies, sbom) = synaptic_api::scan_dependencies_and_sbom_evidence(&root)?;
+    if let Some(registry) = registry.as_ref() {
+        let report = synaptic_api::bind_repository_api_usages_with_dependencies(
+            &mut n,
+            &mut e,
+            registry,
+            &dependencies,
+        );
+        if report.operations > 0 || report.sdk_packages > 0 || report.ambiguous > 0 {
+            println!(
+                "API bindings: {} usage(s) across {} operation(s), {} SDK package(s), and {} vendor(s){}",
+                report.usages,
+                report.operations,
+                report.sdk_packages,
+                report.vendors,
+                if report.ambiguous > 0 {
+                    format!(", {} ambiguous host match(es) skipped", report.ambiguous)
+                } else {
+                    String::new()
+                }
+            );
+        }
+    }
+    synaptic_api::attach_api_coverage_with_evidence(
+        &mut n,
+        &mut e,
+        &dependencies,
+        registry.as_ref(),
+        &sbom,
+    );
 
     kg = build_from_parts(n, e, parts.hyperedges, &opts);
 
@@ -367,35 +402,39 @@ pub(crate) fn run_extract(
     // review (auto-merging the band offline would risk corrupting the graph).
     {
         let nodes_vec: Vec<_> = kg.nodes().cloned().collect();
-        let pairs = ambiguous_concept_pairs(&nodes_vec, &std::collections::HashMap::new());
-        if !pairs.is_empty() {
-            let total = pairs.len();
-            let confirmed = match (&llm, &rt) {
-                (Some(client), Some(rt)) => {
-                    rt.block_on(llm_tiebreak(client.as_ref(), &nodes_vec, pairs))
+        if let (Some(client), Some(rt)) = (&llm, &rt) {
+            let pairs = ambiguous_concept_pairs(&nodes_vec, &std::collections::HashMap::new());
+            if !pairs.is_empty() {
+                let total = pairs.len();
+                let confirmed = rt.block_on(llm_tiebreak(client.as_ref(), &nodes_vec, pairs));
+                let flagged = total - confirmed.len();
+                if !confirmed.is_empty() {
+                    let edges_vec: Vec<_> = kg.edges().cloned().collect();
+                    let (mn, me) = merge_pairs(nodes_vec, edges_vec, &confirmed);
+                    kg = build_from_parts(mn, me, vec![], &opts);
                 }
-                _ => deterministic_tiebreak(&nodes_vec, &pairs),
-            };
-            let flagged = total - confirmed.len();
+                println!(
+                    "Dedup tiebreaker (LLM): merged {} of {total} ambiguous concept pair(s){}",
+                    confirmed.len(),
+                    if flagged > 0 {
+                        format!(", {flagged} left for review")
+                    } else {
+                        String::new()
+                    }
+                );
+            }
+        } else {
+            let confirmed =
+                deterministic_tiebreak_candidates(&nodes_vec, &std::collections::HashMap::new());
             if !confirmed.is_empty() {
                 let edges_vec: Vec<_> = kg.edges().cloned().collect();
                 let (mn, me) = merge_pairs(nodes_vec, edges_vec, &confirmed);
                 kg = build_from_parts(mn, me, vec![], &opts);
+                println!(
+                    "Dedup tiebreaker (deterministic indexed): merged {} confirmed pair(s)",
+                    confirmed.len()
+                );
             }
-            let how = if llm.is_some() {
-                "LLM"
-            } else {
-                "deterministic"
-            };
-            println!(
-                "Dedup tiebreaker ({how}): merged {} of {total} ambiguous concept pair(s){}",
-                confirmed.len(),
-                if flagged > 0 {
-                    format!(", {flagged} left for review")
-                } else {
-                    String::new()
-                }
-            );
         }
     }
 
@@ -420,6 +459,13 @@ pub(crate) fn run_extract(
         obsidian,
         wiki,
     )?;
+    let coverage = crate::commands::api::refresh_coverage_artifact_with_inventory(
+        &root,
+        &out_dir,
+        &kg.to_graph_data(),
+        &dependencies,
+        &sbom,
+    )?;
 
     println!(
         "Built graph: {} nodes · {} edges · {} communities",
@@ -427,6 +473,14 @@ pub(crate) fn run_extract(
         kg.edge_count(),
         communities.len()
     );
+    if !coverage.observations.is_empty() || !coverage.development_dependencies.is_empty() {
+        println!(
+            "API coverage: {} observation(s), {} unresolved gap(s), {} development negative control(s)",
+            coverage.observations.len(),
+            coverage.gaps.len(),
+            coverage.development_dependencies.len()
+        );
+    }
     if let Some(top) = analysis.god_nodes.first() {
         println!("Top god node: {} (degree {})", top.label, top.degree);
     }

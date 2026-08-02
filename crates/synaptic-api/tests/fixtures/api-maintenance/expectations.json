@@ -1,0 +1,65 @@
+{
+  "minimum_precision": 0.95,
+  "minimum_recall": 0.95,
+  "cases": [
+    {
+      "repository": "node-applicable",
+      "vendor": "stripe",
+      "method": "POST",
+      "path": "/v1/customers",
+      "affected_versions": ">=10.0.0,<20.0.0",
+      "applicability": "applicable",
+      "expected_usages": [
+        {"source_file": "src/payments.ts", "basis": "absolute_url_host"},
+        {"source_file": "src/payments.ts", "basis": "sdk_symbol"}
+      ],
+      "forbidden_usage_files": ["src/dynamic.ts", "src/webhook.ts"],
+      "expected_test": "tests/payments.test.ts"
+    },
+    {
+      "repository": "python-applicable",
+      "vendor": "stripe",
+      "method": "POST",
+      "path": "/v1/customers",
+      "affected_versions": ">=10.0.0,<12.0.0",
+      "applicability": "applicable",
+      "expected_usages": [
+        {"source_file": "src/payments.py", "basis": "absolute_url_host"},
+        {"source_file": "src/payments.py", "basis": "sdk_symbol"}
+      ],
+      "expected_test": "tests/test_payments.py"
+    },
+    {
+      "repository": "node-unused",
+      "vendor": "stripe",
+      "method": "POST",
+      "path": "/v1/customers",
+      "affected_versions": ">=10.0.0,<20.0.0",
+      "applicability": "not_applicable",
+      "expected_usages": []
+    },
+    {
+      "repository": "python-wrong-version",
+      "vendor": "stripe",
+      "method": "POST",
+      "path": "/v1/customers",
+      "affected_versions": ">=10.0.0,<12.0.0",
+      "applicability": "not_applicable",
+      "expected_usages": [
+        {"source_file": "src/payments.py", "basis": "sdk_symbol"}
+      ]
+    },
+    {
+      "repository": "pager-second-vendor",
+      "vendor": "pager",
+      "method": "POST",
+      "path": "/incidents",
+      "affected_versions": ">=3.0.0,<4.0.0",
+      "applicability": "applicable",
+      "expected_usages": [
+        {"source_file": "src/incidents.ts", "basis": "absolute_url_host"},
+        {"source_file": "src/incidents.ts", "basis": "sdk_symbol"}
+      ]
+    }
+  ]
+}

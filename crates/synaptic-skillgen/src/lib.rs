@@ -74,6 +74,7 @@ is the fallback. A "--" in a column means that side has no direct equivalent.
 | Port/readiness audit | `synaptic audit readiness` | `readiness_audit` |
 | Audit / critique SQL | -- | `audit_sql` / `advise_sql` |
 | Graph-aware PR review (needs `gh`) | -- | `list_prs` / `get_pr_impact` / `triage_prs` |
+| API dependency inventory / breaking-change impact | `synaptic api inventory`; `synaptic api impact --event <id>` | -- |
 
 Reference MCP tools with your client's prefix (Claude Code:
 `mcp__synaptic__query_graph`); the server's discovery response orients you and each
@@ -90,6 +91,12 @@ reflection or dynamic dispatch is flagged, not assumed safe -- see the server's
 discovery instructions and the `affected` / `dynamic_hazards` tool docs. Before
 editing a symbol other code depends on, run `predict_impact` (or `synaptic
 predict`) and the checks it lists.
+
+API maintenance is explicit CLI/worker automation, not a mutation capability of the
+default MCP server. Start with `synaptic api inventory`, then use `scan`, `impact`, and
+`repair --dry-run`; only an intentionally invoked `repair` may change an isolated
+worktree, and only `publish` receives repository write credentials. It opens draft PRs
+and never auto-merges.
 
 ## Verify before you commit
 Before committing, ground the judgment in graph evidence, not a re-read of your

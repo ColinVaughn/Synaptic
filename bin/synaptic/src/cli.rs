@@ -317,6 +317,11 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         source: IngestSource,
     },
+    /// Discover configured API-vendor dependencies and their resolved versions.
+    Api {
+        #[command(subcommand)]
+        action: ApiAction,
+    },
     /// Install the Synaptic skill for a host assistant
     /// (claude | agents | codex | opencode | gemini | cursor | copilot | kilo).
     Install {
@@ -566,8 +571,7 @@ pub(crate) enum Cmd {
         /// Build / type-check command, run once before the tests.
         #[arg(long)]
         check_cmd: Option<String>,
-        /// Do not auto-detect commands from project markers (Cargo.toml, go.mod,
-        /// pyproject.toml, package.json).
+        /// Do not recursively auto-detect commands from supported build-system manifests.
         #[arg(long)]
         no_detect: bool,
         /// Reverse-impact hop bound for selecting at-risk tests.
@@ -1027,6 +1031,172 @@ pub(crate) enum GlobalAction {
     List,
     /// Print the global graph path.
     Path,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ApiAction {
+    /// Create a safe, draft-only API maintenance configuration template.
+    Init {
+        /// Repository root.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
+    /// Inventory API SDK dependencies without modifying source or contacting vendors.
+    Inventory {
+        /// Repository root to scan.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Config path (default: <root>/.synaptic/api-maintenance.toml).
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Limit matching to one configured vendor id.
+        #[arg(long)]
+        vendor: Option<String>,
+        /// Emit the versioned inventory as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Report every observed external surface and the evidence still missing for automation.
+    Coverage {
+        /// Repository root to scan for dependency versions.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Graph snapshot (default: <root>/synaptic-out/graph.json).
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        /// Optional config path; the conventional config is used when present.
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Sanitized OTLP JSON export to merge; repeat for multiple environments.
+        #[arg(long = "runtime-evidence")]
+        runtime_evidence: Vec<PathBuf>,
+        /// Redacted synthetic canary/error summary; repeat for multiple environments.
+        #[arg(long = "behavioral-evidence")]
+        behavioral_evidence: Vec<PathBuf>,
+        /// Emit the versioned coverage ledger as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Exit non-zero when any observation remains unresolved.
+        #[arg(long)]
+        require_complete: bool,
+    },
+    /// Discover checked-in API contracts without requiring vendor configuration.
+    Discover {
+        /// Repository root to search recursively.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Emit the versioned discovery report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Preview every automatically detected build/test project without executing commands.
+    CheckPlan {
+        /// Repository root to inspect recursively.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Emit the versioned verification command plan as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Exit non-zero when discovery is truncated or has an unresolved capability.
+        #[arg(long)]
+        require_complete: bool,
+    },
+    /// Scan configured official or checked-in sources for normalized changes.
+    Scan {
+        /// Repository root to scan.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Config path (default: <root>/.synaptic/api-maintenance.toml).
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Limit scanning to one configured vendor id.
+        #[arg(long)]
+        vendor: Option<String>,
+        /// Refuse every network source; checked-in sources remain available.
+        #[arg(long)]
+        offline: bool,
+        /// Emit the versioned scan report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Evaluate one stored event against installed versions and live graph usage.
+    Impact {
+        /// Stored API event id.
+        #[arg(long)]
+        event: String,
+        /// Repository root.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Graph snapshot (default: <root>/synaptic-out/graph.json).
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        /// Config path (default: <root>/.synaptic/api-maintenance.toml).
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Restrict automated repair sites to these repository-relative prefixes.
+        #[arg(long = "allow-path")]
+        allowed_paths: Vec<String>,
+        /// Emit assessment, impact, and optional repair brief as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Generate a bounded patch in an isolated worktree and run every gate.
+    Repair {
+        #[arg(long)]
+        event: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Stop after emitting the repair brief; never invoke an agent.
+        #[arg(long)]
+        dry_run: bool,
+        /// Agent command template; must contain `{request}` and emit patch JSON.
+        #[arg(long)]
+        agent_command: Option<String>,
+        /// Network-isolation guard argv, repeated in order (for example unshare flags).
+        #[arg(long = "network-guard", allow_hyphen_values = true)]
+        network_guard: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revalidate the conclusive verification artifact for a run.
+    Verify {
+        #[arg(long)]
+        run: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Push a verified branch and create or update its one draft PR.
+    Publish {
+        #[arg(long)]
+        run: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compose scan, impact, repair, verification, and optional draft publication.
+    Run {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        vendor: Option<String>,
+        #[arg(long)]
+        offline: bool,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        agent_command: Option<String>,
+        #[arg(long = "network-guard", allow_hyphen_values = true)]
+        network_guard: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]

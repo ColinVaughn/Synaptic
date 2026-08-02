@@ -13,13 +13,20 @@
 
 mod detect;
 mod render;
+mod repair_session;
 mod run;
 mod speculate;
 mod worktree;
 
-pub use detect::{detect_commands, DetectedCommands};
+pub use detect::{
+    detect_command_plan, detect_commands, CommandDetectionGap, DetectedCommandPlan,
+    DetectedCommands, DetectedProject, MissingCapability,
+};
 pub use render::render_markdown;
-pub use run::{CommandResult, CommandStatus};
+pub use repair_session::RepairSession;
+pub use run::{
+    run_command_with_policy, CommandResult, CommandStatus, ExecutionPolicy, NetworkPolicy,
+};
 pub use speculate::{speculate, Change, Outcome, SpeculateOptions, SpeculateReport};
 
 /// Errors speculative execution can surface.

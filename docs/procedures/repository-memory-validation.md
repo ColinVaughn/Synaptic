@@ -12,9 +12,11 @@ single-symbol, file-set, working-tree, and PR-impact responses.
 ## Required commands
 
 ```sh
-cargo fmt --all -- --check
-cargo test --workspace
-cargo build --release -p synaptic
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
+cargo build --release -p synaptic --locked
 synaptic memory refresh --root .
 synaptic memory compact --root .
 synaptic memory eval --root . --manifest eval/repository-memory.json \

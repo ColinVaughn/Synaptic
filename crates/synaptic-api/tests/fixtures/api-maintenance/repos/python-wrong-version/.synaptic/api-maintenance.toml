@@ -1,0 +1,9 @@
+schema = 1
+[[vendors]]
+id = "stripe"
+packages = ["pypi:stripe"]
+[[vendors.sdk_bindings]]
+package = "pypi:stripe"
+member = "Customer.create"
+method = "POST"
+path = "/v1/customers"

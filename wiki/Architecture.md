@@ -1,6 +1,6 @@
 # Architecture
 
-Synaptic is a Rust workspace: **26 library crates** under `crates/*` plus the `synaptic`
+Synaptic is a Rust workspace: **27 library crates** under `crates/*` plus the `synaptic`
 CLI under `bin/`. The workspace uses edition 2021 and a pinned Rust 1.96 toolchain, with
 dependencies centralized in the root `Cargo.toml`.
 
@@ -34,6 +34,10 @@ Repository memory is a separate temporal overlay under `.synaptic/memory`.
 It survives graph rebuilds and joins back to current graph nodes with
 revision-aware symbol anchors. See [Repository Memory](Repository-Memory).
 
+API maintenance is another graph-backed overlay. It joins installed SDK versions,
+contract changes, static/runtime evidence, and exact `uses_api` edges to bounded
+repair and verification artifacts; it does not change the canonical graph schema.
+
 ## Crates
 
 | Crate | Responsibility |
@@ -56,6 +60,7 @@ revision-aware symbol anchors. See [Repository Memory](Repository-Memory).
 | `synaptic-synql` | The SYNQL query engine: a small Cypher-inspired language over the graph (kind/visibility/loc/fan-in-out, variable-length paths, `count(...)`), used by `synaptic search` and the `structural_search` tool |
 | `synaptic-history` | Time-travel diff: builds the graph at a git revision in a throwaway worktree (cached per commit) and diffs two revisions (`synaptic diff`, `time_travel_diff`) |
 | `synaptic-memory` | Durable, source-grounded repository memory: Git/file/symbol lineage; document, external-artifact, and semantic refresh; principal authorization; deterministic indexed retrieval; verified compaction; federation/team bundles; and retrieval evaluation |
+| `synaptic-api` | Vendor-neutral API maintenance: dependency inventory, contract/source adapters, breaking-event normalization, coverage and applicability, bounded repair briefs, verification ledgers, patch policy, draft publication, and hosted-worker contracts |
 | `synaptic-refactor` | Safe-refactor plans (rename/move/extract) for an agent to apply, plus post-edit graph-invariant verification |
 | `synaptic-predict` | Change forecasting: blast radius, at-risk tests, public-API risk, change-risk score, co-change, and the analytic edit forecast (`synaptic predict`) |
 | `synaptic-sandbox` | Speculative execution: apply a change in a throwaway worktree and run the at-risk tests + a build/type-check (`synaptic speculate`) |

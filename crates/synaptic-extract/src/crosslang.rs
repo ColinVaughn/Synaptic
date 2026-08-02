@@ -7,7 +7,7 @@
 //! driven over source (pragmatic and imprecise by design: these are best-effort,
 //! low-confidence links, never EXTRACTED facts).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -43,11 +43,25 @@ pub fn augment(path: &str, source: &[u8], result: &mut ExtractionResult) {
             | "cts"
             | "go"
             | "rs"
+            | "swift"
             | "rb"
             | "php"
             | "cs"
             | "java"
             | "kt"
+            | "kts"
+            | "groovy"
+            | "gradle"
+            | "scala"
+            | "sc"
+            | "dart"
+            | "ex"
+            | "exs"
+            | "lua"
+            | "jl"
+            | "zig"
+            | "ps1"
+            | "psm1"
             | "c"
             | "h"
             | "cpp"
@@ -55,6 +69,25 @@ pub fn augment(path: &str, source: &[u8], result: &mut ExtractionResult) {
             | "cxx"
             | "hpp"
             | "hh"
+            | "m"
+            | "mm"
+            | "f"
+            | "f90"
+            | "f95"
+            | "f03"
+            | "f08"
+            | "for"
+            | "cls"
+            | "trigger"
+            | "pas"
+            | "pp"
+            | "dpr"
+            | "dpk"
+            | "lpr"
+            | "asp"
+            | "asa"
+            | "razor"
+            | "cshtml"
             | "sh"
             | "bash"
             | "zsh"
@@ -70,6 +103,7 @@ pub fn augment(path: &str, source: &[u8], result: &mut ExtractionResult) {
     // (2026-07 audit: SFCs were skipped by every scanner).
     let (ext, prepared): (&str, std::borrow::Cow<str>) = match ext {
         "vue" | "svelte" | "astro" => ("ts", sfc_script_view(ext, text).into()),
+        "razor" | "cshtml" => ("cs", text.into()),
         _ => (ext, text.into()),
     };
     // Blank comments + docstrings (preserving string literals and byte offsets) so
@@ -80,6 +114,7 @@ pub fn augment(path: &str, source: &[u8], result: &mut ExtractionResult) {
     scan_subprocess(ext, path, text, result);
     scan_ffi_bindings(ext, path, text, result);
     scan_http(ext, path, text, result);
+    scan_sdk_candidates(ext, path, text, result);
     scan_grpc(ext, path, text, result);
     scan_websocket(ext, path, text, result);
     scan_queues(ext, path, text, result);
@@ -89,6 +124,1915 @@ pub fn augment(path: &str, source: &[u8], result: &mut ExtractionResult) {
     scan_dotnet_events(ext, path, text, result);
     scan_sql(ext, path, text, result);
     crate::dynamic::scan(path, text, result);
+}
+
+#[derive(Clone)]
+struct SdkAlias {
+    coordinate: String,
+    imported_prefix: Option<String>,
+    direct_member: Option<String>,
+}
+
+/// Harvest package-qualified SDK member calls without knowing any vendor. The
+/// API post-pass owns vendor matching and operation mapping; extraction only
+/// records package, member chain, and exact call-site provenance.
+fn scan_sdk_candidates(ext: &str, path: &str, text: &str, result: &mut ExtractionResult) {
+    if ext == "rs" {
+        scan_rust_sdk_candidates(path, text, result);
+        return;
+    }
+    match ext {
+        "java" | "kt" | "kts" | "groovy" | "gradle" | "scala" | "sc" => {
+            scan_jvm_sdk_candidates(ext, path, text, result);
+            return;
+        }
+        "cs" => {
+            scan_dotnet_sdk_candidates(path, text, result);
+            return;
+        }
+        "php" => {
+            scan_php_sdk_candidates(path, text, result);
+            return;
+        }
+        "rb" => {
+            scan_ruby_sdk_candidates(path, text, result);
+            return;
+        }
+        "swift" => {
+            scan_swift_sdk_candidates(path, text, result);
+            return;
+        }
+        "dart" => {
+            scan_dart_sdk_candidates(path, text, result);
+            return;
+        }
+        "ex" | "exs" => {
+            scan_elixir_sdk_candidates(path, text, result);
+            return;
+        }
+        "lua" => {
+            scan_lua_sdk_candidates(path, text, result);
+            return;
+        }
+        "jl" => {
+            scan_julia_sdk_candidates(path, text, result);
+            return;
+        }
+        "zig" => {
+            scan_zig_sdk_candidates(path, text, result);
+            return;
+        }
+        "ps1" | "psm1" => {
+            scan_powershell_sdk_candidates(path, text, result);
+            return;
+        }
+        "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" => {
+            scan_native_sdk_candidates(path, text, result);
+            return;
+        }
+        "m" | "mm" => {
+            scan_objc_sdk_candidates(path, text, result);
+            return;
+        }
+        "f" | "f90" | "f95" | "f03" | "f08" | "for" => {
+            scan_fortran_sdk_candidates(path, text, result);
+            return;
+        }
+        "cls" | "trigger" => {
+            scan_apex_sdk_candidates(path, text, result);
+            return;
+        }
+        "pas" | "pp" | "dpr" | "dpk" | "lpr" => {
+            scan_pascal_sdk_candidates(path, text, result);
+            return;
+        }
+        "asp" | "asa" => {
+            scan_asp_sdk_candidates(path, text, result);
+            return;
+        }
+        _ => {}
+    }
+    let ecosystem = match ext {
+        "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" => "npm",
+        "py" => "pypi",
+        "go" => "go",
+        _ => return,
+    };
+    let mut aliases = HashMap::<String, SdkAlias>::new();
+    match ecosystem {
+        "npm" => collect_js_sdk_aliases(text, &mut aliases),
+        "pypi" => collect_python_sdk_aliases(text, &mut aliases),
+        "go" => collect_go_sdk_aliases(text, &mut aliases),
+        _ => unreachable!("ecosystem is extension-gated above"),
+    }
+    if aliases.is_empty() {
+        return;
+    }
+
+    // Constructor/factory assignments inherit the imported package so calls on
+    // `const client = new Vendor(...)` bind just like calls on the import alias.
+    if ecosystem != "go" {
+        collect_sdk_instances(text, &mut aliases);
+    }
+
+    static CALL: OnceLock<Regex> = OnceLock::new();
+    let call_re = CALL.get_or_init(|| {
+        Regex::new(r"\b([A-Za-z_$][A-Za-z0-9_$]*(?:\s*\.\s*[A-Za-z_$][A-Za-z0-9_$]*)+)\s*\(")
+            .expect("valid regex")
+    });
+    for captures in call_re.captures_iter(text) {
+        let whole = captures.get(0).expect("call match");
+        let chain = captures[1].replace(char::is_whitespace, "");
+        let segments = chain.split('.').collect::<Vec<_>>();
+        let resolved = if ecosystem == "go" {
+            resolve_go_sdk_alias(text, whole.start(), &segments, &aliases)
+        } else {
+            segments
+                .iter()
+                .take(2)
+                .enumerate()
+                .find_map(|(index, segment)| {
+                    aliases.get(*segment).cloned().map(|alias| (index, alias))
+                })
+        };
+        let Some((alias_index, alias)) = resolved else {
+            continue;
+        };
+        let member = segments[alias_index + 1..].join(".");
+        if member.is_empty() {
+            continue;
+        }
+        let member = match &alias.imported_prefix {
+            Some(prefix) => format!("{prefix}.{member}"),
+            None => member,
+        };
+        emit_sdk_candidate(
+            result,
+            path,
+            line_of(text, whole.start()),
+            ecosystem,
+            &alias.coordinate,
+            &member,
+        );
+    }
+
+    // Named imports can be callable exports rather than constructors or objects:
+    // `import { loadStripe } ...; loadStripe(...)` and
+    // `from vendor import charge; charge(...)`. Keep the original export name so
+    // adapter rules remain stable when the import has a local alias. Dotted calls
+    // are excluded here because the member-chain pass above owns them.
+    static DIRECT_CALL: OnceLock<Regex> = OnceLock::new();
+    let direct_call_re = DIRECT_CALL.get_or_init(|| {
+        Regex::new(r"(?m)(?:^|[^A-Za-z0-9_$.])([A-Za-z_$][A-Za-z0-9_$]*)\s*\(")
+            .expect("valid regex")
+    });
+    for captures in direct_call_re.captures_iter(text) {
+        let call = captures.get(1).expect("direct call identifier");
+        let local = call.as_str();
+        let Some(alias) = aliases.get(local) else {
+            continue;
+        };
+        let Some(member) = alias.direct_member.as_deref() else {
+            continue;
+        };
+        emit_sdk_candidate(
+            result,
+            path,
+            line_of(text, call.start()),
+            ecosystem,
+            &alias.coordinate,
+            member,
+        );
+    }
+}
+
+#[derive(Clone)]
+struct NamespaceImport {
+    import: String,
+    member_prefix: String,
+}
+
+fn scan_jvm_sdk_candidates(_ext: &str, path: &str, text: &str, result: &mut ExtractionResult) {
+    static IMPORT: OnceLock<Regex> = OnceLock::new();
+    let import_re = IMPORT.get_or_init(|| {
+        Regex::new(
+            r"(?m)^\s*import\s+(?:static\s+)?([A-Za-z_]\w*(?:\.[A-Za-z_*]\w*)+)(?:\s+as\s+([A-Za-z_]\w*))?\s*;?",
+        )
+        .expect("valid JVM import regex")
+    });
+    let mut aliases = HashMap::<String, NamespaceImport>::new();
+    let mut wildcards = Vec::<String>::new();
+    for captures in import_re.captures_iter(text) {
+        let import = captures[1].trim_end_matches(".*");
+        if is_jvm_standard_import(import) {
+            continue;
+        }
+        if captures[1].ends_with(".*") {
+            wildcards.push(import.to_string());
+            continue;
+        }
+        let symbol = import.rsplit('.').next().unwrap_or(import);
+        let local = captures.get(2).map_or(symbol, |alias| alias.as_str());
+        aliases.insert(
+            local.to_string(),
+            NamespaceImport {
+                import: import.to_string(),
+                member_prefix: symbol.to_string(),
+            },
+        );
+    }
+    scan_dot_namespace_calls("maven", path, text, result, &aliases, &wildcards, true);
+}
+
+fn is_jvm_standard_import(import: &str) -> bool {
+    ["java.", "javax.", "kotlin.", "groovy.", "scala.", "sun."]
+        .iter()
+        .any(|prefix| import.starts_with(prefix))
+}
+
+fn scan_dotnet_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResult) {
+    static USING: OnceLock<Regex> = OnceLock::new();
+    let using_re = USING.get_or_init(|| {
+        Regex::new(
+            r"(?m)^\s*@?(?:global\s+)?using\s+(?:(?:static\s+)?([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)|([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*))\s*;?",
+        )
+        .expect("valid C# using regex")
+    });
+    let mut aliases = HashMap::<String, NamespaceImport>::new();
+    let mut namespaces = Vec::new();
+    for captures in using_re.captures_iter(text) {
+        if let Some(import) = captures.get(1) {
+            if !is_dotnet_standard_import(import.as_str()) {
+                namespaces.push(import.as_str().to_string());
+            }
+            continue;
+        }
+        let Some(local) = captures.get(2) else {
+            continue;
+        };
+        let Some(import) = captures.get(3) else {
+            continue;
+        };
+        if is_dotnet_standard_import(import.as_str()) {
+            continue;
+        }
+        aliases.insert(
+            local.as_str().to_string(),
+            NamespaceImport {
+                import: import.as_str().to_string(),
+                member_prefix: import
+                    .as_str()
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(import.as_str())
+                    .to_string(),
+            },
+        );
+    }
+    scan_dot_namespace_calls("nuget", path, text, result, &aliases, &namespaces, true);
+}
+
+fn is_dotnet_standard_import(import: &str) -> bool {
+    import == "System"
+        || import.starts_with("System.")
+        || import == "Microsoft.CSharp"
+        || import.starts_with("Microsoft.CSharp.")
+}
+
+fn scan_swift_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResult) {
+    static IMPORT: OnceLock<Regex> = OnceLock::new();
+    let import_re = IMPORT.get_or_init(|| {
+        Regex::new(r"(?m)^\s*import\s+(?:class\s+|struct\s+|func\s+)?([A-Za-z_]\w*)")
+            .expect("valid Swift import regex")
+    });
+    let modules = import_re
+        .captures_iter(text)
+        .map(|captures| captures[1].to_string())
+        .filter(|module| {
+            !matches!(
+                module.as_str(),
+                "Swift"
+                    | "Foundation"
+                    | "SwiftUI"
+                    | "UIKit"
+                    | "AppKit"
+                    | "Combine"
+                    | "Dispatch"
+                    | "XCTest"
+                    | "OSLog"
+            )
+        })
+        .collect::<Vec<_>>();
+    scan_dot_namespace_calls("swift", path, text, result, &HashMap::new(), &modules, true);
+}
+
+fn scan_apex_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResult) {
+    static IMPORT: OnceLock<Regex> = OnceLock::new();
+    let import_re = IMPORT.get_or_init(|| {
+        Regex::new(r"(?m)^\s*import\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)\s*;")
+            .expect("valid Apex import regex")
+    });
+    let mut aliases = HashMap::new();
+    for captures in import_re.captures_iter(text) {
+        let import = &captures[1];
+        let symbol = import.rsplit('.').next().unwrap_or(import);
+        aliases.insert(
+            symbol.to_string(),
+            NamespaceImport {
+                import: import.to_string(),
+                member_prefix: symbol.to_string(),
+            },
+        );
+    }
+    scan_dot_namespace_calls("salesforce", path, text, result, &aliases, &[], true);
+}
+
+fn scan_pascal_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResult) {
+    static USES: OnceLock<Regex> = OnceLock::new();
+    let uses_re = USES
+        .get_or_init(|| Regex::new(r"(?is)\buses\s+([^;]+);").expect("valid Pascal uses regex"));
+    let modules = uses_re
+        .captures_iter(text)
+        .flat_map(|captures| {
+            captures[1]
+                .split(',')
+                .map(|module| module.trim().to_string())
+                .collect::<Vec<_>>()
+        })
+        .filter(|module| {
+            !matches!(
+                module.to_ascii_lowercase().as_str(),
+                "system" | "sysutils" | "classes" | "windows" | "math" | "variants"
+            )
+        })
+        .collect::<Vec<_>>();
+    scan_dot_namespace_calls("nuget", path, text, result, &HashMap::new(), &modules, true);
+}
+
+fn scan_dot_namespace_calls(
+    ecosystem: &str,
+    path: &str,
+    text: &str,
+    result: &mut ExtractionResult,
+    aliases: &HashMap<String, NamespaceImport>,
+    wildcard_imports: &[String],
+    require_type_root: bool,
+) {
+    let shared_root_fallback = ecosystem == "nuget";
+    static CALL: OnceLock<Regex> = OnceLock::new();
+    let call_re = CALL.get_or_init(|| {
+        Regex::new(r"\b([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*(?:\s*\(\s*\))?)+)\s*\(")
+            .expect("valid dotted SDK call regex")
+    });
+    for captures in call_re.captures_iter(text) {
+        let whole = captures.get(0).expect("dotted SDK call");
+        let chain = captures[1]
+            .replace(char::is_whitespace, "")
+            .replace("()", "");
+        let segments = chain.split('.').collect::<Vec<_>>();
+        let resolved = aliases.get(segments[0]).cloned().or_else(|| {
+            resolve_dot_instance(
+                text,
+                whole.start(),
+                segments[0],
+                aliases,
+                wildcard_imports,
+                shared_root_fallback,
+            )
+        });
+        let (import, member) = if let Some(resolved) = resolved {
+            (
+                resolved.import,
+                join_sdk_member(&resolved.member_prefix, &segments[1..].join(".")),
+            )
+        } else {
+            if require_type_root && !starts_like_rust_type(segments[0]) {
+                continue;
+            }
+            let Some(import) =
+                select_namespace_for_type(wildcard_imports, segments[0], shared_root_fallback)
+            else {
+                continue;
+            };
+            let member = if segments[0].eq_ignore_ascii_case(
+                import
+                    .rsplit(['.', ':', '\\', '/'])
+                    .next()
+                    .unwrap_or(&import),
+            ) {
+                segments[1..].join(".")
+            } else {
+                chain
+            };
+            (import, member)
+        };
+        emit_sdk_namespace_candidate(
+            result,
+            path,
+            line_of(text, whole.start()),
+            ecosystem,
+            &import,
+            &member,
+            None,
+        );
+    }
+}
+
+fn resolve_dot_instance(
+    text: &str,
+    call_start: usize,
+    local: &str,
+    aliases: &HashMap<String, NamespaceImport>,
+    wildcard_imports: &[String],
+    shared_root_fallback: bool,
+) -> Option<NamespaceImport> {
+    let scope = &text[..call_start];
+    static INFERRED_VALUE: OnceLock<Regex> = OnceLock::new();
+    let inferred_value_re = INFERRED_VALUE.get_or_init(|| {
+        Regex::new(
+            r"\b(?:var|val|let|final)\s+([A-Za-z_]\w*)\s*(?::[^=;]+)?=\s*(?:new\s+)?([A-Za-z_]\w*)\s*(?:\(|\.)",
+        )
+        .expect("valid inferred dotted instance regex")
+    });
+    static DECLARED_VALUE: OnceLock<Regex> = OnceLock::new();
+    let declared_value_re = DECLARED_VALUE.get_or_init(|| {
+        Regex::new(r"\b([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*=\s*(?:new\s+)?([A-Za-z_]\w*)\s*(?:\(|\.)")
+            .expect("valid declared dotted instance regex")
+    });
+    static TYPED: OnceLock<Regex> = OnceLock::new();
+    let typed_re = TYPED.get_or_init(|| {
+        Regex::new(r"\b([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*(?:[,)=;])")
+            .expect("valid dotted typed value regex")
+    });
+    inferred_value_re
+        .captures_iter(scope)
+        .filter_map(|captures| {
+            (&captures[1] == local)
+                .then(|| {
+                    resolve_dot_type(
+                        &captures[2],
+                        aliases,
+                        wildcard_imports,
+                        shared_root_fallback,
+                    )
+                })
+                .flatten()
+                .map(|resolved| (captures.get(0).expect("instance match").start(), resolved))
+        })
+        .chain(
+            declared_value_re
+                .captures_iter(scope)
+                .filter_map(|captures| {
+                    (&captures[2] == local)
+                        .then(|| {
+                            resolve_dot_type(
+                                &captures[3],
+                                aliases,
+                                wildcard_imports,
+                                shared_root_fallback,
+                            )
+                            .or_else(|| {
+                                resolve_dot_type(
+                                    &captures[1],
+                                    aliases,
+                                    wildcard_imports,
+                                    shared_root_fallback,
+                                )
+                            })
+                        })
+                        .flatten()
+                        .map(|resolved| {
+                            (
+                                captures.get(0).expect("declared instance match").start(),
+                                resolved,
+                            )
+                        })
+                }),
+        )
+        .chain(typed_re.captures_iter(scope).filter_map(|captures| {
+            (&captures[2] == local && !matches!(&captures[1], "var" | "val" | "let" | "final"))
+                .then(|| {
+                    resolve_dot_type(
+                        &captures[1],
+                        aliases,
+                        wildcard_imports,
+                        shared_root_fallback,
+                    )
+                })
+                .flatten()
+                .map(|resolved| {
+                    (
+                        captures.get(0).expect("typed instance match").start(),
+                        resolved,
+                    )
+                })
+        }))
+        .max_by_key(|(position, _)| *position)
+        .map(|(_, resolved)| resolved)
+}
+
+fn resolve_dot_type(
+    type_name: &str,
+    aliases: &HashMap<String, NamespaceImport>,
+    wildcard_imports: &[String],
+    shared_root_fallback: bool,
+) -> Option<NamespaceImport> {
+    aliases.get(type_name).cloned().or_else(|| {
+        select_namespace_for_type(wildcard_imports, type_name, shared_root_fallback).map(|import| {
+            NamespaceImport {
+                import,
+                member_prefix: type_name.to_string(),
+            }
+        })
+    })
+}
+
+fn select_namespace_for_type(
+    imports: &[String],
+    type_name: &str,
+    shared_root_fallback: bool,
+) -> Option<String> {
+    let mut matching = imports
+        .iter()
+        .filter(|import| {
+            let root = import
+                .rsplit(['.', ':', '\\', '/'])
+                .next()
+                .unwrap_or(import);
+            let type_name = type_name.to_ascii_lowercase();
+            let root = root.to_ascii_lowercase();
+            type_name.starts_with(&root) || root.ends_with(&type_name)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    matching.sort();
+    matching.dedup();
+    match matching.as_slice() {
+        [only] => Some(only.clone()),
+        [] if imports.len() == 1 => Some(imports[0].clone()),
+        [] if shared_root_fallback => {
+            let mut counts = HashMap::<&str, usize>::new();
+            for import in imports {
+                let root = import.split(['.', ':', '\\', '/']).next().unwrap_or(import);
+                *counts.entry(root).or_default() += 1;
+            }
+            let max_count = counts.values().copied().max().unwrap_or_default();
+            let roots = counts
+                .into_iter()
+                .filter_map(|(root, count)| (count == max_count && count > 1).then_some(root))
+                .collect::<Vec<_>>();
+            (roots.len() == 1).then(|| roots[0].to_string())
+        }
+        _ => None,
+    }
+}
+
+fn package_name_matches_type(package: &str, type_name: &str) -> bool {
+    let type_name = type_name.to_ascii_lowercase();
+    package
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| token.len() >= 3 && !matches!(*token, "sdk" | "api" | "client"))
+        .any(|token| {
+            let token = token.to_ascii_lowercase();
+            type_name == token || type_name.starts_with(&token) || type_name.ends_with(&token)
+        })
+}
+
+fn scan_php_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResult) {
+    static USE: OnceLock<Regex> = OnceLock::new();
+    let use_re = USE.get_or_init(|| {
+        Regex::new(
+            r"(?i)\buse\s+(?:function\s+)?([A-Za-z_]\w*(?:\\[A-Za-z_]\w*)+)(?:\s+as\s+([A-Za-z_]\w*))?\s*;",
+        )
+        .expect("valid PHP use regex")
+    });
+    let mut aliases = HashMap::<String, NamespaceImport>::new();
+    for captures in use_re.captures_iter(text) {
+        let import = &captures[1];
+        let symbol = import.rsplit('\\').next().unwrap_or(import);
+        let local = captures.get(2).map_or(symbol, |alias| alias.as_str());
+        aliases.insert(
+            local.to_string(),
+            NamespaceImport {
+                import: import.to_string(),
+                member_prefix: symbol.to_string(),
+            },
+        );
+    }
+    static QUALIFIED_STATIC_CALL: OnceLock<Regex> = OnceLock::new();
+    let qualified_static_call_re = QUALIFIED_STATIC_CALL.get_or_init(|| {
+        Regex::new(r"\\?([A-Za-z_]\w*(?:\\[A-Za-z_]\w*)+)\s*::\s*([A-Za-z_]\w*)\s*\(")
+            .expect("valid fully-qualified PHP static call regex")
+    });
+    for captures in qualified_static_call_re.captures_iter(text) {
+        let whole = captures.get(0).expect("qualified PHP static call");
+        let import = &captures[1];
+        let class = import.rsplit('\\').next().unwrap_or(import);
+        let member = format!("{class}.{}", &captures[2]);
+        emit_sdk_namespace_candidate(
+            result,
+            path,
+            line_of(text, whole.start()),
+            "composer",
+            import,
+            &member,
+            None,
+        );
+    }
+    static CALL: OnceLock<Regex> = OnceLock::new();
+    let call_re = CALL.get_or_init(|| {
+        Regex::new(r"(\$?[A-Za-z_]\w*(?:(?:\s*->\s*|\s*::\s*)[A-Za-z_]\w*)+)\s*\(")
+            .expect("valid PHP SDK call regex")
+    });
+    for captures in call_re.captures_iter(text) {
+        let whole = captures.get(0).expect("PHP SDK call");
+        let chain = captures[1]
+            .replace(char::is_whitespace, "")
+            .replace("->", ".")
+            .replace("::", ".");
+        let segments = chain
+            .split('.')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        let root = segments[0].trim_start_matches('$');
+        let resolved = aliases
+            .get(root)
+            .cloned()
+            .or_else(|| resolve_php_instance(text, whole.start(), root, &aliases));
+        let Some(resolved) = resolved else {
+            continue;
+        };
+        let member = join_sdk_member(&resolved.member_prefix, &segments[1..].join("."));
+        emit_sdk_namespace_candidate(
+            result,
+            path,
+            line_of(text, whole.start()),
+            "composer",
+            &resolved.import,
+            &member,
+            None,
+        );
+    }
+}
+
+fn resolve_php_instance(
+    text: &str,
+    call_start: usize,
+    local: &str,
+    aliases: &HashMap<String, NamespaceImport>,
+) -> Option<NamespaceImport> {
+    static INSTANCE: OnceLock<Regex> = OnceLock::new();
+    let instance_re = INSTANCE.get_or_init(|| {
+        Regex::new(r"\$([A-Za-z_]\w*)\s*=\s*new\s+([A-Za-z_]\w*)\s*\(")
+            .expect("valid PHP instance regex")
+    });
+    instance_re
+        .captures_iter(&text[..call_start])
+        .filter(|captures| &captures[1] == local)
+        .filter_map(|captures| {
+            aliases.get(&captures[2]).cloned().map(|resolved| {
+                (
+                    captures.get(0).expect("PHP instance match").start(),
+                    resolved,
+                )
+            })
+        })
+        .max_by_key(|(position, _)| *position)
+        .map(|(_, resolved)| resolved)
+}
+
+fn scan_ruby_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResult) {
+    static REQUIRE: OnceLock<Regex> = OnceLock::new();
+    let require_re = REQUIRE.get_or_init(|| {
+        Regex::new(r#"(?m)^\s*require(?:_relative)?\s*\(?\s*["']([^"']+)["']"#)
+            .expect("valid Ruby require regex")
+    });
+    let packages = require_re
+        .captures_iter(text)
+        .filter_map(|captures| {
+            let package = captures[1].split('/').next()?;
+            (!matches!(
+                package,
+                "json" | "uri" | "net" | "time" | "date" | "set" | "pathname" | "logger"
+            ))
+            .then_some(package.to_string())
+        })
+        .collect::<Vec<_>>();
+    static CALL: OnceLock<Regex> = OnceLock::new();
+    let call_re = CALL.get_or_init(|| {
+        Regex::new(r"\b([A-Z][A-Za-z0-9_]*(?:(?:\s*::\s*|\s*\.\s*)[A-Za-z_]\w*)+)\s*\(")
+            .expect("valid Ruby SDK call regex")
+    });
+    static SEPARATOR: OnceLock<Regex> = OnceLock::new();
+    let separator_re =
+        SEPARATOR.get_or_init(|| Regex::new(r"\s*(?:::|\.)\s*").expect("valid regex"));
+    for captures in call_re.captures_iter(text) {
+        let whole = captures.get(0).expect("Ruby SDK call");
+        let segments = separator_re.split(&captures[1]).collect::<Vec<_>>();
+        let matching = packages
+            .iter()
+            .filter(|package| ruby_constant(package).eq_ignore_ascii_case(segments[0]))
+            .collect::<Vec<_>>();
+        let [package] = matching.as_slice() else {
+            continue;
+        };
+        let member = segments[1..].join(".");
+        let coordinate = format!("gem:{package}");
+        emit_sdk_namespace_candidate(
+            result,
+            path,
+            line_of(text, whole.start()),
+            "gem",
+            package,
+            &member,
+            Some(&coordinate),
+        );
+    }
+}
+
+fn ruby_constant(package: &str) -> String {
+    package
+        .split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            chars
+                .next()
+                .map(|first| first.to_ascii_uppercase().to_string() + chars.as_str())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+fn scan_dart_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResult) {
+    static IMPORT: OnceLock<Regex> = OnceLock::new();
+    let import_re = IMPORT.get_or_init(|| {
+        Regex::new(
+            r#"(?m)^\s*import\s+["']package:([A-Za-z0-9_-]+)/[^"']+["'](?:\s+as\s+([A-Za-z_]\w*))?\s*;"#,
+        )
+        .expect("valid Dart package import regex")
+    });
+    let mut aliases = HashMap::<String, String>::new();
+    let mut packages = Vec::new();
+    for captures in import_re.captures_iter(text) {
+        let package = captures[1].to_string();
+        if let Some(alias) = captures.get(2) {
+            aliases.insert(alias.as_str().to_string(), package);
+        } else {
+            packages.push(package);
+        }
+    }
+    static CALL: OnceLock<Regex> = OnceLock::new();
+    let call_re = CALL.get_or_init(|| {
+        Regex::new(r"\b([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)+)\s*\(")
+            .expect("valid Dart SDK call regex")
+    });
+    for captures in call_re.captures_iter(text) {
+        let whole = captures.get(0).expect("Dart SDK call");
+        let chain = captures[1].replace(char::is_whitespace, "");
+        let segments = chain.split('.').collect::<Vec<_>>();
+        let (package, member) = if let Some(package) = aliases.get(segments[0]) {
+            (package.clone(), segments[1..].join("."))
+        } else if starts_like_rust_type(segments[0]) {
+            let matching = packages
+                .iter()
+                .filter(|package| package_name_matches_type(package, segments[0]))
+                .cloned()
+                .collect::<Vec<_>>();
+            let package = match matching.as_slice() {
+                [package] => package.clone(),
+                [] if packages.len() == 1 => packages[0].clone(),
+                _ => continue,
+            };
+            (package, chain)
+        } else {
+            continue;
+        };
+        let coordinate = format!("pub:{package}");
+        emit_sdk_namespace_candidate(
+            result,
+            path,
+            line_of(text, whole.start()),
+            "pub",
+            &package,
+            &member,
+            Some(&coordinate),
+        );
+    }
+}
+
+fn scan_elixir_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResult) {
+    static ALIAS: OnceLock<Regex> = OnceLock::new();
+    let alias_re = ALIAS.get_or_init(|| {
+        Regex::new(
+            r"(?m)^\s*alias\s+([A-Z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)*)(?:\s*,\s*as:\s*([A-Z][A-Za-z0-9_]*))?",
+        )
+        .expect("valid Elixir alias regex")
+    });
+    let mut aliases = HashMap::<String, String>::new();
+    for captures in alias_re.captures_iter(text) {
+        let import = captures[1].to_string();
+        let local = captures.get(2).map_or_else(
+            || import.rsplit('.').next().unwrap_or(&import).to_string(),
+            |alias| alias.as_str().to_string(),
+        );
+        aliases.insert(local, import);
+    }
+    static MODULE: OnceLock<Regex> = OnceLock::new();
+    let module_re = MODULE.get_or_init(|| {
+        Regex::new(r"(?m)^\s*defmodule\s+([A-Z][A-Za-z0-9_]*)").expect("valid Elixir module regex")
+    });
+    let local_roots = module_re
+        .captures_iter(text)
+        .map(|captures| captures[1].to_string())
+        .collect::<HashSet<_>>();
+    static CALL: OnceLock<Regex> = OnceLock::new();
+    let call_re = CALL.get_or_init(|| {
+        Regex::new(r"\b([A-Z][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\s*\(")
+            .expect("valid Elixir SDK call regex")
+    });
+    for captures in call_re.captures_iter(text) {
+        let whole = captures.get(0).expect("Elixir SDK call");
+        let segments = captures[1].split('.').collect::<Vec<_>>();
+        let (import, member) = if let Some(import) = aliases.get(segments[0]) {
+            (
+                import.clone(),
+                join_sdk_member(import, &segments[1..].join(".")),
+            )
+        } else if segments.len() >= 3 && !local_roots.contains(segments[0]) {
+            // Fully-qualified external modules are the idiomatic form in many
+            // Elixir codebases; they need no `alias` declaration. Retain the
+            // complete module namespace so configured vendor imports can match
+            // it segment-wise, while excluding modules declared in this file.
+            (segments[..segments.len() - 1].join("."), segments.join("."))
+        } else {
+            continue;
+        };
+        emit_sdk_namespace_candidate(
+            result,
+            path,
+            line_of(text, whole.start()),
+            "hex",
+            &import,
+            &member,
+            None,
+        );
+    }
+}
+
+fn scan_lua_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResult) {
+    static REQUIRE: OnceLock<Regex> = OnceLock::new();
+    let require_re = REQUIRE.get_or_init(|| {
+        Regex::new(r#"(?m)^\s*local\s+([A-Za-z_]\w*)\s*=\s*require\s*\(?\s*["']([^"']+)["']\s*\)?"#)
+            .expect("valid Lua require regex")
+    });
+    let aliases = require_re
+        .captures_iter(text)
+        .filter(|captures| !captures[2].starts_with('.'))
+        .map(|captures| (captures[1].to_string(), captures[2].to_string()))
+        .collect::<HashMap<_, _>>();
+    scan_simple_module_alias_calls("luarocks", path, text, result, &aliases, true);
+}
+
+fn scan_julia_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResult) {
+    static IMPORT: OnceLock<Regex> = OnceLock::new();
+    let import_re = IMPORT.get_or_init(|| {
+        Regex::new(r"(?m)^\s*(?:using|import)\s+([A-Z][A-Za-z0-9_]*)")
+            .expect("valid Julia import regex")
+    });
+    let aliases = import_re
+        .captures_iter(text)
+        .filter(|captures| !matches!(&captures[1], "Base" | "Core" | "Main" | "Test"))
+        .map(|captures| (captures[1].to_string(), captures[1].to_string()))
+        .collect::<HashMap<_, _>>();
+    scan_simple_module_alias_calls("julia", path, text, result, &aliases, true);
+}
+
+fn scan_zig_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResult) {
+    static IMPORT: OnceLock<Regex> = OnceLock::new();
+    let import_re = IMPORT.get_or_init(|| {
+        Regex::new(r#"\bconst\s+([A-Za-z_]\w*)\s*=\s*@import\s*\(\s*["']([^"']+)["']\s*\)"#)
+            .expect("valid Zig import regex")
+    });
+    let aliases = import_re
+        .captures_iter(text)
+        .filter(|captures| {
+            let package = &captures[2];
+            package != "std"
+                && package != "builtin"
+                && !package.starts_with('.')
+                && !package.ends_with(".zig")
+        })
+        .map(|captures| (captures[1].to_string(), captures[2].to_string()))
+        .collect::<HashMap<_, _>>();
+    scan_simple_module_alias_calls("zig", path, text, result, &aliases, true);
+}
+
+fn scan_simple_module_alias_calls(
+    ecosystem: &str,
+    path: &str,
+    text: &str,
+    result: &mut ExtractionResult,
+    aliases: &HashMap<String, String>,
+    package_is_exact: bool,
+) {
+    static CALL: OnceLock<Regex> = OnceLock::new();
+    let call_re = CALL.get_or_init(|| {
+        Regex::new(r"\b([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)+)\s*\(")
+            .expect("valid module SDK call regex")
+    });
+    for captures in call_re.captures_iter(text) {
+        let whole = captures.get(0).expect("module SDK call");
+        let chain = captures[1].replace(char::is_whitespace, "");
+        let segments = chain.split('.').collect::<Vec<_>>();
+        let Some(package) = aliases.get(segments[0]) else {
+            continue;
+        };
+        let member = segments[1..].join(".");
+        let coordinate = package_is_exact.then(|| format!("{ecosystem}:{package}"));
+        emit_sdk_namespace_candidate(
+            result,
+            path,
+            line_of(text, whole.start()),
+            ecosystem,
+            package,
+            &member,
+            coordinate.as_deref(),
+        );
+    }
+}
+
+fn scan_powershell_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResult) {
+    static IMPORT: OnceLock<Regex> = OnceLock::new();
+    let import_re = IMPORT.get_or_init(|| {
+        Regex::new(r#"(?mi)^\s*(?:Import-Module|#Requires\s+-Modules?)\s+["']?([A-Za-z0-9_.-]+)"#)
+            .expect("valid PowerShell module import regex")
+    });
+    let modules = import_re
+        .captures_iter(text)
+        .map(|captures| captures[1].to_string())
+        .filter(|module| {
+            !matches!(
+                module.to_ascii_lowercase().as_str(),
+                "microsoft.powershell.utility"
+                    | "microsoft.powershell.management"
+                    | "microsoft.powershell.core"
+            )
+        })
+        .collect::<Vec<_>>();
+    static COMMAND: OnceLock<Regex> = OnceLock::new();
+    let command_re = COMMAND.get_or_init(|| {
+        Regex::new(r"(?mi)(?:^|[;|{(]\s*)([A-Za-z]+-[A-Za-z][A-Za-z0-9_-]*)")
+            .expect("valid PowerShell command regex")
+    });
+    for captures in command_re.captures_iter(text) {
+        let whole = captures.get(1).expect("PowerShell command");
+        let command = whole.as_str();
+        let noun = command.split_once('-').map_or(command, |(_, noun)| noun);
+        let matching = modules
+            .iter()
+            .filter(|module| {
+                let short = module.rsplit(['.', '-']).next().unwrap_or(module);
+                noun.to_ascii_lowercase()
+                    .starts_with(&short.to_ascii_lowercase())
+            })
+            .collect::<Vec<_>>();
+        let module = match matching.as_slice() {
+            [module] => (*module).clone(),
+            [] if modules.len() == 1 => modules[0].clone(),
+            _ => continue,
+        };
+        let coordinate = format!("powershell:{module}");
+        emit_sdk_namespace_candidate(
+            result,
+            path,
+            line_of(text, whole.start()),
+            "powershell",
+            &module,
+            command,
+            Some(&coordinate),
+        );
+    }
+}
+
+fn scan_native_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResult) {
+    static INCLUDE: OnceLock<Regex> = OnceLock::new();
+    let include_re = INCLUDE.get_or_init(|| {
+        Regex::new(r#"(?m)^\s*#\s*include\s*[<"]([^>"]+)[>"]"#).expect("valid native include regex")
+    });
+    let roots = include_re
+        .captures_iter(text)
+        .filter_map(|captures| {
+            let include = captures[1].replace('\\', "/");
+            let root = include.split('/').next()?;
+            (include.contains('/') && !is_native_standard_root(root)).then_some(root.to_string())
+        })
+        .collect::<Vec<_>>();
+    static QUALIFIED_CALL: OnceLock<Regex> = OnceLock::new();
+    let qualified_re = QUALIFIED_CALL.get_or_init(|| {
+        Regex::new(r"\b([A-Za-z_]\w*(?:::[A-Za-z_]\w*)+)\s*\(")
+            .expect("valid native qualified call regex")
+    });
+    for captures in qualified_re.captures_iter(text) {
+        let whole = captures.get(0).expect("native SDK call");
+        let segments = captures[1].split("::").collect::<Vec<_>>();
+        let matching = roots
+            .iter()
+            .filter(|root| root.eq_ignore_ascii_case(segments[0]))
+            .collect::<Vec<_>>();
+        let [root] = matching.as_slice() else {
+            continue;
+        };
+        emit_sdk_namespace_candidate(
+            result,
+            path,
+            line_of(text, whole.start()),
+            "conan",
+            root,
+            &segments[1..].join("."),
+            None,
+        );
+    }
+    static C_CALL: OnceLock<Regex> = OnceLock::new();
+    let c_call_re = C_CALL.get_or_init(|| {
+        Regex::new(r"\b([a-z_][A-Za-z0-9_]*)\s*\(").expect("valid C SDK call regex")
+    });
+    for captures in c_call_re.captures_iter(text) {
+        let whole = captures.get(0).expect("C SDK call");
+        let function = &captures[1];
+        let matching = roots
+            .iter()
+            .filter(|root| {
+                function
+                    .to_ascii_lowercase()
+                    .starts_with(&(root.to_ascii_lowercase() + "_"))
+            })
+            .collect::<Vec<_>>();
+        let [root] = matching.as_slice() else {
+            continue;
+        };
+        emit_sdk_namespace_candidate(
+            result,
+            path,
+            line_of(text, whole.start()),
+            "conan",
+            root,
+            function,
+            None,
+        );
+    }
+}
+
+fn is_native_standard_root(root: &str) -> bool {
+    matches!(
+        root,
+        "sys" | "arpa" | "netinet" | "linux" | "windows" | "boost" | "std" | "bits"
+    )
+}
+
+fn scan_objc_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResult) {
+    static MODULE: OnceLock<Regex> = OnceLock::new();
+    let module_re = MODULE.get_or_init(|| {
+        Regex::new(r#"(?m)(?:@import\s+|#\s*import\s*[<"])([A-Za-z_]\w*)"#)
+            .expect("valid Objective-C module regex")
+    });
+    let modules = module_re
+        .captures_iter(text)
+        .map(|captures| captures[1].to_string())
+        .filter(|module| !matches!(module.as_str(), "Foundation" | "UIKit" | "AppKit"))
+        .collect::<Vec<_>>();
+    if modules.len() != 1 {
+        return;
+    }
+    static MESSAGE: OnceLock<Regex> = OnceLock::new();
+    let message_re = MESSAGE.get_or_init(|| {
+        Regex::new(r"\[\s*([A-Z][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)")
+            .expect("valid Objective-C message regex")
+    });
+    for captures in message_re.captures_iter(text) {
+        let whole = captures.get(0).expect("Objective-C message");
+        if matches!(
+            &captures[1],
+            "NSObject" | "NSString" | "NSArray" | "NSDictionary"
+        ) {
+            continue;
+        }
+        emit_sdk_namespace_candidate(
+            result,
+            path,
+            line_of(text, whole.start()),
+            "cocoapods",
+            &modules[0],
+            &format!("{}.{}", &captures[1], &captures[2]),
+            None,
+        );
+    }
+}
+
+fn scan_fortran_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResult) {
+    static USE: OnceLock<Regex> = OnceLock::new();
+    let use_re = USE.get_or_init(|| {
+        Regex::new(r"(?mi)^\s*use(?:\s*,[^:]+::)?\s+([A-Za-z_]\w*)")
+            .expect("valid Fortran use regex")
+    });
+    let modules = use_re
+        .captures_iter(text)
+        .map(|captures| captures[1].to_string())
+        .filter(|module| !module.to_ascii_lowercase().starts_with("iso_"))
+        .collect::<Vec<_>>();
+    static CALL: OnceLock<Regex> = OnceLock::new();
+    let call_re = CALL.get_or_init(|| {
+        Regex::new(r"(?mi)\bcall\s+([A-Za-z_]\w*)\s*\(").expect("valid Fortran call regex")
+    });
+    for captures in call_re.captures_iter(text) {
+        let whole = captures.get(0).expect("Fortran SDK call");
+        let function = &captures[1];
+        let matching = modules
+            .iter()
+            .filter(|module| {
+                function
+                    .to_ascii_lowercase()
+                    .starts_with(&(module.to_ascii_lowercase() + "_"))
+            })
+            .collect::<Vec<_>>();
+        let module = match matching.as_slice() {
+            [module] => (*module).clone(),
+            [] if modules.len() == 1 => modules[0].clone(),
+            _ => continue,
+        };
+        let coordinate = format!("fpm:{module}");
+        emit_sdk_namespace_candidate(
+            result,
+            path,
+            line_of(text, whole.start()),
+            "fpm",
+            &module,
+            function,
+            Some(&coordinate),
+        );
+    }
+}
+
+fn scan_asp_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResult) {
+    static OBJECT: OnceLock<Regex> = OnceLock::new();
+    let object_re = OBJECT.get_or_init(|| {
+        Regex::new(
+            r#"(?mi)\bSet\s+([A-Za-z_]\w*)\s*=\s*(?:Server\.)?CreateObject\s*\(\s*["']([^"']+)["']\s*\)"#,
+        )
+        .expect("valid ASP COM object regex")
+    });
+    let objects = object_re
+        .captures_iter(text)
+        .map(|captures| (captures[1].to_string(), captures[2].to_string()))
+        .collect::<HashMap<_, _>>();
+    static CALL: OnceLock<Regex> = OnceLock::new();
+    let call_re = CALL.get_or_init(|| {
+        Regex::new(r"(?mi)\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)").expect("valid ASP member call regex")
+    });
+    for captures in call_re.captures_iter(text) {
+        let whole = captures.get(0).expect("ASP SDK call");
+        let Some(progid) = objects.get(&captures[1]) else {
+            continue;
+        };
+        let class = progid.rsplit('.').next().unwrap_or(progid);
+        let coordinate = format!("com:{progid}");
+        emit_sdk_namespace_candidate(
+            result,
+            path,
+            line_of(text, whole.start()),
+            "com",
+            progid,
+            &format!("{class}.{}", &captures[2]),
+            Some(&coordinate),
+        );
+    }
+}
+
+#[derive(Clone)]
+struct RustSdkImport {
+    coordinate: String,
+    canonical_prefix: String,
+}
+
+#[derive(Default)]
+struct RustSdkImports {
+    aliases: HashMap<String, RustSdkImport>,
+    globs: Vec<RustSdkImport>,
+    roots: HashMap<String, String>,
+    local_modules: HashSet<String>,
+    non_sdk_aliases: HashSet<String>,
+}
+
+fn scan_rust_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResult) {
+    let imports = collect_rust_sdk_imports(text);
+    if imports.aliases.is_empty() && imports.globs.is_empty() && imports.roots.is_empty() {
+        return;
+    }
+    static CALL: OnceLock<Regex> = OnceLock::new();
+    let call_re = CALL.get_or_init(|| {
+        Regex::new(r"\b([A-Za-z_]\w*(?:(?:\s*::\s*|\s*\.\s*)[A-Za-z_]\w*)+)\s*\(")
+            .expect("valid regex")
+    });
+    static SEPARATOR: OnceLock<Regex> = OnceLock::new();
+    let separator_re =
+        SEPARATOR.get_or_init(|| Regex::new(r"\s*(?:::|\.)\s*").expect("valid regex"));
+    for captures in call_re.captures_iter(text) {
+        let whole = captures.get(0).expect("Rust call match");
+        let segments = separator_re
+            .split(&captures[1])
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        if segments.len() < 2 {
+            continue;
+        }
+        let Some((import, consumed)) =
+            resolve_rust_sdk_call(text, whole.start(), &segments, &imports)
+        else {
+            continue;
+        };
+        let suffix = segments[consumed..].join(".");
+        let member = join_sdk_member(&import.canonical_prefix, &suffix);
+        if member.is_empty() {
+            continue;
+        }
+        emit_sdk_candidate(
+            result,
+            path,
+            line_of(text, whole.start()),
+            "cargo",
+            &import.coordinate,
+            &member,
+        );
+    }
+}
+
+fn collect_rust_sdk_imports(text: &str) -> RustSdkImports {
+    let mut imports = RustSdkImports::default();
+    static LOCAL_MODULE: OnceLock<Regex> = OnceLock::new();
+    let local_module_re = LOCAL_MODULE.get_or_init(|| {
+        Regex::new(r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_]\w*)\s*;")
+            .expect("valid regex")
+    });
+    imports.local_modules.extend(
+        local_module_re
+            .captures_iter(text)
+            .map(|captures| captures[1].to_string()),
+    );
+    static LOCAL_ITEM: OnceLock<Regex> = OnceLock::new();
+    let local_item_re = LOCAL_ITEM.get_or_init(|| {
+        Regex::new(
+            r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|union|trait|type|const|static)\s+([A-Za-z_]\w*)",
+        )
+        .expect("valid regex")
+    });
+    imports.non_sdk_aliases.extend(
+        local_item_re
+            .captures_iter(text)
+            .map(|captures| captures[1].to_string()),
+    );
+
+    static USE: OnceLock<Regex> = OnceLock::new();
+    let use_re = USE.get_or_init(|| {
+        Regex::new(r"(?ms)^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+(.+?);").expect("valid regex")
+    });
+    for captures in use_re.captures_iter(text) {
+        let statement = captures[1].trim();
+        if let (Some(open), Some(close)) = (statement.find('{'), statement.rfind('}')) {
+            let prefix = statement[..open].trim().trim_end_matches("::");
+            for item in statement[open + 1..close].split(',') {
+                let item = item.trim();
+                if item.is_empty() {
+                    continue;
+                }
+                let expanded = if item == "self" {
+                    prefix.to_string()
+                } else {
+                    format!("{prefix}::{item}")
+                };
+                insert_rust_sdk_import(&expanded, &mut imports);
+            }
+        } else {
+            insert_rust_sdk_import(statement, &mut imports);
+        }
+    }
+    imports
+}
+
+fn insert_rust_sdk_import(path: &str, imports: &mut RustSdkImports) {
+    static ALIAS: OnceLock<Regex> = OnceLock::new();
+    let alias_re = ALIAS.get_or_init(|| {
+        Regex::new(r"(?s)^(.+?)\s+as\s+([A-Za-z_]\w*|_)\s*$").expect("valid regex")
+    });
+    let (path, explicit_alias) = alias_re.captures(path).map_or((path, None), |captures| {
+        (
+            captures.get(1).expect("Rust import path").as_str(),
+            captures.get(2).map(|alias| alias.as_str()),
+        )
+    });
+    if explicit_alias == Some("_") {
+        return;
+    }
+    let compact = path.replace(char::is_whitespace, "");
+    let segments = compact.split("::").collect::<Vec<_>>();
+    let Some(root) = segments.first().copied() else {
+        return;
+    };
+    if segments.len() < 2 {
+        return;
+    }
+    if is_rust_non_sdk_root(root) {
+        if segments.last() != Some(&"*") {
+            let local = explicit_alias.unwrap_or_else(|| segments.last().copied().unwrap_or(root));
+            imports.non_sdk_aliases.insert(local.to_string());
+        }
+        return;
+    }
+    let coordinate = root.to_string();
+    imports
+        .roots
+        .entry(root.to_string())
+        .or_insert_with(|| coordinate.clone());
+    if segments.last() == Some(&"*") {
+        imports.globs.push(RustSdkImport {
+            coordinate,
+            canonical_prefix: segments[1..segments.len() - 1].join("."),
+        });
+        return;
+    }
+    let local = explicit_alias.unwrap_or_else(|| segments.last().copied().unwrap_or(root));
+    imports.aliases.insert(
+        local.to_string(),
+        RustSdkImport {
+            coordinate,
+            canonical_prefix: segments[1..].join("."),
+        },
+    );
+}
+
+fn resolve_rust_sdk_call(
+    text: &str,
+    call_start: usize,
+    segments: &[&str],
+    imports: &RustSdkImports,
+) -> Option<(RustSdkImport, usize)> {
+    if let Some(import) = imports.aliases.get(segments[0]) {
+        return Some((import.clone(), 1));
+    }
+    if let Some(coordinate) = imports.roots.get(segments[0]) {
+        return Some((rust_root_import(coordinate), 1));
+    }
+    if imports.non_sdk_aliases.contains(segments[0]) {
+        return None;
+    }
+    if let Some(import) = resolve_rust_local_alias(text, call_start, segments[0], imports) {
+        return Some((import, 1));
+    }
+    if starts_like_rust_type(segments[0])
+        && !is_rust_standard_type(segments[0])
+        && imports.globs.len() == 1
+    {
+        let glob = imports.globs[0].clone();
+        return Some((glob, 0));
+    }
+    if !is_rust_non_sdk_root(segments[0])
+        && !imports.local_modules.contains(segments[0])
+        && segments[..segments.len() - 1]
+            .iter()
+            .skip(1)
+            .any(|segment| starts_like_rust_type(segment))
+    {
+        return Some((rust_root_import(segments[0]), 1));
+    }
+    None
+}
+
+fn resolve_rust_local_alias(
+    text: &str,
+    call_start: usize,
+    local: &str,
+    imports: &RustSdkImports,
+) -> Option<RustSdkImport> {
+    let scope_start = rust_function_scope_start(text, call_start);
+    let scope = &text[scope_start..call_start];
+    static TYPED_VALUE: OnceLock<Regex> = OnceLock::new();
+    let typed_value_re = TYPED_VALUE.get_or_init(|| {
+        Regex::new(r"\b([A-Za-z_]\w*)\s*:\s*&?\s*(?:mut\s+)?([A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)")
+            .expect("valid regex")
+    });
+    static ASSIGNMENT: OnceLock<Regex> = OnceLock::new();
+    let assignment_re = ASSIGNMENT.get_or_init(|| {
+        Regex::new(
+            r"\blet\s+(?:mut\s+)?([A-Za-z_]\w*)\s*(?::[^=]+)?=\s*([A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)::[A-Za-z_]\w*\s*\(",
+        )
+        .expect("valid regex")
+    });
+    typed_value_re
+        .captures_iter(scope)
+        .chain(assignment_re.captures_iter(scope))
+        .filter(|captures| &captures[1] == local)
+        .filter_map(|captures| {
+            let import = resolve_rust_type_path(&captures[2], imports)?;
+            Some((
+                captures.get(0).expect("Rust local alias match").start(),
+                import,
+            ))
+        })
+        .max_by_key(|(position, _)| *position)
+        .map(|(_, import)| import)
+}
+
+fn resolve_rust_type_path(path: &str, imports: &RustSdkImports) -> Option<RustSdkImport> {
+    let segments = path.split("::").collect::<Vec<_>>();
+    if imports.non_sdk_aliases.contains(segments[0]) || is_rust_non_sdk_root(segments[0]) {
+        return None;
+    }
+    if let Some(import) = imports.aliases.get(segments[0]) {
+        let suffix = segments[1..].join(".");
+        return Some(RustSdkImport {
+            coordinate: import.coordinate.clone(),
+            canonical_prefix: join_sdk_member(&import.canonical_prefix, &suffix),
+        });
+    }
+    if let Some(coordinate) = imports.roots.get(segments[0]) {
+        return Some(RustSdkImport {
+            coordinate: coordinate.clone(),
+            canonical_prefix: segments[1..].join("."),
+        });
+    }
+    if starts_like_rust_type(segments[0])
+        && !is_rust_standard_type(segments[0])
+        && imports.globs.len() == 1
+    {
+        let glob = &imports.globs[0];
+        return Some(RustSdkImport {
+            coordinate: glob.coordinate.clone(),
+            canonical_prefix: join_sdk_member(&glob.canonical_prefix, &segments.join(".")),
+        });
+    }
+    None
+}
+
+fn rust_function_scope_start(text: &str, call_start: usize) -> usize {
+    static FUNCTION: OnceLock<Regex> = OnceLock::new();
+    let function_re = FUNCTION.get_or_init(|| {
+        Regex::new(r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+[A-Za-z_]\w*")
+            .expect("valid regex")
+    });
+    function_re
+        .find_iter(&text[..call_start])
+        .last()
+        .map_or(0, |function| function.start())
+}
+
+fn rust_root_import(coordinate: &str) -> RustSdkImport {
+    RustSdkImport {
+        coordinate: coordinate.to_string(),
+        canonical_prefix: String::new(),
+    }
+}
+
+fn starts_like_rust_type(segment: &str) -> bool {
+    segment
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_uppercase())
+}
+
+fn is_rust_non_sdk_root(segment: &str) -> bool {
+    matches!(
+        segment,
+        "std" | "core" | "alloc" | "crate" | "self" | "super"
+    )
+}
+
+fn is_rust_standard_type(segment: &str) -> bool {
+    segment.len() == 1
+        || matches!(
+            segment,
+            "Self"
+                | "String"
+                | "Vec"
+                | "Option"
+                | "Result"
+                | "Box"
+                | "Arc"
+                | "Rc"
+                | "Weak"
+                | "Cow"
+                | "Path"
+                | "PathBuf"
+                | "HashMap"
+                | "HashSet"
+                | "BTreeMap"
+                | "BTreeSet"
+                | "Duration"
+                | "Instant"
+                | "SystemTime"
+                | "Pin"
+                | "Mutex"
+                | "RwLock"
+                | "Cell"
+                | "RefCell"
+                | "Sender"
+                | "Receiver"
+                | "Ordering"
+                | "Default"
+                | "Error"
+        )
+}
+
+fn join_sdk_member(prefix: &str, suffix: &str) -> String {
+    match (prefix.is_empty(), suffix.is_empty()) {
+        (true, _) => suffix.to_string(),
+        (_, true) => prefix.to_string(),
+        (false, false) => format!("{prefix}.{suffix}"),
+    }
+}
+
+fn collect_js_sdk_aliases(text: &str, aliases: &mut HashMap<String, SdkAlias>) {
+    static DEFAULT: OnceLock<Regex> = OnceLock::new();
+    let default_re = DEFAULT.get_or_init(|| {
+        Regex::new(r#"\bimport\s+([A-Za-z_$][\w$]*)\s+from\s*["']([^"']+)["']"#)
+            .expect("valid regex")
+    });
+    static NAMESPACE: OnceLock<Regex> = OnceLock::new();
+    let namespace_re = NAMESPACE.get_or_init(|| {
+        Regex::new(r#"\bimport\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s*["']([^"']+)["']"#)
+            .expect("valid regex")
+    });
+    static NAMED: OnceLock<Regex> = OnceLock::new();
+    let named_re = NAMED.get_or_init(|| {
+        Regex::new(r#"\bimport\s*\{([^}]+)\}\s*from\s*["']([^"']+)["']"#).expect("valid regex")
+    });
+    static REQUIRE: OnceLock<Regex> = OnceLock::new();
+    let require_re = REQUIRE.get_or_init(|| {
+        Regex::new(
+            r#"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\s*\(\s*["']([^"']+)["']\s*\)"#,
+        )
+        .expect("valid regex")
+    });
+    for captures in default_re.captures_iter(text) {
+        let package = &captures[2];
+        if is_external_sdk_package(package) {
+            aliases.insert(
+                captures[1].to_string(),
+                SdkAlias {
+                    coordinate: package.to_string(),
+                    imported_prefix: None,
+                    direct_member: Some("default".to_string()),
+                },
+            );
+        }
+    }
+    for captures in namespace_re.captures_iter(text) {
+        let package = &captures[2];
+        if is_external_sdk_package(package) {
+            aliases.insert(
+                captures[1].to_string(),
+                SdkAlias {
+                    coordinate: package.to_string(),
+                    imported_prefix: None,
+                    direct_member: None,
+                },
+            );
+        }
+    }
+    for captures in require_re.captures_iter(text) {
+        let package = &captures[2];
+        if is_external_sdk_package(package) {
+            aliases.insert(
+                captures[1].to_string(),
+                SdkAlias {
+                    coordinate: package.to_string(),
+                    imported_prefix: None,
+                    direct_member: Some("default".to_string()),
+                },
+            );
+        }
+    }
+    for captures in named_re.captures_iter(text) {
+        let package = &captures[2];
+        if !is_external_sdk_package(package) {
+            continue;
+        }
+        for imported in captures[1].split(',') {
+            let mut parts = imported.split_whitespace();
+            let Some(original) = parts.next() else {
+                continue;
+            };
+            let next = parts.next();
+            let local = if next == Some("as") {
+                parts.next().unwrap_or(original)
+            } else {
+                original
+            };
+            aliases.insert(
+                local.to_string(),
+                SdkAlias {
+                    coordinate: package.to_string(),
+                    imported_prefix: Some(original.to_string()),
+                    direct_member: Some(original.to_string()),
+                },
+            );
+        }
+    }
+}
+
+fn collect_python_sdk_aliases(text: &str, aliases: &mut HashMap<String, SdkAlias>) {
+    static IMPORT: OnceLock<Regex> = OnceLock::new();
+    let import_re = IMPORT.get_or_init(|| {
+        Regex::new(r"(?m)^\s*import\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)(?:\s+as\s+([A-Za-z_]\w*))?")
+            .expect("valid regex")
+    });
+    static FROM: OnceLock<Regex> = OnceLock::new();
+    let from_re = FROM.get_or_init(|| {
+        Regex::new(r"(?m)^\s*from\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s+import\s+([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?")
+            .expect("valid regex")
+    });
+    for captures in import_re.captures_iter(text) {
+        let package = captures[1].split('.').next().unwrap_or(&captures[1]);
+        let local = captures.get(2).map_or(package, |value| value.as_str());
+        aliases.insert(
+            local.to_string(),
+            SdkAlias {
+                coordinate: package.to_string(),
+                imported_prefix: None,
+                direct_member: None,
+            },
+        );
+    }
+    for captures in from_re.captures_iter(text) {
+        let package = captures[1].split('.').next().unwrap_or(&captures[1]);
+        let original = &captures[2];
+        let local = captures.get(3).map_or(original, |value| value.as_str());
+        aliases.insert(
+            local.to_string(),
+            SdkAlias {
+                coordinate: package.to_string(),
+                imported_prefix: Some(original.to_string()),
+                direct_member: Some(original.to_string()),
+            },
+        );
+    }
+}
+
+fn collect_go_sdk_aliases(text: &str, aliases: &mut HashMap<String, SdkAlias>) {
+    static SINGLE: OnceLock<Regex> = OnceLock::new();
+    let single_re = SINGLE.get_or_init(|| {
+        Regex::new(r#"(?m)^\s*import\s+(?:([A-Za-z_]\w*)\s+)?"([^"]+)""#).expect("valid regex")
+    });
+    static BLOCK: OnceLock<Regex> = OnceLock::new();
+    let block_re =
+        BLOCK.get_or_init(|| Regex::new(r"(?s)\bimport\s*\((.*?)\)").expect("valid regex"));
+    static BLOCK_ENTRY: OnceLock<Regex> = OnceLock::new();
+    let block_entry_re = BLOCK_ENTRY.get_or_init(|| {
+        Regex::new(r#"(?m)^\s*(?:([A-Za-z_]\w*)\s+)?"([^"]+)""#).expect("valid regex")
+    });
+
+    for captures in single_re.captures_iter(text) {
+        insert_go_sdk_alias(
+            captures.get(1).map(|value| value.as_str()),
+            &captures[2],
+            aliases,
+        );
+    }
+    for block in block_re.captures_iter(text) {
+        for captures in block_entry_re.captures_iter(&block[1]) {
+            insert_go_sdk_alias(
+                captures.get(1).map(|value| value.as_str()),
+                &captures[2],
+                aliases,
+            );
+        }
+    }
+}
+
+fn insert_go_sdk_alias(
+    explicit_alias: Option<&str>,
+    package: &str,
+    aliases: &mut HashMap<String, SdkAlias>,
+) {
+    let local = explicit_alias.unwrap_or_else(|| package.rsplit('/').next().unwrap_or(package));
+    if matches!(local, "_" | ".") || !is_external_go_sdk_package(package) {
+        return;
+    }
+    aliases.insert(
+        local.to_string(),
+        SdkAlias {
+            coordinate: package.to_string(),
+            imported_prefix: None,
+            direct_member: None,
+        },
+    );
+}
+
+fn is_external_go_sdk_package(package: &str) -> bool {
+    is_external_sdk_package(package)
+        && package
+            .split('/')
+            .next()
+            .is_some_and(|component| component.contains('.'))
+}
+
+fn collect_sdk_instances(text: &str, aliases: &mut HashMap<String, SdkAlias>) {
+    static INSTANCE: OnceLock<Regex> = OnceLock::new();
+    let instance_re = INSTANCE.get_or_init(|| {
+        Regex::new(r"\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:new\s+)?([A-Za-z_$][\w$]*)(?:\.[A-Za-z_$][\w$]*)*\s*\(")
+            .expect("valid regex")
+    });
+    let inherited = instance_re
+        .captures_iter(text)
+        .filter_map(|captures| {
+            let source = aliases.get(&captures[2])?;
+            Some((
+                captures[1].to_string(),
+                SdkAlias {
+                    coordinate: source.coordinate.clone(),
+                    imported_prefix: None,
+                    direct_member: None,
+                },
+            ))
+        })
+        .collect::<Vec<_>>();
+    aliases.extend(inherited);
+}
+
+fn resolve_go_sdk_alias(
+    text: &str,
+    call_start: usize,
+    segments: &[&str],
+    imports: &HashMap<String, SdkAlias>,
+) -> Option<(usize, SdkAlias)> {
+    if let Some(alias) = imports.get(segments[0]) {
+        return Some((0, alias.clone()));
+    }
+    let scope_start = text[..call_start]
+        .rfind("\nfunc ")
+        .map_or(0, |position| position + 1);
+    let scope = &text[scope_start..call_start];
+    if let Some(alias) = resolve_go_local_alias(scope, segments[0], imports) {
+        return Some((0, alias));
+    }
+    if segments.len() > 2 {
+        if let Some(alias) =
+            resolve_go_receiver_field_alias(text, scope, segments[0], segments[1], imports)
+        {
+            return Some((1, alias));
+        }
+    }
+    None
+}
+
+fn resolve_go_local_alias(
+    scope: &str,
+    local: &str,
+    imports: &HashMap<String, SdkAlias>,
+) -> Option<SdkAlias> {
+    static ASSIGNMENT: OnceLock<Regex> = OnceLock::new();
+    let assignment_re = ASSIGNMENT.get_or_init(|| {
+        Regex::new(r"(?m)\b([A-Za-z_]\w*)\s*(?:,\s*[A-Za-z_]\w*)*\s*(?::=|=)\s*([A-Za-z_]\w*)\.[A-Za-z_]\w*\s*\(")
+            .expect("valid regex")
+    });
+    static TYPED_VALUE: OnceLock<Regex> = OnceLock::new();
+    let typed_value_re = TYPED_VALUE.get_or_init(|| {
+        Regex::new(r"\b([A-Za-z_]\w*)\s+(?:\*|\[\]\*)?([A-Za-z_]\w*)\.[A-Za-z_]\w*")
+            .expect("valid regex")
+    });
+    assignment_re
+        .captures_iter(scope)
+        .chain(typed_value_re.captures_iter(scope))
+        .filter(|captures| &captures[1] == local)
+        .filter_map(|captures| {
+            imports
+                .get(&captures[2])
+                .map(|source| (captures.get(0).expect("whole alias match").start(), source))
+        })
+        .max_by_key(|(position, _)| *position)
+        .map(|(_, source)| SdkAlias {
+            coordinate: source.coordinate.clone(),
+            imported_prefix: None,
+            direct_member: None,
+        })
+}
+
+fn resolve_go_receiver_field_alias(
+    text: &str,
+    scope: &str,
+    receiver: &str,
+    field: &str,
+    imports: &HashMap<String, SdkAlias>,
+) -> Option<SdkAlias> {
+    static RECEIVER: OnceLock<Regex> = OnceLock::new();
+    let receiver_re = RECEIVER.get_or_init(|| {
+        Regex::new(r"\bfunc\s*\(\s*([A-Za-z_]\w*)\s+\*?([A-Za-z_]\w*)\s*\)").expect("valid regex")
+    });
+    let captures = receiver_re.captures(scope)?;
+    if &captures[1] != receiver {
+        return None;
+    }
+    let receiver_type = &captures[2];
+    static STRUCT: OnceLock<Regex> = OnceLock::new();
+    let struct_re = STRUCT.get_or_init(|| {
+        Regex::new(r"(?s)\btype\s+([A-Za-z_]\w*)\s+struct\s*\{(.*?)\}").expect("valid regex")
+    });
+    static TYPED_FIELD: OnceLock<Regex> = OnceLock::new();
+    let typed_field_re = TYPED_FIELD.get_or_init(|| {
+        Regex::new(r"\b([A-Za-z_]\w*)\s+(?:\*|\[\]\*)?([A-Za-z_]\w*)\.[A-Za-z_]\w*")
+            .expect("valid regex")
+    });
+    let body = struct_re
+        .captures_iter(text)
+        .find(|candidate| &candidate[1] == receiver_type)?
+        .get(2)?
+        .as_str();
+    let field_type = typed_field_re
+        .captures_iter(body)
+        .find(|candidate| &candidate[1] == field)?
+        .get(2)?
+        .as_str();
+    imports.get(field_type).map(|source| SdkAlias {
+        coordinate: source.coordinate.clone(),
+        imported_prefix: None,
+        direct_member: None,
+    })
+}
+
+fn is_external_sdk_package(package: &str) -> bool {
+    !package.is_empty()
+        && !package.starts_with('.')
+        && !package.starts_with('/')
+        && !package.starts_with("node:")
+}
+
+fn emit_sdk_candidate(
+    result: &mut ExtractionResult,
+    path: &str,
+    line: u32,
+    ecosystem: &str,
+    package: &str,
+    member: &str,
+) {
+    let coordinate = format!("{ecosystem}:{package}");
+    emit_sdk_namespace_candidate(
+        result,
+        path,
+        line,
+        ecosystem,
+        package,
+        member,
+        Some(&coordinate),
+    );
+}
+
+fn emit_sdk_namespace_candidate(
+    result: &mut ExtractionResult,
+    path: &str,
+    line: u32,
+    ecosystem: &str,
+    import: &str,
+    member: &str,
+    package: Option<&str>,
+) {
+    if import.trim().is_empty() || member.trim().is_empty() {
+        return;
+    }
+    let display = package.unwrap_or(import);
+    let identity = format!("{ecosystem}\0{import}\0{member}");
+    let target = NodeId(format!(
+        "sdk_candidate:{}_{}",
+        make_id(&[ecosystem, import, member]),
+        fnv32(&identity)
+    ));
+    ensure_target(
+        result,
+        &target,
+        &format!("{ecosystem}:{display}#{member}"),
+        "sdk_call_candidate",
+    );
+    if let Some(node) = result.nodes.iter_mut().find(|node| node.id == target) {
+        node.extra.insert("sdk_ecosystem".into(), json!(ecosystem));
+        node.extra.insert("sdk_import".into(), json!(import));
+        if let Some(package) = package {
+            node.extra.insert("sdk_package".into(), json!(package));
+        }
+        node.extra.insert("sdk_member_chain".into(), json!(member));
+    }
+    link(
+        result,
+        path,
+        line,
+        target,
+        "calls_sdk",
+        &format!("{ecosystem}:{display} {member}"),
+    );
+    if let Some(edge) = result.edges.last_mut() {
+        edge.extra.insert("sdk_ecosystem".into(), json!(ecosystem));
+        edge.extra.insert("sdk_import".into(), json!(import));
+        if let Some(package) = package {
+            edge.extra.insert("sdk_package".into(), json!(package));
+        }
+        edge.extra.insert("sdk_member_chain".into(), json!(member));
+    }
 }
 
 /// Same-length view of an SFC keeping only `<script ...>` block bodies (Vue,
@@ -2515,11 +4459,23 @@ fn emit_route(
     ensure_route_target(result, &target, &np);
     // Matching stays path-keyed (by design), but the authority is preserved as
     // edge context so a consumer can tell `svc-a/users` from `svc-b/users`.
-    let ctx = match url_authority(http_path) {
+    let authority = url_authority(http_path);
+    let ctx = match &authority {
         Some(host) => format!("{method} {host}"),
         None => method.to_string(),
     };
     link(result, path, line, target, relation, &ctx);
+    // Preserve machine-readable absolute-URL evidence separately from the
+    // compatibility context string. Graph post-passes can now bind vendors
+    // without reparsing source or guessing whether `METHOD host` is HTTP.
+    if let (Some(authority), Some(scheme), Some(edge)) =
+        (authority, url_scheme(http_path), result.edges.last_mut())
+    {
+        edge.extra.insert("http_method".into(), json!(method));
+        edge.extra.insert("http_scheme".into(), json!(scheme));
+        edge.extra.insert("http_authority".into(), json!(authority));
+        edge.extra.insert("http_path".into(), json!(np));
+    }
 }
 
 /// The authority (host[:port]) of an absolute URL, userinfo stripped; None for
@@ -2535,6 +4491,18 @@ fn url_authority(raw: &str) -> Option<String> {
     } else {
         Some(host.to_string())
     }
+}
+
+fn url_scheme(raw: &str) -> Option<String> {
+    let (scheme, _) = raw.split_once("://")?;
+    if scheme.is_empty()
+        || !scheme
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
+    {
+        return None;
+    }
+    Some(scheme.to_ascii_lowercase())
 }
 
 /// Server side: the route node points to its handler via `handled_by` (route ->

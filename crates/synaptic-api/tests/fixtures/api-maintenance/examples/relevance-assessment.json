@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "event_id": "api_event_fixture_001",
+  "vendor": "stripe",
+  "state": "applicable",
+  "reasons": ["applicable"],
+  "matched_change_ids": ["change_fixture_001"],
+  "bindings": [{
+    "vendor": "stripe",
+    "operation_node_id": "api_operation:stripe:https:post:v1_customers:fixtureold",
+    "caller_node_id": "fn:create_customer",
+    "source_file": "src/payments.ts",
+    "source_location": "6:10",
+    "sdk_package": "npm:stripe",
+    "sdk_member": "customers.create",
+    "sdk_version": "18.2.1",
+    "basis": "sdk_symbol",
+    "confidence": 1.0
+  }],
+  "seed_node_ids": ["api_operation:stripe:https:post:v1_customers:fixtureold"],
+  "observed_versions": ["18.2.1"]
+}

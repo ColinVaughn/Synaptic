@@ -119,6 +119,12 @@ grepping or reading files.
   team bundles, retrieval benchmarks, and aggregate impact evidence are built
   into the CLI and MCP surface.
   See [Repository Memory](https://github.com/ColinVaughn/Synaptic/wiki/Repository-Memory).
+- **Self-maintaining API workflows**: `synaptic api` inventories SDK versions,
+  discovers contracts, records coverage gaps, detects source-grounded breaking
+  changes, localizes affected call sites, and prepares bounded repairs in an
+  isolated worktree. Verification fails closed on incomplete evidence, and only
+  the explicit `publish` stage can create or update an idempotent draft PR. See
+  [API maintenance](docs/procedures/api-maintenance.md).
 - **Incremental rebuilds**, file watching, and git hooks keep the graph current. See
   [Incremental Updates](https://github.com/ColinVaughn/Synaptic/wiki/Incremental-Updates).
 - **Graph-aware PR dashboard** with blast radius and merge-order conflict detection. See
@@ -368,6 +374,8 @@ A code-only corpus runs fully offline; the optional LLM semantic pass over docs 
 | `prs [number]` | Graph-aware PR dashboard / detail. Flags: `--triage`, `--conflicts`, `--base`, `--repo` |
 | `workspace <action>` | Multi-repo / monorepo federation (`init`/`add`/`discover`/`build`/`federate`/`coordinate`/`sync`/`status`/`list`). `build --watch` keeps a federated graph live across every member repo |
 | `global <action>` | The cross-repo global graph store (`~/.synaptic`) |
+| `memory <action>` | Ingest, record, search, compact, exchange, and evaluate durable source-grounded repository memory |
+| `api <action>` | Inventory API dependencies, discover contracts, measure coverage, scan changes, assess impact, and safely repair/verify/publish a draft PR |
 | `merge-graphs <graphs...>` | Compose several `graph.json` files into one namespaced graph |
 | `ingest <source>` | Ingest an external source (cargo / mcp / scip / pg / url; `office` / `gws` / `media` behind feature flags) |
 | `hook <action>` | Manage git hooks + the `graph.json` merge driver |
@@ -428,6 +436,9 @@ Framework-aware edges for PHP/Laravel and Dart/Flutter. Full breakdown in
 
 ## Documentation
 
+The graph-native, vendor-neutral self-maintaining API workflow is documented in
+[API maintenance](docs/procedures/api-maintenance.md).
+
 The full documentation lives in the [project wiki](https://github.com/ColinVaughn/Synaptic/wiki):
 
 - **Getting started:** [Home](https://github.com/ColinVaughn/Synaptic/wiki/Home) - [Installation](https://github.com/ColinVaughn/Synaptic/wiki/Installation) - [Quickstart](https://github.com/ColinVaughn/Synaptic/wiki/Quickstart)
@@ -445,7 +456,7 @@ cargo fmt --all --check                            # formatting (enforced in CI)
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-The codebase is 22 library crates (`crates/*`) plus the `synaptic` binary (`bin/`). CI
+The codebase is 27 library crates (`crates/*`) plus the `synaptic` binary (`bin/`). CI
 builds each language grammar in isolation so a grammar bump that silently drops nodes/edges
 fails on its own. See [Development](https://github.com/ColinVaughn/Synaptic/wiki/Development) and [Architecture](https://github.com/ColinVaughn/Synaptic/wiki/Architecture).
 

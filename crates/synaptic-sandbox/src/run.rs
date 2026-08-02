@@ -2,6 +2,7 @@
 //! wall-clock timeout and bounded output capture. The orchestration in
 //! `speculate.rs` calls this for the build/check and each at-risk test.
 
+use std::collections::VecDeque;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -9,6 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+
+const MAX_CAPTURE_BYTES: usize = 2 * 1024 * 1024;
 
 /// The outcome of running one command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +25,33 @@ pub enum CommandStatus {
     TimedOut,
     /// Not run (no command, or a prior step short-circuited the run).
     Skipped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkPolicy {
+    Disabled,
+    Allow,
+}
+
+/// Process isolation controls. Network denial is fail-closed: a disabled
+/// policy without a platform/worker guard does not execute the command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionPolicy {
+    pub network: NetworkPolicy,
+    /// Guard argv placed before the platform shell, e.g. `unshare -Urn --`.
+    pub network_guard: Option<Vec<String>>,
+    pub scrub_credentials: bool,
+}
+
+impl Default for ExecutionPolicy {
+    fn default() -> Self {
+        Self {
+            network: NetworkPolicy::Disabled,
+            network_guard: None,
+            scrub_credentials: true,
+        }
+    }
 }
 
 /// The result of running one command in the sandbox.
@@ -91,8 +121,26 @@ fn shell() -> (&'static str, &'static str) {
 }
 
 /// Snapshot a shared output buffer without holding the lock past the clone.
-fn lock_clone(buf: &Arc<Mutex<Vec<u8>>>) -> Vec<u8> {
-    buf.lock().map(|b| b.clone()).unwrap_or_default()
+fn lock_clone(buf: &Arc<Mutex<VecDeque<u8>>>) -> Vec<u8> {
+    buf.lock()
+        .map(|bytes| bytes.iter().copied().collect())
+        .unwrap_or_default()
+}
+
+fn bounded_append(buffer: &mut VecDeque<u8>, bytes: &[u8]) {
+    if bytes.len() >= MAX_CAPTURE_BYTES {
+        buffer.clear();
+        buffer.extend(&bytes[bytes.len() - MAX_CAPTURE_BYTES..]);
+        return;
+    }
+    let overflow = buffer
+        .len()
+        .saturating_add(bytes.len())
+        .saturating_sub(MAX_CAPTURE_BYTES);
+    if overflow > 0 {
+        buffer.drain(..overflow);
+    }
+    buffer.extend(bytes);
 }
 
 /// Run `command` (a shell command line) in `dir`, killing it after `timeout` and
@@ -104,26 +152,97 @@ pub fn run_command(
     timeout: Duration,
     max_output_lines: usize,
 ) -> CommandResult {
+    run_command_with_policy(
+        label,
+        command,
+        dir,
+        timeout,
+        max_output_lines,
+        &ExecutionPolicy {
+            network: NetworkPolicy::Allow,
+            network_guard: None,
+            scrub_credentials: false,
+        },
+    )
+}
+
+pub fn run_command_with_policy(
+    label: &str,
+    command: &str,
+    dir: &Path,
+    timeout: Duration,
+    max_output_lines: usize,
+    policy: &ExecutionPolicy,
+) -> CommandResult {
     let (sh, flag) = shell();
     let started = Instant::now();
-    let child = Command::new(sh)
-        .arg(flag)
-        .arg(command)
+    let display_command = if policy.scrub_credentials {
+        redact_command_output(command)
+    } else {
+        command.to_string()
+    };
+    if policy.network == NetworkPolicy::Disabled && policy.network_guard.is_none() {
+        return CommandResult::skipped(
+            label,
+            "network isolation is required but no platform guard is configured",
+        );
+    }
+    let mut process = if let Some(guard) = policy.network_guard.as_ref() {
+        if guard.is_empty() {
+            return CommandResult::skipped(label, "configured network guard is empty");
+        }
+        let mut process = Command::new(&guard[0]);
+        process.args(&guard[1..]).arg(sh).arg(flag).arg(command);
+        process
+    } else {
+        let mut process = Command::new(sh);
+        process.arg(flag).arg(command);
+        process
+    };
+    process
         .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
+        .stderr(Stdio::piped());
+    if policy.scrub_credentials {
+        let safe_environment = [
+            "PATH",
+            "PATHEXT",
+            "SystemRoot",
+            "WINDIR",
+            "COMSPEC",
+            "TEMP",
+            "TMP",
+            "TMPDIR",
+            "LANG",
+            "LC_ALL",
+            "CARGO_HOME",
+            "RUSTUP_HOME",
+        ];
+        let values = safe_environment
+            .iter()
+            .filter_map(|name| std::env::var_os(name).map(|value| (*name, value)))
+            .collect::<Vec<_>>();
+        process.env_clear().envs(values);
+        process.env(
+            "SYNAPTIC_NETWORK",
+            match policy.network {
+                NetworkPolicy::Disabled => "disabled",
+                NetworkPolicy::Allow => "allowed",
+            },
+        );
+    }
+    let child = process.spawn();
 
     let mut child = match child {
         Ok(c) => c,
         Err(e) => {
             return CommandResult {
                 label: label.to_string(),
-                command: command.to_string(),
+                command: display_command,
                 status: CommandStatus::Failed,
                 exit_code: None,
-                output: format!("failed to spawn `{command}`: {e}"),
+                output: format!("failed to spawn `{}`: {e}", redact_command_output(command)),
                 duration_ms: started.elapsed().as_millis(),
             };
         }
@@ -133,9 +252,9 @@ pub fn run_command(
     // as bytes arrive, so a chatty command can't deadlock against a full pipe
     // buffer while we poll for the timeout, and so partial output is readable
     // even if we never join the threads.
-    let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let spawn_drain = |pipe: Option<Box<dyn Read + Send>>, buf: Arc<Mutex<Vec<u8>>>| {
+    let stdout_buf = Arc::new(Mutex::new(VecDeque::<u8>::new()));
+    let stderr_buf = Arc::new(Mutex::new(VecDeque::<u8>::new()));
+    let spawn_drain = |pipe: Option<Box<dyn Read + Send>>, buf: Arc<Mutex<VecDeque<u8>>>| {
         std::thread::spawn(move || {
             if let Some(mut p) = pipe {
                 let mut chunk = [0u8; 4096];
@@ -144,7 +263,7 @@ pub fn run_command(
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             if let Ok(mut b) = buf.lock() {
-                                b.extend_from_slice(&chunk[..n]);
+                                bounded_append(&mut b, &chunk[..n]);
                             }
                         }
                     }
@@ -216,12 +335,85 @@ pub fn run_command(
 
     CommandResult {
         label: label.to_string(),
-        command: command.to_string(),
+        command: display_command,
         status,
         exit_code,
-        output: tail_lines(&combined, max_output_lines),
+        output: tail_lines(&redact_command_output(&combined), max_output_lines),
         duration_ms: started.elapsed().as_millis(),
     }
+}
+
+fn redact_command_output(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut in_private_key = false;
+    for line in input.split_inclusive('\n') {
+        let has_newline = line.ends_with('\n');
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        let lowercase = content.to_ascii_lowercase();
+        if lowercase.contains("-----begin ") && lowercase.contains("private key-----") {
+            in_private_key = true;
+            output.push_str("[REDACTED PRIVATE KEY]");
+        } else if in_private_key {
+            if lowercase.contains("-----end ") && lowercase.contains("private key-----") {
+                in_private_key = false;
+            }
+        } else {
+            output.push_str(&redact_command_line(content));
+        }
+        if has_newline {
+            output.push('\n');
+        }
+    }
+    output
+}
+
+fn redact_command_line(input: &str) -> String {
+    let lowercase_line = input.to_ascii_lowercase();
+    if let Some(start) = lowercase_line.find("authorization:") {
+        let value_start = start + "authorization:".len();
+        return format!("{}[REDACTED]", &input[..value_start]);
+    }
+    input
+        .split_inclusive(char::is_whitespace)
+        .map(|chunk| {
+            let token = chunk.trim_end_matches(char::is_whitespace);
+            let suffix = &chunk[token.len()..];
+            let lowercase = token.to_ascii_lowercase();
+            if [
+                "sk_live_",
+                "sk_test_",
+                "rk_live_",
+                "rk_test_",
+                "pk_live_",
+                "pk_test_",
+                "whsec_",
+                "ghp_",
+                "github_pat_",
+                "akia",
+            ]
+            .iter()
+            .any(|marker| lowercase.contains(marker))
+            {
+                return format!("[REDACTED]{suffix}");
+            }
+            for marker in [
+                "password=",
+                "password:",
+                "client_secret=",
+                "api_key=",
+                "token=",
+                "secret=",
+            ] {
+                if let Some(start) = lowercase.find(marker) {
+                    let value_start = start + marker.len();
+                    if value_start < token.len() {
+                        return format!("{}[REDACTED]{suffix}", &token[..value_start]);
+                    }
+                }
+            }
+            chunk.to_string()
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -296,5 +488,109 @@ mod tests {
         let r = run_command("slow", slow, tmp.path(), Duration::from_secs(1), 50);
         assert_eq!(r.status, CommandStatus::TimedOut, "{r:?}");
         assert!(r.duration_ms < 4000, "killed promptly, not after 5s: {r:?}");
+    }
+
+    #[test]
+    fn disabled_network_without_guard_fails_closed_before_execution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("should-not-exist");
+        let command = if cfg!(windows) {
+            format!("type nul > {}", marker.display())
+        } else {
+            format!("touch {}", marker.display())
+        };
+        let result = run_command_with_policy(
+            "guarded",
+            &command,
+            tmp.path(),
+            Duration::from_secs(5),
+            10,
+            &ExecutionPolicy::default(),
+        );
+        assert_eq!(result.status, CommandStatus::Skipped);
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn restricted_environment_scrubs_inherited_credentials() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = if cfg!(windows) { "USERNAME" } else { "USER" };
+        let inherited = std::env::var(key).unwrap_or_default();
+        let command = if cfg!(windows) {
+            format!("echo %{key}%")
+        } else {
+            format!("printf '%s' \"${key}\"")
+        };
+        let result = run_command_with_policy(
+            "scrub",
+            &command,
+            tmp.path(),
+            Duration::from_secs(5),
+            10,
+            &ExecutionPolicy {
+                network: NetworkPolicy::Allow,
+                network_guard: None,
+                scrub_credentials: true,
+            },
+        );
+        assert_eq!(result.status, CommandStatus::Passed, "{result:?}");
+        if !inherited.is_empty() {
+            assert!(!result.output.contains(&inherited));
+        }
+    }
+
+    #[test]
+    fn restricted_command_output_redacts_secret_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let command = if cfg!(windows) {
+            "echo token=command-secret"
+        } else {
+            "printf 'token=command-secret'"
+        };
+        let result = run_command_with_policy(
+            "secret-output",
+            command,
+            tmp.path(),
+            Duration::from_secs(5),
+            10,
+            &ExecutionPolicy {
+                network: NetworkPolicy::Allow,
+                network_guard: None,
+                scrub_credentials: true,
+            },
+        );
+        assert_eq!(result.status, CommandStatus::Passed, "{result:?}");
+        assert!(!result.output.contains("command-secret"));
+        assert!(!result.command.contains("command-secret"));
+        assert!(result.output.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redaction_removes_authorization_values_and_complete_private_keys() {
+        let output = "Authorization: Bearer bearer-secret\npk_live_browser-key\n-----BEGIN PRIVATE KEY-----\nprivate-material\n-----END PRIVATE KEY-----\nsafe";
+        let redacted = redact_command_output(output);
+        assert!(!redacted.contains("bearer-secret"));
+        assert!(!redacted.contains("browser-key"));
+        assert!(!redacted.contains("private-material"));
+        assert!(redacted.contains("Authorization:[REDACTED]"));
+        assert!(redacted.ends_with("safe"));
+    }
+
+    #[test]
+    fn output_capture_keeps_a_bounded_tail() {
+        let mut buffer = VecDeque::new();
+        bounded_append(&mut buffer, &vec![b'a'; MAX_CAPTURE_BYTES]);
+        bounded_append(&mut buffer, b"failure-tail");
+        assert_eq!(buffer.len(), MAX_CAPTURE_BYTES);
+        assert!(buffer
+            .iter()
+            .rev()
+            .take(12)
+            .copied()
+            .collect::<Vec<_>>()
+            .starts_with(b"liat"));
+        let tail = buffer.iter().rev().take(12).copied().collect::<Vec<_>>();
+        let restored = tail.into_iter().rev().collect::<Vec<_>>();
+        assert_eq!(restored, b"failure-tail");
     }
 }

@@ -48,5 +48,5 @@ options:
 substitutions:
   _REGION: us-east4
   _REPOSITORY: synaptic
-  _TAG: v0.8.0
+  _TAG: v0.9.0
 timeout: 3600s

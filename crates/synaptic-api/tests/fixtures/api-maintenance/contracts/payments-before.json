@@ -1,0 +1,25 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "Synthetic Payments API", "version": "2025-01-01"},
+  "paths": {
+    "/v1/customers": {
+      "post": {
+        "operationId": "createCustomer",
+        "requestBody": {"content": {"application/json": {"schema": {
+          "type": "object",
+          "required": ["email"],
+          "properties": {"email": {"type": "string"}, "legacy_token": {"type": "string"}}
+        }}}},
+        "responses": {"200": {"content": {"application/json": {"schema": {
+          "type": "object",
+          "properties": {"id": {"type": "string"}, "status": {"type": "string", "enum": ["active", "inactive"]}}
+        }}}}}
+      }
+    }
+  },
+  "webhooks": {
+    "customer.updated": {"post": {"operationId": "customerUpdated", "requestBody": {"content": {"application/json": {"schema": {
+      "type": "object", "properties": {"customer_id": {"type": "string"}, "legacy_state": {"type": "string"}}
+    }}}}, "responses": {"200": {"description": "accepted"}}}}
+  }
+}

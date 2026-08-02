@@ -9,6 +9,7 @@ mod commands;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Cmd};
+use commands::api::run_api;
 use commands::audit::run_audit;
 use commands::cache::run_cache;
 use commands::diff::run_diff;
@@ -164,6 +165,7 @@ fn run() -> Result<()> {
             password,
         } => run_export(&format, graph, out, push, &user, password, repo),
         Cmd::Ingest { source } => run_ingest(source),
+        Cmd::Api { action } => run_api(action),
         Cmd::Install {
             platform,
             global,

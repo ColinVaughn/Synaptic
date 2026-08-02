@@ -30,7 +30,8 @@ pub use cross_language::{
     CROSS_LANGUAGE_RELATIONS,
 };
 pub use dedup::{
-    ambiguous_concept_pairs, deduplicate_entities, deterministic_tiebreak, merge_pairs,
+    ambiguous_concept_pairs, deduplicate_entities, deterministic_tiebreak,
+    deterministic_tiebreak_candidates, merge_pairs,
 };
 pub use dynamic_link::link_dynamic_refs;
 pub use error::GraphError;

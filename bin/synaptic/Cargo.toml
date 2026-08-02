@@ -37,6 +37,8 @@ cache-binary = ["synaptic-extract/cache-binary"]
 live-explain = ["synaptic-sqlaudit/live-explain"]
 
 [dependencies]
+blake3 = { workspace = true }
+serde = { workspace = true }
 synaptic-core = { workspace = true }
 synaptic-detect = { workspace = true }
 synaptic-extract = { workspace = true }
@@ -63,6 +65,7 @@ synaptic-readiness = { workspace = true }
 synaptic-upgrade = { workspace = true }
 synaptic-store = { workspace = true }
 synaptic-memory = { workspace = true }
+synaptic-api = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 rayon = { workspace = true }

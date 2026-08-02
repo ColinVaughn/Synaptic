@@ -33,6 +33,7 @@ Most read commands operate on `synaptic-out/graph.json` by default; build it fir
 | [`workspace`](#workspace) | Multi-repo / monorepo federation. |
 | [`global`](#global) | Manage the cross-repo global graph store (`~/.synaptic`). |
 | [`memory`](#memory) | Ingest, record, search, and inspect durable repository memory. |
+| [`api`](#api) | Detect API changes, measure coverage, localize impact, and prepare verified draft repairs. |
 | [`merge-graphs`](#merge-graphs) | Compose several `graph.json` files into one namespaced graph. |
 | [`cache`](#cache) | Maintain the on-disk extraction cache. |
 | [`self-update`](#self-update) | Update the binary from the latest GitHub release (opt-in). |
@@ -807,6 +808,54 @@ synaptic hook status
 ```
 
 See [Incremental-Updates](Incremental-Updates).
+
+## api
+
+Run the opt-in, vendor-neutral API maintenance pipeline. Read-only discovery and
+assessment stages never modify repository source or GitHub; repairs execute in an
+isolated worktree, and only `publish` receives repository write credentials.
+
+Syntax:
+
+```sh
+synaptic api init [--root <PATH>]
+synaptic api inventory [--root <PATH>] [--vendor <ID>] [--json]
+synaptic api discover [--root <PATH>] [--json]
+synaptic api coverage [--root <PATH>] [--runtime-evidence <JSON>]... [--behavioral-evidence <JSON>]... [--require-complete] [--json]
+synaptic api check-plan [--root <PATH>] [--require-complete] [--json]
+synaptic api scan [--root <PATH>] [--vendor <ID>] [--offline] [--json]
+synaptic api impact --event <ID> [--root <PATH>] [--allow-path <PREFIX>]... [--json]
+synaptic api repair --event <ID> [--root <PATH>] [--dry-run] [--agent-command <TEMPLATE>] [--network-guard <ARG>]... [--json]
+synaptic api verify --run <ID> [--root <PATH>] [--json]
+synaptic api publish --run <ID> [--root <PATH>] [--json]
+synaptic api run [--root <PATH>] [--vendor <ID>] [--offline] [--dry-run] [--agent-command <TEMPLATE>] [--network-guard <ARG>]... [--json]
+```
+
+- `init` writes a disabled, draft-only configuration template for review.
+- `inventory` resolves configured SDK dependencies from manifests, lockfiles,
+  and supported SBOMs without contacting vendors.
+- `discover` parses checked-in OpenAPI, AsyncAPI, GraphQL, Protobuf/gRPC, WSDL,
+  Smithy, and OpenRPC contracts and explicitly reports unsupported candidates.
+- `coverage` inventories observed HTTP, SDK, and non-HTTP surfaces and preserves
+  provider, model, source, binding, version, and dynamic-behavior gaps. Use
+  `--require-complete` as a fail-closed policy gate.
+- `check-plan` recursively previews detected build and test commands without
+  executing them; unresolved capabilities are inconclusive.
+- `scan` normalizes configured checked-in or official sources into immutable,
+  digest-addressed events. `--offline` refuses all network sources.
+- `impact` joins one event to installed versions and high-confidence `uses_api`
+  edges, then emits a bounded repair brief only when applicability is proven.
+- `repair` verifies the unchanged baseline, invokes the configured agent in a
+  throwaway worktree, applies strict patch policy, and reruns graph, test, build,
+  lint, schema, integration, and security gates. Non-dry runs require an explicit
+  platform network-isolation guard.
+- `verify` revalidates a stored conclusive result; `publish` alone pushes the
+  deterministic branch and creates or updates its single draft PR.
+- `run` composes scan, impact, repair, verification, and optional publication.
+
+Configuration, evidence semantics, schemas, artifacts, security boundaries, and
+the release gates are documented in the repository's
+[API maintenance procedure](https://github.com/ColinVaughn/Synaptic/blob/master/docs/procedures/api-maintenance.md).
 
 ## memory
 

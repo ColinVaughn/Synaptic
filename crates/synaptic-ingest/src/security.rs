@@ -46,6 +46,16 @@ pub enum FetchError {
     TooLarge(u64),
 }
 
+/// Bounded response bytes plus validators used by higher-level caches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafeFetchResponse {
+    pub bytes: Vec<u8>,
+    pub content_type: Option<String>,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub not_modified: bool,
+}
+
 /// True if `ip` is in a private/reserved/internal range — i.e. an SSRF target
 /// (incl. RFC 6598 CGN and RFC 6052 NAT64 unwrapping).
 fn ip_is_blocked(ip: IpAddr) -> bool {
@@ -153,12 +163,29 @@ pub fn validate_url(url: &str) -> Result<Url, FetchError> {
 /// Fetch bytes from a validated URL, re-validating each redirect hop and capping
 /// the response at `cap` bytes.
 pub fn safe_fetch(url: &str, cap: u64) -> Result<Vec<u8>, FetchError> {
+    Ok(safe_fetch_response(url, cap, None, None)?.bytes)
+}
+
+/// Fetch a response with optional HTTP cache validators. Redirect targets are
+/// validated independently and all bodies remain bounded by `cap`.
+pub fn safe_fetch_response(
+    url: &str,
+    cap: u64,
+    prior_etag: Option<&str>,
+    prior_last_modified: Option<&str>,
+) -> Result<SafeFetchResponse, FetchError> {
     let client = &*HTTP_CLIENT;
 
     let mut current = validate_url(url)?;
     for _ in 0..=MAX_REDIRECTS {
-        let resp = client
-            .get(current.clone())
+        let mut request = client.get(current.clone());
+        if let Some(etag) = prior_etag {
+            request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+        }
+        if let Some(last_modified) = prior_last_modified {
+            request = request.header(reqwest::header::IF_MODIFIED_SINCE, last_modified);
+        }
+        let resp = request
             .send()
             .map_err(|e| FetchError::Http(e.to_string()))?;
         let status = resp.status();
@@ -174,6 +201,18 @@ pub fn safe_fetch(url: &str, cap: u64) -> Result<Vec<u8>, FetchError> {
                 .map_err(|e| FetchError::Invalid(e.to_string()))?;
             current = validate_url(next.as_str())?;
             continue;
+        }
+        let content_type = header_text(resp.headers(), reqwest::header::CONTENT_TYPE);
+        let etag = header_text(resp.headers(), reqwest::header::ETAG);
+        let last_modified = header_text(resp.headers(), reqwest::header::LAST_MODIFIED);
+        if status == reqwest::StatusCode::NOT_MODIFIED {
+            return Ok(SafeFetchResponse {
+                bytes: Vec::new(),
+                content_type,
+                etag: etag.or_else(|| prior_etag.map(str::to_string)),
+                last_modified: last_modified.or_else(|| prior_last_modified.map(str::to_string)),
+                not_modified: true,
+            });
         }
         if !status.is_success() {
             return Err(FetchError::Http(format!("status {status}")));
@@ -194,9 +233,25 @@ pub fn safe_fetch(url: &str, cap: u64) -> Result<Vec<u8>, FetchError> {
         if bytes.len() as u64 > cap {
             return Err(FetchError::TooLarge(cap));
         }
-        return Ok(bytes);
+        return Ok(SafeFetchResponse {
+            bytes,
+            content_type,
+            etag,
+            last_modified,
+            not_modified: false,
+        });
     }
     Err(FetchError::Http("too many redirects".into()))
+}
+
+fn header_text(
+    headers: &reqwest::header::HeaderMap,
+    name: reqwest::header::HeaderName,
+) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
 }
 
 /// Fetch text from a validated URL (10 MB cap), lossily decoding as UTF-8.

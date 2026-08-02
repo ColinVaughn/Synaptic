@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synaptic.dev/schemas/repair-brief-v1.json",
+  "title": "Synaptic API repair brief v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "id", "repository_identity", "base_sha", "event", "applicability", "usage_bindings", "impact", "official_evidence", "source_slices", "memory", "dynamic_hazards", "allowed_files", "required_tests", "verification"],
+  "properties": {
+    "version": {"const": 1}, "id": {"type": "string"}, "repository_identity": {"type": "string"}, "base_sha": {"type": "string"},
+    "event": {"type": "object"}, "applicability": {"type": "object"},
+    "usage_bindings": {"type": "array", "items": {"type": "object"}},
+    "impact": {"type": "object"}, "official_evidence": {"type": "array", "items": {"type": "object"}},
+    "source_slices": {"type": "array", "items": {"type": "object", "required": ["file", "start_line", "end_line", "content", "digest"]}},
+    "memory": {"type": "array", "items": {"type": "object"}}, "dynamic_hazards": {"type": "array", "items": {"type": "string"}},
+    "allowed_files": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "required_tests": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "verification": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["gate", "required", "description"]}}
+  }
+}

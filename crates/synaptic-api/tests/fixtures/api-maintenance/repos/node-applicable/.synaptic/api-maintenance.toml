@@ -1,0 +1,13 @@
+schema = 1
+allowed_paths = ["src/"]
+
+[[vendors]]
+id = "stripe"
+packages = ["npm:stripe"]
+hosts = ["api.stripe.com"]
+
+[[vendors.sdk_bindings]]
+package = "npm:stripe"
+member = "customers.create"
+method = "POST"
+path = "/v1/customers"

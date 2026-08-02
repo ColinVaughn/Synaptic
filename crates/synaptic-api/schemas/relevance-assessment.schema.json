@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synaptic.dev/schemas/relevance-assessment-v1.json",
+  "title": "Synaptic API relevance assessment v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "event_id", "vendor", "state", "reasons", "matched_change_ids", "bindings", "seed_node_ids", "observed_versions"],
+  "properties": {
+    "version": {"const": 1}, "event_id": {"type": "string"}, "vendor": {"type": "string"},
+    "state": {"enum": ["not_applicable", "review_required", "applicable"]},
+    "reasons": {"type": "array", "items": {"type": "string"}},
+    "matched_change_ids": {"type": "array", "items": {"type": "string"}},
+    "bindings": {"type": "array", "items": {"$ref": "#/$defs/binding"}},
+    "seed_node_ids": {"type": "array", "items": {"type": "string"}},
+    "observed_versions": {"type": "array", "items": {"type": "string"}}
+  },
+  "$defs": {
+    "binding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["vendor", "operation_node_id", "caller_node_id", "source_file", "basis", "confidence"],
+      "properties": {
+        "vendor": {"type": "string"}, "operation_node_id": {"type": "string"}, "caller_node_id": {"type": "string"}, "source_file": {"type": "string"},
+        "source_location": {"type": "string"}, "sdk_package": {"type": "string"}, "sdk_member": {"type": "string"}, "sdk_version": {"type": "string"}, "api_version": {"type": "string"},
+        "basis": {"enum": ["absolute_url_host", "sdk_symbol", "generated_client", "configured_host", "unknown"]}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    }
+  }
+}

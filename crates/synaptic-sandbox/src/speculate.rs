@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use synaptic_history::git;
 
-use crate::detect::{detect_commands, DetectedCommands};
-use crate::run::{expand_template, run_command, CommandResult, CommandStatus};
+use crate::detect::{detect_command_plan, DetectedCommandPlan, DetectedCommands};
+use crate::run::{expand_template, run_command, tail_lines, CommandResult, CommandStatus};
 use crate::worktree::Worktree;
 use crate::SandboxError;
 
@@ -173,28 +173,61 @@ pub fn speculate(
 
     // Resolve commands: an explicit command always wins; otherwise auto-detect.
     let need_detect = opts.auto_detect && (opts.test_cmd.is_none() || opts.check_cmd.is_none());
-    let detected = need_detect.then(|| detect_commands(&root_file_names(wt.path())));
-    let check_cmd = opts
-        .check_cmd
-        .clone()
-        .or_else(|| detected.as_ref().and_then(|d| d.check.clone()));
-    let test_cmd = opts
-        .test_cmd
-        .clone()
-        .or_else(|| detected.as_ref().and_then(|d| d.test.clone()));
+    let plan = need_detect
+        .then(|| detect_command_plan(wt.path()))
+        .transpose()?;
+    let changed_files =
+        String::from_utf8_lossy(&git_capture(wt.path(), &["diff", "--name-only", "HEAD"])?)
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+    let detected = plan.as_ref().map(summarize_plan);
 
     // Build / type-check first: there is no point testing code that will not build.
-    let check = check_cmd
+    let check = if let Some(command) = opts
+        .check_cmd
         .as_deref()
-        .filter(|c| !c.trim().is_empty())
-        .map(|c| run_command("check", c, wt.path(), opts.timeout, opts.max_output_lines));
+        .filter(|command| !command.trim().is_empty())
+    {
+        Some(run_command(
+            "check",
+            command,
+            wt.path(),
+            opts.timeout,
+            opts.max_output_lines,
+        ))
+    } else {
+        plan.as_ref().and_then(|plan| {
+            let results = plan
+                .projects
+                .iter()
+                .filter(|project| project.is_relevant_to(&changed_files))
+                .flat_map(|project| {
+                    project.checks.iter().map(|command| {
+                        run_command(
+                            &format!("{} check ({})", project.ecosystem, project.root.display()),
+                            command,
+                            &wt.path().join(&project.root),
+                            opts.timeout,
+                            opts.max_output_lines,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            aggregate_results("detected build/checks", results, opts.max_output_lines)
+        })
+    };
     let check_failed = check
         .as_ref()
         .is_some_and(|r| matches!(r.status, CommandStatus::Failed | CommandStatus::TimedOut));
 
     let mut tests = Vec::new();
     let mut tests_scoped = false;
-    if let Some(tcmd) = test_cmd.as_deref().filter(|c| !c.trim().is_empty()) {
+    if let Some(tcmd) = opts
+        .test_cmd
+        .as_deref()
+        .filter(|command| !command.trim().is_empty())
+    {
         if check_failed {
             tests.push(CommandResult::skipped(
                 "tests",
@@ -202,6 +235,40 @@ pub fn speculate(
             ));
         } else {
             tests_scoped = run_tests(wt.path(), tcmd, opts, &mut tests);
+        }
+    } else if let Some(plan) = &plan {
+        if check_failed {
+            tests.push(CommandResult::skipped(
+                "tests",
+                "build/type-check failed; tests not run",
+            ));
+        } else {
+            for project in plan
+                .projects
+                .iter()
+                .filter(|project| project.is_relevant_to(&changed_files))
+            {
+                for command in &project.tests {
+                    tests.push(run_command(
+                        &format!("{} tests ({})", project.ecosystem, project.root.display()),
+                        command,
+                        &wt.path().join(&project.root),
+                        opts.timeout,
+                        opts.max_output_lines,
+                    ));
+                }
+            }
+            tests.extend(
+                plan.gaps
+                    .iter()
+                    .filter(|gap| gap.is_relevant_to(&changed_files))
+                    .map(|gap| {
+                        CommandResult::skipped(
+                            &format!("{} verification gap", gap.ecosystem),
+                            &gap.reason,
+                        )
+                    }),
+            );
         }
     }
 
@@ -223,6 +290,69 @@ pub fn speculate(
     };
     wt.remove();
     Ok(report)
+}
+
+fn summarize_plan(plan: &DetectedCommandPlan) -> DetectedCommands {
+    let ecosystems = plan
+        .projects
+        .iter()
+        .map(|project| project.ecosystem.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(",");
+    DetectedCommands {
+        language: (!ecosystems.is_empty()).then_some(ecosystems),
+        test: None,
+        check: None,
+    }
+}
+
+fn aggregate_results(
+    label: &str,
+    results: Vec<CommandResult>,
+    max_output_lines: usize,
+) -> Option<CommandResult> {
+    if results.is_empty() {
+        return None;
+    }
+    let status = if results
+        .iter()
+        .any(|result| result.status == CommandStatus::Failed)
+    {
+        CommandStatus::Failed
+    } else if results
+        .iter()
+        .any(|result| result.status == CommandStatus::TimedOut)
+    {
+        CommandStatus::TimedOut
+    } else if results
+        .iter()
+        .any(|result| result.status == CommandStatus::Skipped)
+    {
+        CommandStatus::Skipped
+    } else {
+        CommandStatus::Passed
+    };
+    let command = results
+        .iter()
+        .map(|result| result.command.as_str())
+        .collect::<Vec<_>>()
+        .join(" && ");
+    let output = results
+        .iter()
+        .filter(|result| result.status != CommandStatus::Passed || !result.output.is_empty())
+        .map(|result| format!("{}: {}", result.label, result.output))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(CommandResult {
+        label: label.into(),
+        command,
+        status,
+        exit_code: None,
+        output: tail_lines(&output, max_output_lines),
+        duration_ms: results.iter().map(|result| result.duration_ms).sum(),
+    })
 }
 
 /// Run the at-risk tests. A `{files}`-templated command runs once per at-risk
@@ -273,6 +403,13 @@ fn verdict(check: Option<&CommandResult>, tests: &[CommandResult]) -> Outcome {
     if any_failed {
         return Outcome::Failed;
     }
+    let any_skipped = check.is_some_and(|result| result.status == CommandStatus::Skipped)
+        || tests
+            .iter()
+            .any(|test| test.status == CommandStatus::Skipped);
+    if any_skipped {
+        return Outcome::Inconclusive;
+    }
     let any_passed = check.is_some_and(|r| r.status == CommandStatus::Passed)
         || tests.iter().any(|t| t.status == CommandStatus::Passed);
     if any_passed {
@@ -312,19 +449,6 @@ fn summarize(
 
 fn short(sha: &str) -> String {
     sha.chars().take(8).collect()
-}
-
-/// File names directly under `dir` (for command detection).
-fn root_file_names(dir: &Path) -> Vec<String> {
-    let mut names = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for entry in rd.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                names.push(name.to_string());
-            }
-        }
-    }
-    names
 }
 
 /// Run git in `dir`, returning stdout bytes on success.
@@ -449,6 +573,61 @@ mod tests {
         assert_eq!(report.check.as_ref().unwrap().status, CommandStatus::Passed);
         assert_eq!(report.tests.len(), 1);
         assert_eq!(report.tests[0].status, CommandStatus::Passed);
+    }
+
+    #[test]
+    fn auto_detection_uses_the_recursive_command_plan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git_run(root, &["init", "-q"]);
+        std::fs::create_dir_all(root.join("app/src")).unwrap();
+        std::fs::write(
+            root.join("app/Cargo.toml"),
+            "[package]\nname='sample'\nversion='0.1.0'\nedition='2021'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("app/src/lib.rs"),
+            "pub fn value() -> u8 { 1 }\n#[test]\nfn value_is_one() { assert_eq!(value(), 1); }\n",
+        )
+        .unwrap();
+        git_run(root, &["add", "-A"]);
+        git_run(root, &["commit", "-q", "-m", "init", "--no-gpg-sign"]);
+        std::fs::write(
+            root.join("app/src/lib.rs"),
+            "pub fn value() -> u8 { 2 }\n#[test]\nfn value_is_two() { assert_eq!(value(), 2); }\n",
+        )
+        .unwrap();
+
+        let report = speculate(
+            root,
+            &Change::WorkingTree {
+                base: "HEAD".into(),
+                paths: vec!["app/src/lib.rs".into()],
+            },
+            &SpeculateOptions {
+                timeout: Duration::from_secs(120),
+                ..SpeculateOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.outcome, Outcome::Passed, "{report:#?}");
+        assert_eq!(
+            report
+                .detected
+                .as_ref()
+                .and_then(|plan| plan.language.as_deref()),
+            Some("rust")
+        );
+        assert!(report
+            .check
+            .as_ref()
+            .is_some_and(|check| check.command.contains("cargo build")));
+        assert!(report
+            .tests
+            .iter()
+            .any(|test| test.command.contains("cargo test")));
     }
 
     #[test]

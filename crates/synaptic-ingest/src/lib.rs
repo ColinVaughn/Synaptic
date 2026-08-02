@@ -27,7 +27,9 @@ pub use cargo_manifest::introspect_cargo;
 pub use mcp::ingest_mcp_config;
 pub use pg::{build_postgres_graph, introspect_postgres, PgError, PgSchema, SchemaSource};
 pub use scip::ingest_scip_json;
-pub use security::{safe_fetch, safe_fetch_text, validate_url, FetchError};
+pub use security::{
+    safe_fetch, safe_fetch_response, safe_fetch_text, validate_url, FetchError, SafeFetchResponse,
+};
 pub use url::{detect_url_type, ingest_url, yaml_str, UrlKind};
 
 #[cfg(feature = "gws")]

@@ -94,6 +94,7 @@ pub const DEFAULT_AFFECTED_RELATIONS: &[&str] = &[
     "invokes",
     "binds_native",
     "calls_service",
+    "uses_api",
     "handled_by",
     // Dynamic-dispatch evidence-link: a reflection site whose literal key resolved
     // to a unique target points caller->target, so the target's reverse-impact
@@ -3572,6 +3573,26 @@ mod tests {
         assert_eq!(b.depth, 1);
         assert_eq!(b.via_relation, "calls");
         assert_eq!(aff.iter().find(|h| h.node_id.0 == "c").unwrap().depth, 2);
+    }
+
+    #[test]
+    fn api_usage_edges_propagate_vendor_operation_impact() {
+        let kg = build(
+            &[
+                ("operation", "POST /v1/charges"),
+                ("caller", "createCharge"),
+            ],
+            &[("caller", "operation", "uses_api")],
+        );
+        let affected = affected_nodes(
+            &kg,
+            &NodeId("operation".into()),
+            DEFAULT_AFFECTED_RELATIONS,
+            1,
+        );
+        assert_eq!(affected.len(), 1);
+        assert_eq!(affected[0].node_id.0, "caller");
+        assert_eq!(affected[0].via_relation, "uses_api");
     }
 
     #[test]

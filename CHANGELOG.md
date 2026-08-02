@@ -10,6 +10,8 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-01
+
 ### Added
 
 - **CodeQL QL is a first-class source language.** `.ql` queries and `.qll`
@@ -51,6 +53,28 @@ All notable changes to Synaptic are documented here. The format is based on
   verified compact snapshots, collision-safe peer federation, checksummed team
   bundles, and recall/MRR/selectivity benchmark gates complete the durable
   retrieval workflow.
+- **Graph-native, vendor-neutral API maintenance.** The new `synaptic-api`
+  crate and `synaptic api` command family inventory installed SDK versions,
+  discover checked-in OpenAPI, AsyncAPI, GraphQL, Protobuf/gRPC, WSDL, Smithy,
+  and OpenRPC contracts, normalize source-grounded breaking changes, measure
+  explicit coverage gaps, and bind affected operations to exact call sites and
+  downstream tests. The repair pipeline builds a bounded brief, establishes an
+  unchanged baseline, invokes an agent only inside a network-isolated worktree,
+  enforces patch and graph invariants, reruns every relevant project gate, and
+  can create or update one idempotent draft pull request. Recursive verification
+  planning covers the workspace's supported build systems and reports missing
+  tools, credentials, tests, ambiguous ownership, and incomplete evidence as
+  inconclusive instead of successful. Versioned schemas, an offline labeled
+  corpus, behavioral/runtime evidence adapters, deterministic run ledgers,
+  tenant-scoped worker contracts, and Criterion scaling benchmarks make the
+  automation boundary auditable and regression-testable.
+
+### Fixed
+
+- **Repository document refresh remains idempotent as contextual metadata
+  improves.** Re-ingesting unchanged ADR or procedure bytes after a commit,
+  branch change, or graph-anchor refresh now preserves the original immutable
+  record instead of rejecting the same content-derived key as a conflict.
 
 ## [0.8.0] - 2026-07-29
 
@@ -1734,7 +1758,8 @@ parameters), and `graph.json` gains only additive edge keys.
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/ColinVaughn/Synaptic/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.1...v0.7.2

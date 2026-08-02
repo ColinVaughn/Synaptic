@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "verified": true,
+  "gates": [
+    {"gate": "patch_integrity", "outcome": "passed", "detail": "Patch stayed in scope.", "duration_ms": 2},
+    {"gate": "graph_invariants", "outcome": "passed", "detail": "Bindings migrated.", "duration_ms": 12},
+    {"gate": "selected_tests", "outcome": "passed", "detail": "Affected tests passed.", "duration_ms": 30},
+    {"gate": "repository_policy", "outcome": "passed", "detail": "Policy checks passed.", "duration_ms": 8},
+    {"gate": "final_forecast", "outcome": "passed", "detail": "Risk stayed below policy.", "duration_ms": 5}
+  ]
+}
