@@ -225,6 +225,8 @@ fn normalize_path(path: &str) -> String {
 fn is_protected(path: &str) -> bool {
     let lowercase = path.to_ascii_lowercase();
     lowercase.starts_with(".github/workflows/")
+        || lowercase == ".gitlab-ci.yml"
+        || lowercase.starts_with(".gitlab/")
         || lowercase.ends_with("codeowners")
         || lowercase.contains("security.md")
         || lowercase.contains("credentials")

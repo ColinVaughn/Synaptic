@@ -1,0 +1,37 @@
+# Synaptic engine API maintenance dogfood policy.
+# Report-only until scheduled baselines and failure drills are complete.
+schema = 1
+mode = "report"
+base_branch = "master"
+max_files = 10
+max_changed_lines = 600
+max_attempts = 3
+max_risk_score = 65
+allowed_paths = ["crates/", "bin/", "tests/", "Cargo.toml", "Cargo.lock"]
+allow_workflow_changes = false
+allow_generated_changes = false
+require_resolved_version = true
+require_graph_invariants = true
+require_tests = true
+
+[commands]
+check = "cargo check --workspace --locked"
+test = "cargo test --workspace --locked"
+policy = ["cargo fmt --all -- --check", "cargo clippy --workspace --all-targets --locked -- -D warnings"]
+
+[publish]
+labels = ["dependencies", "api-migration", "synaptic"]
+reviewers = []
+
+[[vendors]]
+id = "github"
+enabled = true
+packages = []
+hosts = ["api.github.com"]
+auto_repair_confidence = 0.95
+
+[[vendors.sources]]
+kind = "changelog"
+uri = "https://api.github.com/repos/github/rest-api-description/releases/latest"
+max_bytes = 1048576
+min_poll_interval_seconds = 21600

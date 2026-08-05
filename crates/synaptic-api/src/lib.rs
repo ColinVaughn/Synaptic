@@ -13,6 +13,7 @@ mod coverage;
 mod discovery;
 mod evaluation;
 mod event;
+mod handoff;
 mod invariants;
 mod inventory;
 mod ledger;
@@ -79,6 +80,7 @@ pub use event::{
     ApiBreakingChange, ApiChangeEvent, BreakingChangeKind, EvidenceSpan, SdkSymbolAnchor,
     SourceArtifact, VersionRange,
 };
+pub use handoff::{HandoffError, VerifiedRunHandoff};
 pub use invariants::{verify_api_invariants, ApiInvariantReport, InvariantCheck};
 pub use inventory::{
     inventory, scan_dependencies, scan_dependencies_and_sbom_evidence, scan_sbom_evidence,
@@ -91,8 +93,9 @@ pub use model::{
 };
 pub use patch_policy::{validate_patch, PatchInspection, PatchPolicy, PatchPolicyError};
 pub use publisher::{
-    deterministic_branch, publish_verified_draft, CommandOutput, DraftPublishRequest,
-    PublishAction, PublishCommandRunner, PublishError, PublishResult, SystemPublishCommandRunner,
+    deterministic_branch, publish_verified_change_request, publish_verified_draft,
+    ChangeRequestKind, ChangeRequestProvider, CommandOutput, DraftPublishRequest, PublishAction,
+    PublishCommandRunner, PublishContext, PublishError, PublishResult, SystemPublishCommandRunner,
 };
 pub use relevance::{
     evaluate_relevance, usage_bindings, ApiUsageBinding, ApplicabilityReason, ApplicabilityState,

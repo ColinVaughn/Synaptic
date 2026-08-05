@@ -23,7 +23,7 @@ steps:
       - --tag
       - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/synaptic-engine-worker:${_TAG}
       - .
-  - id: record-engine-binary-digests
+  - id: verify-engine-binaries
     name: gcr.io/cloud-builders/docker
     entrypoint: bash
     args:
@@ -33,13 +33,13 @@ steps:
       - |
         glibc_image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/synaptic-engine:${_TAG}"
         musl_image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/synaptic-engine-worker:${_TAG}"
-        test "$(docker run --rm "$${glibc_image}" --version)" = "synaptic ${_ENGINE_VERSION}"
-        test "$(docker run --rm "$${musl_image}" --version)" = "synaptic ${_ENGINE_VERSION}"
-        glibc_container="$(docker create "$${glibc_image}")"
-        musl_container="$(docker create "$${musl_image}")"
-        trap 'docker rm -f "$${glibc_container}" "$${musl_container}" >/dev/null 2>&1 || true' EXIT
-        docker cp "$${glibc_container}:/usr/local/bin/synaptic" /workspace/synaptic-glibc
-        docker cp "$${musl_container}:/usr/local/bin/synaptic" /workspace/synaptic-musl
+        test "$(docker run --rm "${glibc_image}" --version)" = "synaptic ${_ENGINE_VERSION}"
+        test "$(docker run --rm "${musl_image}" --version)" = "synaptic ${_ENGINE_VERSION}"
+        glibc_container="$(docker create "${glibc_image}")"
+        musl_container="$(docker create "${musl_image}")"
+        trap 'docker rm -f "${glibc_container}" "${musl_container}" >/dev/null 2>&1 || true' EXIT
+        docker cp "${glibc_container}:/usr/local/bin/synaptic" /workspace/synaptic-glibc
+        docker cp "${musl_container}:/usr/local/bin/synaptic" /workspace/synaptic-musl
         sha256sum /workspace/synaptic-glibc /workspace/synaptic-musl
 images:
   - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/synaptic-engine:${_TAG}
@@ -50,6 +50,9 @@ options:
 substitutions:
   _REGION: us-east4
   _REPOSITORY: synaptic
-  _TAG: v0.9.0
+  _TAG: v0.9.0-cloud
   _ENGINE_VERSION: 0.9.0
+# The glibc and musl release builds are intentionally sequential on the
+# quota-available E2_MEDIUM builder. Synaptic's full parser matrix needs more
+# than one hour on that class even though each individual image stays bounded.
 timeout: 7200s

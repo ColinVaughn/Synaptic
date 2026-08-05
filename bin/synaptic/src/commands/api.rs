@@ -1,5 +1,7 @@
 //! Graph-native API maintenance commands.
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -63,6 +65,8 @@ pub(crate) fn run_api(action: ApiAction) -> Result<()> {
             config,
             dry_run,
             agent_command,
+            candidate,
+            repository_identity,
             network_guard,
             json,
         } => run_repair(
@@ -72,12 +76,44 @@ pub(crate) fn run_api(action: ApiAction) -> Result<()> {
             config,
             dry_run,
             agent_command,
+            candidate,
+            repository_identity,
             network_guard,
             json,
         )
         .map(|_| ()),
         ApiAction::Verify { run, root, json } => run_verify(run, root, json),
-        ApiAction::Publish { run, root, json } => run_publish(run, root, json),
+        ApiAction::Publish {
+            run,
+            root,
+            provider,
+            provider_base_url,
+            repository,
+            target_branch,
+            json,
+        } => run_publish(
+            run,
+            root,
+            json,
+            PublishOptions {
+                provider,
+                provider_base_url,
+                repository,
+                target_branch,
+            },
+        ),
+        ApiAction::ExportRun {
+            run,
+            root,
+            output,
+            json,
+        } => run_export(run, root, output, json),
+        ApiAction::ImportRun {
+            bundle,
+            expected_digest,
+            root,
+            json,
+        } => run_import(bundle, expected_digest, root, json),
         ApiAction::Run {
             root,
             vendor,
@@ -85,6 +121,11 @@ pub(crate) fn run_api(action: ApiAction) -> Result<()> {
             dry_run,
             agent_command,
             network_guard,
+            defer_publish,
+            provider,
+            provider_base_url,
+            repository,
+            target_branch,
             json,
         } => run_composed(
             root,
@@ -93,6 +134,13 @@ pub(crate) fn run_api(action: ApiAction) -> Result<()> {
             dry_run,
             agent_command,
             network_guard,
+            defer_publish,
+            PublishOptions {
+                provider,
+                provider_base_url,
+                repository,
+                target_branch,
+            },
             json,
         ),
     }
@@ -172,6 +220,21 @@ struct AgentRequest<'a> {
 struct CliPatchGenerator {
     command: String,
     execution: synaptic_sandbox::ExecutionPolicy,
+}
+
+#[derive(Clone)]
+struct CandidatePatchGenerator {
+    patch: synaptic_api::GeneratedPatch,
+}
+
+impl synaptic_api::PatchGenerator for CandidatePatchGenerator {
+    fn generate(
+        &self,
+        _brief: &synaptic_api::RepairBrief,
+        _worktree: &Path,
+    ) -> std::result::Result<synaptic_api::GeneratedPatch, synaptic_api::PatchGenerationError> {
+        Ok(self.patch.clone())
+    }
 }
 
 impl CliPatchGenerator {
@@ -468,6 +531,8 @@ fn run_repair(
     config_path: Option<PathBuf>,
     dry_run: bool,
     agent_command: Option<String>,
+    candidate: Option<PathBuf>,
+    repository_identity: Option<String>,
     network_guard: Vec<String>,
     json: bool,
 ) -> Result<Option<String>> {
@@ -478,10 +543,39 @@ fn run_repair(
         config_path,
         dry_run,
         agent_command.as_deref(),
+        candidate.as_deref(),
+        repository_identity.as_deref(),
         network_guard,
         json,
         true,
     )
+}
+
+fn maintenance_repository_identity(explicit: Option<&str>, root: &Path) -> Result<String> {
+    let Some(identity) = explicit else {
+        return Ok(root
+            .canonicalize()
+            .unwrap_or_else(|_| root.to_path_buf())
+            .to_string_lossy()
+            .into_owned());
+    };
+    let normalized = identity.trim();
+    let segments = normalized.split('/').collect::<Vec<_>>();
+    if normalized != identity
+        || normalized.len() > 512
+        || segments.len() < 2
+        || segments.iter().any(|segment| {
+            segment.is_empty()
+                || *segment == "."
+                || *segment == ".."
+                || !segment
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+        })
+    {
+        bail!("repository identity must be a canonical provider namespace/repository path");
+    }
+    Ok(normalized.into())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -492,16 +586,14 @@ fn repair_event(
     config_path: Option<PathBuf>,
     dry_run: bool,
     agent_command: Option<&str>,
+    candidate: Option<&Path>,
+    repository_identity: Option<&str>,
     network_guard: Vec<String>,
     json: bool,
     emit: bool,
 ) -> Result<Option<String>> {
     let context = prepare_impact(root, event_id, graph_path, config_path, Vec::new())?;
-    let repository_identity = root
-        .canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf())
-        .to_string_lossy()
-        .into_owned();
+    let repository_identity = maintenance_repository_identity(repository_identity, root)?;
     let base_sha = context
         .brief
         .as_ref()
@@ -532,7 +624,7 @@ fn repair_event(
                 &format!("API event {event_id}: {:?}", context.assessment.state),
             )?;
         }
-        return Ok(None);
+        return Ok(Some(run.id));
     };
     brief.id = run.id.clone();
     let directory = run_directory(root, &run.id)?;
@@ -563,8 +655,12 @@ fn repair_event(
         }
         return Ok(Some(run.id));
     }
-    let agent_command = agent_command
-        .ok_or_else(|| anyhow::anyhow!("--agent-command is required unless --dry-run is used"))?;
+    if agent_command.is_some() && candidate.is_some() {
+        bail!("--agent-command and --candidate are mutually exclusive");
+    }
+    if agent_command.is_none() && candidate.is_none() {
+        bail!("--agent-command or --candidate is required unless --dry-run is used");
+    }
     ledger.transition(&mut run, synaptic_api::RunState::Repairing, None, None)?;
     let session = synaptic_sandbox::RepairSession::create(
         root,
@@ -577,10 +673,27 @@ fn repair_event(
         network_guard: (!network_guard.is_empty()).then_some(network_guard),
         scrub_credentials: true,
     };
-    let generator = CliPatchGenerator {
-        command: agent_command.into(),
-        execution: execution.clone(),
-    };
+    let (generator, max_attempts): (Box<dyn synaptic_api::PatchGenerator>, usize) =
+        if let Some(candidate) = candidate {
+            let metadata = std::fs::metadata(candidate)
+                .with_context(|| format!("inspect patch candidate {}", candidate.display()))?;
+            if metadata.len() > 8 * 1024 * 1024 {
+                bail!("patch candidate exceeds the 8 MiB limit");
+            }
+            let patch: synaptic_api::GeneratedPatch = read_json(candidate.to_path_buf())?;
+            if patch.unified_diff.trim().is_empty() || patch.rationale.trim().is_empty() {
+                bail!("patch candidate must include a non-empty unified_diff and rationale");
+            }
+            (Box::new(CandidatePatchGenerator { patch }), 1)
+        } else {
+            (
+                Box::new(CliPatchGenerator {
+                    command: agent_command.unwrap_or_default().into(),
+                    execution: execution.clone(),
+                }),
+                context.registry.config().max_attempts,
+            )
+        };
     let baseline_project_gate = run_project_gate(
         "baseline_tests_and_build",
         session.path(),
@@ -596,12 +709,13 @@ fn repair_event(
     if baseline_project_gate.outcome != synaptic_api::GateOutcome::Passed {
         let verification =
             synaptic_api::VerificationReport::from_gates(vec![baseline_project_gate.clone()]);
-        ledger.transition(
-            &mut run,
-            synaptic_api::RunState::VerificationFailed,
-            Some(verification.clone()),
-            None,
-        )?;
+        let terminal_state =
+            if baseline_project_gate.outcome == synaptic_api::GateOutcome::Inconclusive {
+                synaptic_api::RunState::Inconclusive
+            } else {
+                synaptic_api::RunState::VerificationFailed
+            };
+        ledger.transition(&mut run, terminal_state, Some(verification.clone()), None)?;
         record_run_memory(
             root,
             &context,
@@ -654,9 +768,9 @@ fn repair_event(
         &brief,
         session.path(),
         &policy,
-        &generator,
+        generator.as_ref(),
         &verifier,
-        context.registry.config().max_attempts,
+        max_attempts,
     ) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -686,10 +800,17 @@ fn repair_event(
         );
     }
     if !outcome.verified {
-        let state = if outcome.final_verification.is_some() {
-            synaptic_api::RunState::VerificationFailed
-        } else {
-            synaptic_api::RunState::RepairFailed
+        let state = match outcome.final_verification.as_ref() {
+            Some(report)
+                if report
+                    .gates
+                    .iter()
+                    .any(|gate| gate.outcome == synaptic_api::GateOutcome::Inconclusive) =>
+            {
+                synaptic_api::RunState::Inconclusive
+            }
+            Some(_) => synaptic_api::RunState::VerificationFailed,
+            None => synaptic_api::RunState::RepairFailed,
         };
         ledger.transition(&mut run, state, outcome.final_verification.clone(), None)?;
         if emit {
@@ -1122,6 +1243,52 @@ struct RepairManifest {
     commit: String,
 }
 
+#[derive(Debug, Clone)]
+struct PublishOptions {
+    provider: String,
+    provider_base_url: Option<String>,
+    repository: Option<String>,
+    target_branch: Option<String>,
+}
+
+impl Default for PublishOptions {
+    fn default() -> Self {
+        Self {
+            provider: "github".into(),
+            provider_base_url: None,
+            repository: None,
+            target_branch: None,
+        }
+    }
+}
+
+fn publish_context(
+    options: &PublishOptions,
+    configured_base_branch: &str,
+) -> Result<synaptic_api::PublishContext> {
+    let provider = match options.provider.trim().to_ascii_lowercase().as_str() {
+        "github" => synaptic_api::ChangeRequestProvider::Github,
+        "gitlab" => synaptic_api::ChangeRequestProvider::Gitlab,
+        value => bail!("unsupported change-request provider {value:?}; use github or gitlab"),
+    };
+    let provider_base_url = options
+        .provider_base_url
+        .clone()
+        .unwrap_or_else(|| match provider {
+            synaptic_api::ChangeRequestProvider::Github => "https://github.com".into(),
+            synaptic_api::ChangeRequestProvider::Gitlab => "https://gitlab.com".into(),
+        });
+    Ok(synaptic_api::PublishContext {
+        provider,
+        provider_base_url,
+        repository_identity: options.repository.clone().unwrap_or_default(),
+        target_branch: options
+            .target_branch
+            .clone()
+            .unwrap_or_else(|| configured_base_branch.into()),
+    })
+}
+
 fn run_verify(run_id: String, root: PathBuf, json: bool) -> Result<()> {
     let (verification, digest) = validate_run(&run_id, &root)?;
     emit_json_or_text(
@@ -1157,7 +1324,7 @@ fn validate_run(run_id: &str, root: &Path) -> Result<(synaptic_api::Verification
     Ok((verification, digest))
 }
 
-fn run_publish(run_id: String, root: PathBuf, json: bool) -> Result<()> {
+fn run_publish(run_id: String, root: PathBuf, json: bool, options: PublishOptions) -> Result<()> {
     let _ = validate_run(&run_id, &root)?;
     let directory = run_directory(&root, &run_id)?;
     let manifest: RepairManifest = read_json(directory.join("run.json"))?;
@@ -1165,6 +1332,7 @@ fn run_publish(run_id: String, root: PathBuf, json: bool) -> Result<()> {
     let verification: synaptic_api::VerificationReport =
         read_json(directory.join("verification.json"))?;
     let registry = load_registry(&root, None, Some(&brief.event.vendor))?;
+    let publish_context = publish_context(&options, &registry.config().base_branch)?;
     let ledger = synaptic_api::ApiRunStore::new(&root);
     let mut run = ledger.load(&run_id)?;
     if !matches!(
@@ -1179,7 +1347,7 @@ fn run_publish(run_id: String, root: PathBuf, json: bool) -> Result<()> {
         &brief.event.vendor,
         &brief.event.id,
     )?;
-    let result = synaptic_api::publish_verified_draft(
+    let result = synaptic_api::publish_verified_change_request(
         &synaptic_api::DraftPublishRequest {
             worktree: session.path().to_path_buf(),
             branch: manifest.branch.clone(),
@@ -1188,6 +1356,7 @@ fn run_publish(run_id: String, root: PathBuf, json: bool) -> Result<()> {
             labels: registry.config().publish.labels.clone(),
             reviewers: registry.config().publish.reviewers.clone(),
         },
+        &publish_context,
         &synaptic_api::SystemPublishCommandRunner,
     )?;
     let _branch = session.retain_verified_branch()?;
@@ -1218,6 +1387,151 @@ fn run_publish(run_id: String, root: PathBuf, json: bool) -> Result<()> {
     )
 }
 
+fn run_export(run_id: String, root: PathBuf, output: PathBuf, json: bool) -> Result<()> {
+    let (verification, _) = validate_run(&run_id, &root)?;
+    let directory = run_directory(&root, &run_id)?;
+    let run = synaptic_api::ApiRunStore::new(&root).load(&run_id)?;
+    let event: synaptic_api::ApiChangeEvent = read_json(directory.join("event.json"))?;
+    let brief: synaptic_api::RepairBrief = read_json(directory.join("repair-brief.json"))?;
+    let outcome: synaptic_api::RepairOutcome = read_json(directory.join("repair-outcome.json"))?;
+    let patch = std::fs::read_to_string(directory.join("proposed.patch"))?;
+    let handoff =
+        synaptic_api::VerifiedRunHandoff::new(run, event, brief, outcome, verification, patch)?;
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&output)
+        .with_context(|| format!("create verified-run handoff {}", output.display()))?;
+    let mut bytes = serde_json::to_vec_pretty(&handoff)?;
+    bytes.push(b'\n');
+    file.write_all(&bytes)?;
+    emit_json_or_text(
+        json,
+        &serde_json::json!({
+            "version": 1,
+            "run": run_id,
+            "output": output,
+            "bundle_digest": handoff.bundle_digest,
+            "patch_digest": handoff.patch_digest
+        }),
+        &format!(
+            "Exported verified API run {run_id} to {} ({})",
+            output.display(),
+            handoff.bundle_digest
+        ),
+    )
+}
+
+fn run_import(bundle: PathBuf, expected_digest: String, root: PathBuf, json: bool) -> Result<()> {
+    const MAX_HANDOFF_BYTES: u64 = 64 * 1024 * 1024;
+    let metadata = std::fs::metadata(&bundle)
+        .with_context(|| format!("inspect verified-run handoff {}", bundle.display()))?;
+    if metadata.len() > MAX_HANDOFF_BYTES {
+        bail!("verified-run handoff exceeds the 64 MiB limit");
+    }
+    let handoff: synaptic_api::VerifiedRunHandoff = read_json(bundle.clone())?;
+    handoff.verify()?;
+    if handoff.bundle_digest != expected_digest {
+        bail!("verified-run handoff digest does not match --expected-digest");
+    }
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("canonicalize publication checkout {}", root.display()))?;
+    let head = git_stdout(&root, &["rev-parse", "HEAD"])?;
+    if head != handoff.run.base_sha {
+        bail!(
+            "publication checkout HEAD {head} does not match verified base {}",
+            handoff.run.base_sha
+        );
+    }
+    if !git_stdout(&root, &["status", "--porcelain"])?.is_empty() {
+        bail!("publication checkout must be clean before importing a verified run");
+    }
+    let registry = load_registry(&root, None, Some(&handoff.event.vendor))?;
+    let policy_digest = synaptic_api::maintenance_policy_digest(registry.config())?;
+    if policy_digest != handoff.run.policy_digest {
+        bail!("publication checkout policy digest differs from the verified run");
+    }
+    let policy = synaptic_api::PatchPolicy {
+        allowed_files: handoff.brief.allowed_files.clone(),
+        max_files: registry.config().max_files,
+        max_changed_lines: registry.config().max_changed_lines,
+        allow_workflows: registry.config().allow_workflow_changes,
+        allow_generated: registry.config().allow_generated_changes,
+        ..synaptic_api::PatchPolicy::default()
+    };
+    let inspection = synaptic_api::validate_patch(&root, &handoff.patch, &policy)?;
+    let session = synaptic_sandbox::RepairSession::create(
+        &root,
+        &handoff.run.base_sha,
+        &handoff.event.vendor,
+        &handoff.event.id,
+    )?;
+    if session.branch() != handoff.branch {
+        bail!("verified-run handoff branch does not match the repair session");
+    }
+    session.apply_patch(handoff.patch.as_bytes())?;
+    let title = format!(
+        "Migrate {} API for {}",
+        handoff.event.vendor, handoff.event.id
+    );
+    let commit = session.commit_verified(&title, &handoff.event.id, &inspection.changed_files)?;
+    let branch = session.retain_verified_branch()?;
+    synaptic_api::ApiEventStore::new(&root).put_event(&handoff.event)?;
+    let directory = run_directory(&root, &handoff.run.id)?;
+    std::fs::create_dir_all(&directory)?;
+    write_pretty(directory.join("event.json"), &handoff.event)?;
+    write_pretty(directory.join("repair-brief.json"), &handoff.brief)?;
+    write_pretty(directory.join("repair-outcome.json"), &handoff.outcome)?;
+    write_pretty(directory.join("verification.json"), &handoff.verification)?;
+    std::fs::write(directory.join("proposed.patch"), &handoff.patch)?;
+    write_pretty(
+        directory.join("run.json"),
+        &RepairManifest {
+            version: 1,
+            run_id: handoff.run.id.clone(),
+            event_id: handoff.event.id.clone(),
+            branch,
+            commit,
+        },
+    )?;
+    synaptic_api::ApiRunStore::new(&root).import_verified(&handoff.run)?;
+    emit_json_or_text(
+        json,
+        &serde_json::json!({
+            "version": 1,
+            "run": handoff.run.id,
+            "branch": handoff.branch,
+            "bundle_digest": handoff.bundle_digest,
+            "patch_digest": handoff.patch_digest
+        }),
+        &format!("Imported verified API run {}", handoff.run.id),
+    )
+}
+
+fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .with_context(|| format!("run git {}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().into())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_composed(
     root: PathBuf,
@@ -1226,6 +1540,8 @@ fn run_composed(
     dry_run: bool,
     agent_command: Option<String>,
     network_guard: Vec<String>,
+    defer_publish: bool,
+    publish_options: PublishOptions,
     json: bool,
 ) -> Result<()> {
     let registry = load_registry(&root, None, vendor)?;
@@ -1246,6 +1562,16 @@ fn run_composed(
         })
         .collect::<Vec<_>>();
     let mut runs = Vec::new();
+    let mut outcomes = Vec::new();
+    if events.is_empty() {
+        outcomes.push(serde_json::json!({
+            "run": serde_json::Value::Null,
+            "state": "no_change",
+            "event": format!("scan:{}", vendor.unwrap_or("all")),
+            "base_sha": git_stdout(&root, &["rev-parse", "HEAD"])?,
+            "policy_digest": synaptic_api::maintenance_policy_digest(registry.config())?
+        }));
+    }
     for event in &events {
         if let Some(run_id) = repair_event(
             &event.id,
@@ -1254,22 +1580,33 @@ fn run_composed(
             None,
             dry_run,
             agent_command.as_deref(),
+            None,
+            publish_options.repository.as_deref(),
             network_guard.clone(),
             false,
             false,
         )? {
             if !dry_run
+                && !defer_publish
                 && synaptic_api::ApiRunStore::new(&root).load(&run_id)?.state
                     == synaptic_api::RunState::Verified
             {
-                run_publish(run_id.clone(), root.clone(), false)?;
+                run_publish(run_id.clone(), root.clone(), false, publish_options.clone())?;
             }
+            let completed = synaptic_api::ApiRunStore::new(&root).load(&run_id)?;
+            outcomes.push(serde_json::json!({
+                "run": run_id,
+                "state": completed.state,
+                "event": completed.event_id,
+                "base_sha": completed.base_sha,
+                "policy_digest": completed.policy_digest
+            }));
             runs.push(run_id);
         }
     }
     emit_json_or_text(
         json,
-        &serde_json::json!({"version":1,"scan":scan,"events_considered":events.len(),"runs":runs,"dry_run":dry_run}),
+        &serde_json::json!({"version":1,"scan":scan,"events_considered":events.len(),"runs":runs,"outcomes":outcomes,"dry_run":dry_run,"publication_deferred":defer_publish}),
         &format!(
             "API maintenance run: {} event(s), {} repository run(s)",
             events.len(),

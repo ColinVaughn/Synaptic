@@ -20,6 +20,7 @@ pub enum RunState {
     Repairing,
     RepairFailed,
     VerificationFailed,
+    Inconclusive,
     Verified,
     PrOpen,
     Superseded,
@@ -171,6 +172,46 @@ impl ApiRunStore {
         Ok(records)
     }
 
+    pub fn import_verified(&self, record: &ApiRunRecord) -> Result<(), LedgerError> {
+        if record.state != RunState::Verified
+            || !record
+                .verification
+                .as_ref()
+                .is_some_and(|report| report.verified)
+            || record.pull_request_url.is_some()
+        {
+            return Err(LedgerError::UnverifiedTransition);
+        }
+        fs::create_dir_all(&self.root)?;
+        let _lock = RunLock::acquire(&self.root)?;
+        let identity = serde_json::to_vec(&(
+            &record.repository_identity,
+            &record.base_sha,
+            &record.event_id,
+            &record.policy_digest,
+        ))?;
+        let digest = blake3::hash(&identity).to_hex().to_string();
+        let expected_id = format!("api_run_{}", &digest[..24]);
+        if record.id != expected_id {
+            return Err(LedgerError::Integrity(format!(
+                "run id {} does not match its identity fields",
+                record.id
+            )));
+        }
+        let path = self.path(&record.id)?;
+        if path.exists() {
+            let existing = read_record(&path)?;
+            if existing == *record {
+                return Ok(());
+            }
+            return Err(LedgerError::Integrity(format!(
+                "run {} already exists with different content",
+                record.id
+            )));
+        }
+        write_record(&path, record)
+    }
+
     fn path(&self, id: &str) -> Result<PathBuf, LedgerError> {
         if id.is_empty()
             || !id.chars().all(|character| {
@@ -193,9 +234,12 @@ fn valid_transition(from: RunState, to: RunState) -> bool {
                 RunState::NotApplicable | RunState::ReviewRequired | RunState::Repairing
             ) | (
                 RunState::Repairing,
-                RunState::RepairFailed | RunState::VerificationFailed | RunState::Verified
+                RunState::RepairFailed
+                    | RunState::VerificationFailed
+                    | RunState::Inconclusive
+                    | RunState::Verified
             ) | (
-                RunState::RepairFailed | RunState::VerificationFailed,
+                RunState::RepairFailed | RunState::VerificationFailed | RunState::Inconclusive,
                 RunState::Repairing
             ) | (RunState::Verified, RunState::PrOpen)
         )

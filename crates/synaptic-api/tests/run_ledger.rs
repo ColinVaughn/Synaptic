@@ -61,3 +61,27 @@ fn concurrent_begin_reuses_one_valid_record() {
     assert_eq!(ids.len(), 1);
     assert_eq!(store.list().unwrap().len(), 1);
 }
+
+#[test]
+fn inconclusive_verification_is_terminal_but_can_be_retried() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ApiRunStore::new(root.path());
+    let mut run = store.begin("repo", "base", "event", "policy").unwrap();
+    store
+        .transition(&mut run, RunState::Repairing, None, None)
+        .unwrap();
+    let report = VerificationReport::from_gates(vec![GateResult {
+        gate: "tests".into(),
+        outcome: GateOutcome::Inconclusive,
+        detail: "test command unavailable".into(),
+        duration_ms: 1,
+    }]);
+    store
+        .transition(&mut run, RunState::Inconclusive, Some(report), None)
+        .unwrap();
+    assert_eq!(store.load(&run.id).unwrap().state, RunState::Inconclusive);
+    store
+        .transition(&mut run, RunState::Repairing, None, None)
+        .unwrap();
+    assert_eq!(run.attempts, 2);
+}

@@ -119,6 +119,127 @@ fn api_inventory_missing_config_fails_with_actionable_path() {
 }
 
 #[test]
+fn api_run_reports_a_deterministic_no_change_outcome_when_no_events_exist() {
+    let repo = repository();
+    for args in [
+        vec!["init"],
+        vec!["config", "user.email", "synaptic-tests@example.test"],
+        vec!["config", "user.name", "Synaptic Tests"],
+        vec!["add", "."],
+        vec!["commit", "-m", "fixture"],
+    ] {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    let output = cargo_bin_cmd!("synaptic")
+        .args([
+            "api",
+            "run",
+            "--root",
+            repo.path().to_str().unwrap(),
+            "--offline",
+            "--dry-run",
+            "--defer-publish",
+            "--repository",
+            "acme/widgets",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["events_considered"], 0);
+    assert_eq!(report["runs"].as_array().unwrap().len(), 0);
+    assert_eq!(report["outcomes"].as_array().unwrap().len(), 1);
+    assert_eq!(report["outcomes"][0]["run"], serde_json::Value::Null);
+    assert_eq!(report["outcomes"][0]["state"], "no_change");
+    assert_eq!(report["outcomes"][0]["event"], "scan:all");
+    assert_eq!(
+        report["outcomes"][0]["base_sha"].as_str().unwrap().len(),
+        40
+    );
+    assert_eq!(
+        report["outcomes"][0]["policy_digest"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+}
+
+#[test]
+fn api_publish_and_run_help_expose_provider_context_and_deferred_publication() {
+    let publish = cargo_bin_cmd!("synaptic")
+        .args(["api", "publish", "--help"])
+        .output()
+        .unwrap();
+    assert!(publish.status.success());
+    let publish_help = String::from_utf8_lossy(&publish.stdout);
+    for flag in [
+        "--provider",
+        "--provider-base-url",
+        "--repository",
+        "--target-branch",
+    ] {
+        assert!(
+            publish_help.contains(flag),
+            "publish help missing {flag}: {publish_help}"
+        );
+    }
+
+    let run = cargo_bin_cmd!("synaptic")
+        .args(["api", "run", "--help"])
+        .output()
+        .unwrap();
+    assert!(run.status.success());
+    let run_help = String::from_utf8_lossy(&run.stdout);
+    for flag in [
+        "--defer-publish",
+        "--provider",
+        "--provider-base-url",
+        "--repository",
+        "--target-branch",
+    ] {
+        assert!(
+            run_help.contains(flag),
+            "run help missing {flag}: {run_help}"
+        );
+    }
+
+    for command in ["export-run", "import-run"] {
+        let output = cargo_bin_cmd!("synaptic")
+            .args(["api", command, "--help"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "api {command} help is unavailable");
+    }
+
+    let repair = cargo_bin_cmd!("synaptic")
+        .args(["api", "repair", "--help"])
+        .output()
+        .unwrap();
+    assert!(repair.status.success());
+    assert!(
+        String::from_utf8_lossy(&repair.stdout).contains("--candidate"),
+        "repair help must expose the externally generated candidate boundary"
+    );
+    assert!(
+        String::from_utf8_lossy(&repair.stdout).contains("--repository-identity"),
+        "repair help must bind the run to a canonical provider repository identity"
+    );
+}
+
+#[test]
 fn api_coverage_reports_unconfigured_surfaces_without_requiring_config() {
     let repo = tempfile::tempdir().unwrap();
     fs::create_dir_all(repo.path().join("synaptic-out")).unwrap();
@@ -825,6 +946,9 @@ hosts = ["api.acme.example"]
         1,
         "stored pending events must be resumed even when the scan finds nothing new"
     );
+    assert_eq!(replay["outcomes"].as_array().unwrap().len(), 1);
+    assert_eq!(replay["outcomes"][0]["run"], replay["runs"][0]);
+    assert_eq!(replay["outcomes"][0]["state"], "planned");
 }
 
 #[test]

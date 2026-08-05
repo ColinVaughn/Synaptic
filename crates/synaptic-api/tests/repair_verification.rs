@@ -15,10 +15,20 @@ fn patch(path: &str, added: &str) -> String {
 fn patch_policy_allows_bounded_graph_scope_and_rejects_security_escapes() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(root.path().join("src")).unwrap();
+    std::fs::create_dir_all(root.path().join(".github/workflows")).unwrap();
+    std::fs::create_dir_all(root.path().join(".gitlab/ci")).unwrap();
     std::fs::write(root.path().join("src/client.ts"), "old\n").unwrap();
+    std::fs::write(root.path().join(".github/workflows/ci.yml"), "old\n").unwrap();
+    std::fs::write(root.path().join(".gitlab-ci.yml"), "old\n").unwrap();
+    std::fs::write(root.path().join(".gitlab/ci/api.yml"), "old\n").unwrap();
     let policy = PatchPolicy {
-        allowed_files: vec!["src/client.ts".into()],
-        max_files: 2,
+        allowed_files: vec![
+            "src/client.ts".into(),
+            ".github/workflows/ci.yml".into(),
+            ".gitlab-ci.yml".into(),
+            ".gitlab/ci/api.yml".into(),
+        ],
+        max_files: 4,
         max_changed_lines: 20,
         ..PatchPolicy::default()
     };
@@ -28,7 +38,9 @@ fn patch_policy_allows_bounded_graph_scope_and_rejects_security_escapes() {
     for bad in [
         patch("../outside.ts", "new"),
         patch("src/unrelated.ts", "new"),
-        patch(".github/workflows/steal.yml", "new"),
+        patch(".github/workflows/ci.yml", "new"),
+        patch(".gitlab-ci.yml", "new"),
+        patch(".gitlab/ci/api.yml", "new"),
         patch("src/client.ts", "const key = 'sk_live_abcdefghijklmnop';"),
         format!("{}new mode 100755\n", patch("src/client.ts", "new")),
         format!("{}GIT binary patch\n", patch("src/client.ts", "new")),

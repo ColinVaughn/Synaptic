@@ -1156,6 +1156,12 @@ pub(crate) enum ApiAction {
         /// Agent command template; must contain `{request}` and emit patch JSON.
         #[arg(long)]
         agent_command: Option<String>,
+        /// Pre-generated patch JSON (`unified_diff` and `rationale`) from a separated agent stage.
+        #[arg(long, conflicts_with = "agent_command")]
+        candidate: Option<PathBuf>,
+        /// Canonical provider namespace/repository identity recorded in the run handoff.
+        #[arg(long)]
+        repository_identity: Option<String>,
         /// Network-isolation guard argv, repeated in order (for example unshare flags).
         #[arg(long = "network-guard", allow_hyphen_values = true)]
         network_guard: Vec<String>,
@@ -1177,6 +1183,40 @@ pub(crate) enum ApiAction {
         run: String,
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// Change-request provider (github or gitlab).
+        #[arg(long, default_value = "github")]
+        provider: String,
+        /// HTTPS provider origin (defaults to the public origin for the provider).
+        #[arg(long)]
+        provider_base_url: Option<String>,
+        /// Canonical owner/repository or namespace/project identity.
+        #[arg(long)]
+        repository: Option<String>,
+        /// Explicit pull/merge request target branch (defaults to configured base_branch).
+        #[arg(long)]
+        target_branch: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export a checksummed, conclusively verified run for a credential-separated publisher.
+    ExportRun {
+        #[arg(long)]
+        run: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Import a verified run into a fresh checkout pinned to the same base SHA.
+    ImportRun {
+        #[arg(long)]
+        bundle: PathBuf,
+        #[arg(long)]
+        expected_digest: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
         #[arg(long)]
         json: bool,
     },
@@ -1194,6 +1234,21 @@ pub(crate) enum ApiAction {
         agent_command: Option<String>,
         #[arg(long = "network-guard", allow_hyphen_values = true)]
         network_guard: Vec<String>,
+        /// Stop after conclusive verification; publish later with `api publish`.
+        #[arg(long)]
+        defer_publish: bool,
+        /// Change-request provider (github or gitlab).
+        #[arg(long, default_value = "github")]
+        provider: String,
+        /// HTTPS provider origin (defaults to the public origin for the provider).
+        #[arg(long)]
+        provider_base_url: Option<String>,
+        /// Canonical owner/repository or namespace/project identity.
+        #[arg(long)]
+        repository: Option<String>,
+        /// Explicit pull/merge request target branch (defaults to configured base_branch).
+        #[arg(long)]
+        target_branch: Option<String>,
         #[arg(long)]
         json: bool,
     },

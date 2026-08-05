@@ -10,21 +10,96 @@
   <a href="https://discord.gg/ytX7R2PbNz"><img src="https://invidget.switchblade.xyz/ytX7R2PbNz" alt="Synaptic Discord invite"></a>
 </p>
 
-Turn any folder of code into a persistent, queryable **knowledge graph**, then work over that
-graph instead of re-reading the codebase. Synaptic extracts symbols and relationships across
-30+ languages with [tree-sitter](https://tree-sitter.github.io/), clusters them into
-communities, and surfaces the structurally important pieces. It scales with your codebase:
-from a single small folder to a large **monorepo**, or a fleet of **separate repositories
-federated into one graph** — with real cross-repo edge resolution that keeps architecture
-visible across repo boundaries.
+Synaptic is a source-grounded code maintenance platform built around three connected systems:
+**API maintenance**, **repository memory**, and a persistent **knowledge graph**. Together they
+let an engineer or AI assistant understand what the code does, remember what has happened to
+it, and make bounded repairs without guessing.
 
-On top of the graph it answers structural and architectural queries, traces reverse impact
-("what would this change break?"), forecasts and speculatively runs a change before you make
-it, plans safe refactors, diffs architecture across git history, and audits SQL for
-performance and security. It is a single static Rust binary (`synaptic`) with no runtime and
-no interpreter, writes machine-readable graphs alongside human-readable reports and 2D/3D/SVG
-visualizations, and ships an MCP server so an AI coding assistant can run all of that before
-grepping or reading files.
+1. **API maintenance** keeps external dependencies and SDKs safe to change. Dependency bots
+   can tell you a new version exists; Synaptic inventories the APIs your code actually uses,
+   detects source-grounded breaking changes, finds the affected call sites, plans a bounded
+   repair in an isolated worktree, verifies graph invariants and selected tests, and only
+   publishes a draft PR when the evidence is complete.
+2. **Repository memory** preserves the history that usually lives in people, chats, failed
+   branches, incident notes, and old PRs. It records previous changes, regressions, decisions,
+   procedures, verification results, and external artifacts as source-linked evidence, then
+   retrieves that memory through the CLI or MCP server so future work starts with context
+   instead of archaeology.
+3. **The knowledge graph** is the structural map underneath everything. Synaptic turns any
+   folder, monorepo, or federated set of repositories into a persistent, queryable graph of
+   symbols, files, resources, calls, imports, inheritance, SQL usage, dynamic-dispatch hazards,
+   and cross-repo edges across 30+ languages with
+   [tree-sitter](https://tree-sitter.github.io/).
+
+The graph answers architectural questions, traces reverse impact ("what would this change
+break?"), forecasts and speculatively runs changes before you make them, plans safe refactors,
+diffs architecture across git history, and audits SQL for performance and security. Memory adds
+what the graph cannot infer from the current tree alone. API maintenance uses both to turn
+upstream change into evidence-backed repair plans. It all ships as a single static Rust binary
+(`synaptic`) with no runtime and no interpreter, writes machine-readable graphs alongside
+human-readable reports and 2D/3D/SVG visualizations, and exposes an MCP server so an AI coding
+assistant can use these systems before grepping or reading files.
+
+## Use Synaptic with a project
+
+Start from any repository root. Synaptic writes its index and reports to `synaptic-out/`
+and keeps project-specific configuration under `.synaptic/`.
+
+The easiest path is to ask your AI coding agent to install and configure Synaptic for
+the current repository, then have it follow the
+[Installation](https://github.com/ColinVaughn/Synaptic/wiki/Installation),
+[Quickstart](https://github.com/ColinVaughn/Synaptic/wiki/Quickstart), and
+[Assistant Integration](https://github.com/ColinVaughn/Synaptic/wiki/Assistant-Integration)
+guides. If you prefer to do it yourself, the manual path is:
+
+```sh
+# 1. Install the binary from this repository
+cargo install --path bin/synaptic
+
+# Or download a prebuilt binary from GitHub Releases, then confirm it works
+synaptic --version
+
+# 2. Build the first graph for your project
+cd path/to/your/project
+synaptic extract .
+
+# 3. Ask structural questions without rereading the whole codebase
+synaptic query "authentication flow"
+synaptic affected parse_config
+synaptic search --pattern god-class
+
+# 4. Keep the graph current as the project changes
+synaptic update
+synaptic watch
+synaptic hook install
+```
+
+For a normal project setup, add a `.synapticignore` if there are generated, vendored,
+or sensitive paths you do not want indexed; `extract` also honors `.gitignore` and skips
+common secrets like `.env` and key files. Use `synaptic hook install` when you want Git
+commits, checkouts, and graph merges to keep `synaptic-out/graph.json` fresh automatically.
+
+Once the graph exists, turn on the higher-level systems as needed:
+
+```sh
+# Repository memory: ingest history, docs, decisions, and outcomes
+synaptic memory refresh --root .
+synaptic memory search "previous auth migration"
+
+# API maintenance: configure monitored APIs and check real usage
+synaptic api init
+synaptic api discover --json
+synaptic api coverage --json
+synaptic api scan --offline --json
+
+# AI assistant integration: serve the graph and memory over MCP
+synaptic serve
+synaptic install codex --global
+```
+
+The safest mental model: run `extract` first, use `query` / `affected` / `search` to explore,
+add hooks or `watch` when the project is active, then enable `memory` and `api` workflows when
+you want Synaptic to preserve history or maintain external contracts.
 
 ---
 

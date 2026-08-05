@@ -1,0 +1,38 @@
+steps:
+  - id: build-musl-engine
+    name: gcr.io/cloud-builders/docker
+    env:
+      - DOCKER_BUILDKIT=1
+    args:
+      - build
+      - --pull
+      - --file
+      - docker/synaptic-engine-worker.Dockerfile
+      - --tag
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/synaptic-engine-worker:${_TAG}
+      - .
+  - id: verify-musl-engine
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -euo
+      - pipefail
+      - -c
+      - |
+        image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/synaptic-engine-worker:${_TAG}"
+        test "$(docker run --rm "${image}" --version)" = "synaptic ${_ENGINE_VERSION}"
+        container="$(docker create "${image}")"
+        trap 'docker rm -f "${container}" >/dev/null 2>&1 || true' EXIT
+        docker cp "${container}:/usr/local/bin/synaptic" /workspace/synaptic-musl
+        sha256sum /workspace/synaptic-musl
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/synaptic-engine-worker:${_TAG}
+options:
+  requestedVerifyOption: VERIFIED
+  machineType: E2_MEDIUM
+substitutions:
+  _REGION: us-east4
+  _REPOSITORY: synaptic
+  _TAG: v0.9.0-cloud
+  _ENGINE_VERSION: 0.9.0
+timeout: 5400s

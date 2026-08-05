@@ -17,6 +17,6 @@ synaptic-out/
 /.mcp.json
 /CLAUDE.md
 /.vscode/
-# Synaptic extension state: workspace.json carries the control-plane project and
-# workspace ids, which this public repository must never track.
-/.synaptic/
+# Synaptic extension state and runtime evidence stay local. The API policy is versioned.
+/.synaptic/*
+!/.synaptic/api-maintenance.toml

@@ -67,6 +67,41 @@ pub struct DraftPublishRequest {
     pub reviewers: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeRequestProvider {
+    #[default]
+    Github,
+    Gitlab,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeRequestKind {
+    #[default]
+    PullRequest,
+    MergeRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishContext {
+    pub provider: ChangeRequestProvider,
+    pub provider_base_url: String,
+    pub repository_identity: String,
+    pub target_branch: String,
+}
+
+impl Default for PublishContext {
+    fn default() -> Self {
+        Self {
+            provider: ChangeRequestProvider::Github,
+            provider_base_url: "https://github.com".into(),
+            repository_identity: String::new(),
+            target_branch: "main".into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PublishAction {
@@ -77,6 +112,10 @@ pub enum PublishAction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishResult {
     pub version: u32,
+    #[serde(default)]
+    pub provider: ChangeRequestProvider,
+    #[serde(default)]
+    pub kind: ChangeRequestKind,
     pub action: PublishAction,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub number: Option<u64>,
@@ -98,15 +137,68 @@ pub fn publish_verified_draft(
     request: &DraftPublishRequest,
     runner: &dyn PublishCommandRunner,
 ) -> Result<PublishResult, PublishError> {
+    publish_verified_change_request(request, &PublishContext::default(), runner)
+}
+
+pub fn publish_verified_change_request(
+    request: &DraftPublishRequest,
+    context: &PublishContext,
+    runner: &dyn PublishCommandRunner,
+) -> Result<PublishResult, PublishError> {
     if !request.verification.verified {
         return Err(PublishError::NotVerified);
     }
+    validate_publish_context(context)?;
     let expected_branch =
         deterministic_branch(&request.brief.event.vendor, &request.brief.event.id)?;
     if request.branch != expected_branch {
         return Err(PublishError::Branch {
             expected: expected_branch,
             actual: request.branch.clone(),
+        });
+    }
+    let target_reference = format!("refs/heads/{}", context.target_branch);
+    let remote = run_checked(
+        runner,
+        "git",
+        &[
+            "ls-remote".into(),
+            "--exit-code".into(),
+            "--refs".into(),
+            "origin".into(),
+            target_reference.clone(),
+        ],
+        &request.worktree,
+        "",
+    )?;
+    let lines = remote
+        .stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    if lines.len() != 1 {
+        return Err(PublishError::UnsafeContext(
+            "target branch lookup returned an ambiguous result".into(),
+        ));
+    }
+    let mut fields = lines[0].split_whitespace();
+    let remote_base = fields.next().unwrap_or_default();
+    let remote_reference = fields.next().unwrap_or_default();
+    if fields.next().is_some()
+        || remote_reference != target_reference
+        || !matches!(remote_base.len(), 40 | 64)
+        || !remote_base
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err(PublishError::UnsafeContext(
+            "target branch lookup returned an invalid identity".into(),
+        ));
+    }
+    if !remote_base.eq_ignore_ascii_case(&request.brief.base_sha) {
+        return Err(PublishError::StaleBase {
+            expected: request.brief.base_sha.clone(),
+            actual: remote_base.to_ascii_lowercase(),
         });
     }
     let marker = format!(
@@ -164,22 +256,37 @@ pub fn publish_verified_draft(
         "",
     )?;
 
-    let list = run_checked(
-        runner,
-        "gh",
-        &[
-            "pr".into(),
-            "list".into(),
-            "--state".into(),
-            "open".into(),
-            "--search".into(),
-            marker.clone(),
-            "--json".into(),
-            "number,url,headRefName,body".into(),
-        ],
-        &request.worktree,
-        "",
-    )?;
+    match context.provider {
+        ChangeRequestProvider::Github => {
+            publish_github_change_request(request, context, runner, marker, title, body)
+        }
+        ChangeRequestProvider::Gitlab => {
+            publish_gitlab_change_request(request, context, runner, marker, title, body)
+        }
+    }
+}
+
+fn publish_github_change_request(
+    request: &DraftPublishRequest,
+    context: &PublishContext,
+    runner: &dyn PublishCommandRunner,
+    marker: String,
+    title: String,
+    body: String,
+) -> Result<PublishResult, PublishError> {
+    let mut list_args = vec![
+        "pr".into(),
+        "list".into(),
+        "--state".into(),
+        "open".into(),
+        "--search".into(),
+        marker.clone(),
+        "--json".into(),
+        "number,url,headRefName,body".into(),
+    ];
+    add_repository_argument(&mut list_args, context);
+
+    let list = run_checked(runner, "gh", &list_args, &request.worktree, "")?;
     let candidates: Vec<ExistingPr> = serde_json::from_str(&list.stdout)?;
     let mut matching = candidates
         .into_iter()
@@ -206,9 +313,12 @@ pub fn publish_verified_draft(
         if !reviewers.is_empty() {
             args.extend(["--add-reviewer".into(), reviewers]);
         }
+        add_repository_argument(&mut args, context);
         run_checked(runner, "gh", &args, &request.worktree, &body)?;
         Ok(PublishResult {
             version: 1,
+            provider: ChangeRequestProvider::Github,
+            kind: ChangeRequestKind::PullRequest,
             action: PublishAction::Updated,
             number: Some(existing.number),
             url: existing.url,
@@ -222,6 +332,8 @@ pub fn publish_verified_draft(
             "--draft".into(),
             "--head".into(),
             request.branch.clone(),
+            "--base".into(),
+            context.target_branch.clone(),
             "--title".into(),
             title,
             "--body-file".into(),
@@ -233,16 +345,179 @@ pub fn publish_verified_draft(
         if !reviewers.is_empty() {
             args.extend(["--reviewer".into(), reviewers]);
         }
+        add_repository_argument(&mut args, context);
         let created = run_checked(runner, "gh", &args, &request.worktree, &body)?;
+        let url = created.stdout.trim().to_string();
         Ok(PublishResult {
             version: 1,
+            provider: ChangeRequestProvider::Github,
+            kind: ChangeRequestKind::PullRequest,
             action: PublishAction::Created,
-            number: None,
-            url: created.stdout.trim().to_string(),
+            number: change_request_number(&url),
+            url,
             branch: request.branch.clone(),
             marker,
         })
     }
+}
+
+fn publish_gitlab_change_request(
+    request: &DraftPublishRequest,
+    context: &PublishContext,
+    runner: &dyn PublishCommandRunner,
+    marker: String,
+    title: String,
+    body: String,
+) -> Result<PublishResult, PublishError> {
+    let mut list_args = vec![
+        "mr".into(),
+        "list".into(),
+        "--state".into(),
+        "opened".into(),
+        "--source-branch".into(),
+        request.branch.clone(),
+        "--output".into(),
+        "json".into(),
+    ];
+    add_repository_argument(&mut list_args, context);
+    let list = run_checked(runner, "glab", &list_args, &request.worktree, "")?;
+    let candidates: Vec<ExistingMergeRequest> = serde_json::from_str(&list.stdout)?;
+    let mut matching = candidates
+        .into_iter()
+        .filter(|change| {
+            change.source_branch == request.branch && change.description.contains(&marker)
+        })
+        .collect::<Vec<_>>();
+    if matching.len() > 1 {
+        return Err(PublishError::DuplicateChangeRequest(matching.len()));
+    }
+    let labels = request.labels.join(",");
+    let reviewers = request.reviewers.join(",");
+    if let Some(existing) = matching.pop() {
+        let mut args = vec![
+            "mr".into(),
+            "update".into(),
+            existing.iid.to_string(),
+            "--title".into(),
+            title,
+            "--description-file".into(),
+            "-".into(),
+        ];
+        if !labels.is_empty() {
+            args.extend(["--label".into(), labels]);
+        }
+        if !reviewers.is_empty() {
+            args.extend(["--reviewer".into(), reviewers]);
+        }
+        add_repository_argument(&mut args, context);
+        run_checked(runner, "glab", &args, &request.worktree, &body)?;
+        Ok(PublishResult {
+            version: 1,
+            provider: ChangeRequestProvider::Gitlab,
+            kind: ChangeRequestKind::MergeRequest,
+            action: PublishAction::Updated,
+            number: Some(existing.iid),
+            url: existing.web_url,
+            branch: request.branch.clone(),
+            marker,
+        })
+    } else {
+        let mut args = vec![
+            "mr".into(),
+            "create".into(),
+            "--draft".into(),
+            "--source-branch".into(),
+            request.branch.clone(),
+            "--target-branch".into(),
+            context.target_branch.clone(),
+            "--title".into(),
+            title,
+            "--description-file".into(),
+            "-".into(),
+            "--yes".into(),
+        ];
+        if !labels.is_empty() {
+            args.extend(["--label".into(), labels]);
+        }
+        if !reviewers.is_empty() {
+            args.extend(["--reviewer".into(), reviewers]);
+        }
+        add_repository_argument(&mut args, context);
+        let created = run_checked(runner, "glab", &args, &request.worktree, &body)?;
+        let url = output_url(&created.stdout);
+        Ok(PublishResult {
+            version: 1,
+            provider: ChangeRequestProvider::Gitlab,
+            kind: ChangeRequestKind::MergeRequest,
+            action: PublishAction::Created,
+            number: change_request_number(&url),
+            url,
+            branch: request.branch.clone(),
+            marker,
+        })
+    }
+}
+
+fn add_repository_argument(args: &mut Vec<String>, context: &PublishContext) {
+    if !context.repository_identity.is_empty() {
+        args.extend(["--repo".into(), context.repository_identity.clone()]);
+    }
+}
+
+fn change_request_number(url: &str) -> Option<u64> {
+    url.split(['?', '#'])
+        .next()?
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn validate_publish_context(context: &PublishContext) -> Result<(), PublishError> {
+    if !context.provider_base_url.starts_with("https://")
+        || context.provider_base_url.len() > 2_048
+        || context.provider_base_url.chars().any(char::is_control)
+    {
+        return Err(PublishError::UnsafeContext("provider base URL".into()));
+    }
+    if !context.repository_identity.is_empty()
+        && (context.repository_identity.len() > 500
+            || context.repository_identity.starts_with('/')
+            || context.repository_identity.ends_with('/')
+            || context.repository_identity.contains("..")
+            || context.repository_identity.split('/').any(|part| {
+                part.is_empty()
+                    || !part.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+                    })
+            }))
+    {
+        return Err(PublishError::UnsafeContext("repository identity".into()));
+    }
+    if context.target_branch.is_empty()
+        || context.target_branch.len() > 256
+        || context.target_branch.starts_with('-')
+        || context.target_branch.starts_with('/')
+        || context.target_branch.ends_with('/')
+        || context.target_branch.contains("..")
+        || context.target_branch.contains("//")
+        || !context.target_branch.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_' | '/')
+        })
+    {
+        return Err(PublishError::UnsafeContext("target branch".into()));
+    }
+    Ok(())
+}
+
+fn output_url(output: &str) -> String {
+    output
+        .split_whitespace()
+        .find(|part| part.starts_with("https://"))
+        .unwrap_or(output.trim())
+        .trim_end_matches([',', ')', ']'])
+        .to_string()
 }
 
 fn render_pr_body(request: &DraftPublishRequest, marker: &str) -> String {
@@ -412,6 +687,17 @@ struct ExistingPr {
     body: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ExistingMergeRequest {
+    iid: u64,
+    #[serde(alias = "webUrl")]
+    web_url: String,
+    #[serde(alias = "sourceBranch")]
+    source_branch: String,
+    #[serde(default, alias = "body")]
+    description: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PublishError {
     #[error("only a fully verified run can publish a pull request")]
@@ -422,6 +708,12 @@ pub enum PublishError {
     UnsafeIdentity(String),
     #[error("multiple open pull requests match the same event marker: {0}")]
     DuplicatePr(usize),
+    #[error("multiple open change requests match the same event marker: {0}")]
+    DuplicateChangeRequest(usize),
+    #[error("unsafe publish context: {0}")]
+    UnsafeContext(String),
+    #[error("target branch moved after verification: expected {expected}, got {actual}")]
+    StaleBase { expected: String, actual: String },
     #[error("publish command failed: {0}")]
     Command(String),
     #[error("publish I/O failed: {0}")]
