@@ -40,6 +40,9 @@ upstream change into evidence-backed repair plans. It all ships as a single stat
 human-readable reports and 2D/3D/SVG visualizations, and exposes an MCP server so an AI coding
 assistant can use these systems before grepping or reading files.
 
+If you do not want to run the MCP server yourself, **Synaptic Cloud** is a paid hosted MCP
+service for using Synaptic with your projects: [synapticgraph.com](https://synapticgraph.com/).
+
 ## Use Synaptic with a project
 
 Start from any repository root. Synaptic writes its index and reports to `synaptic-out/`
