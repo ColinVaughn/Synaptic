@@ -1,0 +1,7 @@
+schema = 1
+
+[[exception]]
+finding = "vuln_finding_2852589210b6008289db2c9e"
+reason = "rsa is reachable only through sqlx's optional, off-by-default MySQL driver (synaptic-sqlaudit live-explain feature), where it encrypts a password with the server's PUBLIC key; the private-key timing path the Marvin attack targets is never exercised. No patched rsa release exists (RustCrypto/RSA#390)."
+expires = "2027-02-01"
+approved_by = "ColinVaughn (maintainer)"

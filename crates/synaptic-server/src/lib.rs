@@ -38,6 +38,7 @@ mod provider;
 mod search;
 pub mod session;
 mod source;
+mod vuln_tools;
 pub use http::{serve_http, serve_http_with_ready_file};
 pub use session::{SessionStore, DEFAULT_SESSION_IDLE};
 
@@ -5663,6 +5664,34 @@ Cross-repo: {} edge(s) span repositories{}",
             return Ok(tool_execution_result(outcome));
         }
 
+        if let Some(tool) = name.strip_prefix("vuln_") {
+            let root = vuln_tools::repository_root(self.graph_path.as_deref());
+            let Some(root) = root else {
+                return Err((
+                    -32602,
+                    "vulnerability tools need a repository root, which is derived from the                      graph path; serve a graph from <root>/synaptic-out/graph.json"
+                        .to_string(),
+                ));
+            };
+            let (text, structured) = match tool {
+                "check_dependency" => {
+                    vuln_tools::check_dependency_tool(&root, &s("package"), opt("version"))
+                }
+                "findings" => {
+                    vuln_tools::findings_tool(&root, opt("state"), u("limit", 20) as usize)
+                }
+                "explain" => vuln_tools::explain_tool(&root, &s("finding")),
+                other => {
+                    return Err((-32601, format!("unknown vulnerability tool vuln_{other}")));
+                }
+            };
+            return Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": structured,
+                "isError": false
+            }));
+        }
+
         if name == "dynamic_hazards" {
             let (text, structured) = self.dynamic_hazards_dual(
                 opt("repo"),
@@ -6881,6 +6910,20 @@ fn build_tools_list(allow_exec: bool) -> Value {
               "dynamic_sites_opaque": {"type":"integer", "description": "Of those, sites whose dispatched name is computed (not a string literal) and so could not be evidence-linked."},
               "dynamic_refs_linked": {"type":"integer", "description": "Evidence-linked dynamic_ref edges added from literal-key sites to their unique target."}
           }, "required": ["nodes","edges","communities"] } },
+        { "name": "vuln_check_dependency", "description": "Check a package is safe BEFORE writing it into a manifest. Returns allowed/constrained/blocked, the advisories behind it, and the version constraint to use instead. That constraint is advisory-derived, NOT registry-verified. No corpus configured means UNKNOWN, never safe.",
+          "inputSchema": { "type": "object", "properties": {
+              "package": { "type": "string", "description": "<ecosystem>:<name>, e.g. cargo:serde, npm:@acme/sdk, pypi:requests." },
+              "version": { "type": "string", "description": "Version under consideration; omit to ask for the lowest safe version." }
+          }, "required": ["package"] } },
+        { "name": "vuln_findings", "description": "List findings from this repo's vulnerability ledger with applicability, priority and recommended fix. Empty means no scan was recorded, NOT that the repo is clean.",
+          "inputSchema": { "type": "object", "properties": {
+              "state": { "type": "string", "enum": ["open","accepted","remediating","verified","pull_request_open","resolved"], "description": "Filter by lifecycle state." },
+              "limit": { "type": "integer", "description": "Max findings (default 20)." }
+          } } },
+        { "name": "vuln_explain", "description": "Explain one finding: applicability evidence ladder, dependency path from a workspace root, remediation plan, decision history. Use before acting on or accepting it.",
+          "inputSchema": { "type": "object", "properties": {
+              "finding": { "type": "string", "description": "Finding id from vuln_findings." }
+          }, "required": ["finding"] } },
         { "name": "dynamic_hazards", "description": "List the reflection / dynamic-dispatch sites (by-name lookups, dispatch tables, eval, dynamic import, .NET/Python/JVM reflection) in the graph. Use it to judge a '0 dependents' answer: a symbol reached only by dynamic dispatch has no static dependents. A literal-key site is evidence-linked to its target; an opaque (computed-name) site cannot be and is cataloged here as residual risk. Filter by `repo`/`path_glob`/`kind`, or pass `target` for the sites that could reach one symbol.",
           "inputSchema": { "type": "object", "properties": {
               "repo": { "type": "string", "description": "Restrict to one federated member tag (as listed by list_repos)." },
@@ -7938,6 +7981,99 @@ mod tests {
         s.handle_request(&req).unwrap()
     }
 
+    #[test]
+    fn vuln_tools_dispatch_over_the_protocol() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph_path = dir.path().join("synaptic-out").join("graph.json");
+        std::fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
+        let mut server = Server::from_graph_data(
+            GraphData {
+                nodes: vec![node("auth", "AuthService", Some(0))],
+                ..GraphData::default()
+            },
+            Some(graph_path),
+        );
+
+        for name in ["vuln_findings", "vuln_explain", "vuln_check_dependency"] {
+            let args = match name {
+                "vuln_explain" => json!({ "finding": "vuln_finding_absent" }),
+                "vuln_check_dependency" => json!({ "package": "cargo:serde" }),
+                _ => json!({}),
+            };
+            let response = call_tool_full(&mut server, name, args);
+            assert!(
+                response.get("error").is_none(),
+                "{name} returned a protocol error: {response}"
+            );
+            let text = response["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(!text.is_empty(), "{name} returned no text");
+        }
+    }
+
+    /// `with_fresh_server` must not hold the read guard it used to decide a
+    /// rebuild is needed while it takes the write lock to perform one.
+    ///
+    /// In edition 2021 the temporary in an `if let` scrutinee lives until the
+    /// end of the whole `if let`, body included, so
+    /// `if let Some(r) = read_server(s).needs_freshen() { write_server(s)... }`
+    /// self-deadlocks: `std::sync::RwLock` is not upgradeable. The plain `if`
+    /// above it is safe, because an `if` condition is its own temporary scope,
+    /// which is why this only ever bit the freshen path.
+    #[test]
+    fn freshening_does_not_deadlock_when_a_rebuild_is_needed() {
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src").join("main.rs"),
+            "fn main() {}
+",
+        )
+        .unwrap();
+        let out_dir = root.join("synaptic-out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        // First detection only bootstraps the manifest; edit a file afterwards
+        // so the next one reports a real diff and freshening is actually asked
+        // for.
+        let _ = synaptic_incremental::detect_changes(&out_dir, &root);
+        std::fs::write(
+            root.join("src").join("main.rs"),
+            "fn main() { let changed = 1; }
+",
+        )
+        .unwrap();
+
+        let mut server =
+            Server::from_graph_data(GraphData::default(), Some(out_dir.join("graph.json")));
+        server.freshen = Some(FreshenConfig {
+            root: root.clone(),
+            out_dir,
+            enabled: true,
+            debounce: Duration::from_secs(0),
+            max_files: 0,
+        });
+        assert!(
+            server.needs_freshen().is_some(),
+            "fixture must actually need freshening for this to test anything"
+        );
+
+        let shared = Arc::new(RwLock::new(server));
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (_reloaded, ()) = http::with_fresh_server(&shared, |_| ());
+            let _ = tx.send(());
+        });
+
+        assert!(
+            rx.recv_timeout(Duration::from_secs(20)).is_ok(),
+            "with_fresh_server deadlocked: the read guard from the needs_freshen()              scrutinee is still held when apply_freshen takes the write lock"
+        );
+    }
+
     /// A hub node with 25 outgoing 'calls' neighbors, for the cap / verbose /
     /// concise-default tests.
     fn hub_server() -> Server {
@@ -8835,13 +8971,17 @@ mod tests {
             .expect("cl100k tokenizer")
             .encode_with_special_tokens(&encoded)
             .len();
+        // Budget re-baselined when the three vuln_* tools were added: 33 tools
+        // instead of 30. The guard exists to catch prose creep in existing
+        // descriptions, not to forbid new tools, so it is raised by roughly
+        // what three terse tool entries cost and no more.
         assert!(
-            encoded.len() <= 34_000,
+            encoded.len() <= 35_600,
             "tools/list prose grew beyond the measured character budget: {}",
             encoded.len()
         );
         assert!(
-            tokens <= 7_500,
+            tokens <= 7_900,
             "tools/list prose grew beyond the measured token budget: {tokens}"
         );
     }
@@ -9194,7 +9334,7 @@ mod tests {
             .unwrap();
         assert_eq!(tools["result"]["resultType"], "complete", "{tools}");
         assert_eq!(tools["result"]["cacheScope"], "public", "{tools}");
-        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 30);
+        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 33);
         assert!(matches!(lifecycle, ConnectionLifecycle::New));
 
         // The final schema marks clientInfo as SHOULD/optional. Clients that
@@ -9649,7 +9789,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 30);
+        assert_eq!(names.len(), 33);
         for expected in [
             "query_graph",
             "get_node",

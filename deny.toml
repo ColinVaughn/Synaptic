@@ -13,6 +13,13 @@ ignore = [
     # the server's PUBLIC key during caching_sha2_password auth -- the vulnerable
     # RSA private-key path the timing attack targets is never exercised here.
     # Revisit when a constant-time `rsa` release ships (RustCrypto/RSA#390).
+    #
+    # cargo-deny ignores have no expiry, so the reviewable record of this
+    # decision lives in .synaptic/vuln-policy.toml as finding
+    # vuln_finding_2852589210b6008289db2c9e, accepted until 2027-02-01. That
+    # exception does expire: after the date `synaptic vuln scan` reports the
+    # finding again, which is what forces this entry to be revisited rather
+    # than inherited forever. Remove both together, or renew both together.
     "RUSTSEC-2023-0071",
 ]
 

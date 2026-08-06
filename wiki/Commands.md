@@ -34,6 +34,7 @@ Most read commands operate on `synaptic-out/graph.json` by default; build it fir
 | [`global`](#global) | Manage the cross-repo global graph store (`~/.synaptic`). |
 | [`memory`](#memory) | Ingest, record, search, and inspect durable repository memory. |
 | [`api`](#api) | Detect API changes, measure coverage, localize impact, and prepare verified draft repairs. |
+| [`vuln`](#vuln) | Audit dependencies for known vulnerabilities across every lockfile, and check whether a package version is safe to use. |
 | [`merge-graphs`](#merge-graphs) | Compose several `graph.json` files into one namespaced graph. |
 | [`cache`](#cache) | Maintain the on-disk extraction cache. |
 | [`self-update`](#self-update) | Update the binary from the latest GitHub release (opt-in). |
@@ -856,6 +857,53 @@ synaptic api run [--root <PATH>] [--vendor <ID>] [--offline] [--dry-run] [--agen
 Configuration, evidence semantics, schemas, artifacts, security boundaries, and
 the release gates are documented in the repository's
 [API maintenance procedure](https://github.com/ColinVaughn/Synaptic/blob/master/docs/procedures/api-maintenance.md).
+
+## vuln
+
+Audit resolved dependencies against an OSV advisory corpus, decide whether each
+vulnerability actually applies, and record the decision. Every lockfile in the
+repository is discovered and audited together, so a polyglot repository is
+scanned as a whole.
+
+Syntax:
+
+```sh
+synaptic vuln init   [--root <DIR>]
+synaptic vuln sync   [--ecosystem <NAME>] [--max-bytes <N>] [--cache <DIR>]
+synaptic vuln scan   [--root <DIR>] [--advisories <DIR>] [--graph <FILE>]
+                     [--offline] [--record] [--fail-on <p0|p1|p2|p3>] [--json]
+synaptic vuln findings [--root <DIR>] [--state <STATE>] [--json]
+synaptic vuln explain  <FINDING_ID> [--root <DIR>] [--json]
+synaptic vuln check    <PACKAGE> [--version <V>] [--advisories <DIR>]
+                       [--offline] [--root <DIR>] [--json]
+synaptic vuln accept   <FINDING_ID> --reason <TEXT> --until <YYYY-MM-DD>
+                       --approved-by <WHO> [--root <DIR>]
+```
+
+Options:
+
+- `--advisories <DIR>`: use this OSV corpus instead of the shared cache at
+  `~/.synaptic/advisories`.
+- `--offline`: never fetch. Fails when nothing is cached rather than reporting a
+  clean scan against an empty corpus.
+- `--record`: persist findings to the ledger under `.synaptic/vuln/findings/`.
+- `--fail-on <priority>`: exit non-zero when any finding is at or above it,
+  which is what makes the command usable as a CI gate.
+- `--max-bytes <N>` (sync): raise the auto-download limit. npm's export is about
+  218 MB against a 64 MB default.
+
+Notes:
+
+- Analysis never touches the network; only `sync` and the first `scan` do.
+- `NotApplicable` is reachable only through a withdrawn advisory or a version
+  outside every affected range. Unreachable symbols and absent usage de-rank a
+  finding but never dismiss it.
+- Packages whose ecosystem has no corpus are reported as unaudited, not scanned.
+- Exceptions require an expiry date, so an accepted risk returns on its own.
+
+Supported lockfiles, ecosystem coverage, the agent-facing MCP tools, policy
+format, and known limitations are documented in
+[Vulnerability Management](Vulnerability-Management).
 
 ## memory
 

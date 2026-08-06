@@ -17,6 +17,9 @@ synaptic-out/
 /.mcp.json
 /CLAUDE.md
 /.vscode/
-# Synaptic extension state and runtime evidence stay local. The API policy is versioned.
+# Synaptic extension state and runtime evidence stay local. The API and
+# vulnerability policies are versioned: an accepted security risk has to be
+# reviewable in the repository, not just on the machine that accepted it.
 /.synaptic/*
 !/.synaptic/api-maintenance.toml
+!/.synaptic/vuln-policy.toml

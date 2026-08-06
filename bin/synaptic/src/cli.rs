@@ -322,6 +322,11 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         action: ApiAction,
     },
+    /// Audit dependencies for known vulnerabilities and check version safety.
+    Vuln {
+        #[command(subcommand)]
+        action: VulnAction,
+    },
     /// Install the Synaptic skill for a host assistant
     /// (claude | agents | codex | opencode | gemini | cursor | copilot | kilo).
     Install {
@@ -1031,6 +1036,106 @@ pub(crate) enum GlobalAction {
     List,
     /// Print the global graph path.
     Path,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum VulnAction {
+    /// Write a policy template with every rule commented out.
+    Init {
+        /// Repository root.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
+    /// Scan the lockfile against a local advisory corpus. Reads no network.
+    Scan {
+        /// Repository root to scan.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Directory of OSV JSON advisories. Defaults to the synced cache in
+        /// ~/.synaptic/advisories, fetching it on first use.
+        #[arg(long)]
+        advisories: Option<PathBuf>,
+        /// Never touch the network; fail if no local corpus is available.
+        #[arg(long)]
+        offline: bool,
+        /// Graph snapshot (default: <root>/synaptic-out/graph.json when present).
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        /// Emit the versioned scan report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Exit non-zero when any finding is at or above this priority.
+        #[arg(long, value_name = "p0|p1|p2|p3")]
+        fail_on: Option<String>,
+        /// Write findings into the auditable ledger under .synaptic/vuln/.
+        #[arg(long)]
+        record: bool,
+    },
+    /// List findings recorded in the ledger.
+    Findings {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        json: bool,
+        /// Filter by lifecycle state.
+        #[arg(long)]
+        state: Option<String>,
+    },
+    /// Show one finding's full evidence, remediation plan, and history.
+    Explain {
+        /// Finding id from `vuln scan --record` or `vuln findings`.
+        finding: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Ask whether a package is safe to use, and at what version.
+    Check {
+        /// Package coordinate, for example `cargo:serde` or `npm:@acme/sdk`.
+        package: String,
+        /// Version being considered. Omit to ask for the safe floor.
+        #[arg(long)]
+        version: Option<String>,
+        /// Directory of OSV JSON advisories. Defaults to the synced cache.
+        #[arg(long)]
+        advisories: Option<PathBuf>,
+        /// Never touch the network; fail if no local corpus is available.
+        #[arg(long)]
+        offline: bool,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Download or refresh the local OSV advisory corpus.
+    Sync {
+        /// Ecosystem to fetch (default: cargo).
+        #[arg(long, default_value = "cargo")]
+        ecosystem: String,
+        /// Refuse to download an export larger than this many bytes.
+        #[arg(long)]
+        max_bytes: Option<u64>,
+        /// Cache directory (default: ~/.synaptic/advisories).
+        #[arg(long)]
+        cache: Option<PathBuf>,
+    },
+    /// Accept a finding's risk until a date, recording who approved it.
+    Accept {
+        /// Finding id.
+        finding: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Why the risk is acceptable.
+        #[arg(long)]
+        reason: String,
+        /// Expiry date, YYYY-MM-DD. Required: acceptance is never permanent.
+        #[arg(long)]
+        until: String,
+        /// Who approved the acceptance.
+        #[arg(long)]
+        approved_by: String,
+    },
 }
 
 #[derive(Subcommand)]

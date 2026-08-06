@@ -79,7 +79,13 @@ pub(crate) fn with_fresh_server<T>(
         write_server(server).maybe_reload();
         reloaded = true;
     }
-    if let Some(report) = read_server(server).needs_freshen() {
+    // The binding is load-bearing: it ends the read borrow before the write
+    // lock is taken. Inlining this back into the `if let` scrutinee keeps the
+    // temporary guard alive for the whole body, and `RwLock` is not
+    // upgradeable, so the thread deadlocks against itself. The plain `if`
+    // above is safe because an `if` condition is its own temporary scope.
+    let report = read_server(server).needs_freshen();
+    if let Some(report) = report {
         write_server(server).apply_freshen(report);
         reloaded = true;
     }

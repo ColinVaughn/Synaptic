@@ -203,6 +203,14 @@ you want Synaptic to preserve history or maintain external contracts.
   isolated worktree. Verification fails closed on incomplete evidence, and only
   the explicit `publish` stage can create or update an idempotent draft PR. See
   [API maintenance](docs/procedures/api-maintenance.md).
+- **Dependency vulnerability management**: `synaptic vuln` reads every lockfile in
+  a repository across 12 package ecosystems, matches resolved versions against an
+  OSV corpus, and decides whether each advisory actually applies here rather than
+  stopping at a version match. Findings carry an evidence ladder, a dependency
+  path, a CVSS-derived priority and a remediation plan; accepted risks are
+  time-boxed and expire on their own. Three MCP tools let assistants check a
+  package before writing it into a manifest. Analysis makes no network calls. See
+  [Vulnerability Management](https://github.com/ColinVaughn/Synaptic/wiki/Vulnerability-Management).
 - **Incremental rebuilds**, file watching, and git hooks keep the graph current. See
   [Incremental Updates](https://github.com/ColinVaughn/Synaptic/wiki/Incremental-Updates).
 - **Graph-aware PR dashboard** with blast radius and merge-order conflict detection. See

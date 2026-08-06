@@ -981,6 +981,48 @@ Returns a summary grouped by severity and subsystem, then ranked findings. The
 has no registered source root, source/config checks are skipped explicitly and
 graph-only findings are still returned.
 
+### vuln_check_dependency
+
+Check whether a package is safe to add or upgrade to, BEFORE writing it into a
+manifest. Returns `allowed`, `constrained` or `blocked`, the advisories behind
+that answer, and the version constraint to use instead. Where several advisories
+affect a package the strictest floor is returned.
+
+Parameters:
+- `package` (string, required) -- `<ecosystem>:<name>`, for example
+  `cargo:serde`, `npm:@acme/sdk`, `pypi:requests`.
+- `version` (string) -- the version under consideration. Omit to ask for the
+  lowest safe version instead.
+
+Two honesty rules an agent cannot verify for itself: the returned constraint is
+`Unverified`, meaning the advisory says it fixes the issue but no registry was
+consulted about whether such a release exists; and when no advisory corpus is
+configured the answer is UNKNOWN, never safe.
+
+The corpus comes from `SYNAPTIC_VULN_ADVISORIES` or `.synaptic/vuln/advisories`.
+The server never downloads one, so an operator decides explicitly what an agent
+answers from.
+
+### vuln_findings
+
+List vulnerability findings recorded in this repository's audit ledger, with
+applicability, priority and recommended fix. An empty result means no scan has
+been recorded, NOT that the repository is clean.
+
+Parameters:
+- `state` (string) -- filter by lifecycle state (`open`|`accepted`|
+  `remediating`|`verified`|`pull_request_open`|`resolved`).
+- `limit` (integer, default 20) -- max findings to return.
+
+### vuln_explain
+
+Explain one finding: the full applicability evidence ladder, the dependency path
+from a workspace root, the remediation plan, and the decision history. Use it
+before acting on or accepting a finding.
+
+Parameters:
+- `finding` (string, required) -- finding id, as returned by `vuln_findings`.
+
 ### audit_sql
 
 Audit the codebase's SQL for performance and security problems over the
@@ -1037,6 +1079,9 @@ formatted text:
 | `affected_tests` | `{ tests: [{ id, label, file, depth, via_relation }], total }` |
 | `readiness_audit` | `{ version, summary, counts_by_severity, groups, findings: [{ rule_id, severity, category, subsystem, title, detail, location, node_ids, evidence, remediation, confidence, impact }], skipped }` |
 | `audit_sql` / `advise_sql` | `{ version, summary, findings: [{ rule_id, severity, category, title, detail, location, remediation, confidence }] }` |
+| `vuln_check_dependency` | `{ verdict, package, requested_version, advisories, approved_constraint, constraint_availability, alternatives, reasons, corpus }` (`constraint_availability` is `unverified` offline) |
+| `vuln_findings` | `{ total, findings: [{ id, state, priority, advisory_id, package, resolved_version, applicability, severity, recommended_version }] }` |
+| `vuln_explain` | `{ id, state, finding, decisions }` (`finding` carries the evidence ladder, dependency path and remediation plan) |
 
 The other tools return text only. A tool whose structured mirror cannot resolve
 its node (e.g. `get_neighbors` on an ambiguous label) omits `structuredContent`

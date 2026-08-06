@@ -166,6 +166,7 @@ fn run() -> Result<()> {
         } => run_export(&format, graph, out, push, &user, password, repo),
         Cmd::Ingest { source } => run_ingest(source),
         Cmd::Api { action } => run_api(action),
+        Cmd::Vuln { action } => commands::vuln::run_vuln(action),
         Cmd::Install {
             platform,
             global,

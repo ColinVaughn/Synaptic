@@ -19,6 +19,7 @@
 - [Querying](Querying)
 - [Cross-Language Edges](Cross-Language-Edges)
 - [SQL Auditing](SQL-Auditing)
+- [Vulnerability Management](Vulnerability-Management)
 - [Analysis and Reports](Analysis-and-Reports)
 - [Output Formats](Output-Formats)
 - [Visualizations](Visualizations)
