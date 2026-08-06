@@ -10,6 +10,81 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-08-06
+
+### Added
+
+- **Dependency vulnerability management (`synaptic vuln`).** A new
+  `synaptic-vuln` crate audits a repository's resolved dependencies against an
+  OSV advisory corpus. It reads 15 lockfile formats across 12 package
+  ecosystems in one pass, so a polyglot repository is scanned as a whole:
+  `Cargo.lock`, `package-lock.json` (v1/v2/v3), `pnpm-lock.yaml`, `yarn.lock`,
+  `poetry.lock`, `uv.lock`, `composer.lock`, `Gemfile.lock`,
+  `packages.lock.json`, `Podfile.lock`, `go.mod`, `Package.resolved`,
+  `pubspec.lock`, `mix.lock`, and `gradle.lockfile`. Ten of those record
+  per-package dependency lists, so their findings report the full dependency
+  path from a workspace root to the vulnerable package.
+
+  Applicability is decided by an evidence ladder rather than a version match
+  alone, using the code graph for reachability where one is available.
+  `NotApplicable` is reachable only through a withdrawn advisory or a version
+  outside every affected range; unreachable symbols, absent first-party usage
+  and development-only scope de-rank a finding but never dismiss it, because
+  static reachability is incomplete in every language and an absence of evidence
+  is not evidence of safety. Severity uses the advisory's own CVSS v3.x vector
+  with no environmental re-scoring, and priority combines severity,
+  applicability and runtime reachability.
+
+  Packages whose ecosystem has no advisory corpus are reported as unaudited
+  rather than counted as scanned, so "we had no advisories" can never read as
+  "we found none".
+
+- **Agent-facing version safety.** Three MCP tools (`vuln_check_dependency`,
+  `vuln_findings`, `vuln_explain`) let assistants check a package before writing
+  it into a manifest. `vuln_check_dependency` returns allowed / constrained /
+  blocked plus the strictest safe version floor across every advisory affecting
+  the package. Constraints are reported as `Unverified` because they come from
+  advisory metadata rather than a registry, and an absent corpus answers
+  UNKNOWN, never safe.
+
+- **Advisory corpus sync (`synaptic vuln sync`).** OSV bulk exports are cached
+  under `~/.synaptic/advisories` and refreshed after seven days, so `vuln scan`
+  works with no setup. Bulk export is preferred over per-package API queries: it
+  costs one request instead of one per package, everything afterwards works
+  offline, and it never discloses what a repository depends on. Exports above
+  64 MB are refused rather than downloaded silently. `--offline` never fetches
+  and fails rather than reporting a clean scan against an empty corpus.
+
+- **Time-boxed accepted risk.** `.synaptic/vuln-policy.toml` records denials,
+  version pins and exceptions. Exception expiry is mandatory, and with
+  `--fail-on` it is enforced: once the date passes the finding returns to the
+  active set and the build fails until someone renews or removes the acceptance.
+  The policy file is versioned in the repository, so an accepted security risk
+  is reviewable rather than living only on the machine that accepted it.
+
+- **Auditable findings ledger** under `.synaptic/vuln/findings/`, content
+  addressed over repository, advisory, package and resolved version so
+  rescanning is idempotent and history accumulates on one record. Decisions are
+  appended, never rewritten. The repository component of that identity is the
+  git remote normalized to `host/namespace/repository` rather than the checkout
+  path, so a finding id is the same for every developer and CI runner and a
+  shared policy exception matches everywhere.
+
+### Fixed
+
+- **MCP server could deadlock and drop a `tools/call` response.** In
+  `with_fresh_server`, the read guard used to decide that a rebuild was needed
+  was still held when the write lock was taken, because an `if let` scrutinee's
+  temporary lives to the end of the whole `if let` in edition 2021.
+  `std::sync::RwLock` is not upgradeable, so the worker deadlocked against
+  itself and its response never arrived. Present since the auto-freshen path
+  was introduced; it surfaced only when a rebuild was actually required.
+
+- `RUSTSEC-2023-0071` remains suppressed for `cargo-deny`, which has no expiry
+  mechanism, but the decision is now also recorded as a dated, attributed
+  exception in `.synaptic/vuln-policy.toml`, cross-referenced from `deny.toml`
+  so the two are renewed or removed together.
+
 ## [0.9.0] - 2026-08-01
 
 ### Added

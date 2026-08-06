@@ -4,7 +4,7 @@ members = ["crates/*", "bin/*"]
 
 [workspace.package]
 edition = "2021"
-version = "0.9.0"
+version = "0.9.1"
 license = "FSL-1.1-ALv2"
 rust-version = "1.96"
 
@@ -47,6 +47,7 @@ synaptic-upgrade = { path = "crates/synaptic-upgrade" }
 synaptic-store = { path = "crates/synaptic-store" }
 synaptic-memory = { path = "crates/synaptic-memory" }
 synaptic-api = { path = "crates/synaptic-api" }
+synaptic-vuln = { path = "crates/synaptic-vuln" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 rayon = "1"
