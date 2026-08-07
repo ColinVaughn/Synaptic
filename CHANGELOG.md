@@ -10,6 +10,112 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-08-07
+
+### Added
+
+- **CVSS v4.0 base scoring.** A v4 vector is now scored rather than retained
+  unscored, so those advisories report a real severity band instead of an
+  unknown one that `prioritize` treated as Medium. Where an advisory carries
+  both a v4 and a v3 vector, v4 wins: it is the publisher's most specific
+  statement. A v4 vector that cannot be parsed still reports an unknown band
+  rather than a number derived from the part that did parse.
+
+  The 270-entry MacroVector table is generated from FIRST's reference
+  calculator rather than transcribed, and three test layers hold it: a
+  differential against 503 reference-scored vectors, a monotonicity sweep over
+  the metric lattice, and an `--ignored` differential over all 104,976 base
+  vectors for anyone editing the table.
+
+- **Dependency kind is read where the lockfile records it.**
+  `package-lock.json`, `composer.lock`, `pubspec.lock` and `poetry.lock` all
+  state what a package is needed for, and the scan now reads it. For Cargo,
+  where the lockfile has edges but no kind and the manifest has kind but no
+  edges, the two are combined: a crate reached only through
+  `[dev-dependencies]` is now recognised as development-only, not just the
+  declared entry itself.
+
+  Where nothing records a kind, runtime use is still assumed, but the finding
+  now says so with `dependency_scope_unrecorded` evidence. A reading and an
+  assumption are different claims and no longer look the same in a report.
+
+- **Feature-gated Cargo dependencies are resolved.** An optional dependency no
+  enabled feature compiles, and anything reachable only through one, carries
+  `feature_gated` evidence. Resolution covers this repository's own manifests;
+  features of registry crates need the index and remain unresolved.
+
+  Both new signals de-rank and neither dismisses, which the exhaustive
+  applicability sweep now covers at 512 input combinations.
+
+- **Maven and Gradle projects without a lockfile are audited from their
+  declarations.** A `pom.xml` that pins a literal version is now scanned, as is
+  a CycloneDX or SPDX SBOM, which is a resolved set in its own right. Because a
+  declaration says nothing about transitive dependencies, `ScanReport` gains
+  per-ecosystem coverage — `full`, `direct_only` or `unaudited` — and a
+  `packages partially audited` count that `packages scanned` never absorbs.
+
+  Deliberately narrow: promotion applies to Maven and SBOMs only. Extending it
+  to every manifest-declared dependency meant a repository carrying a fixture
+  `package.json` loaded npm's 226,000-document corpus to audit two packages
+  nobody ships, turning a one-second scan into a five-minute one.
+
+- **Live OSV querying.** `synaptic vuln scan --online` adds the OSV API
+  alongside the local corpora, covering ecosystems whose bulk export is too
+  large to download. `synaptic vuln check` and the `vuln_check_dependency` MCP
+  tool query it by default, since they ask about a single named package;
+  `--offline` and `SYNAPTIC_OFFLINE=1` opt out, and a configured corpus wins.
+
+  `vuln scan` stays offline-first because a scan discloses the whole dependency
+  list, while the bulk export discloses nothing. A failed query is reported,
+  never read as an empty result: `check` falls back to a local corpus and
+  labels the answer `DEGRADED` in both text and structured output. Documents are
+  cached under `~/.synaptic/advisories/_live/` keyed on the version OSV reports,
+  and fetched six at a time — a first online scan of 479 packages resolves ~190
+  advisories in about five seconds instead of several minutes.
+
+### Fixed
+
+- **A scan running during `vuln sync` no longer sees a partially swapped
+  corpus.** A corpus is published as an immutable generation directory and a
+  `current` pointer is moved onto it by a rename, replacing the previous
+  remove-then-rename that left a window where the live directory was missing or
+  half-written. A scan resolves the pointer once and reads that generation for
+  its whole run, so a sync landing underneath it changes nothing. Retired
+  generations are collected after a grace period. Caches written by earlier
+  releases are read as-is, so upgrading costs no re-download, and a lost pointer
+  recovers the newest generation present.
+
+- **An advisory carried by two sources is reported once.** Deduplication ran
+  after the policy-exception check, so composing the local corpus with the OSV
+  API listed a suppressed finding once per source.
+
+### Performance
+
+`synaptic vuln scan` is **1.62x faster than 0.9.1** (374 ms to 231 ms on this
+repository), and `synaptic api inventory` **3.17x faster** (90 ms to 28 ms) with
+byte-identical output. Four fixes, each found by measurement rather than
+inspection:
+
+- **The advisory corpus is parsed in parallel** (177 ms to 56 ms). Reading and
+  parsing dominate a scan and each document is independent. Paths are sorted
+  before the fan-out and results collected in that order, so the corpus never
+  depends on which thread finished first.
+- **`Cargo.lock` is parsed once per scan, not once per manifest** (84 ms to
+  15 ms). `cargo_lock_versions` is the only lockfile reader that searches
+  *upwards* for its file, so every workspace member resolved to the same one:
+  30 `Cargo.toml` files each re-parsed the same 118 KB lockfile. Memoised on the
+  resolved lockfile path, since those 30 manifests sit in 30 different
+  directories.
+- **`GraphUsageOracle` indexes the graph once** instead of re-deriving it per
+  question (563 us to 225 ns per call). It scanned every node, allocated a map
+  of every node id, and scanned every edge on each call, and the scan asks three
+  questions per matching advisory: 1.7 ms per finding on a 13,570-node graph.
+- **One repository traversal instead of two.** Lockfile discovery and the Cargo
+  feature resolver now share a single walk.
+
+The graph is also no longer read when the corpus names none of the resolved
+packages, since nothing can consult it in that case.
+
 ## [0.9.1] - 2026-08-06
 
 ### Added
@@ -1833,7 +1939,9 @@ parameters), and `graph.json` gains only additive edge keys.
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/ColinVaughn/Synaptic/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/ColinVaughn/Synaptic/compare/v0.7.2...v0.7.3

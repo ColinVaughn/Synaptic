@@ -4,7 +4,7 @@ members = ["crates/*", "bin/*"]
 
 [workspace.package]
 edition = "2021"
-version = "0.9.1"
+version = "0.9.2"
 license = "FSL-1.1-ALv2"
 rust-version = "1.96"
 
