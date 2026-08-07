@@ -7,10 +7,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 use synaptic_api::{Ecosystem, PackageCoordinate};
 use synaptic_vuln::{
-    check_dependency, decision, scan, sync_ecosystem, AdvisorySource, CompositeSource, CorpusCache,
-    DecisionKind, Finding, FindingState, FindingStore, GraphUsageOracle, LocalDirSource,
-    LockfileKind, NoUsageEvidence, PackageGraph, Priority, ScanReport, ScanRequest,
-    SystemCorpusFetcher, UsageOracle, VulnPolicy, DEFAULT_MAX_DOWNLOAD_BYTES, DEFAULT_POLICY_PATH,
+    check_dependency, decision, discover_repository_files, feature_gated_in, is_sbom_source, scan,
+    sync_ecosystem, AdvisorySource, CompositeSource, CorpusCache, DecisionKind, EcosystemCoverage,
+    Finding, FindingState, FindingStore, GraphUsageOracle, LocalDirSource, LockfileKind,
+    NoUsageEvidence, PackageGraph, Priority, ScanReport, ScanRequest, SystemCorpusFetcher,
+    SystemOsvTransport, UsageOracle, VulnPolicy, DEFAULT_MAX_DOWNLOAD_BYTES, DEFAULT_POLICY_PATH,
     DEFAULT_STALE_AFTER_SECONDS,
 };
 
@@ -24,6 +25,7 @@ pub(crate) fn run_vuln(action: VulnAction) -> Result<()> {
             root,
             advisories,
             offline,
+            online,
             graph,
             json,
             fail_on,
@@ -32,6 +34,7 @@ pub(crate) fn run_vuln(action: VulnAction) -> Result<()> {
             &root,
             advisories.as_deref(),
             offline,
+            online,
             graph,
             json,
             fail_on.as_deref(),
@@ -130,14 +133,14 @@ fn resolve_source(
 
     let cache = CorpusCache::user_default()
         .context("cannot locate a home directory for the advisory cache; pass --advisories")?;
-    let directory = cache.ecosystem_dir(ecosystem);
+    let container = cache.ecosystem_dir(ecosystem);
     let now = unix_now();
     let stale = cache.needs_sync(ecosystem, now, DEFAULT_STALE_AFTER_SECONDS);
 
     if stale && !offline {
         eprintln!(
             "[synaptic] fetching the {ecosystem} advisory corpus into {}",
-            directory.display()
+            container.display()
         );
         match sync_ecosystem(
             &cache,
@@ -150,7 +153,7 @@ fn resolve_source(
                 metadata.advisory_count,
                 metadata.last_modified.as_deref().unwrap_or("unknown")
             ),
-            Err(error) if directory.is_dir() => {
+            Err(error) if cache.resolve(ecosystem).is_some() => {
                 eprintln!("[synaptic] corpus refresh failed ({error}); using the cached copy");
             }
             Err(error) => {
@@ -162,13 +165,16 @@ fn resolve_source(
         }
     }
 
-    if !directory.is_dir() {
+    // Read the generation the cache is currently serving, never the container:
+    // retired generations may still be on disk, and loading the container would
+    // read all of them at once.
+    let Some(directory) = cache.resolve(ecosystem) else {
         bail!(
             "no advisory corpus at {}. Run `synaptic vuln sync` (or pass --advisories <dir>). \
              Refusing to report a scan against an empty corpus.",
-            directory.display()
+            container.display()
         );
-    }
+    };
     if stale && offline {
         eprintln!(
             "[synaptic] WARNING: the cached corpus is stale and --offline forbids refreshing it"
@@ -178,16 +184,38 @@ fn resolve_source(
         .with_context(|| format!("cannot load advisories from {}", directory.display()))
 }
 
+/// Ask the OSV API about a set of packages.
+///
+/// Documents are cached under the shared advisory cache so a loop of checks
+/// does not re-download what it already has; the batch query still runs every
+/// time, so a newly published advisory is never missed.
+fn live_source(coordinates: &[PackageCoordinate]) -> Result<LocalDirSource> {
+    let transport = SystemOsvTransport::new()?;
+    let cache = CorpusCache::user_default().map(|cache| cache.live_dir());
+    Ok(synaptic_vuln::fetch_advisories(
+        &transport,
+        coordinates,
+        cache.as_deref(),
+    )?)
+}
+
 /// Resolve one corpus per ecosystem the repository actually locks.
 ///
 /// An ecosystem whose corpus cannot be obtained is reported and skipped rather
 /// than failing the whole scan, so a repository with one exotic ecosystem still
 /// gets audited for the others. Skipping is announced loudly: unaudited is not
 /// the same as clean.
+///
+/// `may_be_empty` is set when the caller has another source lined up. The bulk
+/// export for a large ecosystem is refused outright for exceeding the download
+/// limit, which is precisely the case `--online` exists to cover, so failing
+/// here would make that flag unreachable on the repositories that need it. The
+/// caller still refuses to scan against nothing.
 fn resolve_sources(
     explicit: Option<&Path>,
     offline: bool,
     ecosystems: &BTreeSet<Ecosystem>,
+    may_be_empty: bool,
 ) -> Result<(CompositeSource, BTreeSet<Ecosystem>)> {
     if let Some(directory) = explicit {
         let source = LocalDirSource::load(directory)
@@ -212,7 +240,7 @@ fn resolve_sources(
     for note in &skipped {
         eprintln!("[synaptic] WARNING: no advisory corpus for {note}");
     }
-    if composite.is_empty() {
+    if composite.is_empty() && !may_be_empty {
         bail!(
             "no advisory corpus could be obtained for any locked ecosystem ({}). \
              Run `synaptic vuln sync`, or pass --advisories <dir>.",
@@ -240,7 +268,10 @@ fn run_sync(ecosystem: &str, max_bytes: Option<u64>, cache: Option<PathBuf>) -> 
     println!(
         "synced {} advisories for {ecosystem} into {}",
         metadata.advisory_count,
-        cache.ecosystem_dir(ecosystem).display()
+        cache
+            .resolve(ecosystem)
+            .unwrap_or_else(|| cache.ecosystem_dir(ecosystem))
+            .display()
     );
     println!("source: {}", metadata.source_url);
     if let Some(modified) = &metadata.last_modified {
@@ -254,6 +285,7 @@ fn run_scan(
     root: &Path,
     advisories: Option<&Path>,
     offline: bool,
+    online: bool,
     graph: Option<PathBuf>,
     json: bool,
     fail_on: Option<&str>,
@@ -262,8 +294,11 @@ fn run_scan(
     let threshold = fail_on.map(parse_priority).transpose()?;
 
     // Every lockfile in the repository, not just Cargo's: a polyglot repo is
-    // only as audited as its least-covered ecosystem.
-    let (packages, reads) = PackageGraph::from_repository(root);
+    // only as audited as its least-covered ecosystem. The Cargo manifests come
+    // out of the same traversal, because the feature resolver needs them and
+    // walking the tree twice bought nothing.
+    let discovered = discover_repository_files(root);
+    let (packages, reads) = PackageGraph::from_lockfiles(root, &discovered.lockfiles);
     if reads.is_empty() {
         bail!(
             "no lockfile found under {}. Supported: {}",
@@ -290,25 +325,110 @@ fn run_scan(
         }
     }
 
-    let ecosystems = reads
+    let policy = VulnPolicy::load(root).context("cannot load the vulnerability policy")?;
+    let direct = synaptic_api::scan_dependencies(root)
+        .context("cannot inventory the repository's direct dependencies")?;
+
+    let mut ecosystems = reads
         .iter()
         .filter(|read| read.error.is_none())
         .map(|read| read.kind.ecosystem())
         .collect::<BTreeSet<_>>();
-    let (source, covered_ecosystems) = resolve_sources(advisories, offline, &ecosystems)?;
-    let policy = VulnPolicy::load(root).context("cannot load the vulnerability policy")?;
-    let direct = synaptic_api::scan_dependencies(root)
-        .context("cannot inventory the repository's direct dependencies")?;
+    // An ecosystem can be present without a lockfile: Maven has none, and
+    // Gradle writes one only when dependency locking is enabled. A declaration
+    // that pins a literal version is still auditable, so those ecosystems need
+    // a corpus too, or they would be reported unaudited while their versions
+    // were sitting right there.
+    //
+    // This mirrors the promotion rule in `scan` exactly. Widening it to every
+    // declared ecosystem would resolve a corpus for each, and npm's is 226,000
+    // documents -- minutes of loading to audit whatever a stray fixture
+    // manifest happened to name.
+    let declared_only = direct
+        .iter()
+        .filter(|dependency| dependency.resolved_version.is_some())
+        .filter(|dependency| {
+            dependency.package.ecosystem == Ecosystem::Maven
+                || is_sbom_source(&dependency.source_file)
+        })
+        .map(|dependency| dependency.package.ecosystem)
+        .filter(|ecosystem| !ecosystems.contains(ecosystem))
+        .collect::<BTreeSet<_>>();
+    ecosystems.extend(&declared_only);
+
+    let (mut source, mut covered_ecosystems) =
+        resolve_sources(advisories, offline, &ecosystems, online)?;
+
+    // An explicit --online adds the OSV API alongside whatever corpora were
+    // resolved. It is opt-in because the bulk export is the better default:
+    // one request, offline afterwards, and it discloses nothing about this
+    // repository's dependencies.
+    if online && !synaptic_vuln::offline_forced() {
+        let coordinates: Vec<PackageCoordinate> = packages
+            .packages()
+            .map(|package| package.key.coordinate.clone())
+            .chain(
+                direct
+                    .iter()
+                    .filter(|dependency| dependency.resolved_version.is_some())
+                    .map(|dependency| dependency.package.clone()),
+            )
+            .collect();
+        match live_source(&coordinates) {
+            Ok(live) => {
+                // An ecosystem the API can answer for is no longer unaudited.
+                covered_ecosystems.extend(
+                    ecosystems.iter().copied().filter(|ecosystem| {
+                        synaptic_vuln::osv_ecosystem_name(*ecosystem).is_some()
+                    }),
+                );
+                eprintln!("[synaptic] queried the OSV API: {}", live.describe().origin);
+                source.push(live);
+            }
+            // A failed query must not quietly become a clean scan, but it must
+            // not discard the corpora that did load either.
+            Err(error) => eprintln!(
+                "[synaptic] WARNING: the OSV API could not be reached ({error}); \
+                 the scan continues against the local corpus only"
+            ),
+        }
+    }
+
+    // Nothing answered. Reporting that as a scan would print a clean bill of
+    // health nobody checked.
+    if source.is_empty() {
+        bail!(
+            "no advisory corpus could be obtained for any locked ecosystem and the OSV API \
+             did not answer. Run `synaptic vuln sync`, or pass --advisories <dir>. \
+             Refusing to report a scan against an empty corpus."
+        );
+    }
+
+    // The graph supplies the raising signals, and is only ever consulted about
+    // a package some advisory names. When the corpus names none of them there
+    // is nothing to raise, so reading a 22 MB graph and indexing it would be
+    // pure cost -- and a repository with no findings is the common case.
+    //
+    // The declared dependencies are asked about too, because `scan` promotes
+    // the Maven and SBOM ones to scannable packages and they are not in the
+    // lockfile graph this iterates.
+    let corpus_names_something = packages.scan_targets().any(|resolved| {
+        !AdvisorySource::advisories_for(&source, &resolved.key.coordinate).is_empty()
+    }) || direct.iter().any(|dependency| {
+        dependency.resolved_version.is_some()
+            && !AdvisorySource::advisories_for(&source, &dependency.package).is_empty()
+    });
 
     // The graph supplies the raising signals. Without it every finding still
     // gets version and dependency-path analysis, it just stays at
     // review-required more often.
     let graph_data = match graph {
+        // An explicitly requested graph is always loaded, so a path that does
+        // not exist is still reported rather than silently ignored.
         Some(path) => Some(load_graph_data(&path, None)?),
         None => {
             let conventional = root.join("synaptic-out/graph.json");
-            conventional
-                .exists()
+            (corpus_names_something && conventional.exists())
                 .then(|| load_graph_data(&conventional, None))
                 .transpose()?
         }
@@ -330,6 +450,7 @@ fn run_scan(
         validation_commands: validation_commands(root),
         today: today(),
         covered_ecosystems,
+        feature_gated: feature_gated_in(&discovered.cargo_manifests),
     })?;
 
     if record {
@@ -397,6 +518,20 @@ fn print_report(report: &ScanReport) {
         );
     }
     println!("packages scanned: {}", report.packages_scanned);
+    if report.packages_partially_audited > 0 {
+        let ecosystems = report
+            .coverage
+            .iter()
+            .filter(|(_, coverage)| **coverage == EcosystemCoverage::DirectOnly)
+            .map(|(ecosystem, _)| ecosystem.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "packages partially audited: {} ({ecosystems}: direct declarations only, transitive \
+             dependencies were not seen)",
+            report.packages_partially_audited
+        );
+    }
     if report.packages_unaudited > 0 {
         let ecosystems = report
             .uncovered_ecosystems
@@ -557,17 +692,44 @@ fn run_check(
         .parse()
         .map_err(|error| anyhow::anyhow!("{error}"))
         .context("package must be <ecosystem>:<name>, for example cargo:serde")?;
-    // Check the corpus for the package's own ecosystem, not the repository's.
-    let source = resolve_source(advisories, offline, coordinate.ecosystem)?;
+    // Checking one package is a question about that package, so it goes
+    // straight to OSV unless told not to. `--advisories` means the operator
+    // chose a corpus deliberately, and that choice wins.
+    let offline = offline || synaptic_vuln::offline_forced();
+    let live = (!offline && advisories.is_none())
+        .then(|| live_source(std::slice::from_ref(&coordinate)))
+        .transpose();
+    let source = match live {
+        Ok(Some(source)) => source,
+        Ok(None) => resolve_source(advisories, offline, coordinate.ecosystem)?,
+        // Degrade to the local corpus rather than failing, and say which
+        // answered: a degraded answer must never read as a complete one.
+        Err(error) => {
+            eprintln!(
+                "[synaptic] WARNING: the OSV API could not be reached ({error}); \
+                 falling back to the local corpus"
+            );
+            resolve_source(advisories, true, coordinate.ecosystem)?
+        }
+    };
     let policy = VulnPolicy::load(root).context("cannot load the vulnerability policy")?;
 
     let safety = check_dependency(&coordinate, version, &source, policy.as_ref());
+    let corpus = source.describe();
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&safety)?);
+        // The corpus travels with the answer. Without it there is no way to
+        // tell a live OSV result from one read out of a corpus that has not
+        // been refreshed in a fortnight, and those are different claims.
+        let mut document = serde_json::to_value(&safety)?;
+        if let Some(object) = document.as_object_mut() {
+            object.insert("corpus".into(), serde_json::to_value(&corpus)?);
+        }
+        println!("{}", serde_json::to_string_pretty(&document)?);
         return Ok(());
     }
     println!("{:?} {}", safety.verdict, safety.package);
+    println!("  source: {}", corpus.origin);
     if let Some(constraint) = &safety.approved_constraint {
         println!(
             "  use {constraint} (availability {:?})",
@@ -583,10 +745,7 @@ fn run_check(
         println!("  {reason}");
     }
     if safety.advisories.is_empty() && safety.reasons.is_empty() {
-        println!(
-            "  no advisory in {} names this package",
-            source.describe().origin
-        );
+        println!("  no advisory in {} names this package", corpus.origin);
     }
     Ok(())
 }
@@ -853,9 +1012,36 @@ mod tests {
         let identity = normalize_remote_identity("git@github.com:ColinVaughn/Synaptic.git")
             .expect("valid remote");
 
-        assert!(!identity.contains(std::path::MAIN_SEPARATOR));
-        assert!(!identity.contains(':'));
-        assert!(!identity.starts_with('/'));
+        assert_eq!(identity, "github.com/ColinVaughn/Synaptic");
+        // `/` is the identity's own namespace separator, so testing it against
+        // `MAIN_SEPARATOR` asserted something different on each platform: it
+        // held on Windows and could never hold on Unix. What actually has to be
+        // true is that nothing machine-local survived normalization.
+        assert!(!identity.contains('\\'), "no Windows path separator");
+        assert!(!identity.contains(':'), "no scheme or scp-style separator");
+        assert!(!identity.starts_with('/'), "not an absolute path");
+        assert!(
+            identity
+                .split('/')
+                .next()
+                .is_some_and(|host| host.contains('.')),
+            "the first segment is a host, not a drive or directory"
+        );
+    }
+
+    #[test]
+    fn an_identity_from_a_windows_checkout_path_is_recognisably_local() {
+        // The fallback when a repository has no remote. It is deliberately a
+        // path, and the test above is what guards the portable case; this one
+        // pins the distinction so the two never get conflated again.
+        let local = PathBuf::from(r"C:\Users\dev\repo");
+
+        let identity = local.to_string_lossy().into_owned();
+
+        assert!(
+            normalize_remote_identity(&identity).is_none(),
+            "a bare checkout path is not a portable remote identity"
+        );
     }
 
     #[test]

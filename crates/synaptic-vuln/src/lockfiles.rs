@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 use synaptic_api::{Ecosystem, PackageCoordinate};
 
-use crate::lockgraph::{LockGraphError, PackageKey, ResolvedPackage};
+use crate::lockgraph::{LockGraphError, PackageKey, PackageScope, ResolvedPackage};
 
 /// A lockfile format this crate can read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -111,6 +111,21 @@ impl LockfileKind {
         )
     }
 
+    /// Whether the format records what a package is needed for, and therefore
+    /// whether a finding from it can distinguish a development-only dependency
+    /// from one this file simply says nothing about.
+    ///
+    /// `uv.lock` is deliberately absent. It records dev groups as edges from the
+    /// root package rather than as a property of each package, so reading it
+    /// needs graph work the other four do not, and claiming it here without
+    /// that work would overstate what the scan knows.
+    pub fn records_dependency_scope(self) -> bool {
+        matches!(
+            self,
+            Self::NpmPackageLock | Self::ComposerLock | Self::PubspecLock | Self::PoetryLock
+        )
+    }
+
     /// Every format, for coverage reporting.
     pub fn all() -> &'static [LockfileKind] {
         &[
@@ -163,6 +178,20 @@ fn package(ecosystem: Ecosystem, name: &str, version: &str) -> ResolvedPackage {
         key: key(ecosystem, name, version),
         dependencies: Vec::new(),
         is_workspace_member: false,
+        scope: PackageScope::Unknown,
+    }
+}
+
+/// Build a package whose scope the lockfile states outright.
+fn scoped_package(
+    ecosystem: Ecosystem,
+    name: &str,
+    version: &str,
+    scope: PackageScope,
+) -> ResolvedPackage {
+    ResolvedPackage {
+        scope,
+        ..package(ecosystem, name, version)
     }
 }
 
@@ -210,6 +239,14 @@ struct NpmLockEntry {
     dependencies: std::collections::BTreeMap<String, String>,
     #[serde(default, rename = "optionalDependencies")]
     optional_dependencies: std::collections::BTreeMap<String, String>,
+    /// npm marks every package it resolved only for development, including the
+    /// transitive ones, so this needs no propagation of its own.
+    #[serde(default)]
+    dev: bool,
+    /// Reached both ways in different parts of the tree, so it is needed at
+    /// runtime somewhere.
+    #[serde(default, rename = "devOptional")]
+    dev_optional: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -245,7 +282,14 @@ fn parse_npm_package_lock(source: &str) -> Result<Vec<ResolvedPackage>, LockGrap
             let Some(version) = entry.version.clone() else {
                 continue;
             };
-            let mut resolved = package(Ecosystem::Npm, &name, &version);
+            // `devOptional` means the package is reached through a runtime path
+            // somewhere else in the tree, so it is not development-only.
+            let scope = if entry.dev && !entry.dev_optional {
+                PackageScope::Development
+            } else {
+                PackageScope::Runtime
+            };
+            let mut resolved = scoped_package(Ecosystem::Npm, &name, &version, scope);
             resolved.is_workspace_member = is_root;
             // Shallower paths win, matching npm's own resolution order.
             index
@@ -433,7 +477,12 @@ fn parse_poetry_lock(source: &str) -> Result<Vec<ResolvedPackage>, LockGraphErro
             .and_then(toml::Value::as_table)
             .map(|table| table.keys().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
-        packages.push(package(Ecosystem::Pypi, name, version));
+        packages.push(scoped_package(
+            Ecosystem::Pypi,
+            name,
+            version,
+            poetry_scope(&entry),
+        ));
         named.push((name.to_string(), dependency_names));
     }
     let index = packages
@@ -442,6 +491,33 @@ fn parse_poetry_lock(source: &str) -> Result<Vec<ResolvedPackage>, LockGraphErro
         .collect();
     link(&mut packages, &named, &index, Ecosystem::Pypi);
     Ok(packages)
+}
+
+/// Read a poetry entry's dependency group.
+///
+/// Poetry 1.5 replaced the single `category` string with a `groups` list. Both
+/// spellings are still in the wild, because a lockfile outlives the tool that
+/// wrote it.
+fn poetry_scope(entry: &toml::Value) -> PackageScope {
+    if let Some(groups) = entry.get("groups").and_then(toml::Value::as_array) {
+        let named: Vec<&str> = groups.iter().filter_map(toml::Value::as_str).collect();
+        if named.is_empty() {
+            return PackageScope::Unknown;
+        }
+        // "main" is poetry's runtime group. A package in any other group and
+        // not in main is needed only for development.
+        return if named.contains(&"main") {
+            PackageScope::Runtime
+        } else {
+            PackageScope::Development
+        };
+    }
+    match entry.get("category").and_then(toml::Value::as_str) {
+        Some("main") => PackageScope::Runtime,
+        Some("dev") => PackageScope::Development,
+        Some(_) => PackageScope::Development,
+        None => PackageScope::Runtime,
+    }
 }
 
 fn parse_uv_lock(source: &str) -> Result<Vec<ResolvedPackage>, LockGraphError> {
@@ -494,6 +570,14 @@ fn parse_composer_lock(source: &str) -> Result<Vec<ResolvedPackage>, LockGraphEr
     let mut packages = Vec::new();
     let mut named = Vec::new();
     for section in ["packages", "packages-dev"] {
+        // Composer resolves the two sets separately and puts everything needed
+        // only for development, transitive dependencies included, in the second
+        // one. Section membership is therefore the whole answer.
+        let scope = if section == "packages-dev" {
+            PackageScope::Development
+        } else {
+            PackageScope::Runtime
+        };
         let Some(entries) = document.get(section).and_then(serde_json::Value::as_array) else {
             continue;
         };
@@ -520,7 +604,7 @@ fn parse_composer_lock(source: &str) -> Result<Vec<ResolvedPackage>, LockGraphEr
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            packages.push(package(Ecosystem::Composer, name, version));
+            packages.push(scoped_package(Ecosystem::Composer, name, version, scope));
             named.push((name.to_string(), dependency_names));
         }
     }
@@ -709,7 +793,15 @@ fn parse_pubspec_lock(source: &str) -> Result<Vec<ResolvedPackage>, LockGraphErr
         .iter()
         .filter_map(|(name, entry)| {
             let version = entry.get("version").and_then(serde_json::Value::as_str)?;
-            Some(package(Ecosystem::Pub, name, version))
+            // "direct main" / "direct dev" / "transitive". A transitive entry
+            // does not say whose transitive it is, so it stays unknown rather
+            // than being guessed into either bucket.
+            let scope = match entry.get("dependency").and_then(serde_json::Value::as_str) {
+                Some("direct dev") => PackageScope::Development,
+                Some("direct main") => PackageScope::Runtime,
+                _ => PackageScope::Unknown,
+            };
+            Some(scoped_package(Ecosystem::Pub, name, version, scope))
         })
         .collect())
 }

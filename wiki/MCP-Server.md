@@ -996,12 +996,24 @@ Parameters:
 
 Two honesty rules an agent cannot verify for itself: the returned constraint is
 `Unverified`, meaning the advisory says it fixes the issue but no registry was
-consulted about whether such a release exists; and when no advisory corpus is
-configured the answer is UNKNOWN, never safe.
+consulted about whether such a release exists; and when no advisory source can
+be reached the answer is UNKNOWN, never safe.
 
-The corpus comes from `SYNAPTIC_VULN_ADVISORIES` or `.synaptic/vuln/advisories`.
-The server never downloads one, so an operator decides explicitly what an agent
-answers from.
+Where the answer comes from, in order:
+
+1. A corpus configured through `SYNAPTIC_VULN_ADVISORIES` or
+   `.synaptic/vuln/advisories`. An operator who configured one chose it, so it
+   wins and no request is made.
+2. Otherwise **the OSV API, queried directly**. This tool answers a question
+   about one named package, so it is asked rather than guessed at.
+3. If that query fails, the corpus left behind by `synaptic vuln sync`. The
+   answer then carries a `DEGRADED` line and a `degraded` field naming the
+   failure, because a stale corpus finding nothing is a weaker claim than OSV
+   finding nothing.
+
+`SYNAPTIC_OFFLINE=1` disables step 2 outright, for air-gapped machines and for
+operators who want an agent answering only from a corpus they control. Requests
+carry a five-second timeout, and a failure never fails the tool.
 
 ### vuln_findings
 
@@ -1079,7 +1091,7 @@ formatted text:
 | `affected_tests` | `{ tests: [{ id, label, file, depth, via_relation }], total }` |
 | `readiness_audit` | `{ version, summary, counts_by_severity, groups, findings: [{ rule_id, severity, category, subsystem, title, detail, location, node_ids, evidence, remediation, confidence, impact }], skipped }` |
 | `audit_sql` / `advise_sql` | `{ version, summary, findings: [{ rule_id, severity, category, title, detail, location, remediation, confidence }] }` |
-| `vuln_check_dependency` | `{ verdict, package, requested_version, advisories, approved_constraint, constraint_availability, alternatives, reasons, corpus }` (`constraint_availability` is `unverified` offline) |
+| `vuln_check_dependency` | `{ verdict, package, requested_version, advisories, approved_constraint, constraint_availability, alternatives, reasons, corpus, degraded }` (`constraint_availability` is `unverified` offline; `degraded` names the failure when the answer fell back from the OSV API to a local corpus, and is null otherwise) |
 | `vuln_findings` | `{ total, findings: [{ id, state, priority, advisory_id, package, resolved_version, applicability, severity, recommended_version }] }` |
 | `vuln_explain` | `{ id, state, finding, decisions }` (`finding` carries the evidence ladder, dependency path and remediation plan) |
 

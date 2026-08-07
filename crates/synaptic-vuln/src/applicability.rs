@@ -29,6 +29,14 @@ pub enum EvidenceKind {
     NoFirstPartyUsage,
     /// The package is reached only through development, build, or test edges.
     DevelopmentOnlyDependency,
+    /// Nothing recorded what this package is needed for, so runtime
+    /// reachability was assumed rather than read. This is an absence of data,
+    /// not a finding that the package ships.
+    DependencyScopeUnrecorded,
+    /// The package is reached only through a dependency no enabled feature
+    /// compiles. A feature this build leaves off is still one another build
+    /// turns on, so this de-ranks and never dismisses.
+    FeatureGated,
     /// Reflection or dynamic dispatch was detected in the reaching region, so
     /// static reachability results cannot be trusted to be complete.
     DynamicHazard,
@@ -86,6 +94,13 @@ pub struct ApplicabilityInput {
     pub is_direct_dependency: bool,
     /// Whether any path to the package runs through runtime edges.
     pub runtime_reachable: bool,
+    /// Whether anything actually recorded what this package is needed for.
+    /// When false, `runtime_reachable` is an assumption, and the verdict says
+    /// so instead of presenting it as a reading.
+    pub scope_recorded: bool,
+    /// Whether every path to the package runs through an optional dependency
+    /// no enabled feature compiles.
+    pub feature_gated: bool,
     /// Whether dynamic dispatch or reflection was detected nearby.
     pub dynamic_hazard_present: bool,
 }
@@ -100,6 +115,8 @@ impl Default for ApplicabilityInput {
             first_party_usage_observed: false,
             is_direct_dependency: false,
             runtime_reachable: true,
+            scope_recorded: false,
+            feature_gated: false,
             dynamic_hazard_present: false,
         }
     }
@@ -172,6 +189,19 @@ pub fn assess_applicability(input: &ApplicabilityInput) -> ApplicabilityVerdict 
             EvidenceKind::DevelopmentOnlyDependency,
             EvidenceDirection::LowersPriority,
             "reached only through development, build, or test dependencies",
+        ));
+    } else if !input.scope_recorded {
+        evidence.push(ApplicabilityEvidence::new(
+            EvidenceKind::DependencyScopeUnrecorded,
+            EvidenceDirection::Informational,
+            "nothing records what this package is needed for, so runtime use is assumed",
+        ));
+    }
+    if input.feature_gated {
+        evidence.push(ApplicabilityEvidence::new(
+            EvidenceKind::FeatureGated,
+            EvidenceDirection::LowersPriority,
+            "reached only through an optional dependency no enabled feature compiles",
         ));
     }
     if input.dynamic_hazard_present {
@@ -447,38 +477,74 @@ mod tests {
     fn no_input_combination_yields_not_applicable_without_a_gate_reason() {
         // Exhaustive sweep of the boolean inputs. NotApplicable must only ever
         // come from a withdrawn advisory or a version outside every range.
-        for withdrawn in [false, true] {
-            for usage in [false, true] {
-                for direct in [false, true] {
-                    for runtime in [false, true] {
-                        for hazard in [false, true] {
-                            for functions in [Vec::new(), vec!["f".to_string()]] {
-                                for reachable in [Vec::new(), vec!["f".to_string()]] {
-                                    let input = ApplicabilityInput {
-                                        version_match: VersionMatch::Affected,
-                                        advisory_withdrawn: withdrawn,
-                                        advisory_functions: functions.clone(),
-                                        reachable_functions: reachable.clone(),
-                                        first_party_usage_observed: usage,
-                                        is_direct_dependency: direct,
-                                        runtime_reachable: runtime,
-                                        dynamic_hazard_present: hazard,
-                                    };
+        //
+        // This is the crate's central invariant, so the sweep is enumerated as
+        // a bitmask rather than nested loops: every new input costs one line
+        // here, which makes it cheap to keep exhaustive as signals are added.
+        // Skipping that is how a de-ranking signal quietly becomes a dismissing
+        // one.
+        const INPUTS: u32 = 7;
+        for combination in 0..(1 << INPUTS) {
+            let bit = |index: u32| combination & (1 << index) != 0;
+            for functions in [Vec::new(), vec!["f".to_string()]] {
+                for reachable in [Vec::new(), vec!["f".to_string()]] {
+                    let input = ApplicabilityInput {
+                        version_match: VersionMatch::Affected,
+                        advisory_withdrawn: bit(0),
+                        advisory_functions: functions.clone(),
+                        reachable_functions: reachable.clone(),
+                        first_party_usage_observed: bit(1),
+                        is_direct_dependency: bit(2),
+                        runtime_reachable: bit(3),
+                        scope_recorded: bit(4),
+                        feature_gated: bit(5),
+                        dynamic_hazard_present: bit(6),
+                    };
 
-                                    let verdict = assess_applicability(&input);
+                    let verdict = assess_applicability(&input);
 
-                                    if verdict.state == ApplicabilityState::NotApplicable {
-                                        assert!(
-                                            withdrawn,
-                                            "NotApplicable reached without a gate reason: {input:?}"
-                                        );
-                                    }
-                                }
-                            }
-                        }
+                    if verdict.state == ApplicabilityState::NotApplicable {
+                        assert!(
+                            input.advisory_withdrawn,
+                            "NotApplicable reached without a gate reason: {input:?}"
+                        );
                     }
                 }
             }
         }
+    }
+
+    #[test]
+    fn an_unrecorded_scope_is_reported_as_an_assumption() {
+        let input = ApplicabilityInput {
+            version_match: VersionMatch::Affected,
+            runtime_reachable: true,
+            scope_recorded: false,
+            ..Default::default()
+        };
+
+        let verdict = assess_applicability(&input);
+        let evidence = verdict
+            .evidence
+            .iter()
+            .find(|item| item.kind == EvidenceKind::DependencyScopeUnrecorded)
+            .expect("an assumed scope is recorded as one");
+
+        assert_eq!(evidence.direction, EvidenceDirection::Informational);
+        assert!(verdict.runtime_reachable, "the assumption still stands");
+    }
+
+    #[test]
+    fn a_recorded_runtime_scope_is_not_reported_as_an_assumption() {
+        let input = ApplicabilityInput {
+            version_match: VersionMatch::Affected,
+            runtime_reachable: true,
+            scope_recorded: true,
+            ..Default::default()
+        };
+
+        let verdict = assess_applicability(&input);
+
+        assert!(!kinds(&verdict).contains(&EvidenceKind::DependencyScopeUnrecorded));
     }
 }

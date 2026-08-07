@@ -1058,6 +1058,10 @@ pub(crate) enum VulnAction {
         /// Never touch the network; fail if no local corpus is available.
         #[arg(long)]
         offline: bool,
+        /// Also query the OSV API for each resolved package, covering
+        /// ecosystems whose bulk export is too large to download.
+        #[arg(long, conflicts_with = "offline")]
+        online: bool,
         /// Graph snapshot (default: <root>/synaptic-out/graph.json when present).
         #[arg(long)]
         graph: Option<PathBuf>,
@@ -1100,7 +1104,9 @@ pub(crate) enum VulnAction {
         /// Directory of OSV JSON advisories. Defaults to the synced cache.
         #[arg(long)]
         advisories: Option<PathBuf>,
-        /// Never touch the network; fail if no local corpus is available.
+        /// Answer from a local corpus only, never the OSV API. Checking one
+        /// package queries OSV directly by default; this opts out, as does
+        /// SYNAPTIC_OFFLINE=1.
         #[arg(long)]
         offline: bool,
         #[arg(long, default_value = ".")]

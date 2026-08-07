@@ -191,10 +191,27 @@ fn dependency_manifests(root: &Path) -> Result<Vec<PathBuf>, InventoryError> {
     Ok(manifests)
 }
 
+/// `Cargo.lock` contents, parsed at most once per scan and keyed on the
+/// lockfile's own path.
+///
+/// `cargo_lock_versions` is the only lockfile reader that searches *upwards*
+/// for its file, so every member of a workspace resolves to the same one.
+/// Parsing per manifest therefore re-read one file once per member: on Synaptic
+/// itself, 30 `Cargo.toml` files each re-parsed the same 118 KB `Cargo.lock`,
+/// which was 67 ms of the 84 ms this function took. Every other reader takes
+/// `dir.join(...)`, so its file is naturally distinct per manifest and parsed
+/// once already.
+///
+/// Keyed on the resolved path rather than the manifest's directory, because
+/// those 30 manifests sit in 30 different directories and share one lockfile.
+/// Scoped to a single scan so a later call cannot be served a stale parse.
+type CargoLockCache = std::cell::RefCell<BTreeMap<PathBuf, std::rc::Rc<BTreeMap<String, String>>>>;
+
 fn scan_dependencies_from_manifests(
     root: &Path,
     manifests: &[PathBuf],
 ) -> Result<Vec<Dependency>, InventoryError> {
+    let cargo_locks = CargoLockCache::default();
     let mut dependencies = Vec::new();
     for manifest in manifests {
         let name = manifest
@@ -206,7 +223,7 @@ fn scan_dependencies_from_manifests(
             "package.json" => dependencies.extend(scan_package_json(root, manifest)?),
             "pyproject.toml" => dependencies.extend(scan_pyproject(root, manifest)?),
             "go.mod" => dependencies.extend(scan_go_mod(root, manifest)?),
-            "Cargo.toml" => dependencies.extend(scan_cargo_toml(root, manifest)?),
+            "Cargo.toml" => dependencies.extend(scan_cargo_toml(root, manifest, &cargo_locks)?),
             "pom.xml" => dependencies.extend(scan_maven_pom(root, manifest)?),
             "build.gradle" | "build.gradle.kts" => {
                 dependencies.extend(scan_gradle(root, manifest)?)
@@ -367,7 +384,11 @@ fn is_dependency_manifest(name: &str, path: &Path) -> bool {
         })
 }
 
-fn is_sbom_manifest(name: &str) -> bool {
+/// Whether a manifest file name is an SBOM document (CycloneDX or SPDX).
+///
+/// Takes a bare file name, not a path. Callers holding a path should pass the
+/// final component.
+pub fn is_sbom_manifest(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     name == "bom.json"
         || name == "bom.xml"
@@ -1217,13 +1238,17 @@ fn scan_go_mod(root: &Path, path: &Path) -> Result<Vec<Dependency>, InventoryErr
     Ok(out)
 }
 
-fn scan_cargo_toml(root: &Path, path: &Path) -> Result<Vec<Dependency>, InventoryError> {
+fn scan_cargo_toml(
+    root: &Path,
+    path: &Path,
+    cargo_locks: &CargoLockCache,
+) -> Result<Vec<Dependency>, InventoryError> {
     let source = fs::read_to_string(path)?;
     let data: toml::Value = toml::from_str(&source).map_err(|source| InventoryError::Toml {
         path: path.to_path_buf(),
         source,
     })?;
-    let resolved = cargo_lock_versions(root, path.parent().unwrap_or(root))?;
+    let resolved = cargo_lock_versions(root, path.parent().unwrap_or(root), cargo_locks)?;
     let mut out = Vec::new();
     collect_cargo_tables(root, path, &data, &resolved, &mut Vec::new(), &mut out);
     Ok(out)
@@ -1290,13 +1315,17 @@ fn collect_cargo_tables(
 fn cargo_lock_versions(
     root: &Path,
     dir: &Path,
-) -> Result<BTreeMap<String, String>, InventoryError> {
+    cache: &CargoLockCache,
+) -> Result<std::rc::Rc<BTreeMap<String, String>>, InventoryError> {
     let path = ancestors_within(root, dir)
         .map(|candidate| candidate.join("Cargo.lock"))
         .find(|candidate| candidate.is_file());
     let Some(path) = path else {
-        return Ok(BTreeMap::new());
+        return Ok(std::rc::Rc::new(BTreeMap::new()));
     };
+    if let Some(hit) = cache.borrow().get(&path) {
+        return Ok(std::rc::Rc::clone(hit));
+    }
     let source = fs::read_to_string(&path)?;
     let data: toml::Value = toml::from_str(&source).map_err(|source| InventoryError::Toml {
         path: path.clone(),
@@ -1315,6 +1344,10 @@ fn cargo_lock_versions(
             }
         }
     }
+    let versions = std::rc::Rc::new(versions);
+    cache
+        .borrow_mut()
+        .insert(path, std::rc::Rc::clone(&versions));
     Ok(versions)
 }
 

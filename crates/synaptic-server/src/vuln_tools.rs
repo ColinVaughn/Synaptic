@@ -2,8 +2,11 @@
 //!
 //! These expose the dependency-safety guardrail and the findings ledger to
 //! assistants so generated code does not reach for a known-vulnerable version.
-//! Everything here reads local state only: a checked-out advisory corpus and
-//! the repository's own ledger.
+//!
+//! The ledger tools read local state only. `vuln_check_dependency` asks OSV
+//! about the one package it was given, unless an operator configured a corpus
+//! or set `SYNAPTIC_OFFLINE=1`, in which case it reads that instead. It is the
+//! only tool in the server that reaches the network.
 
 use std::path::{Path, PathBuf};
 
@@ -43,11 +46,111 @@ pub(crate) fn advisory_dir(root: &Path) -> Option<PathBuf> {
     conventional.is_dir().then_some(conventional)
 }
 
+/// Obtain advisories for one package, preferring the live OSV API.
+///
+/// Checking a single package is a question about that package, so it is asked
+/// directly. The guardrails matter more here than in the CLI, because an
+/// assistant cannot see a warning on stderr:
+///
+/// - `SYNAPTIC_OFFLINE=1` disables the query outright.
+/// - An explicitly configured corpus wins, because the operator chose it.
+/// - A network failure degrades to that corpus rather than failing, and the
+///   returned message says the answer is degraded. It never reports "safe".
+#[allow(clippy::type_complexity)]
+fn resolve_check_source(
+    root: &Path,
+    coordinate: &synaptic_vuln::PackageCoordinate,
+    transport: Option<&dyn synaptic_vuln::OsvTransport>,
+    synced: Option<&Path>,
+) -> Result<(LocalDirSource, Option<String>), (String, Value)> {
+    // An operator who configured a corpus chose their data source, exactly as
+    // `--advisories` does on the command line. That choice wins, and it keeps
+    // this path deterministic and network-free.
+    if let Some(directory) = advisory_dir(root) {
+        return match LocalDirSource::load(&directory) {
+            Ok(source) => Ok((source, None)),
+            Err(_) => Err((
+                format!(
+                    "The advisory corpus at {} could not be read.",
+                    directory.display()
+                ),
+                json!({ "error": "unreadable_advisory_corpus" }),
+            )),
+        };
+    }
+
+    let mut live_error = None;
+    if let Some(transport) = transport {
+        let cache = synaptic_vuln::CorpusCache::user_default().map(|cache| cache.live_dir());
+        match synaptic_vuln::fetch_advisories_for_package(transport, coordinate, cache.as_deref()) {
+            Ok(source) => return Ok((source, None)),
+            // Remember why, then fall back to whatever is already on disk. The
+            // caller reports both the answer and the fact that it is degraded.
+            Err(error) => live_error = Some(error.to_string()),
+        }
+    }
+
+    // The shared corpus a `synaptic vuln sync` left behind. It may be days old,
+    // which is why an answer from it is labelled when the API was meant to
+    // supply one.
+    if let Some(source) = synced.and_then(|directory| LocalDirSource::load(directory).ok()) {
+        return Ok((source, live_error));
+    }
+
+    let reason = match &live_error {
+        Some(error) => format!("OSV could not answer ({error})"),
+        None => "querying OSV is disabled".to_string(),
+    };
+    Err((
+        format!(
+            "No advisory corpus is configured and {reason}, so {coordinate} could not be \
+             checked. Set {ADVISORY_DIR_ENV} to a directory of OSV JSON documents, place one \
+             at {CONVENTIONAL_ADVISORY_DIR}, or run `synaptic vuln sync`. Treat this as \
+             UNKNOWN, not as safe."
+        ),
+        json!({ "error": "no_advisory_corpus" }),
+    ))
+}
+
 /// Answer whether a package is safe to use, and at what version.
 pub(crate) fn check_dependency_tool(
     root: &Path,
     package: &str,
     version: Option<&str>,
+) -> (String, Value) {
+    // Built here rather than inside the resolver so tests can drive the whole
+    // tool without a network, and so `SYNAPTIC_OFFLINE` is read in exactly one
+    // place.
+    let transport = (!synaptic_vuln::offline_forced())
+        .then(synaptic_vuln::SystemOsvTransport::new)
+        .and_then(Result::ok);
+    let synced = synaptic_vuln::CorpusCache::user_default()
+        .and_then(|cache| cache.resolve(coordinate_ecosystem(package)?));
+    check_dependency_tool_with(
+        root,
+        package,
+        version,
+        transport
+            .as_ref()
+            .map(|transport| transport as &dyn synaptic_vuln::OsvTransport),
+        synced.as_deref(),
+    )
+}
+
+/// The ecosystem a coordinate names, for locating its synced corpus.
+fn coordinate_ecosystem(package: &str) -> Option<synaptic_vuln::Ecosystem> {
+    package
+        .parse::<synaptic_vuln::PackageCoordinate>()
+        .ok()
+        .map(|coordinate| coordinate.ecosystem)
+}
+
+fn check_dependency_tool_with(
+    root: &Path,
+    package: &str,
+    version: Option<&str>,
+    transport: Option<&dyn synaptic_vuln::OsvTransport>,
+    synced: Option<&Path>,
 ) -> (String, Value) {
     let Ok(coordinate) = package.parse() else {
         return (
@@ -59,24 +162,9 @@ pub(crate) fn check_dependency_tool(
         );
     };
 
-    let Some(directory) = advisory_dir(root) else {
-        return (
-            format!(
-                "No advisory corpus is configured, so dependency safety cannot be checked. \
-                 Set {ADVISORY_DIR_ENV} to a directory of OSV JSON documents, or place one \
-                 at {CONVENTIONAL_ADVISORY_DIR}. Treat this as UNKNOWN, not as safe."
-            ),
-            json!({ "error": "no_advisory_corpus" }),
-        );
-    };
-    let Ok(source) = LocalDirSource::load(&directory) else {
-        return (
-            format!(
-                "The advisory corpus at {} could not be read.",
-                directory.display()
-            ),
-            json!({ "error": "unreadable_advisory_corpus" }),
-        );
+    let (source, live_error) = match resolve_check_source(root, &coordinate, transport, synced) {
+        Ok(resolved) => resolved,
+        Err(message) => return (message.0, message.1),
     };
     let policy = VulnPolicy::load(root).ok().flatten();
     let safety = check_dependency(&coordinate, version, &source, policy.as_ref());
@@ -106,6 +194,16 @@ pub(crate) fn check_dependency_tool(
             corpus.newest_modified.as_deref().unwrap_or("unknown")
         ));
     }
+    // A degraded answer must be unmistakable in the text, because that is what
+    // the model reads. A local corpus can be days old; "nothing found" against
+    // a stale corpus is a weaker claim than "nothing found" against OSV.
+    if let Some(error) = &live_error {
+        text.push_str(&format!(
+            "DEGRADED: OSV could not answer ({error}), so this answer comes from \
+             the local corpus at {} and may be out of date.\n",
+            corpus.origin
+        ));
+    }
 
     let structured = json!({
         "verdict": safety.verdict,
@@ -117,6 +215,7 @@ pub(crate) fn check_dependency_tool(
         "alternatives": safety.alternatives,
         "reasons": safety.reasons,
         "corpus": corpus,
+        "degraded": live_error,
     });
     (text, structured)
 }
@@ -297,11 +396,115 @@ mod tests {
         );
     }
 
+    /// A transport that always fails, standing in for a machine with no route
+    /// to OSV.
+    struct UnreachableOsv;
+
+    impl synaptic_vuln::OsvTransport for UnreachableOsv {
+        fn post_json(&self, url: &str, _body: &str) -> Result<String, synaptic_vuln::SourceError> {
+            Err(synaptic_vuln::SourceError::Transport {
+                url: url.into(),
+                message: "network is unreachable".into(),
+            })
+        }
+
+        fn get_json(&self, url: &str) -> Result<String, synaptic_vuln::SourceError> {
+            Err(synaptic_vuln::SourceError::Transport {
+                url: url.into(),
+                message: "network is unreachable".into(),
+            })
+        }
+    }
+
+    #[test]
+    fn an_unreachable_api_falls_back_to_the_synced_corpus_and_says_the_answer_is_degraded() {
+        // An assistant cannot see a warning on stderr, so the degradation has
+        // to be in the text it reads. A stale corpus finding nothing is a much
+        // weaker claim than OSV finding nothing, and the two must not read the
+        // same.
+        let repo = tempfile::tempdir().unwrap();
+        let synced = tempfile::tempdir().unwrap();
+        write_advisory(synced.path(), "RUSTSEC-2026-0001", "example", "1.5.0");
+
+        let (text, structured) = check_dependency_tool_with(
+            repo.path(),
+            "cargo:example",
+            Some("1.0.0"),
+            Some(&UnreachableOsv),
+            Some(synced.path()),
+        );
+
+        assert!(
+            text.contains("DEGRADED"),
+            "a fallback answer must announce itself: {text}"
+        );
+        assert!(
+            structured["degraded"].is_string(),
+            "and be machine-readable: {structured}"
+        );
+        assert_eq!(
+            structured["verdict"], "blocked",
+            "the fallback still answers the question"
+        );
+    }
+
+    #[test]
+    fn a_reachable_api_answer_is_not_labelled_degraded() {
+        let repo = tempfile::tempdir().unwrap();
+        let synced = tempfile::tempdir().unwrap();
+        write_advisory(synced.path(), "RUSTSEC-2026-0001", "example", "1.5.0");
+
+        let (text, structured) = check_dependency_tool_with(
+            repo.path(),
+            "cargo:example",
+            Some("1.0.0"),
+            None,
+            Some(synced.path()),
+        );
+
+        assert!(!text.contains("DEGRADED"), "{text}");
+        assert!(structured["degraded"].is_null());
+    }
+
+    /// A transport that would answer, if it were ever asked.
+    struct NeverAsked;
+
+    impl synaptic_vuln::OsvTransport for NeverAsked {
+        fn post_json(&self, _url: &str, _body: &str) -> Result<String, synaptic_vuln::SourceError> {
+            Ok(r#"{"results":[{}]}"#.into())
+        }
+
+        fn get_json(&self, _url: &str) -> Result<String, synaptic_vuln::SourceError> {
+            Ok("{}".into())
+        }
+    }
+
+    #[test]
+    fn an_ecosystem_osv_does_not_publish_reports_unknown_rather_than_safe() {
+        // OSV has no name for this ecosystem, so the query would be dropped and
+        // come back empty. An empty answer is indistinguishable from "nothing
+        // is wrong", which is the one thing this tool must never say by
+        // accident.
+        let repo = tempfile::tempdir().unwrap();
+
+        let (text, structured) = check_dependency_tool_with(
+            repo.path(),
+            "swift:Alamofire",
+            Some("1.0.0"),
+            Some(&NeverAsked),
+            None,
+        );
+
+        assert_eq!(structured["error"], "no_advisory_corpus");
+        assert!(text.contains("UNKNOWN"), "{text}");
+    }
+
     #[test]
     fn a_missing_corpus_reports_unknown_rather_than_safe() {
         let dir = tempfile::tempdir().unwrap();
 
-        let (text, structured) = check_dependency_tool(dir.path(), "cargo:example", Some("1.0.0"));
+        let (text, structured) =
+            check_dependency_tool_with(dir.path(), "cargo:example", Some("1.0.0"), None, None);
 
         assert_eq!(structured["error"], "no_advisory_corpus");
         assert!(

@@ -27,6 +27,25 @@ pub const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
 /// A cache older than this is reported as stale.
 pub const DEFAULT_STALE_AFTER_SECONDS: i64 = 7 * 24 * 60 * 60;
 
+/// Name of the file naming the generation currently being served.
+const CURRENT_POINTER: &str = "current";
+
+/// Prefix marking a directory as a corpus generation.
+const GENERATION_PREFIX: &str = "g-";
+
+/// Prefix marking a generation that is still being unpacked.
+///
+/// A generation only takes its real name once every document is on disk, so a
+/// sync interrupted halfway leaves nothing a reader can mistake for a corpus.
+/// Without this the pointer-recovery path in [`CorpusCache::resolve`] would
+/// hand back a half-written directory, and a partial corpus reporting no
+/// findings reads exactly like a clean one.
+const STAGING_PREFIX: &str = "incoming-";
+
+/// How long a retired generation is kept before it can be collected. A scan
+/// that resolved it is still reading it, and scans take seconds.
+const GENERATION_GRACE_SECONDS: u64 = 10 * 60;
+
 /// What a `HEAD` told us about a corpus before we commit to downloading it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CorpusHead {
@@ -52,6 +71,10 @@ pub struct CorpusMetadata {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub last_modified: Option<String>,
     pub advisory_count: usize,
+    /// The generation directory this sync published. Absent on metadata written
+    /// by a release that predates generations.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub generation: Option<String>,
 }
 
 impl CorpusMetadata {
@@ -87,8 +110,107 @@ impl CorpusCache {
         &self.root
     }
 
+    /// The container holding one ecosystem's corpus generations.
+    ///
+    /// This is not the directory to read advisories from; see [`Self::resolve`].
+    /// Loading this path directly would read every retained generation at once.
     pub fn ecosystem_dir(&self, ecosystem: Ecosystem) -> PathBuf {
         self.root.join(ecosystem.as_str())
+    }
+
+    /// Where documents fetched one at a time from the OSV API are kept.
+    ///
+    /// Deliberately outside any ecosystem's container, so a corpus loader never
+    /// reads live documents as if they were a synced bulk export.
+    pub fn live_dir(&self) -> PathBuf {
+        self.root.join("_live")
+    }
+
+    /// The pointer naming the generation currently being served.
+    fn pointer_path(&self, ecosystem: Ecosystem) -> PathBuf {
+        self.ecosystem_dir(ecosystem).join(CURRENT_POINTER)
+    }
+
+    /// The directory a reader should load advisories from, if one exists.
+    ///
+    /// A corpus is published as an immutable generation directory, and the
+    /// `current` pointer is swapped to it by a rename once it is complete.
+    /// Resolving therefore never returns a directory that is mid-write, and a
+    /// caller that holds the returned path keeps reading a complete corpus even
+    /// while the next sync lands.
+    ///
+    /// A directory written by a release that predates generations holds its
+    /// documents flat, with no pointer. That layout is returned as-is, so an
+    /// upgrade does not silently invalidate a cache that cost a large download.
+    pub fn resolve(&self, ecosystem: Ecosystem) -> Option<PathBuf> {
+        let container = self.ecosystem_dir(ecosystem);
+        if let Ok(name) = std::fs::read_to_string(self.pointer_path(ecosystem)) {
+            let generation = container.join(name.trim());
+            if generation.is_dir() {
+                return Some(generation);
+            }
+        }
+        // No usable pointer. Either this cache predates generations, or a
+        // pointer was lost. Recovering the newest generation beats reporting no
+        // corpus at all, which for npm would mean re-downloading 218 MB.
+        let mut newest: Option<PathBuf> = None;
+        let mut has_flat_documents = false;
+        for entry in std::fs::read_dir(&container).ok()?.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.starts_with(GENERATION_PREFIX) && path.is_dir() {
+                // Generation names are a fixed-width millisecond stamp, so the
+                // greatest name is the most recent.
+                if newest.as_ref().is_none_or(|current| path > *current) {
+                    newest = Some(path);
+                }
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+            {
+                has_flat_documents = true;
+            }
+        }
+        // An empty container means nothing was ever synced. Reporting it as a
+        // corpus would let "we read nothing" read as "we found nothing".
+        newest.or(has_flat_documents.then_some(container))
+    }
+
+    /// Remove generations that are neither current nor recent.
+    ///
+    /// The grace period exists because a scan that resolved a generation is
+    /// still reading it. On Windows an open handle makes removal fail outright,
+    /// which is tolerated: a generation that outlives its welcome costs disk,
+    /// while one deleted underneath a reader costs a corrupted scan.
+    fn collect_garbage(&self, ecosystem: Ecosystem, keep: &str, now: SystemTime) {
+        let container = self.ecosystem_dir(ecosystem);
+        let Ok(entries) = std::fs::read_dir(&container) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            // Staging directories are collected too: an interrupted sync leaves
+            // one behind, and nothing ever renames it into place afterwards.
+            let ours = name.starts_with(GENERATION_PREFIX) || name.starts_with(STAGING_PREFIX);
+            if !ours || name == keep || !path.is_dir() {
+                continue;
+            }
+            let recent = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_none_or(|age| age.as_secs() < GENERATION_GRACE_SECONDS);
+            if recent {
+                continue;
+            }
+            let _ = std::fs::remove_dir_all(&path);
+        }
     }
 
     /// Provenance lives beside the corpus directory, never inside it. Anything
@@ -158,22 +280,19 @@ pub fn sync_ecosystem(
     }
 
     let archive = fetcher.get(&url)?;
-    let directory = cache.ecosystem_dir(ecosystem);
-    // Unpack into a sibling directory and swap, so a resync that drops a
-    // withdrawn advisory really drops it, and an interrupted sync cannot leave
-    // a half-written corpus in place of a working one.
-    let staging = directory.with_extension("incoming");
-    remove_dir_if_present(&staging)?;
-    let advisory_count = unpack_corpus(&archive, &staging)?;
+    let container = cache.ecosystem_dir(ecosystem);
+    create_dir(&container)?;
 
-    remove_dir_if_present(&directory)?;
-    if let Some(parent) = directory.parent() {
-        create_dir(parent)?;
-    }
-    std::fs::rename(&staging, &directory).map_err(|source| SyncError::Io {
-        path: directory.clone(),
-        source,
-    })?;
+    // Publish into a brand-new generation rather than over the live one. A
+    // resync that drops a withdrawn advisory really drops it, because readers
+    // move to the new generation wholesale; an interrupted sync leaves the old
+    // generation serving; and a scan running right now sees neither a missing
+    // directory nor a half-written one.
+    let (generation, staging) = claim_generation(&container)?;
+    let advisory_count = unpack_corpus(&archive, &staging)?;
+    seal_generation(&container, &staging, &generation)?;
+    publish_generation(cache, ecosystem, &generation)?;
+    cache.collect_garbage(ecosystem, &generation, SystemTime::now());
 
     let metadata = CorpusMetadata {
         ecosystem: ecosystem.as_str().to_string(),
@@ -181,6 +300,7 @@ pub fn sync_ecosystem(
         fetched_at: unix_now(),
         last_modified: head.last_modified,
         advisory_count,
+        generation: Some(generation),
     };
     let encoded = serde_json::to_string_pretty(&metadata)?;
     let metadata_path = cache.metadata_path(ecosystem);
@@ -246,12 +366,79 @@ fn create_dir(path: &Path) -> Result<(), SyncError> {
     })
 }
 
-fn remove_dir_if_present(path: &Path) -> Result<(), SyncError> {
-    if !path.exists() {
-        return Ok(());
+/// Claim a generation name and an empty staging directory to unpack into.
+///
+/// Returns the name the generation will take once it is complete, and the
+/// directory to write it in meanwhile. `create_dir` fails rather than
+/// succeeding when the directory already exists, which makes claiming a name
+/// atomic against another process syncing the same ecosystem at the same
+/// moment.
+fn claim_generation(container: &Path) -> Result<(String, PathBuf), SyncError> {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    for attempt in 0..1_000 {
+        let suffix = if attempt == 0 {
+            stamp.to_string()
+        } else {
+            format!("{stamp}-{attempt}")
+        };
+        // Both names have to be free, or a completed sync could not take the
+        // generation name it staged for.
+        if container
+            .join(format!("{GENERATION_PREFIX}{suffix}"))
+            .exists()
+        {
+            continue;
+        }
+        let path = container.join(format!("{STAGING_PREFIX}{suffix}"));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok((format!("{GENERATION_PREFIX}{suffix}"), path)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(source) => return Err(SyncError::Io { path, source }),
+        }
     }
-    std::fs::remove_dir_all(path).map_err(|source| SyncError::Io {
-        path: path.to_path_buf(),
+    Err(SyncError::Io {
+        path: container.to_path_buf(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not claim a corpus generation name",
+        ),
+    })
+}
+
+/// Give a fully unpacked staging directory its generation name.
+///
+/// A rename, so the generation appears complete or not at all. Only after this
+/// can [`CorpusCache::resolve`] find it, pointer or no pointer.
+fn seal_generation(container: &Path, staging: &Path, generation: &str) -> Result<(), SyncError> {
+    let published = container.join(generation);
+    std::fs::rename(staging, &published).map_err(|source| SyncError::Io {
+        path: published,
+        source,
+    })
+}
+
+/// Point readers at a finished generation.
+///
+/// The pointer is written beside its target and then renamed over the live one.
+/// Renaming onto an existing file replaces it in one step on both Unix and
+/// Windows, so a reader sees either the old generation or the new one, never
+/// neither.
+fn publish_generation(
+    cache: &CorpusCache,
+    ecosystem: Ecosystem,
+    generation: &str,
+) -> Result<(), SyncError> {
+    let pointer = cache.pointer_path(ecosystem);
+    let incoming = pointer.with_extension("incoming");
+    std::fs::write(&incoming, generation).map_err(|source| SyncError::Io {
+        path: incoming.clone(),
+        source,
+    })?;
+    std::fs::rename(&incoming, &pointer).map_err(|source| SyncError::Io {
+        path: pointer,
         source,
     })
 }
@@ -512,7 +699,8 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = crate::LocalDirSource::load(&cache.ecosystem_dir(Ecosystem::Cargo)).unwrap();
+        let live = cache.resolve(Ecosystem::Cargo).unwrap();
+        let loaded = crate::LocalDirSource::load(&live).unwrap();
         let described = crate::AdvisorySource::describe(&loaded);
 
         assert_eq!(described.unreadable_documents, 0);
@@ -587,12 +775,206 @@ mod tests {
         .unwrap();
 
         assert_eq!(metadata.advisory_count, 1);
+        let live = cache.resolve(Ecosystem::Cargo).unwrap();
         assert!(
-            !cache
-                .ecosystem_dir(Ecosystem::Cargo)
-                .join("REMOVED.json")
-                .exists(),
+            !live.join("REMOVED.json").exists(),
             "a stale document must not survive a resync"
+        );
+        assert!(live.join("A.json").exists(), "the live corpus is complete");
+    }
+
+    #[test]
+    fn a_reader_holding_a_generation_still_sees_all_of_it_after_a_resync() {
+        // The gap this closes. The previous implementation removed the live
+        // corpus directory and then renamed staging into its place, so a scan
+        // running during a sync saw a missing or half-populated corpus and
+        // reported documents as unreadable. A published generation is now
+        // immutable, so a reader that resolved one is unaffected by the next.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = CorpusCache::new(dir.path());
+        let first = FakeFetcher {
+            head: CorpusHead::default(),
+            body: zip_with(&[("A.json", &advisory("A")), ("B.json", &advisory("B"))]),
+        };
+        sync_ecosystem(&cache, &first, Ecosystem::Cargo, DEFAULT_MAX_DOWNLOAD_BYTES).unwrap();
+
+        // A scan resolves the corpus once and reads from that path, as it does.
+        let held = cache.resolve(Ecosystem::Cargo).unwrap();
+
+        let second = FakeFetcher {
+            head: CorpusHead::default(),
+            body: zip_with(&[("C.json", &advisory("C"))]),
+        };
+        sync_ecosystem(
+            &cache,
+            &second,
+            Ecosystem::Cargo,
+            DEFAULT_MAX_DOWNLOAD_BYTES,
+        )
+        .unwrap();
+
+        let held_source = crate::LocalDirSource::load(&held).unwrap();
+        let described = crate::AdvisorySource::describe(&held_source);
+        assert_eq!(described.advisory_count, 2, "the held generation is intact");
+        assert_eq!(
+            described.unreadable_documents, 0,
+            "no document became unreadable underneath the reader"
+        );
+
+        // A reader that resolves afresh gets the new corpus.
+        let fresh = cache.resolve(Ecosystem::Cargo).unwrap();
+        assert_ne!(fresh, held, "the pointer moved to a new generation");
+        let fresh_source = crate::LocalDirSource::load(&fresh).unwrap();
+        assert_eq!(
+            crate::AdvisorySource::describe(&fresh_source).advisory_count,
+            1
+        );
+    }
+
+    #[test]
+    fn a_corpus_written_by_an_older_release_is_read_without_a_resync() {
+        // Upgrading must not silently invalidate a cache that took a 218 MB
+        // download to populate.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = CorpusCache::new(dir.path());
+        let legacy = cache.ecosystem_dir(Ecosystem::Cargo);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("A.json"), advisory("A")).unwrap();
+
+        let resolved = cache.resolve(Ecosystem::Cargo).unwrap();
+
+        assert_eq!(resolved, legacy, "a flat corpus is its own generation");
+        let source = crate::LocalDirSource::load(&resolved).unwrap();
+        assert_eq!(crate::AdvisorySource::describe(&source).advisory_count, 1);
+    }
+
+    #[test]
+    fn a_lost_pointer_recovers_the_newest_generation() {
+        // Losing the pointer must not cost a re-download. For npm that is
+        // 218 MB, which is enough to make an operator turn the scan off.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = CorpusCache::new(dir.path());
+        let fetcher = FakeFetcher {
+            head: CorpusHead::default(),
+            body: zip_with(&[("A.json", &advisory("A"))]),
+        };
+        sync_ecosystem(
+            &cache,
+            &fetcher,
+            Ecosystem::Cargo,
+            DEFAULT_MAX_DOWNLOAD_BYTES,
+        )
+        .unwrap();
+        let published = cache.resolve(Ecosystem::Cargo).unwrap();
+
+        std::fs::remove_file(cache.ecosystem_dir(Ecosystem::Cargo).join("current")).unwrap();
+
+        assert_eq!(
+            cache.resolve(Ecosystem::Cargo).as_deref(),
+            Some(published.as_path())
+        );
+    }
+
+    #[test]
+    fn a_sync_that_fails_while_unpacking_leaves_nothing_that_reads_as_a_corpus() {
+        // The first sync for an ecosystem writes no pointer, so recovery falls
+        // back to "the newest generation on disk". A generation that was still
+        // being unpacked when the sync failed must not be that generation: a
+        // partial corpus reporting no findings reads exactly like a clean one.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = CorpusCache::new(dir.path());
+        let corrupt = FakeFetcher {
+            head: CorpusHead::default(),
+            body: b"not a zip archive".to_vec(),
+        };
+
+        let failed = sync_ecosystem(
+            &cache,
+            &corrupt,
+            Ecosystem::Cargo,
+            DEFAULT_MAX_DOWNLOAD_BYTES,
+        );
+
+        assert!(failed.is_err());
+        assert_eq!(
+            cache.resolve(Ecosystem::Cargo),
+            None,
+            "an unfinished generation is not a corpus"
+        );
+    }
+
+    #[test]
+    fn resolving_an_ecosystem_that_was_never_synced_finds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = CorpusCache::new(dir.path());
+
+        assert_eq!(cache.resolve(Ecosystem::Cargo), None);
+    }
+
+    #[test]
+    fn a_failed_sync_leaves_the_live_corpus_serving() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = CorpusCache::new(dir.path());
+        let good = FakeFetcher {
+            head: CorpusHead::default(),
+            body: zip_with(&[("A.json", &advisory("A"))]),
+        };
+        sync_ecosystem(&cache, &good, Ecosystem::Cargo, DEFAULT_MAX_DOWNLOAD_BYTES).unwrap();
+        let before = cache.resolve(Ecosystem::Cargo).unwrap();
+
+        struct FailingFetcher;
+        impl CorpusFetcher for FailingFetcher {
+            fn head(&self, _url: &str) -> Result<CorpusHead, SyncError> {
+                Ok(CorpusHead::default())
+            }
+            fn get(&self, url: &str) -> Result<Vec<u8>, SyncError> {
+                Err(SyncError::Transport {
+                    url: url.into(),
+                    message: "connection reset".into(),
+                })
+            }
+        }
+        let failed = sync_ecosystem(
+            &cache,
+            &FailingFetcher,
+            Ecosystem::Cargo,
+            DEFAULT_MAX_DOWNLOAD_BYTES,
+        );
+
+        assert!(failed.is_err());
+        assert_eq!(
+            cache.resolve(Ecosystem::Cargo).as_deref(),
+            Some(before.as_path()),
+            "a failed sync must not retire the corpus that still works"
+        );
+        let source = crate::LocalDirSource::load(&before).unwrap();
+        assert_eq!(crate::AdvisorySource::describe(&source).advisory_count, 1);
+    }
+
+    #[test]
+    fn the_generation_is_recorded_in_the_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = CorpusCache::new(dir.path());
+        let fetcher = FakeFetcher {
+            head: CorpusHead::default(),
+            body: zip_with(&[("A.json", &advisory("A"))]),
+        };
+
+        let metadata = sync_ecosystem(
+            &cache,
+            &fetcher,
+            Ecosystem::Cargo,
+            DEFAULT_MAX_DOWNLOAD_BYTES,
+        )
+        .unwrap();
+
+        let generation = metadata.generation.expect("a sync records its generation");
+        assert!(
+            cache
+                .resolve(Ecosystem::Cargo)
+                .unwrap()
+                .ends_with(&generation),
+            "the recorded generation is the one being served"
         );
     }
 
@@ -613,6 +995,7 @@ mod tests {
             fetched_at: 1_000_000,
             last_modified: None,
             advisory_count: 1,
+            generation: None,
         };
 
         assert!(!metadata.is_stale(1_000_000 + 60, DEFAULT_STALE_AFTER_SECONDS));

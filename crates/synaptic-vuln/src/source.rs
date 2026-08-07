@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use synaptic_api::PackageCoordinate;
 
@@ -50,6 +51,12 @@ impl LocalDirSource {
     /// A document that fails to parse is counted rather than propagated: one
     /// malformed file in a large corpus must not stop the rest of the corpus
     /// from being scanned. The count is reported so the gap stays visible.
+    ///
+    /// Reading and parsing dominate a scan -- a cargo corpus is 2,698 documents
+    /// and npm's is 226,161 -- and each document is independent, so they are
+    /// parsed in parallel. Paths are sorted first and results collected in that
+    /// same order, so the corpus a scan sees never depends on which thread
+    /// happened to finish first.
     pub fn load(root: &Path) -> Result<Self, SourceError> {
         if !root.exists() {
             return Err(SourceError::Missing(root.to_path_buf()));
@@ -58,21 +65,37 @@ impl LocalDirSource {
         collect_json_files(root, &mut documents)?;
         documents.sort();
 
-        let mut advisories = Vec::new();
+        let parsed: Vec<Result<Advisory, ()>> = documents
+            .par_iter()
+            .map(|path| {
+                let body = std::fs::read_to_string(path).map_err(|_| ())?;
+                Advisory::parse(&body).map_err(|_| ())
+            })
+            .collect();
+
+        let mut advisories = Vec::with_capacity(parsed.len());
         let mut unreadable_documents = 0;
-        for path in documents {
-            match std::fs::read_to_string(&path) {
-                Ok(body) => match Advisory::parse(&body) {
-                    Ok(advisory) => advisories.push(advisory),
-                    Err(_) => unreadable_documents += 1,
-                },
-                Err(_) => unreadable_documents += 1,
+        for outcome in parsed {
+            match outcome {
+                Ok(advisory) => advisories.push(advisory),
+                // A document that fails to parse is counted rather than
+                // propagated: one malformed file in a large corpus must not
+                // stop the rest from being scanned.
+                Err(()) => unreadable_documents += 1,
             }
         }
 
         let mut source = Self::from_advisories(root.display().to_string(), advisories);
         source.unreadable_documents = unreadable_documents;
         Ok(source)
+    }
+
+    /// Record how many documents could not be read.
+    ///
+    /// A source built from advisories someone else fetched still has to report
+    /// its gaps, or an incomplete result reads as a complete one.
+    pub fn set_unreadable_documents(&mut self, count: usize) {
+        self.unreadable_documents = count;
     }
 
     /// Build a source directly from parsed advisories, for callers that
@@ -228,6 +251,10 @@ pub enum SourceError {
     },
     #[error("advisory directory {0} does not exist")]
     Missing(PathBuf),
+    #[error("cannot reach {url}: {message}")]
+    Transport { url: String, message: String },
+    #[error("OSV publishes no advisories for the {0} ecosystem")]
+    UnsupportedEcosystem(String),
 }
 
 #[cfg(test)]
@@ -496,5 +523,52 @@ mod tests {
 
         assert_eq!(description.advisory_count, 0);
         assert_eq!(description.newest_modified, None);
+    }
+
+    #[test]
+    fn a_parallel_load_produces_the_same_corpus_every_time() {
+        // Documents are parsed across threads, so nothing about the result may
+        // depend on which thread finished first. Malformed documents are
+        // interleaved so the unreadable count has to come out stable too.
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..200 {
+            let body = if index % 17 == 0 {
+                "{ not json".to_string()
+            } else {
+                format!(
+                    r#"{{"id":"OSV-{index:04}","modified":"2026-01-{:02}T00:00:00Z","affected":[{{"package":{{"ecosystem":"crates.io","name":"pkg{index}"}}}}]}}"#,
+                    (index % 28) + 1
+                )
+            };
+            std::fs::write(dir.path().join(format!("{index:04}.json")), body).unwrap();
+        }
+
+        let first = LocalDirSource::load(dir.path()).unwrap();
+        let baseline: Vec<String> = first
+            .advisories
+            .iter()
+            .map(|advisory| advisory.id.clone())
+            .collect();
+        let described = AdvisorySource::describe(&first);
+
+        for _ in 0..8 {
+            let again = LocalDirSource::load(dir.path()).unwrap();
+            let ids: Vec<String> = again
+                .advisories
+                .iter()
+                .map(|advisory| advisory.id.clone())
+                .collect();
+            assert_eq!(ids, baseline, "advisory order must be stable across loads");
+            assert_eq!(AdvisorySource::describe(&again), described);
+        }
+
+        // Sorted by file name, which is the order the paths were walked in.
+        assert!(baseline.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(described.advisory_count, 188);
+        assert_eq!(described.unreadable_documents, 12);
+        assert_eq!(
+            described.newest_modified.as_deref(),
+            Some("2026-01-28T00:00:00Z")
+        );
     }
 }

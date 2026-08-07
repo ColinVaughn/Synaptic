@@ -83,9 +83,9 @@ pub use event::{
 pub use handoff::{HandoffError, VerifiedRunHandoff};
 pub use invariants::{verify_api_invariants, ApiInvariantReport, InvariantCheck};
 pub use inventory::{
-    inventory, scan_dependencies, scan_dependencies_and_sbom_evidence, scan_sbom_evidence,
-    AmbiguousVendorDependency, ApiInventory, ExternalServiceEvidence, InventoryError,
-    SbomCompleteness, SbomDocumentEvidence, SbomEvidenceReport, VendorDependency,
+    inventory, is_sbom_manifest, scan_dependencies, scan_dependencies_and_sbom_evidence,
+    scan_sbom_evidence, AmbiguousVendorDependency, ApiInventory, ExternalServiceEvidence,
+    InventoryError, SbomCompleteness, SbomDocumentEvidence, SbomEvidenceReport, VendorDependency,
 };
 pub use ledger::{ApiRunRecord, ApiRunStore, LedgerError, RunState};
 pub use model::{

@@ -871,7 +871,8 @@ Syntax:
 synaptic vuln init   [--root <DIR>]
 synaptic vuln sync   [--ecosystem <NAME>] [--max-bytes <N>] [--cache <DIR>]
 synaptic vuln scan   [--root <DIR>] [--advisories <DIR>] [--graph <FILE>]
-                     [--offline] [--record] [--fail-on <p0|p1|p2|p3>] [--json]
+                     [--offline | --online] [--record]
+                     [--fail-on <p0|p1|p2|p3>] [--json]
 synaptic vuln findings [--root <DIR>] [--state <STATE>] [--json]
 synaptic vuln explain  <FINDING_ID> [--root <DIR>] [--json]
 synaptic vuln check    <PACKAGE> [--version <V>] [--advisories <DIR>]
@@ -884,8 +885,12 @@ Options:
 
 - `--advisories <DIR>`: use this OSV corpus instead of the shared cache at
   `~/.synaptic/advisories`.
-- `--offline`: never fetch. Fails when nothing is cached rather than reporting a
-  clean scan against an empty corpus.
+- `--offline`: never fetch. For `scan`, fails when nothing is cached rather than
+  reporting a clean scan against an empty corpus. For `check`, answers from the
+  local corpus instead of querying OSV.
+- `--online` (scan): also query the OSV API for every resolved package, covering
+  ecosystems whose bulk export is too large to download. Off by default: a scan
+  discloses the whole dependency list, and the export does not.
 - `--record`: persist findings to the ledger under `.synaptic/vuln/findings/`.
 - `--fail-on <priority>`: exit non-zero when any finding is at or above it,
   which is what makes the command usable as a CI gate.
@@ -894,11 +899,19 @@ Options:
 
 Notes:
 
-- Analysis never touches the network; only `sync` and the first `scan` do.
+- `scan` is offline-first: only `sync`, the first `scan`, and `--online` fetch.
+  `check` queries OSV by default, because it asks about one package rather than
+  disclosing a whole dependency list.
+- `SYNAPTIC_OFFLINE=1` disables every online path regardless of flags.
+- Every result names the corpus that answered it, so a live answer and one from
+  a stale local copy are never confused.
 - `NotApplicable` is reachable only through a withdrawn advisory or a version
-  outside every affected range. Unreachable symbols and absent usage de-rank a
-  finding but never dismiss it.
+  outside every affected range. Unreachable symbols, absent usage,
+  development-only scope and disabled Cargo features de-rank a finding but never
+  dismiss it.
 - Packages whose ecosystem has no corpus are reported as unaudited, not scanned.
+  Ecosystems read from declarations rather than a lockfile are reported and
+  counted separately as partially audited.
 - Exceptions require an expiry date, so an accepted risk returns on its own.
 
 Supported lockfiles, ecosystem coverage, the agent-facing MCP tools, policy

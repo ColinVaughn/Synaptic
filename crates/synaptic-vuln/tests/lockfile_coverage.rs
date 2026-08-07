@@ -7,7 +7,7 @@
 //! the code really does.
 
 use synaptic_api::{Ecosystem, PackageCoordinate};
-use synaptic_vuln::{parse_lockfile, LockfileKind, PackageGraph};
+use synaptic_vuln::{parse_lockfile, LockfileKind, PackageGraph, PackageScope};
 
 /// One fixture per format: the source, and a package it must resolve.
 struct Fixture {
@@ -497,6 +497,137 @@ fn a_malformed_lockfile_reports_an_error_rather_than_pretending_it_is_empty() {
         error.is_err(),
         "a corrupt lockfile must not silently scan as zero packages"
     );
+}
+
+// ------------------------------------------------------------ dependency scope
+
+const NPM_V3_DEV: &str = r#"{
+  "name": "app",
+  "lockfileVersion": 3,
+  "packages": {
+    "": { "name": "app", "version": "1.0.0" },
+    "node_modules/lodash": { "version": "4.17.20" },
+    "node_modules/jest": { "version": "29.0.0", "dev": true }
+  }
+}"#;
+
+const PUBSPEC_DEV: &str = r#"
+packages:
+  http:
+    dependency: "direct main"
+    source: hosted
+    version: "0.13.5"
+  test:
+    dependency: "direct dev"
+    source: hosted
+    version: "1.24.0"
+  meta:
+    dependency: transitive
+    source: hosted
+    version: "1.9.1"
+"#;
+
+const POETRY_DEV: &str = r#"
+[[package]]
+name = "requests"
+version = "2.31.0"
+
+[[package]]
+name = "pytest"
+version = "7.4.0"
+groups = ["dev"]
+
+[[package]]
+name = "black"
+version = "23.0.0"
+category = "dev"
+"#;
+
+fn scope_of(packages: &[synaptic_vuln::ResolvedPackage], name: &str) -> PackageScope {
+    packages
+        .iter()
+        .find(|package| package.key.coordinate.name == name)
+        .unwrap_or_else(|| panic!("fixture resolves {name}"))
+        .scope
+}
+
+#[test]
+fn npm_marks_a_dev_dependency_as_development() {
+    let packages = parse_lockfile(LockfileKind::NpmPackageLock, NPM_V3_DEV).unwrap();
+
+    assert_eq!(scope_of(&packages, "jest"), PackageScope::Development);
+    assert_eq!(scope_of(&packages, "lodash"), PackageScope::Runtime);
+}
+
+#[test]
+fn composer_marks_the_dev_section_as_development() {
+    let packages = parse_lockfile(LockfileKind::ComposerLock, COMPOSER).unwrap();
+
+    assert_eq!(
+        scope_of(&packages, "phpunit/phpunit"),
+        PackageScope::Development
+    );
+    assert_eq!(
+        scope_of(&packages, "monolog/monolog"),
+        PackageScope::Runtime
+    );
+}
+
+#[test]
+fn pubspec_marks_a_direct_dev_dependency_but_not_a_transitive_one() {
+    let packages = parse_lockfile(LockfileKind::PubspecLock, PUBSPEC_DEV).unwrap();
+
+    assert_eq!(scope_of(&packages, "test"), PackageScope::Development);
+    assert_eq!(scope_of(&packages, "http"), PackageScope::Runtime);
+    // A transitive entry does not say whose transitive it is, so nothing is
+    // known about it. Guessing "runtime" here would be an assumption dressed as
+    // a reading of the file.
+    assert_eq!(scope_of(&packages, "meta"), PackageScope::Unknown);
+}
+
+#[test]
+fn poetry_marks_dev_groups_in_both_spellings() {
+    let packages = parse_lockfile(LockfileKind::PoetryLock, POETRY_DEV).unwrap();
+
+    // Poetry 1.5 and later.
+    assert_eq!(scope_of(&packages, "pytest"), PackageScope::Development);
+    // Poetry before 1.5.
+    assert_eq!(scope_of(&packages, "black"), PackageScope::Development);
+    assert_eq!(scope_of(&packages, "requests"), PackageScope::Runtime);
+}
+
+#[test]
+fn a_format_without_a_scope_field_reports_unknown_not_runtime() {
+    // The distinction matters: "we read that it is runtime" and "this file
+    // cannot tell us" must not collapse into the same value, or an absence of
+    // evidence starts reading as evidence.
+    let packages = parse_lockfile(LockfileKind::GemfileLock, GEMFILE).unwrap();
+
+    assert!(
+        packages
+            .iter()
+            .all(|package| package.scope == PackageScope::Unknown),
+        "Gemfile.lock records no dependency kind"
+    );
+}
+
+#[test]
+fn every_format_claiming_to_record_scope_actually_produces_one() {
+    // The mirror of the dependency-edge coverage test: a format cannot claim a
+    // capability in the documentation table without a fixture proving it.
+    for fixture in fixtures() {
+        if !fixture.kind.records_dependency_scope() {
+            continue;
+        }
+        let packages = parse_lockfile(fixture.kind, fixture.source).unwrap();
+        assert!(
+            packages
+                .iter()
+                .any(|package| package.scope != PackageScope::Unknown),
+            "{:?} claims to record dependency scope but resolved none",
+            fixture.kind
+        );
+    }
 }
 
 #[test]

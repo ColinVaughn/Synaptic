@@ -7,7 +7,7 @@ use synaptic_core::GraphData;
 use crate::advisory::Advisory;
 use crate::applicability::{assess_applicability, ApplicabilityInput};
 use crate::finding::{finding_id, Finding};
-use crate::lockgraph::PackageGraph;
+use crate::lockgraph::{PackageGraph, PackageKey, PackageScope, ResolvedPackage};
 use crate::matching::{match_version, VersionMatch};
 use crate::plan::plan_remediation;
 use crate::policy::VulnPolicy;
@@ -59,80 +59,102 @@ impl UsageOracle for NoUsageEvidence {
     }
 }
 
+/// One stub member of a package, and what the graph says about reaching it.
+type MemberUsage = (String, bool, bool);
+
 /// Reads usage signals out of a Synaptic graph.
 ///
 /// External packages appear in the graph as SDK stub nodes labelled
 /// `Sdk: <ecosystem>:<package>#<member>` with an empty source file. An incoming
 /// edge from a node that does have a source file is first-party usage.
-#[derive(Debug, Clone, Copy)]
-pub struct GraphUsageOracle<'a> {
-    graph: &'a GraphData,
+#[derive(Debug, Clone, Default)]
+pub struct GraphUsageOracle {
+    /// Stub members per package, keyed `<ecosystem>:<normalized name>`.
+    ///
+    /// Built once. The three trait methods below are each asked about the same
+    /// package, and the scan asks about a package once per matching advisory,
+    /// so deriving this per call meant re-deriving one answer many times: a
+    /// full pass over every node, a fresh map of every node id, and a full pass
+    /// over every edge, for each question. On a 13,570-node graph that measured
+    /// 563 us per call, or 1.7 ms for every advisory that named a package this
+    /// repository resolves.
+    stubs: BTreeMap<String, Vec<MemberUsage>>,
 }
 
-impl<'a> GraphUsageOracle<'a> {
-    pub fn new(graph: &'a GraphData) -> Self {
-        Self { graph }
-    }
-
-    /// SDK stub nodes for a package, paired with whether first-party code
-    /// reaches them.
-    fn stub_usage(&self, package: &PackageCoordinate) -> Vec<(String, bool, bool)> {
-        let wanted = normalize_package_ident(&package.name);
-        let mut stubs = BTreeMap::new();
-        for node in &self.graph.nodes {
+impl GraphUsageOracle {
+    pub fn new(graph: &GraphData) -> Self {
+        // Every node by id, and every stub node's package and member. Kept in
+        // node-id order so the members reported for a package are stable.
+        let mut by_id: BTreeMap<&str, &synaptic_core::Node> = BTreeMap::new();
+        let mut stub_nodes: BTreeMap<&str, (String, String)> = BTreeMap::new();
+        for node in &graph.nodes {
+            by_id.insert(node.id.0.as_str(), node);
             if !node.is_external_stub() {
                 continue;
             }
             let Some((ecosystem, name, member)) = parse_sdk_label(&node.label) else {
                 continue;
             };
-            if ecosystem != package.ecosystem.as_str() {
-                continue;
-            }
-            if normalize_package_ident(&name) != wanted {
-                continue;
-            }
-            stubs.insert(node.id.0.clone(), member);
-        }
-        if stubs.is_empty() {
-            return Vec::new();
+            stub_nodes.insert(node.id.0.as_str(), (package_key(&ecosystem, &name), member));
         }
 
         // An edge whose source has a real source file is first-party usage.
-        let sources: BTreeMap<&str, &synaptic_core::Node> = self
-            .graph
-            .nodes
-            .iter()
-            .map(|node| (node.id.0.as_str(), node))
-            .collect();
-
-        let mut reached: BTreeMap<String, (bool, bool)> = BTreeMap::new();
-        for edge in &self.graph.links {
-            let Some(member) = stubs.get(&edge.target.0) else {
+        // Reachability is keyed on the package as well as the member, because
+        // two packages can expose a member of the same name and one being
+        // reached says nothing about the other.
+        let mut reached: BTreeMap<(&str, &str), (bool, bool)> = BTreeMap::new();
+        for edge in &graph.links {
+            let Some((key, member)) = stub_nodes.get(edge.target.0.as_str()) else {
                 continue;
             };
-            let Some(source) = sources.get(edge.source.0.as_str()) else {
+            let Some(source) = by_id.get(edge.source.0.as_str()) else {
                 continue;
             };
             if source.is_external_stub() {
                 continue;
             }
-            let entry = reached.entry(member.clone()).or_insert((false, false));
+            let entry = reached
+                .entry((key.as_str(), member.as_str()))
+                .or_insert((false, false));
             entry.0 = true;
             entry.1 |= source.dynamically_referenced();
         }
 
-        stubs
-            .into_values()
-            .map(|member| {
-                let (used, hazard) = reached.get(&member).copied().unwrap_or((false, false));
-                (member, used, hazard)
-            })
-            .collect()
+        let mut stubs: BTreeMap<String, Vec<MemberUsage>> = BTreeMap::new();
+        for (key, member) in stub_nodes.values() {
+            let (used, hazard) = reached
+                .get(&(key.as_str(), member.as_str()))
+                .copied()
+                .unwrap_or((false, false));
+            stubs
+                .entry(key.clone())
+                .or_default()
+                .push((member.clone(), used, hazard));
+        }
+        Self { stubs }
+    }
+
+    /// SDK stub members for a package, paired with whether first-party code
+    /// reaches them.
+    fn stub_usage(&self, package: &PackageCoordinate) -> &[MemberUsage] {
+        self.stubs
+            .get(&package_key(package.ecosystem.as_str(), &package.name))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 }
 
-impl UsageOracle for GraphUsageOracle<'_> {
+/// The key a package is indexed under, folding the spelling differences that
+/// separate a manifest's name from the one that appears in source.
+fn package_key(ecosystem: &str, name: &str) -> String {
+    format!(
+        "{}:{}",
+        ecosystem.trim().to_ascii_lowercase(),
+        normalize_package_ident(name)
+    )
+}
+
+impl UsageOracle for GraphUsageOracle {
     fn first_party_usage(&self, package: &PackageCoordinate) -> bool {
         self.stub_usage(package).iter().any(|(_, used, _)| *used)
     }
@@ -215,6 +237,51 @@ pub struct ScanRequest<'a> {
     /// Ecosystems an advisory corpus was actually obtained for. Packages
     /// outside these are counted as unaudited rather than scanned.
     pub covered_ecosystems: std::collections::BTreeSet<Ecosystem>,
+    /// Directly declared dependencies no enabled feature compiles, from
+    /// [`crate::feature_gated_dependencies`]. Findings reached only through one
+    /// of these are de-ranked, never dismissed.
+    pub feature_gated: std::collections::BTreeSet<PackageCoordinate>,
+}
+
+/// Whether a dependency was declared by an SBOM rather than a manifest.
+///
+/// An SBOM lists a resolved dependency set, so it stands in for a lockfile in
+/// ecosystems that have none.
+pub fn is_sbom_source(source_file: &str) -> bool {
+    let name = source_file
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(source_file);
+    synaptic_api::is_sbom_manifest(name)
+}
+
+/// How completely one ecosystem was audited.
+///
+/// This exists so a partial audit can never be read as a complete one. A `pom.xml`
+/// yields the dependencies it declares and nothing about what those pull in, and
+/// reporting that next to a lockfile-resolved ecosystem without saying so would
+/// overstate the scan by exactly the part nobody can see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EcosystemCoverage {
+    /// A lockfile or SBOM supplied the fully resolved dependency set.
+    Full,
+    /// Only directly declared dependencies carrying a literal version were
+    /// read. Transitive dependencies were not seen at all.
+    DirectOnly,
+    /// No advisory corpus was available, so nothing here was checked.
+    Unaudited,
+}
+
+impl std::fmt::Display for EcosystemCoverage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            Self::Full => "fully resolved",
+            Self::DirectOnly => "direct declarations only",
+            Self::Unaudited => "not audited",
+        };
+        f.write_str(text)
+    }
 }
 
 /// The result of one scan.
@@ -228,6 +295,14 @@ pub struct ScanReport {
     /// Packages skipped because their ecosystem had no corpus. These were not
     /// checked at all; they are not known to be clean.
     pub packages_unaudited: usize,
+    /// Packages checked from a direct declaration rather than a resolved
+    /// dependency set. Counted apart from `packages_scanned` so a partial audit
+    /// never reads as a complete one.
+    #[serde(default)]
+    pub packages_partially_audited: usize,
+    /// How completely each ecosystem present in the repository was audited.
+    #[serde(default)]
+    pub coverage: std::collections::BTreeMap<Ecosystem, EcosystemCoverage>,
     /// Ecosystems present in the lockfiles but lacking a corpus.
     pub uncovered_ecosystems: std::collections::BTreeSet<Ecosystem>,
     /// Findings that need attention, ordered by priority then id.
@@ -255,31 +330,131 @@ pub enum ScanError {
 
 /// Detect, assess, prioritise and plan every applicable vulnerability.
 pub fn scan(request: &ScanRequest) -> Result<ScanReport, ScanError> {
-    let graph = request.packages;
     let direct: BTreeMap<&PackageCoordinate, &Dependency> = request
         .direct_dependencies
         .iter()
         .map(|dependency| (&dependency.package, dependency))
         .collect();
 
+    // Ecosystems a lockfile or SBOM already resolved in full.
+    let resolved_ecosystems: std::collections::BTreeSet<Ecosystem> = request
+        .packages
+        .packages()
+        .map(|package| package.key.coordinate.ecosystem)
+        .collect();
+
+    // Maven and Gradle without dependency locking have no lockfile to read, so
+    // an ecosystem can be present in the repository and absent from the graph.
+    // A declaration that pins a literal version still says what is resolved, so
+    // it is promoted to a scannable package rather than being written off.
+    //
+    // Deliberately narrow. Promoting every manifest-declared dependency sounds
+    // more thorough and is worse: a repository that merely carries a fixture
+    // `package.json` would pull in npm's corpus, which is 226,000 documents, to
+    // audit two packages nobody ships. So only declarations that genuinely have
+    // no lockfile behind them qualify: Maven, and an SBOM, which is a resolved
+    // set in its own right.
+    let promoted: Vec<ResolvedPackage> = request
+        .direct_dependencies
+        .iter()
+        .filter(|dependency| !resolved_ecosystems.contains(&dependency.package.ecosystem))
+        .filter(|dependency| {
+            dependency.package.ecosystem == Ecosystem::Maven
+                || is_sbom_source(&dependency.source_file)
+        })
+        .filter_map(|dependency| {
+            let version = dependency.resolved_version.as_deref()?;
+            Some(ResolvedPackage {
+                key: PackageKey::new(dependency.package.clone(), version),
+                dependencies: Vec::new(),
+                is_workspace_member: false,
+                scope: match dependency.scope {
+                    DependencyScope::Development => PackageScope::Development,
+                    DependencyScope::Runtime => PackageScope::Runtime,
+                    DependencyScope::Optional => PackageScope::Unknown,
+                },
+            })
+        })
+        .collect();
+
+    let partial_ecosystems: std::collections::BTreeSet<Ecosystem> = promoted
+        .iter()
+        .map(|package| package.key.coordinate.ecosystem)
+        .collect();
+
+    let augmented;
+    let graph = if promoted.is_empty() {
+        request.packages
+    } else {
+        let mut clone = request.packages.clone();
+        clone.absorb(promoted);
+        augmented = clone;
+        &augmented
+    };
+
+    // Coordinates a manifest declared development-only. For a format whose
+    // lockfile records no dependency kind, this plus the lockfile's edges is
+    // the only way to tell a test-only subtree from a shipped one.
+    //
+    // Only a coordinate nothing declares for runtime qualifies. In a workspace
+    // the same crate is routinely a dependency of one member and a
+    // dev-dependency of another, and the union of every declaration would call
+    // it development-only, de-ranking it and everything reached through it.
+    // That is the direction this analysis must never err in.
+    let runtime_declared: std::collections::BTreeSet<&PackageCoordinate> = request
+        .direct_dependencies
+        .iter()
+        .filter(|dependency| dependency.scope != DependencyScope::Development)
+        .map(|dependency| &dependency.package)
+        .collect();
+    let development: std::collections::BTreeSet<PackageCoordinate> = request
+        .direct_dependencies
+        .iter()
+        .filter(|dependency| dependency.scope == DependencyScope::Development)
+        .filter(|dependency| !runtime_declared.contains(&dependency.package))
+        .map(|dependency| dependency.package.clone())
+        .collect();
+    let runtime_reachable_keys = graph.runtime_reachable_keys(&development);
+    // Reachability with the feature-gated dependencies also removed. Anything
+    // that drops out between the two is reached only through code a default
+    // build does not compile.
+    //
+    // `None` when nothing is gated, rather than a copy of the set above:
+    // cloning it cost a per-scan duplicate of every resolved package's key to
+    // answer a question whose answer is already known to be "nothing".
+    let compiled_reachable_keys = (!request.feature_gated.is_empty()).then(|| {
+        let excluded = development
+            .union(&request.feature_gated)
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        graph.runtime_reachable_keys(&excluded)
+    });
+
     let mut findings = Vec::new();
     let mut suppressed = Vec::new();
     let mut packages_scanned = 0;
 
     let mut packages_unaudited = 0;
+    let mut packages_partially_audited = 0;
     let mut uncovered_ecosystems = std::collections::BTreeSet::new();
+    let mut coverage = std::collections::BTreeMap::new();
     let mut seen_findings = std::collections::BTreeSet::new();
 
     for resolved in graph.scan_targets() {
-        if !request
-            .covered_ecosystems
-            .contains(&resolved.key.coordinate.ecosystem)
-        {
+        let ecosystem = resolved.key.coordinate.ecosystem;
+        if !request.covered_ecosystems.contains(&ecosystem) {
             packages_unaudited += 1;
-            uncovered_ecosystems.insert(resolved.key.coordinate.ecosystem);
+            uncovered_ecosystems.insert(ecosystem);
+            coverage.insert(ecosystem, EcosystemCoverage::Unaudited);
             continue;
         }
-        packages_scanned += 1;
+        if partial_ecosystems.contains(&ecosystem) {
+            packages_partially_audited += 1;
+            coverage.insert(ecosystem, EcosystemCoverage::DirectOnly);
+        } else {
+            packages_scanned += 1;
+            coverage.insert(ecosystem, EcosystemCoverage::Full);
+        }
         let package = &resolved.key.coordinate;
         let declared = direct.get(package).copied();
 
@@ -297,12 +472,19 @@ pub fn scan(request: &ScanRequest) -> Result<ScanReport, ScanError> {
                 let reachable_functions = request
                     .usage
                     .reachable_functions(package, &advisory_functions);
-                // Cargo lockfiles record no dependency kind, so a transitive
-                // package is assumed runtime-reachable. Only a directly
-                // declared dev dependency is known not to be.
-                let runtime_reachable = declared
-                    .map(|dependency| dependency.scope != DependencyScope::Development)
-                    .unwrap_or(true);
+                // Reachability now comes from the resolved graph: a package is
+                // development-only when the lockfile says so outright, or when
+                // every path to it from a root runs through something a
+                // manifest declared development-only.
+                let runtime_reachable = runtime_reachable_keys.contains(&resolved.key);
+                // Whether that conclusion rests on a reading or an assumption.
+                let scope_recorded = resolved.scope != PackageScope::Unknown
+                    || declared.is_some()
+                    || !runtime_reachable;
+                let feature_gated = runtime_reachable
+                    && compiled_reachable_keys
+                        .as_ref()
+                        .is_some_and(|compiled| !compiled.contains(&resolved.key));
 
                 let verdict = assess_applicability(&ApplicabilityInput {
                     version_match,
@@ -312,6 +494,8 @@ pub fn scan(request: &ScanRequest) -> Result<ScanReport, ScanError> {
                     first_party_usage_observed: request.usage.first_party_usage(package),
                     is_direct_dependency: declared.is_some(),
                     runtime_reachable,
+                    scope_recorded,
+                    feature_gated,
                     dynamic_hazard_present: request.usage.dynamic_hazard(package),
                 });
 
@@ -332,6 +516,15 @@ pub fn scan(request: &ScanRequest) -> Result<ScanReport, ScanError> {
                     &resolved.key.version,
                 );
 
+                // Deduplicate before deciding what to do with the finding. The
+                // same advisory can be named by several affected entries and,
+                // once the local corpus is composed with the OSV API, by
+                // several sources; either way it is one finding, and a
+                // suppressed one must be listed once too.
+                if !seen_findings.insert(id.clone()) {
+                    continue;
+                }
+
                 if let Some(exception) = request
                     .policy
                     .and_then(|policy| policy.active_exception(&id, &request.today))
@@ -346,11 +539,6 @@ pub fn scan(request: &ScanRequest) -> Result<ScanReport, ScanError> {
                     continue;
                 }
 
-                if !seen_findings.insert(id.clone()) {
-                    // The same advisory can name a package in several affected
-                    // entries; they are one finding, not several.
-                    continue;
-                }
                 findings.push(Finding {
                     version: Finding::VERSION,
                     id,
@@ -389,6 +577,8 @@ pub fn scan(request: &ScanRequest) -> Result<ScanReport, ScanError> {
         corpus: request.source.describe(),
         packages_scanned,
         packages_unaudited,
+        packages_partially_audited,
+        coverage,
         uncovered_ecosystems,
         findings,
         suppressed,
@@ -409,7 +599,7 @@ mod tests {
     use super::*;
     use crate::advisory::Advisory;
     use crate::severity::Priority;
-    use crate::source::LocalDirSource;
+    use crate::source::{CompositeSource, LocalDirSource};
     use synaptic_api::ApplicabilityState;
 
     const LOCK: &str = r#"
@@ -479,7 +669,208 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             validation_commands: vec!["cargo test".into()],
             today: "2026-08-05".into(),
             covered_ecosystems: [Ecosystem::Cargo].into_iter().collect(),
+            feature_gated: Default::default(),
         }
+    }
+
+    // ------------------------------------------------------- usage oracle
+    //
+    // These pin what the graph oracle answers, so the index it builds can be
+    // changed without changing what a scan concludes from it.
+
+    fn stub_node(id: &str, label: &str) -> synaptic_core::Node {
+        synaptic_core::Node {
+            id: synaptic_core::NodeId(id.into()),
+            label: label.into(),
+            file_type: synaptic_core::FileType::Code,
+            // An empty source file is what marks a node as an external stub.
+            source_file: String::new(),
+            source_location: None,
+            community: None,
+            repo: None,
+            extra: Default::default(),
+        }
+    }
+
+    fn source_node(id: &str, dynamic: bool) -> synaptic_core::Node {
+        let mut node = synaptic_core::Node {
+            id: synaptic_core::NodeId(id.into()),
+            label: id.into(),
+            file_type: synaptic_core::FileType::Code,
+            source_file: "src/main.rs".into(),
+            source_location: None,
+            community: None,
+            repo: None,
+            extra: Default::default(),
+        };
+        node.set_dynamically_referenced(dynamic);
+        node
+    }
+
+    fn edge(source: &str, target: &str) -> synaptic_core::Edge {
+        synaptic_core::Edge {
+            source: synaptic_core::NodeId(source.into()),
+            target: synaptic_core::NodeId(target.into()),
+            relation: "calls".into(),
+            confidence: synaptic_core::Confidence::Extracted,
+            source_file: "src/main.rs".into(),
+            source_location: None,
+            confidence_score: None,
+            weight: 1.0,
+            context: None,
+            cross_repo: false,
+            extra: Default::default(),
+        }
+    }
+
+    fn graph_with(nodes: Vec<synaptic_core::Node>, links: Vec<synaptic_core::Edge>) -> GraphData {
+        GraphData {
+            nodes,
+            links,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_stub_reached_from_first_party_code_is_first_party_usage() {
+        let graph = graph_with(
+            vec![
+                stub_node("s1", "Sdk: cargo:serde#Value.get"),
+                source_node("caller", false),
+            ],
+            vec![edge("caller", "s1")],
+        );
+        let oracle = GraphUsageOracle::new(&graph);
+
+        assert!(oracle.first_party_usage(&PackageCoordinate::new(Ecosystem::Cargo, "serde")));
+        assert!(!oracle.dynamic_hazard(&PackageCoordinate::new(Ecosystem::Cargo, "serde")));
+    }
+
+    #[test]
+    fn a_stub_reached_only_from_another_stub_is_not_first_party_usage() {
+        let graph = graph_with(
+            vec![
+                stub_node("s1", "Sdk: cargo:serde#Value.get"),
+                stub_node("s2", "Sdk: cargo:other#thing"),
+            ],
+            vec![edge("s2", "s1")],
+        );
+        let oracle = GraphUsageOracle::new(&graph);
+
+        assert!(!oracle.first_party_usage(&PackageCoordinate::new(Ecosystem::Cargo, "serde")));
+    }
+
+    #[test]
+    fn a_dynamically_referenced_caller_raises_the_hazard_flag() {
+        let graph = graph_with(
+            vec![
+                stub_node("s1", "Sdk: cargo:serde#Value.get"),
+                source_node("caller", true),
+            ],
+            vec![edge("caller", "s1")],
+        );
+        let oracle = GraphUsageOracle::new(&graph);
+
+        assert!(oracle.dynamic_hazard(&PackageCoordinate::new(Ecosystem::Cargo, "serde")));
+    }
+
+    #[test]
+    fn package_names_match_across_hyphen_and_underscore_spellings() {
+        // A manifest says `serde-json`; Rust source says `serde_json`.
+        let graph = graph_with(
+            vec![
+                stub_node("s1", "Sdk: cargo:serde_json#Value.get"),
+                source_node("caller", false),
+            ],
+            vec![edge("caller", "s1")],
+        );
+        let oracle = GraphUsageOracle::new(&graph);
+
+        assert!(oracle.first_party_usage(&PackageCoordinate::new(Ecosystem::Cargo, "serde-json")));
+    }
+
+    #[test]
+    fn a_stub_from_another_ecosystem_is_not_matched() {
+        let graph = graph_with(
+            vec![
+                stub_node("s1", "Sdk: npm:serde#Value.get"),
+                source_node("caller", false),
+            ],
+            vec![edge("caller", "s1")],
+        );
+        let oracle = GraphUsageOracle::new(&graph);
+
+        assert!(!oracle.first_party_usage(&PackageCoordinate::new(Ecosystem::Cargo, "serde")));
+    }
+
+    #[test]
+    fn usage_of_one_package_does_not_leak_into_another_sharing_a_member_name() {
+        // Both packages expose a member called `get`. Only one is reached.
+        // Anything that keys reachability on the member name alone rather than
+        // on the package would report both as used.
+        let graph = graph_with(
+            vec![
+                stub_node("used", "Sdk: cargo:reached#get"),
+                stub_node("unused", "Sdk: cargo:untouched#get"),
+                source_node("caller", false),
+            ],
+            vec![edge("caller", "used")],
+        );
+        let oracle = GraphUsageOracle::new(&graph);
+
+        assert!(oracle.first_party_usage(&PackageCoordinate::new(Ecosystem::Cargo, "reached")));
+        assert!(
+            !oracle.first_party_usage(&PackageCoordinate::new(Ecosystem::Cargo, "untouched")),
+            "an unreached package must not inherit usage from a same-named member"
+        );
+    }
+
+    #[test]
+    fn reachable_functions_matches_an_advisory_path_by_its_final_segment() {
+        let graph = graph_with(
+            vec![
+                stub_node("s1", "Sdk: cargo:serde#Value.get"),
+                source_node("caller", false),
+            ],
+            vec![edge("caller", "s1")],
+        );
+        let oracle = GraphUsageOracle::new(&graph);
+        let candidates = vec![
+            "serde::value::Value::GET".to_string(),
+            "serde::other::absent".to_string(),
+        ];
+
+        let reachable = oracle.reachable_functions(
+            &PackageCoordinate::new(Ecosystem::Cargo, "serde"),
+            &candidates,
+        );
+
+        assert_eq!(reachable, vec!["serde::value::Value::GET".to_string()]);
+    }
+
+    #[test]
+    fn an_unreached_member_yields_no_reachable_functions() {
+        let graph = graph_with(
+            vec![stub_node("s1", "Sdk: cargo:serde#Value.get")],
+            Vec::new(),
+        );
+        let oracle = GraphUsageOracle::new(&graph);
+
+        assert!(oracle
+            .reachable_functions(
+                &PackageCoordinate::new(Ecosystem::Cargo, "serde"),
+                &["Value.get".to_string()]
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn a_package_with_no_stub_at_all_yields_nothing() {
+        let graph = graph_with(vec![source_node("caller", false)], Vec::new());
+        let oracle = GraphUsageOracle::new(&graph);
+
+        assert!(!oracle.first_party_usage(&PackageCoordinate::new(Ecosystem::Cargo, "absent")));
+        assert!(!oracle.dynamic_hazard(&PackageCoordinate::new(Ecosystem::Cargo, "absent")));
     }
 
     #[test]
@@ -649,6 +1040,71 @@ approved_by = "security-review"
     }
 
     #[test]
+    fn an_advisory_two_sources_both_carry_is_suppressed_once() {
+        // Composing the local corpus with the OSV API means the same advisory
+        // arrives twice. Deduplication ran after the exception check, so a
+        // suppressed finding was listed once per source.
+        let source = CompositeSource::new(vec![corpus(&[LEAF_ADVISORY]), corpus(&[LEAF_ADVISORY])]);
+        let id = finding_id(
+            "test-repo",
+            "RUSTSEC-2026-0001",
+            &PackageCoordinate::new(Ecosystem::Cargo, "leaf"),
+            "0.9.18",
+        );
+        let policy = VulnPolicy::parse(&format!(
+            r#"
+schema = 1
+
+[[exception]]
+finding = "{id}"
+reason = "accepted"
+expires = "2099-01-01"
+approved_by = "security-review"
+"#
+        ))
+        .unwrap();
+        let graph = graph_of(LOCK);
+        let request = ScanRequest {
+            repository_identity: "test-repo",
+            packages: &graph,
+            direct_dependencies: &[],
+            source: &source,
+            policy: Some(&policy),
+            usage: &NoUsageEvidence,
+            validation_commands: Vec::new(),
+            today: "2026-08-06".into(),
+            covered_ecosystems: [Ecosystem::Cargo].into_iter().collect(),
+            feature_gated: Default::default(),
+        };
+
+        let report = scan(&request).unwrap();
+
+        assert_eq!(report.suppressed.len(), 1, "one finding, one entry");
+    }
+
+    #[test]
+    fn an_advisory_two_sources_both_carry_is_reported_once() {
+        let source = CompositeSource::new(vec![corpus(&[LEAF_ADVISORY]), corpus(&[LEAF_ADVISORY])]);
+        let graph = graph_of(LOCK);
+        let request = ScanRequest {
+            repository_identity: "test-repo",
+            packages: &graph,
+            direct_dependencies: &[],
+            source: &source,
+            policy: None,
+            usage: &NoUsageEvidence,
+            validation_commands: Vec::new(),
+            today: "2026-08-06".into(),
+            covered_ecosystems: [Ecosystem::Cargo].into_iter().collect(),
+            feature_gated: Default::default(),
+        };
+
+        let report = scan(&request).unwrap();
+
+        assert_eq!(report.findings.len(), 1);
+    }
+
+    #[test]
     fn an_expired_exception_no_longer_suppresses() {
         let source = corpus(&[LEAF_ADVISORY]);
         let id = finding_id(
@@ -705,6 +1161,307 @@ approved_by = "security-review"
 
         assert!(!report.findings[0].verdict.runtime_reachable);
         assert_eq!(report.findings[0].priority, Priority::P2);
+    }
+
+    #[test]
+    fn a_crate_reached_only_through_a_dev_dependency_is_de_ranked() {
+        // `middle` is declared as a dev dependency, and `leaf` is reached only
+        // through it. Before dependency-kind propagation only `middle` itself
+        // was known to be development-only, so `leaf` was ranked as though it
+        // shipped. This is the Rust case the gap named.
+        let source = corpus(&[LEAF_ADVISORY]);
+        let mut dependency = Dependency::new(
+            PackageCoordinate::new(Ecosystem::Cargo, "middle"),
+            "Cargo.toml",
+            DependencyScope::Development,
+        );
+        dependency.resolved_version = Some("1.0.0".into());
+        let direct = vec![dependency];
+
+        let report = scan(&request(
+            &source,
+            &NoUsageEvidence,
+            None,
+            &direct,
+            &graph_of(LOCK),
+        ))
+        .unwrap();
+
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].package.name, "leaf");
+        assert!(
+            !report.findings[0].verdict.runtime_reachable,
+            "leaf is reachable only through a dev dependency"
+        );
+        assert!(report.findings[0]
+            .verdict
+            .evidence
+            .iter()
+            .any(|item| item.kind == crate::EvidenceKind::DevelopmentOnlyDependency));
+    }
+
+    #[test]
+    fn a_crate_one_member_ships_and_another_only_tests_with_stays_runtime_reachable() {
+        // `middle` is a dependency of one workspace member and a
+        // dev-dependency of another, which is routine in a workspace: this
+        // repository does it with serde, tokio, reqwest and zip. Taking the
+        // union of every dev declaration marked it development-only and dragged
+        // `leaf` down with it, demoting a critical finding on a crate that
+        // ships.
+        let source = corpus(&[LEAF_ADVISORY]);
+        let mut ships = Dependency::new(
+            PackageCoordinate::new(Ecosystem::Cargo, "middle"),
+            "a/Cargo.toml",
+            DependencyScope::Runtime,
+        );
+        ships.resolved_version = Some("1.0.0".into());
+        let mut tests_with = Dependency::new(
+            PackageCoordinate::new(Ecosystem::Cargo, "middle"),
+            "b/Cargo.toml",
+            DependencyScope::Development,
+        );
+        tests_with.resolved_version = Some("1.0.0".into());
+        let direct = vec![ships, tests_with];
+
+        let report = scan(&request(
+            &source,
+            &NoUsageEvidence,
+            None,
+            &direct,
+            &graph_of(LOCK),
+        ))
+        .unwrap();
+
+        assert_eq!(report.findings.len(), 1);
+        assert!(
+            report.findings[0].verdict.runtime_reachable,
+            "one member ships it, so it ships"
+        );
+        assert!(
+            !report.findings[0]
+                .verdict
+                .evidence
+                .iter()
+                .any(|item| item.kind == crate::EvidenceKind::DevelopmentOnlyDependency),
+            "a crate that ships is not a development-only dependency"
+        );
+    }
+
+    #[test]
+    fn a_finding_says_when_the_lockfile_recorded_no_dependency_kind() {
+        // The honest counterpart to the test above. Nothing declared a scope
+        // here, and Cargo.lock records none, so the scan is assuming runtime
+        // reachability rather than reading it. The finding has to say so, or an
+        // absence of evidence reads as evidence.
+        let source = corpus(&[LEAF_ADVISORY]);
+
+        let report = scan(&request(
+            &source,
+            &NoUsageEvidence,
+            None,
+            &[],
+            &graph_of(LOCK),
+        ))
+        .unwrap();
+
+        assert!(report.findings[0].verdict.runtime_reachable);
+        assert!(
+            report.findings[0]
+                .verdict
+                .evidence
+                .iter()
+                .any(|item| item.kind == crate::EvidenceKind::DependencyScopeUnrecorded),
+            "an assumed scope must be labelled as assumed"
+        );
+    }
+
+    #[test]
+    fn a_crate_reached_only_through_a_disabled_feature_is_de_ranked_not_dismissed() {
+        // `middle` is an optional dependency no default feature enables, and
+        // `leaf` is reached only through it. Nothing here compiles, but the
+        // finding must survive: a feature this build leaves off is still a
+        // feature someone else turns on.
+        let source = corpus(&[LEAF_ADVISORY]);
+        let graph = graph_of(LOCK);
+        let mut request = request(&source, &NoUsageEvidence, None, &[], &graph);
+        request.feature_gated = [PackageCoordinate::new(Ecosystem::Cargo, "middle")]
+            .into_iter()
+            .collect();
+
+        let report = scan(&request).unwrap();
+
+        assert_eq!(report.findings.len(), 1, "the finding is not dismissed");
+        assert_ne!(
+            report.findings[0].verdict.state,
+            ApplicabilityState::NotApplicable
+        );
+        assert!(report.findings[0]
+            .verdict
+            .evidence
+            .iter()
+            .any(|item| item.kind == crate::EvidenceKind::FeatureGated));
+    }
+
+    #[test]
+    fn a_crate_a_default_feature_compiles_carries_no_feature_gate_evidence() {
+        let source = corpus(&[LEAF_ADVISORY]);
+
+        let report = scan(&request(
+            &source,
+            &NoUsageEvidence,
+            None,
+            &[],
+            &graph_of(LOCK),
+        ))
+        .unwrap();
+
+        assert!(!report.findings[0]
+            .verdict
+            .evidence
+            .iter()
+            .any(|item| item.kind == crate::EvidenceKind::FeatureGated));
+    }
+
+    const MAVEN_ADVISORY: &str = r#"{
+        "id": "GHSA-maven-0001",
+        "summary": "log4j-core is vulnerable",
+        "severity": [
+            { "type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H" }
+        ],
+        "affected": [
+            {
+                "package": { "ecosystem": "Maven", "name": "org.apache.logging.log4j:log4j-core" },
+                "ranges": [
+                    { "type": "ECOSYSTEM", "events": [{ "introduced": "0" }, { "fixed": "2.17.1" }] }
+                ]
+            }
+        ]
+    }"#;
+
+    fn maven_dependency(version: Option<&str>) -> Dependency {
+        let mut dependency = Dependency::new(
+            PackageCoordinate::new(Ecosystem::Maven, "org.apache.logging.log4j:log4j-core"),
+            "pom.xml",
+            DependencyScope::Runtime,
+        );
+        dependency.resolved_version = version.map(str::to_string);
+        dependency
+    }
+
+    #[test]
+    fn a_declared_dependency_is_scanned_when_its_ecosystem_has_no_lockfile() {
+        // Maven has no lockfile unless dependency locking is switched on, so
+        // before this the whole ecosystem landed in the unaudited count. A pom
+        // that pins a literal version still says exactly what is resolved.
+        let source = corpus(&[MAVEN_ADVISORY]);
+        let direct = vec![maven_dependency(Some("2.14.1"))];
+        let graph = graph_of(LOCK);
+        let mut request = request(&source, &NoUsageEvidence, None, &direct, &graph);
+        request.covered_ecosystems = [Ecosystem::Cargo, Ecosystem::Maven].into_iter().collect();
+
+        let report = scan(&request).unwrap();
+
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.package.name == "org.apache.logging.log4j:log4j-core"));
+    }
+
+    #[test]
+    fn a_directly_declared_ecosystem_is_reported_as_partially_covered() {
+        // The accounting is the point. A pom gives direct declarations only, so
+        // calling that "scanned" alongside a lockfile would overstate it.
+        let source = corpus(&[MAVEN_ADVISORY]);
+        let direct = vec![maven_dependency(Some("2.14.1"))];
+        let graph = graph_of(LOCK);
+        let mut request = request(&source, &NoUsageEvidence, None, &direct, &graph);
+        request.covered_ecosystems = [Ecosystem::Cargo, Ecosystem::Maven].into_iter().collect();
+
+        let report = scan(&request).unwrap();
+
+        assert_eq!(
+            report.coverage.get(&Ecosystem::Maven),
+            Some(&EcosystemCoverage::DirectOnly)
+        );
+        assert_eq!(
+            report.coverage.get(&Ecosystem::Cargo),
+            Some(&EcosystemCoverage::Full)
+        );
+        assert_eq!(
+            report.packages_partially_audited, 1,
+            "the maven package is counted apart from the fully resolved ones"
+        );
+        assert_eq!(
+            report.packages_scanned, 2,
+            "packages scanned stays the lockfile-resolved count"
+        );
+    }
+
+    #[test]
+    fn a_declared_dependency_without_a_resolved_version_is_not_scanned() {
+        // A pom whose version is an unresolved property says nothing about what
+        // is installed, and a version match needs a version.
+        let source = corpus(&[MAVEN_ADVISORY]);
+        let direct = vec![maven_dependency(None)];
+        let graph = graph_of(LOCK);
+        let mut request = request(&source, &NoUsageEvidence, None, &direct, &graph);
+        request.covered_ecosystems = [Ecosystem::Cargo, Ecosystem::Maven].into_iter().collect();
+
+        let report = scan(&request).unwrap();
+
+        assert!(report
+            .findings
+            .iter()
+            .all(|finding| finding.package.ecosystem != Ecosystem::Maven));
+        assert_eq!(report.packages_partially_audited, 0);
+    }
+
+    #[test]
+    fn a_declaration_does_not_duplicate_a_package_its_lockfile_already_resolved() {
+        // Cargo.toml declares what Cargo.lock resolves. Promoting declarations
+        // for an ecosystem that already has a lockfile would scan it twice and
+        // inflate every count in the report.
+        let source = corpus(&[LEAF_ADVISORY]);
+        let mut dependency = Dependency::new(
+            PackageCoordinate::new(Ecosystem::Cargo, "leaf"),
+            "Cargo.toml",
+            DependencyScope::Runtime,
+        );
+        dependency.resolved_version = Some("0.9.18".into());
+        let direct = vec![dependency];
+
+        let report = scan(&request(
+            &source,
+            &NoUsageEvidence,
+            None,
+            &direct,
+            &graph_of(LOCK),
+        ))
+        .unwrap();
+
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.packages_partially_audited, 0);
+        assert_eq!(
+            report.coverage.get(&Ecosystem::Cargo),
+            Some(&EcosystemCoverage::Full)
+        );
+    }
+
+    #[test]
+    fn an_ecosystem_without_a_corpus_is_reported_as_unaudited_not_partial() {
+        let source = corpus(&[MAVEN_ADVISORY]);
+        let direct = vec![maven_dependency(Some("2.14.1"))];
+        let graph = graph_of(LOCK);
+        // Only cargo has a corpus.
+        let request = request(&source, &NoUsageEvidence, None, &direct, &graph);
+
+        let report = scan(&request).unwrap();
+
+        assert_eq!(
+            report.coverage.get(&Ecosystem::Maven),
+            Some(&EcosystemCoverage::Unaudited)
+        );
+        assert!(report.uncovered_ecosystems.contains(&Ecosystem::Maven));
     }
 
     #[test]

@@ -19,6 +19,12 @@ reqwest = { workspace = true, features = ["blocking"] }
 zip = { workspace = true }
 serde_norway = { workspace = true }
 ignore = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "vuln_scan"
+harness = false

@@ -23,8 +23,11 @@ pub enum SeverityBand {
 pub enum SeverityScoreSource {
     /// Computed from a CVSS v3.x base vector.
     CvssV3Vector,
-    /// A CVSS v4.0 vector was present but this build does not compute v4 base
-    /// scores. The vector is retained rather than discarded or guessed at.
+    /// Computed from a CVSS v4.0 base vector.
+    CvssV4Vector,
+    /// A CVSS v4.0 vector was present but could not be parsed, so no score was
+    /// derived from it. The vector is retained rather than discarded or guessed
+    /// at.
     CvssV4VectorUnscored,
     /// The advisory carried no severity entry at all.
     Absent,
@@ -63,11 +66,27 @@ pub struct PriorityInputs {
 
 /// Read the best severity the advisory offers.
 ///
-/// A scorable CVSS v3 vector is preferred over a v4 vector, because this build
-/// can turn the former into a number. The v4 vector is still retained when it
-/// is all that exists: recording "we have a vector we cannot score" is more
-/// useful than recording nothing.
+/// A scorable CVSS v4 vector wins, then a scorable v3 one. v4 is preferred
+/// because it is the publisher's most specific statement: where both are
+/// present the publisher scored the same vulnerability twice, and the newer
+/// scoring system is the one they would stand behind.
+///
+/// A v4 vector this build cannot parse falls back to v3 rather than reporting
+/// an unknown band, and is retained when nothing else exists: recording "we
+/// have a vector we cannot read" is more useful than recording nothing.
 pub fn assess_severity(advisory: &Advisory) -> SeverityAssessment {
+    for entry in &advisory.severity {
+        if entry.kind == SeverityKind::CvssV4 {
+            if let Some(score) = crate::cvss4::cvss_v4_base_score(&entry.score) {
+                return SeverityAssessment {
+                    band: band_for_score(score),
+                    base_score: Some(score),
+                    vector: Some(entry.score.clone()),
+                    source: SeverityScoreSource::CvssV4Vector,
+                };
+            }
+        }
+    }
     for entry in &advisory.severity {
         if entry.kind == SeverityKind::CvssV3 {
             if let Some(score) = cvss_v3_base_score(&entry.score) {
@@ -322,7 +341,40 @@ mod tests {
     }
 
     #[test]
-    fn retains_a_v4_vector_without_inventing_a_score_for_it() {
+    fn assesses_a_cvss_v4_advisory_from_its_vector() {
+        let advisory = advisory_with_severity(
+            "CVSS_V4",
+            "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H",
+        );
+
+        let assessment = assess_severity(&advisory);
+
+        assert_eq!(assessment.band, SeverityBand::Critical);
+        assert_eq!(assessment.source, SeverityScoreSource::CvssV4Vector);
+        assert!((assessment.base_score.unwrap() - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_v4_vector_with_a_trailing_separator_is_still_scored() {
+        // Publishers emit these, and the v3 reader has always tolerated them.
+        // Rejecting the vector outright meant silently reporting an unknown
+        // band for an advisory that stated its severity perfectly clearly.
+        let advisory = advisory_with_severity(
+            "CVSS_V4",
+            "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H/",
+        );
+
+        let assessment = assess_severity(&advisory);
+
+        assert_eq!(assessment.source, SeverityScoreSource::CvssV4Vector);
+        assert_eq!(assessment.band, SeverityBand::Critical);
+    }
+
+    #[test]
+    fn retains_a_v4_vector_it_cannot_parse_without_inventing_a_score() {
+        // Truncated: the impact metrics a v4 score depends on are absent. A
+        // vector this build cannot read must report an unknown band rather than
+        // a number derived from the half of it that did parse.
         let advisory = advisory_with_severity("CVSS_V4", "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N");
 
         let assessment = assess_severity(&advisory);
@@ -337,10 +389,31 @@ mod tests {
     }
 
     #[test]
-    fn prefers_a_scorable_v3_vector_over_an_unscorable_v4_one() {
+    fn prefers_a_scorable_v4_vector_over_a_v3_one() {
+        // Both are scorable, and they disagree. v4 is the publisher's most
+        // specific statement about this vulnerability, so it wins.
         let advisory = Advisory::parse(
             r#"{
                 "id": "OSV-Y",
+                "severity": [
+                    { "type": "CVSS_V4", "score": "CVSS:4.0/AV:P/AC:H/AT:P/PR:H/UI:A/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N" },
+                    { "type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H" }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let assessment = assess_severity(&advisory);
+
+        assert_eq!(assessment.source, SeverityScoreSource::CvssV4Vector);
+        assert_eq!(assessment.band, SeverityBand::Low);
+    }
+
+    #[test]
+    fn falls_back_to_a_scorable_v3_vector_when_the_v4_one_cannot_be_read() {
+        let advisory = Advisory::parse(
+            r#"{
+                "id": "OSV-Y2",
                 "severity": [
                     { "type": "CVSS_V4", "score": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N" },
                     { "type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H" }
