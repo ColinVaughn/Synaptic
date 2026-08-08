@@ -10,6 +10,16 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-08-08
+
+### Fixed
+- **Gradle vulnerability scans no longer fail solely because dependency locking is off.**
+  The inventory resolves pinned versions referenced through `gradle.properties`, recognizes
+  plugin-provided dependency configurations such as `modImplementation`, and safely performs
+  a direct-dependency audit without executing repository build scripts. Dynamic and unresolved
+  versions still fail closed and receive a stable diagnostic instructing callers to request
+  resolved dependency evidence.
+
 ## [0.9.4] - 2026-08-08
 
 ### Added
@@ -2006,7 +2016,9 @@ parameters), and `graph.json` gains only additive edge keys.
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.5...HEAD
+[0.9.5]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.4...v0.9.5
+[0.9.4]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.0...v0.9.1

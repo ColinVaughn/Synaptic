@@ -305,17 +305,6 @@ fn run_scan(
     // walking the tree twice bought nothing.
     let discovered = discover_repository_files(root);
     let (packages, reads) = PackageGraph::from_lockfiles(root, &discovered.lockfiles);
-    if reads.is_empty() {
-        bail!(
-            "no lockfile found under {}. Supported: {}",
-            root.display(),
-            LockfileKind::all()
-                .iter()
-                .map(|kind| kind.file_name())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
     for read in &reads {
         match &read.error {
             Some(error) => eprintln!(
@@ -334,6 +323,23 @@ fn run_scan(
     let policy = VulnPolicy::load(root).context("cannot load the vulnerability policy")?;
     let direct = synaptic_api::scan_dependencies(root)
         .context("cannot inventory the repository's direct dependencies")?;
+    let has_auditable_declaration = direct.iter().any(|dependency| {
+        dependency.resolved_version.is_some()
+            && (dependency.package.ecosystem == Ecosystem::Maven
+                || is_sbom_source(&dependency.source_file))
+    });
+    if reads.is_empty() && !has_auditable_declaration {
+        bail!(
+            "[synaptic:vuln:no-auditable-dependencies] no supported lockfile or auditable pinned \
+             dependency declaration was found under {}. Supported lockfiles: {}",
+            root.display(),
+            LockfileKind::all()
+                .iter()
+                .map(|kind| kind.file_name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
 
     let mut ecosystems = reads
         .iter()

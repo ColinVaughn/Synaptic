@@ -1398,48 +1398,76 @@ fn scan_maven_pom(root: &Path, path: &Path) -> Result<Vec<Dependency>, Inventory
 }
 
 fn scan_gradle(root: &Path, path: &Path) -> Result<Vec<Dependency>, InventoryError> {
-    let resolved = gradle_lock_versions(path.parent().unwrap_or(root))?;
+    let directory = path.parent().unwrap_or(root);
+    let resolved = gradle_lock_versions(root, directory)?;
+    let properties = gradle_properties(root, directory)?;
     let mut out = Vec::new();
     for raw in fs::read_to_string(path)?.lines() {
         let line = raw.split("//").next().unwrap_or("").trim();
-        let scope = if line.starts_with("testImplementation") || line.starts_with("testCompile") {
+        let Some(configuration) = line.split_once('(').map(|(name, _)| name.trim()) else {
+            continue;
+        };
+        let configuration = configuration.to_ascii_lowercase();
+        let scope = if configuration.contains("test") {
             DependencyScope::Development
-        } else if line.starts_with("compileOnly") || line.starts_with("runtimeOnly") {
+        } else if configuration.ends_with("compileonly")
+            || configuration.ends_with("runtimeonly")
+            || configuration.ends_with("localruntime")
+        {
             DependencyScope::Optional
-        } else if line.starts_with("implementation")
-            || line.starts_with("api")
-            || line.starts_with("compile")
+        } else if configuration.ends_with("implementation")
+            || configuration.ends_with("api")
+            || configuration.ends_with("compile")
+            || matches!(
+                configuration.as_str(),
+                "classpath"
+                    | "annotationprocessor"
+                    | "kapt"
+                    | "ksp"
+                    | "minecraft"
+                    | "mappings"
+                    | "neoforge"
+                    | "include"
+            )
         {
             DependencyScope::Runtime
         } else {
             continue;
         };
-        let Some(coordinate) = first_quoted(line) else {
+        let Some(coordinate) = gradle_quoted_argument(line) else {
             continue;
         };
-        let parts: Vec<_> = coordinate.split(':').collect();
-        if parts.len() < 2 {
+        let mut parts = coordinate.split(':');
+        let (Some(group), Some(artifact)) = (parts.next(), parts.next()) else {
             continue;
-        }
-        let name = format!("{}:{}", parts[0], parts[1]);
-        let declared = parts.get(2).map(|value| (*value).to_string());
+        };
+        let name = format!("{group}:{artifact}");
+        let declared = parts.next().map(str::to_string);
+        let declared_version = declared
+            .as_deref()
+            .and_then(|value| resolve_gradle_version(value, &properties));
         let mut dependency = Dependency::new(
             PackageCoordinate::new(Ecosystem::Maven, &name),
             relative(root, path),
             scope,
         );
-        dependency.declared_requirement = declared.clone();
-        dependency.resolved_version = resolved.get(&name).cloned().or(declared);
+        dependency.declared_requirement = declared;
+        dependency.resolved_version = resolved.get(&name).cloned().or(declared_version);
         out.push(dependency);
     }
     Ok(out)
 }
 
-fn gradle_lock_versions(dir: &Path) -> Result<BTreeMap<String, String>, InventoryError> {
-    let path = dir.join("gradle.lockfile");
-    if !path.is_file() {
+fn gradle_lock_versions(
+    root: &Path,
+    dir: &Path,
+) -> Result<BTreeMap<String, String>, InventoryError> {
+    let Some(path) = ancestors_within(root, dir)
+        .map(|candidate| candidate.join("gradle.lockfile"))
+        .find(|candidate| candidate.is_file())
+    else {
         return Ok(BTreeMap::new());
-    }
+    };
     let mut versions = BTreeMap::new();
     for line in fs::read_to_string(path)?.lines() {
         let coordinate = line.split('=').next().unwrap_or("").trim();
@@ -1449,6 +1477,75 @@ fn gradle_lock_versions(dir: &Path) -> Result<BTreeMap<String, String>, Inventor
         }
     }
     Ok(versions)
+}
+
+fn gradle_properties(root: &Path, dir: &Path) -> Result<BTreeMap<String, String>, InventoryError> {
+    let mut directories = ancestors_within(root, dir).collect::<Vec<_>>();
+    directories.reverse();
+    let mut properties = BTreeMap::new();
+    for directory in directories {
+        let path = directory.join("gradle.properties");
+        if !path.is_file() {
+            continue;
+        }
+        for raw in fs::read_to_string(path)?.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+                continue;
+            }
+            let Some((name, value)) = line.split_once('=').or_else(|| line.split_once(':')) else {
+                continue;
+            };
+            let name = name.trim();
+            if !name.is_empty() {
+                properties.insert(name.to_string(), value.trim().to_string());
+            }
+        }
+    }
+    Ok(properties)
+}
+
+fn gradle_quoted_argument(line: &str) -> Option<&str> {
+    let arguments = line.split_once('(')?.1;
+    let (start, quote) = arguments
+        .char_indices()
+        .find(|(_, character)| matches!(character, '\'' | '"'))?;
+    let after = &arguments[start + quote.len_utf8()..];
+    let end = after.rfind(quote)?;
+    Some(&after[..end])
+}
+
+fn resolve_gradle_version(value: &str, properties: &BTreeMap<String, String>) -> Option<String> {
+    static PROPERTY: OnceLock<Regex> = OnceLock::new();
+    let property_re = PROPERTY.get_or_init(|| {
+        Regex::new(
+            r#"\$\{(?:(?:rootProject|project)\.)?(?:property|findProperty)\(["']([^"']+)["']\)\}"#,
+        )
+        .expect("valid Gradle property expression regex")
+    });
+    let mut unresolved = false;
+    let resolved = property_re
+        .replace_all(value, |captures: &regex::Captures<'_>| {
+            properties.get(&captures[1]).cloned().unwrap_or_else(|| {
+                unresolved = true;
+                captures[0].to_string()
+            })
+        })
+        .into_owned();
+    if unresolved
+        || resolved.is_empty()
+        || resolved.contains("${")
+        || resolved.contains('*')
+        || resolved.ends_with('+')
+        || resolved.eq_ignore_ascii_case("latest.release")
+        || resolved.eq_ignore_ascii_case("latest.integration")
+        || resolved.starts_with('[')
+        || resolved.starts_with('(')
+    {
+        None
+    } else {
+        Some(resolved)
+    }
 }
 
 fn scan_msbuild_packages(root: &Path, path: &Path) -> Result<Vec<Dependency>, InventoryError> {
@@ -2232,15 +2329,6 @@ fn ancestors_within<'a>(root: &'a Path, path: &'a Path) -> impl Iterator<Item = 
         .take_while(move |candidate| candidate.starts_with(root))
 }
 
-fn first_quoted(value: &str) -> Option<&str> {
-    let (quote_index, quote) = value
-        .char_indices()
-        .find(|(_, ch)| matches!(ch, '\'' | '"'))?;
-    let after = &value[quote_index + quote.len_utf8()..];
-    let end = after.find(quote)?;
-    Some(&after[..end])
-}
-
 fn resolve_property(value: &str, properties: &BTreeMap<String, String>) -> String {
     value
         .strip_prefix("${")
@@ -2340,6 +2428,61 @@ mod tests {
         assert_eq!(
             parse_python_requirement("Requests[socks]>=2.0; python_version > '3.9'"),
             Some(("Requests".into(), Some(">=2.0".into())))
+        );
+    }
+
+    #[test]
+    fn gradle_inventory_resolves_root_properties_and_custom_configurations() {
+        let repository = tempfile::tempdir().unwrap();
+        fs::create_dir_all(repository.path().join("fabric")).unwrap();
+        fs::write(
+            repository.path().join("gradle.properties"),
+            "loader.version=0.19.3\nobj.version=0.4.0\n",
+        )
+        .unwrap();
+        fs::write(
+            repository.path().join("fabric/build.gradle.kts"),
+            r#"
+dependencies {
+    modImplementation("net.fabricmc:fabric-loader:${rootProject.property("loader.version")}")
+    implementation("de.javagl:obj:${rootProject.property("obj.version")}")
+    modCompileOnly("example:optional:1.2.3")
+}
+"#,
+        )
+        .unwrap();
+
+        let dependencies = scan_dependencies(repository.path()).unwrap();
+
+        assert!(dependencies.iter().any(|dependency| {
+            dependency.package.name == "net.fabricmc:fabric-loader"
+                && dependency.resolved_version.as_deref() == Some("0.19.3")
+                && dependency.scope == DependencyScope::Runtime
+        }));
+        assert!(dependencies.iter().any(|dependency| {
+            dependency.package.name == "de.javagl:obj"
+                && dependency.resolved_version.as_deref() == Some("0.4.0")
+        }));
+        assert!(dependencies.iter().any(|dependency| {
+            dependency.package.name == "example:optional"
+                && dependency.resolved_version.as_deref() == Some("1.2.3")
+                && dependency.scope == DependencyScope::Optional
+        }));
+    }
+
+    #[test]
+    fn gradle_inventory_does_not_treat_dynamic_or_unresolved_versions_as_pinned() {
+        let properties = BTreeMap::new();
+
+        assert_eq!(resolve_gradle_version("1.+", &properties), None);
+        assert_eq!(resolve_gradle_version("latest.release", &properties), None);
+        assert_eq!(
+            resolve_gradle_version(r#"${rootProject.property("missing.version")}"#, &properties),
+            None
+        );
+        assert_eq!(
+            resolve_gradle_version("0.116.14+1.21.1", &properties),
+            Some("0.116.14+1.21.1".to_string())
         );
     }
 }
