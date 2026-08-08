@@ -7,12 +7,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 use synaptic_api::{Ecosystem, PackageCoordinate};
 use synaptic_vuln::{
-    check_dependency, decision, discover_repository_files, feature_gated_in, is_sbom_source, scan,
-    sync_ecosystem, AdvisorySource, CompositeSource, CorpusCache, DecisionKind, EcosystemCoverage,
-    Finding, FindingState, FindingStore, GraphUsageOracle, LocalDirSource, LockfileKind,
-    NoUsageEvidence, PackageGraph, Priority, ScanReport, ScanRequest, SystemCorpusFetcher,
-    SystemOsvTransport, UsageOracle, VulnPolicy, DEFAULT_MAX_DOWNLOAD_BYTES, DEFAULT_POLICY_PATH,
-    DEFAULT_STALE_AFTER_SECONDS,
+    check_dependency, decision, discover_repository_files, feature_gated_in, is_sbom_source,
+    repair_inputs, scan, sync_ecosystem, AdvisorySource, CompositeSource, CorpusCache,
+    DecisionKind, EcosystemCoverage, Finding, FindingState, FindingStore, GraphUsageOracle,
+    ImpactIndex, LocalDirSource, LockfileKind, NoUsageEvidence, PackageGraph, Priority, ReachIndex,
+    ScanReport, ScanRequest, SystemCorpusFetcher, SystemOsvTransport, UsageOracle, VulnPolicy,
+    DEFAULT_MAX_DOWNLOAD_BYTES, DEFAULT_POLICY_PATH, DEFAULT_STALE_AFTER_SECONDS,
 };
 
 use crate::cli::VulnAction;
@@ -46,6 +46,12 @@ pub(crate) fn run_vuln(action: VulnAction) -> Result<()> {
             root,
             json,
         } => run_explain(&finding, &root, json),
+        VulnAction::Brief {
+            finding,
+            root,
+            graph,
+            json,
+        } => run_brief(&finding, &root, graph, json),
         VulnAction::Sync {
             ecosystem,
             max_bytes,
@@ -438,6 +444,14 @@ fn run_scan(
         Some(oracle) => oracle,
         None => &NoUsageEvidence,
     };
+    // Built from the same graph, and only when there is one, so an absent
+    // graph leaves findings without entry-point evidence rather than
+    // reporting that nothing reaches them.
+    let reach_index = graph_data.as_ref().map(ReachIndex::new);
+    // Last, because building a KnowledgeGraph consumes the GraphData the two
+    // indexes above borrow.
+    let impact_index = graph_data
+        .map(|data| ImpactIndex::new(synaptic_graph::KnowledgeGraph::from_graph_data(data)));
 
     let identity = repository_identity(root);
     let report = scan(&ScanRequest {
@@ -447,6 +461,8 @@ fn run_scan(
         source: &source,
         policy: policy.as_ref(),
         usage,
+        reach: reach_index.as_ref(),
+        impact: impact_index.as_ref(),
         validation_commands: validation_commands(root),
         today: today(),
         covered_ecosystems,
@@ -649,6 +665,13 @@ fn run_explain(finding: &str, root: &Path, json: bool) -> Result<()> {
     for item in &record.finding.verdict.evidence {
         println!("  [{:?}] {:?}: {}", item.direction, item.kind, item.detail);
     }
+    let exposure = exposure_lines(&record.finding);
+    if !exposure.is_empty() {
+        println!();
+        for line in exposure {
+            println!("{line}");
+        }
+    }
     if !record.finding.remediation.required_changes.is_empty() {
         println!("\nrequired changes:");
         for change in &record.finding.remediation.required_changes {
@@ -677,6 +700,91 @@ fn run_explain(finding: &str, root: &Path, json: bool) -> Result<()> {
             entry.at, entry.kind, entry.actor, entry.detail
         );
     }
+    Ok(())
+}
+
+/// Convert one finding into the brief the repair loop consumes.
+///
+/// The brief is only built for an `Applicable` finding, because generating a
+/// patch for something never shown to be reachable would spend an agent's
+/// budget on a guess. Anything short of that reports what is missing instead.
+fn run_brief(finding_id: &str, root: &Path, graph: Option<PathBuf>, json: bool) -> Result<()> {
+    let record = FindingStore::new(root)
+        .get(finding_id)?
+        .with_context(|| format!("finding {finding_id} is not in the ledger"))?;
+
+    // The record's creation time, not the wall clock, so the same finding
+    // always converts to the same event.
+    let Some(inputs) = repair_inputs(&record.finding, record.created_at) else {
+        bail!(
+            "{finding_id} has no fixed version to upgrade to ({:?}); \
+             remediation requires removing, replacing, or mitigating the dependency",
+            record.finding.remediation.kind
+        );
+    };
+
+    if inputs.assessment.state != synaptic_api::ApplicabilityState::Applicable {
+        bail!(
+            "{finding_id} is {:?}, not applicable; the repair loop only patches findings shown \
+             to be reachable. Run `synaptic vuln explain {finding_id}` for the evidence.",
+            inputs.assessment.state
+        );
+    }
+
+    let graph_path = graph.unwrap_or_else(|| root.join("synaptic-out/graph.json"));
+    let data = load_graph_data(&graph_path, None)
+        .with_context(|| format!("loading graph {}", graph_path.display()))?;
+    let base_sha = data
+        .built_at_commit
+        .clone()
+        .unwrap_or_else(|| "working-tree".into());
+    let knowledge = synaptic_graph::KnowledgeGraph::from_graph_data(data);
+    let identity = repository_identity(root);
+
+    let brief = synaptic_api::build_repair_brief(synaptic_api::RepairBriefRequest {
+        repository_root: root,
+        repository_identity: &identity,
+        base_sha: &base_sha,
+        event: &inputs.event,
+        assessment: &inputs.assessment,
+        graph: &knowledge,
+        memory: &[],
+        budget: &synaptic_api::BriefBudget::default(),
+    })?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&brief)?);
+        return Ok(());
+    }
+
+    println!("brief {} for {}", brief.id, record.finding.advisory_id);
+    println!("  package:   {}", record.finding.package);
+    println!(
+        "  upgrade:   {} -> {}",
+        record.finding.resolved_version,
+        inputs.event.release.as_deref().unwrap_or("?")
+    );
+    println!("  base sha:  {}", brief.base_sha);
+    println!("  bindings:  {}", brief.usage_bindings.len());
+    if !brief.allowed_files.is_empty() {
+        println!("  patch may touch:");
+        for file in &brief.allowed_files {
+            println!("    - {file}");
+        }
+    }
+    if !brief.required_tests.is_empty() {
+        println!("  required tests:");
+        for test in &brief.required_tests {
+            println!("    - {test}");
+        }
+    }
+    if !brief.verification.is_empty() {
+        println!("  verification:");
+        for gate in &brief.verification {
+            println!("    - {gate:?}");
+        }
+    }
+    println!("\nrun `synaptic vuln brief {finding_id} --json` for the full generation input");
     Ok(())
 }
 
@@ -936,9 +1044,239 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (year + i64::from(month <= 2), month, day)
 }
 
+/// Render the reachability evidence a finding carries.
+///
+/// Returns an empty vector only when there is genuinely nothing to say. The
+/// difference between "no graph was read" and "the graph showed no calls" is
+/// always stated, because those two carry opposite weight for a reviewer.
+fn exposure_lines(finding: &Finding) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    if !finding.scope.graph_backed {
+        lines.push(
+            "exposure: no graph was read, so call sites and entry points were not measured"
+                .to_string(),
+        );
+        return lines;
+    }
+
+    if finding.call_sites.is_empty() {
+        lines.push(
+            "exposure: no first-party call sites found in the graph (static reachability is \
+             incomplete; this does not prove the package is unused)"
+                .to_string(),
+        );
+    } else {
+        lines.push(format!(
+            "call sites ({} in {} file(s)):",
+            finding.call_sites.len(),
+            finding.scope.review_files.len()
+        ));
+        for site in &finding.call_sites {
+            let location = match site.line {
+                Some(line) => format!("{}:{line}", site.file),
+                None => site.file.clone(),
+            };
+            lines.push(format!("  {location}  {} -> {}", site.symbol, site.member));
+        }
+    }
+
+    if finding.entry_points.is_empty() {
+        if !finding.call_sites.is_empty() {
+            lines.push(
+                "entry points: none traced to a route, queue, or command (the walk is bounded \
+                 and cannot see dynamic dispatch)"
+                    .to_string(),
+            );
+        }
+    } else {
+        lines.push(format!(
+            "reachable from {} entry point(s):",
+            finding.entry_points.len()
+        ));
+        for entry in &finding.entry_points {
+            lines.push(format!(
+                "  [{}] {}",
+                entry.kind.as_str(),
+                entry.path.join(" -> ")
+            ));
+        }
+    }
+
+    if !finding.scope.review_files.is_empty() {
+        lines.push("review after upgrading:".to_string());
+        for file in &finding.scope.review_files {
+            lines.push(format!("  - {file}"));
+        }
+    }
+
+    if let Some(impact) = &finding.scope.impact {
+        lines.push(format!(
+            "upgrade blast radius: {} symbol(s) depend on the calling code",
+            impact.dependent_symbols
+        ));
+        if !impact.public_api_touched.is_empty() {
+            lines.push("  public API in the calling set:".to_string());
+            for symbol in &impact.public_api_touched {
+                lines.push(format!("    - {symbol}"));
+            }
+        }
+        if impact.at_risk_tests.is_empty() {
+            lines.push("  no covering tests found; verify this upgrade by hand".to_string());
+        } else {
+            lines.push(format!("  tests to run ({}):", impact.at_risk_tests.len()));
+            for test in &impact.at_risk_tests {
+                lines.push(format!("    - {test}"));
+            }
+        }
+    }
+
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn exposed_finding() -> Finding {
+        let json = serde_json::json!({
+            "version": 1,
+            "id": "vuln_finding_test",
+            "advisory_id": "RUSTSEC-2026-0001",
+            "package": "cargo:leaf",
+            "resolved_version": "0.9.18",
+            "is_direct_dependency": true,
+            "verdict": { "state": "applicable", "evidence": [], "runtime_reachable": true },
+            "severity": { "band": "high", "source": "cvss_v3_vector" },
+            "priority": "p1",
+            "remediation": {
+                "kind": "upgrade",
+                "recommended_version": "0.9.20",
+                "availability": "unverified",
+                "compatibility_risk": "patch",
+                "required_changes": [],
+                "validation_commands": [],
+                "notes": []
+            },
+            "call_sites": [
+                { "symbol": "handle_items()", "symbol_id": "handle_items",
+                  "file": "src/api.rs", "line": 31, "member": "parse" }
+            ],
+            "entry_points": [
+                { "kind": "http_route", "label": "/items", "id": "route_items",
+                  "path": ["/items", "handle_items()"] }
+            ],
+            "scope": {
+                "graph_backed": true,
+                "review_files": ["src/api.rs"],
+                "calling_symbols": 1,
+                "exposed_entry_points": 1
+            }
+        });
+        serde_json::from_value(json).expect("fixture parses")
+    }
+
+    fn unmeasured_finding() -> Finding {
+        let mut finding = exposed_finding();
+        finding.call_sites.clear();
+        finding.entry_points.clear();
+        finding.scope = Default::default();
+        finding
+    }
+
+    #[test]
+    fn the_exposure_names_each_call_site_with_its_file_and_line() {
+        let lines = exposure_lines(&exposed_finding()).join("\n");
+
+        assert!(
+            lines.contains("src/api.rs:31"),
+            "call site location missing from:\n{lines}"
+        );
+        assert!(
+            lines.contains("handle_items()"),
+            "enclosing symbol missing from:\n{lines}"
+        );
+    }
+
+    #[test]
+    fn the_exposure_names_the_reaching_entry_point_and_its_path() {
+        let lines = exposure_lines(&exposed_finding()).join("\n");
+
+        assert!(
+            lines.contains("/items"),
+            "entry point missing from:\n{lines}"
+        );
+        assert!(
+            lines.contains("/items -> handle_items()"),
+            "reaching path missing from:\n{lines}"
+        );
+    }
+
+    #[test]
+    fn the_exposure_reports_the_upgrade_blast_radius_and_tests_to_run() {
+        let mut finding = exposed_finding();
+        finding.scope.impact = Some(
+            serde_json::from_value(serde_json::json!({
+                "dependent_symbols": 12,
+                "public_api_touched": ["generateReport()"],
+                "at_risk_tests": ["report_generator_test"]
+            }))
+            .expect("impact fixture parses"),
+        );
+
+        let lines = exposure_lines(&finding).join("\n");
+
+        assert!(lines.contains("12"), "blast radius missing from:\n{lines}");
+        assert!(
+            lines.contains("report_generator_test"),
+            "at-risk tests missing from:\n{lines}"
+        );
+        assert!(
+            lines.contains("generateReport()"),
+            "public API missing from:\n{lines}"
+        );
+    }
+
+    #[test]
+    fn an_exposure_without_a_forecast_makes_no_blast_radius_claim() {
+        let lines = exposure_lines(&exposed_finding()).join("\n");
+
+        assert!(
+            !lines.contains("depend on"),
+            "no forecast was run; this must not imply one:\n{lines}"
+        );
+    }
+
+    #[test]
+    fn an_unmeasured_finding_says_no_graph_was_read() {
+        let lines = exposure_lines(&unmeasured_finding()).join("\n");
+
+        assert!(
+            lines.contains("no graph"),
+            "an unmeasured scope must say so, got:\n{lines}"
+        );
+    }
+
+    #[test]
+    fn a_measured_finding_with_no_call_sites_is_distinguished_from_an_unmeasured_one() {
+        let mut finding = exposed_finding();
+        finding.call_sites.clear();
+        finding.entry_points.clear();
+        finding.scope.review_files.clear();
+        finding.scope.calling_symbols = 0;
+        finding.scope.exposed_entry_points = 0;
+
+        let lines = exposure_lines(&finding).join("\n");
+
+        assert!(
+            !lines.contains("no graph"),
+            "a graph was read; this must not claim otherwise:\n{lines}"
+        );
+        assert!(
+            lines.contains("no first-party call sites"),
+            "a measured absence must be stated, got:\n{lines}"
+        );
+    }
 
     #[test]
     fn converts_a_known_epoch_day_to_its_calendar_date() {

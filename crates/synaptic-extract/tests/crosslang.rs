@@ -3873,3 +3873,428 @@ fn non_executable_formats_do_not_emit_sdk_calls() {
         );
     }
 }
+
+// --- Next.js file-convention routing ---
+//
+// The URL lives in the file path, so these fix the path -> route mapping as
+// much as the handler linkage.
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn nextjs_app_route_links_its_exported_method_handler() {
+    let r = extract_source(
+        "app/api/v1/health/route.ts",
+        b"export async function GET(request: Request) {\n  return Response.json({ ok: true });\n}\n",
+    )
+    .unwrap();
+
+    assert!(
+        r.nodes.iter().any(|n| n.label == "/api/v1/health"),
+        "route node from the file path, got {:?}",
+        r.nodes.iter().map(|n| &n.label).collect::<Vec<_>>()
+    );
+    let (src, tgt, ctx) = edge_of(&r, "handled_by").expect("handled_by edge");
+    assert_eq!(src, "/api/v1/health", "route is the source");
+    assert_eq!(tgt, "GET()", "the exported method function is the handler");
+    assert_eq!(ctx.as_deref(), Some("GET"));
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn nextjs_route_group_segments_are_not_part_of_the_url() {
+    // `(marketing)` is an organisational folder Next.js strips from the URL.
+    let r = extract_source(
+        "app/(marketing)/blog/feed.xml/route.ts",
+        b"export async function GET() {\n  return new Response('<rss/>');\n}\n",
+    )
+    .unwrap();
+
+    assert!(
+        r.nodes.iter().any(|n| n.label == "/blog/feed.xml"),
+        "route group must be stripped, got {:?}",
+        r.nodes.iter().map(|n| &n.label).collect::<Vec<_>>()
+    );
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn nextjs_dynamic_segments_become_parameters() {
+    let r = extract_source(
+        "app/api/v1/projects/[projectId]/access/route.ts",
+        b"export async function POST() {\n  return Response.json({});\n}\n",
+    )
+    .unwrap();
+
+    assert!(
+        r.nodes
+            .iter()
+            .any(|n| n.label == "/api/v1/projects/{projectId}/access"),
+        "dynamic segment must read as a parameter, got {:?}",
+        r.nodes.iter().map(|n| &n.label).collect::<Vec<_>>()
+    );
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn nextjs_catch_all_segments_become_wildcard_parameters() {
+    let r = extract_source(
+        "app/api/[...slug]/route.ts",
+        b"export async function GET() {\n  return Response.json({});\n}\n",
+    )
+    .unwrap();
+
+    assert!(
+        r.nodes.iter().any(|n| n.label == "/api/{*slug}"),
+        "catch-all must read as a wildcard, got {:?}",
+        r.nodes.iter().map(|n| &n.label).collect::<Vec<_>>()
+    );
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn nextjs_registers_every_exported_method_in_one_route_file() {
+    let r = extract_source(
+        "app/api/items/route.ts",
+        b"export async function GET() {\n  return Response.json([]);\n}\n\nexport async function DELETE() {\n  return new Response(null, { status: 204 });\n}\n",
+    )
+    .unwrap();
+
+    let methods: Vec<_> = r
+        .edges
+        .iter()
+        .filter(|e| e.relation == "handled_by")
+        .filter_map(|e| e.context.clone())
+        .collect();
+    assert!(
+        methods.contains(&"GET".to_string()) && methods.contains(&"DELETE".to_string()),
+        "both exported methods must register, got {methods:?}"
+    );
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_helper_file_beside_a_next_route_is_not_itself_a_route() {
+    // Only `route.ts` is a route file; co-located helpers are ordinary modules.
+    let r = extract_source(
+        "app/api/items/helpers.ts",
+        b"export async function GET() {\n  return Response.json([]);\n}\n",
+    )
+    .unwrap();
+
+    assert!(
+        !r.edges.iter().any(|e| e.relation == "handled_by"),
+        "a non-route file must not register an endpoint"
+    );
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn nextjs_pages_router_api_file_is_a_route() {
+    let r = extract_source(
+        "pages/api/users.ts",
+        b"export default function handler(req, res) {\n  res.status(200).json([]);\n}\n",
+    )
+    .unwrap();
+
+    assert!(
+        r.nodes.iter().any(|n| n.label == "/api/users"),
+        "pages-router api file is an endpoint, got {:?}",
+        r.nodes.iter().map(|n| &n.label).collect::<Vec<_>>()
+    );
+}
+
+// --- Supabase / Deno edge functions ---
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn supabase_edge_function_links_its_serve_handler() {
+    let r = extract_source(
+        "supabase/functions/analyze-link/index.ts",
+        b"import { serve } from 'https://deno.land/std/http/server.ts';\n\nserve(async (req) => {\n  return new Response('ok');\n});\n",
+    )
+    .unwrap();
+
+    assert!(
+        r.nodes.iter().any(|n| n.label == "/analyze-link"),
+        "the function directory is the endpoint, got {:?}",
+        r.nodes.iter().map(|n| &n.label).collect::<Vec<_>>()
+    );
+    let (src, _, _) = edge_of(&r, "handled_by").expect("handled_by edge");
+    assert_eq!(src, "/analyze-link");
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn supabase_deno_serve_is_also_recognised() {
+    let r = extract_source(
+        "supabase/functions/create-checkout-session/index.ts",
+        b"Deno.serve(async (req) => {\n  return new Response('ok');\n});\n",
+    )
+    .unwrap();
+
+    assert!(
+        r.nodes
+            .iter()
+            .any(|n| n.label == "/create-checkout-session"),
+        "Deno.serve must register too, got {:?}",
+        r.nodes.iter().map(|n| &n.label).collect::<Vec<_>>()
+    );
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_supabase_shared_module_is_not_an_endpoint() {
+    // `_shared` holds helpers imported by real functions; it is not deployed.
+    let r = extract_source(
+        "supabase/functions/_shared/cors.ts",
+        b"export const corsHeaders = { 'Access-Control-Allow-Origin': '*' };\n",
+    )
+    .unwrap();
+
+    assert!(
+        !r.nodes.iter().any(|n| n.label == "/_shared"),
+        "a shared helper directory is not an endpoint"
+    );
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_next_handler_preceded_by_blank_lines_resolves_to_its_function() {
+    // `^\s*` would consume the blank line and report the match a line early,
+    // putting it outside the handler's span and silently degrading the handler
+    // to the file node. Observed live: synaptic-platform reported L25 for an
+    // export on line 26, so every Next.js route linked to `route.ts`.
+    let r = extract_source(
+        "app/api/v1/health/route.ts",
+        b"import { getSql } from '@/lib/db';\n\n\nexport async function GET(request: Request) {\n  return Response.json({ ok: true });\n}\n",
+    )
+    .unwrap();
+
+    let (_, tgt, _) = edge_of(&r, "handled_by").expect("handled_by edge");
+    assert_eq!(
+        tgt, "GET()",
+        "the handler must be the exported function, not the file"
+    );
+}
+
+// --- Deno / edge-runtime import specifiers ---
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_deno_npm_specifier_resolves_to_the_bare_package_name() {
+    // Supabase edge functions import `npm:pkg@version`. Keeping the scheme and
+    // version in the coordinate made the package unmatchable against the
+    // lockfile, hiding every call site inside a deployed function.
+    let r = extract_source(
+        "supabase/functions/analyze-link/index.ts",
+        b"import { createClient } from \"npm:@supabase/supabase-js@2.39.0\";\n\nconst db = createClient(u, k);\ndb.from('t').select();\n",
+    )
+    .unwrap();
+
+    // Candidate labels read `<ecosystem>:<coordinate>#<member>`, so one `npm:`
+    // is the ecosystem tag. What must not survive is the specifier's own
+    // scheme or its pinned version.
+    let labels: Vec<&String> = r.nodes.iter().map(|n| &n.label).collect();
+    assert!(
+        labels.iter().any(|l| l.contains("@supabase/supabase-js")
+            && l.contains('#')
+            && !l.contains("npm:npm:npm:")
+            && !l.contains("2.39.0")),
+        "coordinate must be the bare package, got {labels:?}"
+    );
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn an_esm_sh_url_specifier_resolves_to_the_bare_package_name() {
+    let r = extract_source(
+        "supabase/functions/x/index.ts",
+        b"import Stripe from \"https://esm.sh/stripe@14.11.0?target=deno\";\n\nStripe.customers.create({});\n",
+    )
+    .unwrap();
+
+    let labels: Vec<&String> = r.nodes.iter().map(|n| &n.label).collect();
+    assert!(
+        labels
+            .iter()
+            .any(|l| l.contains("stripe") && !l.contains("esm.sh") && !l.contains("14.11.0")),
+        "CDN url must reduce to the package, got {labels:?}"
+    );
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_scoped_package_keeps_its_scope_when_the_version_is_stripped() {
+    let r = extract_source(
+        "app/lib/x.ts",
+        b"import { z } from \"@scope/thing@1.2.3\";\n\nz.parse({});\n",
+    )
+    .unwrap();
+
+    let labels: Vec<&String> = r.nodes.iter().map(|n| &n.label).collect();
+    assert!(
+        labels.iter().any(|l| l.contains("@scope/thing")),
+        "the leading scope @ must survive, got {labels:?}"
+    );
+}
+
+// --- Symfony PHP attribute routing ---
+//
+// `scan_php_routes` only understood Laravel's `Route::get(...)` facade, so a
+// Symfony app (attribute-routed) reported no endpoints at all.
+
+#[cfg(feature = "lang-php")]
+#[test]
+fn symfony_attribute_route_links_its_controller_action() {
+    let src = br#"<?php
+namespace App\Controller;
+
+use Symfony\Component\Routing\Attribute\Route;
+
+class BlogController
+{
+    #[Route('/posts', name: 'blog_posts', methods: ['GET'])]
+    public function index(): Response
+    {
+        return $this->render('blog/index.html.twig');
+    }
+}
+"#;
+    let r = extract_source("src/Controller/BlogController.php", src).unwrap();
+
+    assert!(
+        r.nodes.iter().any(|n| n.label == "/posts"),
+        "attribute route node, got {:?}",
+        r.nodes.iter().map(|n| &n.label).collect::<Vec<_>>()
+    );
+    let (src_lbl, tgt_lbl, ctx) = edge_of(&r, "handled_by").expect("handled_by edge");
+    assert_eq!(src_lbl, "/posts", "route is the source");
+    assert_eq!(
+        tgt_lbl, ".index()",
+        "the attributed method is the handler, not the file"
+    );
+    assert_eq!(ctx.as_deref(), Some("GET"));
+}
+
+#[cfg(feature = "lang-php")]
+#[test]
+fn a_symfony_class_level_route_prefixes_its_methods() {
+    let src = br#"<?php
+use Symfony\Component\Routing\Attribute\Route;
+
+#[Route('/blog')]
+class BlogController
+{
+    #[Route('/rss.xml', name: 'blog_rss', methods: ['GET'])]
+    public function rss(): Response
+    {
+        return new Response();
+    }
+}
+"#;
+    let r = extract_source("src/Controller/BlogController.php", src).unwrap();
+
+    assert!(
+        r.nodes.iter().any(|n| n.label == "/blog/rss.xml"),
+        "class prefix must compose with the method path, got {:?}",
+        r.nodes.iter().map(|n| &n.label).collect::<Vec<_>>()
+    );
+}
+
+#[cfg(feature = "lang-php")]
+#[test]
+fn a_symfony_route_listing_several_methods_registers_each() {
+    let src = br#"<?php
+use Symfony\Component\Routing\Attribute\Route;
+
+class ApiController
+{
+    #[Route('/items', methods: ['GET', 'POST'])]
+    public function items(): Response
+    {
+        return new Response();
+    }
+}
+"#;
+    let r = extract_source("src/Controller/ApiController.php", src).unwrap();
+
+    let methods: Vec<String> = r
+        .edges
+        .iter()
+        .filter(|e| e.relation == "handled_by")
+        .filter_map(|e| e.context.clone())
+        .collect();
+    assert!(
+        methods.contains(&"GET".to_string()) && methods.contains(&"POST".to_string()),
+        "each listed verb must register, got {methods:?}"
+    );
+}
+
+#[cfg(feature = "lang-php")]
+#[test]
+fn a_symfony_route_without_methods_accepts_any_verb() {
+    let src = br#"<?php
+use Symfony\Component\Routing\Attribute\Route;
+
+class PageController
+{
+    #[Route('/about')]
+    public function about(): Response
+    {
+        return new Response();
+    }
+}
+"#;
+    let r = extract_source("src/Controller/PageController.php", src).unwrap();
+
+    let (_, _, ctx) = edge_of(&r, "handled_by").expect("handled_by edge");
+    assert_eq!(ctx.as_deref(), Some("ANY"));
+}
+
+#[cfg(feature = "lang-php")]
+#[test]
+fn a_symfony_mapped_parameter_keeps_only_its_placeholder_name() {
+    // Symfony 7 allows `{slug:post}`, mapping the slug onto an entity. The URL
+    // segment is still `{slug}`; the type must not leak into the route.
+    let src = br#"<?php
+use Symfony\Component\Routing\Attribute\Route;
+
+class BlogController
+{
+    #[Route('/posts/{slug:post}', methods: ['GET'])]
+    public function show(): Response
+    {
+        return new Response();
+    }
+}
+"#;
+    let r = extract_source("src/Controller/BlogController.php", src).unwrap();
+
+    assert!(
+        r.nodes.iter().any(|n| n.label == "/posts/{slug}"),
+        "mapped parameter must reduce to its name, got {:?}",
+        r.nodes.iter().map(|n| &n.label).collect::<Vec<_>>()
+    );
+}
+
+#[cfg(feature = "lang-php")]
+#[test]
+fn a_commented_out_php_route_is_still_ignored() {
+    // `#` remains a PHP line comment; only `#[` opens an attribute. Masking
+    // must keep ignoring genuinely commented-out routes.
+    let src = br#"<?php
+class C
+{
+    # Route::get('/commented-out');
+    // Route::post('/also-commented');
+    public function noop(): void {}
+}
+"#;
+    let r = extract_source("src/C.php", src).unwrap();
+
+    assert!(
+        !r.nodes.iter().any(|n| n.label.contains("commented")),
+        "commented-out routes must stay masked, got {:?}",
+        r.nodes.iter().map(|n| &n.label).collect::<Vec<_>>()
+    );
+}

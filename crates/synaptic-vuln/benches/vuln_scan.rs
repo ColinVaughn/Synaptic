@@ -127,6 +127,8 @@ fn bench_scan(criterion: &mut Criterion) {
                         source: &source,
                         policy: None,
                         usage: &NoUsageEvidence,
+                        reach: None,
+                        impact: None,
                         validation_commands: Vec::new(),
                         today: "2026-08-06".into(),
                         covered_ecosystems: [Ecosystem::Cargo].into_iter().collect(),

@@ -875,6 +875,7 @@ synaptic vuln scan   [--root <DIR>] [--advisories <DIR>] [--graph <FILE>]
                      [--fail-on <p0|p1|p2|p3>] [--json]
 synaptic vuln findings [--root <DIR>] [--state <STATE>] [--json]
 synaptic vuln explain  <FINDING_ID> [--root <DIR>] [--json]
+synaptic vuln brief    <FINDING_ID> [--root <DIR>] [--graph <FILE>] [--json]
 synaptic vuln check    <PACKAGE> [--version <V>] [--advisories <DIR>]
                        [--offline] [--root <DIR>] [--json]
 synaptic vuln accept   <FINDING_ID> --reason <TEXT> --until <YYYY-MM-DD>
@@ -892,6 +893,11 @@ Options:
   ecosystems whose bulk export is too large to download. Off by default: a scan
   discloses the whole dependency list, and the export does not.
 - `--record`: persist findings to the ledger under `.synaptic/vuln/findings/`.
+- `brief`: convert a recorded applicable finding with a recommended upgrade
+  version into the bounded repair brief consumed by the API-maintenance repair
+  workflow. It reads `<ROOT>/synaptic-out/graph.json` by default; use `--graph`
+  to select a different snapshot. It refuses unproven findings and advisories
+  without a fixed version rather than generating a speculative repair request.
 - `--fail-on <priority>`: exit non-zero when any finding is at or above it,
   which is what makes the command usable as a CI gate.
 - `--max-bytes <N>` (sync): raise the auto-download limit. npm's export is about

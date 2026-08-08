@@ -1094,6 +1094,18 @@ pub(crate) enum VulnAction {
         #[arg(long)]
         json: bool,
     },
+    /// Hand a finding to the repair loop as a generation-ready brief.
+    Brief {
+        /// Finding id from `vuln scan --record` or `vuln findings`.
+        finding: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Graph snapshot (default: <root>/synaptic-out/graph.json when present).
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Ask whether a package is safe to use, and at what version.
     Check {
         /// Package coordinate, for example `cargo:serde` or `npm:@acme/sdk`.

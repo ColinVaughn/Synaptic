@@ -207,9 +207,11 @@ you want Synaptic to preserve history or maintain external contracts.
   a repository across 12 package ecosystems, matches resolved versions against an
   OSV corpus, and decides whether each advisory actually applies here rather than
   stopping at a version match. Findings carry an evidence ladder, a dependency
-  path, a CVSS-derived priority and a remediation plan; accepted risks are
-  time-boxed and expire on their own. Three MCP tools let assistants check a
-  package before writing it into a manifest. Analysis makes no network calls. See
+  path, a CVSS-derived priority, graph-backed call sites and entry-point
+  exposure, and a remediation plan; applicable findings with a fixed target can
+  become bounded generation-ready repair briefs. Accepted risks are time-boxed
+  and expire on their own. Three MCP tools let assistants check a package before
+  writing it into a manifest. Analysis makes no network calls. See
   [Vulnerability Management](https://github.com/ColinVaughn/Synaptic/wiki/Vulnerability-Management).
 - **Incremental rebuilds**, file watching, and git hooks keep the graph current. See
   [Incremental Updates](https://github.com/ColinVaughn/Synaptic/wiki/Incremental-Updates).

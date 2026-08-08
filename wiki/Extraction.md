@@ -76,6 +76,12 @@ Vue/Svelte/Astro), Go, Rust, Java/Kotlin, C#, PHP, Ruby, C/C++, and shell — so
 impact analysis traverses language boundaries. See
 [Cross-Language-Edges](Cross-Language-Edges) for the full model.
 
+HTTP boundary discovery includes framework-declared routes as well as routes
+whose URL comes from source layout: Next.js App Router and Pages Router,
+Supabase/Deno edge functions, and Symfony `#[Route]` attributes. Their handlers
+are emitted as `handled_by` edges, so the same graph evidence can establish
+vulnerability exposure from an externally reachable entry point.
+
 [architectural search]: Commands
 [time-travel]: Commands
 

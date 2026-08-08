@@ -10,6 +10,44 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-08-08
+
+### Added
+
+- **Graph-backed vulnerability exposure evidence.** A vulnerability finding now
+  names the concrete first-party call sites that reach its affected package
+  members, the inbound HTTP, WebSocket, gRPC, queue, or CLI entry points that
+  reach those calls, and the files to review after an upgrade. When available,
+  its remediation scope also includes the change forecaster's dependent-symbol
+  count, public API touched, and targeted tests. An absent graph is explicitly
+  marked as unmeasured; an empty static result is never presented as proof that
+  the dependency is unused.
+
+- **Generation-ready remediation briefs.** `synaptic vuln brief <finding>`
+  turns a recorded, applicable finding with a fixed upgrade target into the
+  bounded repair input used by the API-maintenance workflow. The brief carries
+  the advisory evidence, observed SDK call sites, permitted files, and
+  verification gates; `--json` emits the complete hand-off artifact. Findings
+  that are not proven applicable, or that lack a fixed version, are refused
+  rather than asking an agent to invent a remediation.
+
+- **More served HTTP boundaries.** Cross-language extraction recognizes Next.js
+  App Router and Pages Router endpoints, Supabase/Deno edge functions, and
+  Symfony `#[Route]` attributes (including class prefixes, verb lists, dynamic
+  parameters, route groups, and catch-alls). Those handlers now participate in
+  service-boundary impact and in vulnerability entry-point evidence.
+
+### Fixed
+
+- **Non-SemVer package versions are compared conservatively.** Version matching
+  now normalizes common package-manager spellings: `v`-prefixed tags,
+  PEP 440/RubyGems attached pre-releases, and zero-padded components. Versions
+  with no faithful SemVer ordering, such as four-component RubyGems releases,
+  remain undetermined instead of being guessed unaffected. Nested import paths
+  now also map back to their declared package without matching similarly named
+  siblings, restoring call-site evidence for Go modules and JavaScript deep
+  imports.
+
 ## [0.9.2] - 2026-08-07
 
 ### Added
@@ -1939,7 +1977,8 @@ parameters), and `graph.json` gains only additive edge keys.
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/ColinVaughn/Synaptic/compare/v0.8.0...v0.9.0

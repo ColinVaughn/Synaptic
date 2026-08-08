@@ -15,6 +15,8 @@ blake3 = { workspace = true }
 semver = { workspace = true }
 synaptic-api = { workspace = true }
 synaptic-core = { workspace = true }
+synaptic-graph = { workspace = true }
+synaptic-predict = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
 zip = { workspace = true }
 serde_norway = { workspace = true }

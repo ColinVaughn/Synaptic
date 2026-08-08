@@ -19,6 +19,8 @@ mod matching;
 mod osv_api;
 mod plan;
 mod policy;
+mod reach;
+mod repair;
 mod scan;
 mod severity;
 mod source;
@@ -57,6 +59,11 @@ pub use plan::{
     VersionAvailability,
 };
 pub use policy::{DenyRule, ExceptionRule, PinRule, PolicyError, VulnPolicy, DEFAULT_POLICY_PATH};
+pub use reach::{
+    remediation_scope, CallSite, EntryPoint, EntryPointKind, ImpactForecast, ImpactIndex,
+    ReachIndex, RemediationScope,
+};
+pub use repair::{repair_inputs, RepairInputs};
 pub use scan::{
     advisories_for, is_sbom_source, scan, EcosystemCoverage, GraphUsageOracle, NoUsageEvidence,
     ScanError, ScanReport, ScanRequest, SuppressedFinding, UsageOracle,

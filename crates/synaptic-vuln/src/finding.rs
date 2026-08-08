@@ -4,6 +4,7 @@ use synaptic_api::PackageCoordinate;
 use crate::applicability::ApplicabilityVerdict;
 use crate::lockgraph::PackageKey;
 use crate::plan::RemediationPlan;
+use crate::reach::{CallSite, EntryPoint, RemediationScope};
 use crate::severity::{Priority, SeverityAssessment};
 
 /// One vulnerability, as it applies to one resolved package in one repository.
@@ -29,6 +30,19 @@ pub struct Finding {
     pub remediation: RemediationPlan,
     #[serde(default)]
     pub references: Vec<String>,
+    /// Concrete first-party locations that reach the vulnerable package.
+    ///
+    /// Empty means none were shown, which happens both when nothing calls the
+    /// package and when no graph was available. Read `scope.graph_backed`
+    /// before concluding anything from emptiness.
+    #[serde(default)]
+    pub call_sites: Vec<CallSite>,
+    /// Inbound surfaces shown to reach a call site.
+    #[serde(default)]
+    pub entry_points: Vec<EntryPoint>,
+    /// How much first-party code the remediation puts in scope for review.
+    #[serde(default)]
+    pub scope: RemediationScope,
 }
 
 impl Finding {

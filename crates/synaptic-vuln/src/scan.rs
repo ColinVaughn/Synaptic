@@ -11,6 +11,7 @@ use crate::lockgraph::{PackageGraph, PackageKey, PackageScope, ResolvedPackage};
 use crate::matching::{match_version, VersionMatch};
 use crate::plan::plan_remediation;
 use crate::policy::VulnPolicy;
+use crate::reach::{parse_line, remediation_scope, CallSite, ImpactIndex, ReachIndex};
 use crate::severity::{assess_severity, prioritize, PriorityInputs};
 use crate::source::{AdvisorySource, SourceDescription};
 
@@ -32,6 +33,16 @@ pub trait UsageOracle {
 
     /// Whether dynamic dispatch or reflection makes reachability unreliable.
     fn dynamic_hazard(&self, package: &PackageCoordinate) -> bool;
+
+    /// Concrete places first-party code reaches the advisory's named members.
+    ///
+    /// Defaulted to empty so an oracle with no graph behind it, and any
+    /// out-of-tree implementation, keeps compiling. Reporting no sites is
+    /// always safe: sites are corroborating detail, never a dismissal.
+    fn call_sites(&self, package: &PackageCoordinate, candidates: &[String]) -> Vec<CallSite> {
+        let _ = (package, candidates);
+        Vec::new()
+    }
 }
 
 /// The oracle used when no graph is available.
@@ -60,7 +71,15 @@ impl UsageOracle for NoUsageEvidence {
 }
 
 /// One stub member of a package, and what the graph says about reaching it.
-type MemberUsage = (String, bool, bool);
+#[derive(Debug, Clone, Default)]
+struct MemberUsage {
+    member: String,
+    used: bool,
+    hazard: bool,
+    /// Concrete first-party locations that reach this member, deduplicated and
+    /// ordered by file then line so a scan is reproducible.
+    sites: Vec<CallSite>,
+}
 
 /// Reads usage signals out of a Synaptic graph.
 ///
@@ -102,7 +121,12 @@ impl GraphUsageOracle {
         // Reachability is keyed on the package as well as the member, because
         // two packages can expose a member of the same name and one being
         // reached says nothing about the other.
-        let mut reached: BTreeMap<(&str, &str), (bool, bool)> = BTreeMap::new();
+        //
+        // The edge also carries the concrete locations that produced it, which
+        // is the only place a call site exists: the stub node has no file and
+        // the source node names the enclosing symbol, not the line. Dropping
+        // the edge here is what left findings unable to say where to look.
+        let mut reached: BTreeMap<(&str, &str), (bool, bool, Vec<CallSite>)> = BTreeMap::new();
         for edge in &graph.links {
             let Some((key, member)) = stub_nodes.get(edge.target.0.as_str()) else {
                 continue;
@@ -115,32 +139,69 @@ impl GraphUsageOracle {
             }
             let entry = reached
                 .entry((key.as_str(), member.as_str()))
-                .or_insert((false, false));
+                .or_insert_with(|| (false, false, Vec::new()));
             entry.0 = true;
             entry.1 |= source.dynamically_referenced();
+            for site in edge.sites() {
+                // An edge site can omit the file even when it has a line. The
+                // enclosing symbol's own file is the correct fallback; without
+                // either there is nothing actionable to report.
+                let file = if site.source_file.is_empty() {
+                    source.source_file.clone()
+                } else {
+                    site.source_file.clone()
+                };
+                if file.is_empty() {
+                    continue;
+                }
+                entry.2.push(CallSite {
+                    symbol: source.label.clone(),
+                    symbol_id: source.id.0.clone(),
+                    file,
+                    line: parse_line(site.source_location.as_deref()),
+                    member: member.clone(),
+                });
+            }
         }
 
         let mut stubs: BTreeMap<String, Vec<MemberUsage>> = BTreeMap::new();
         for (key, member) in stub_nodes.values() {
-            let (used, hazard) = reached
+            let (used, hazard, mut sites) = reached
                 .get(&(key.as_str(), member.as_str()))
-                .copied()
-                .unwrap_or((false, false));
-            stubs
-                .entry(key.clone())
-                .or_default()
-                .push((member.clone(), used, hazard));
+                .cloned()
+                .unwrap_or((false, false, Vec::new()));
+            sort_call_sites(&mut sites);
+            stubs.entry(key.clone()).or_default().push(MemberUsage {
+                member: member.clone(),
+                used,
+                hazard,
+                sites,
+            });
         }
         Self { stubs }
     }
 
     /// SDK stub members for a package, paired with whether first-party code
     /// reaches them.
-    fn stub_usage(&self, package: &PackageCoordinate) -> &[MemberUsage] {
+    ///
+    /// Matches the package itself and any import path nested inside it. A
+    /// manifest names a distributable unit while source names an importable
+    /// one, and in several ecosystems those differ: Go advisories say
+    /// `golang.org/x/net` where source imports `golang.org/x/net/http2/h2c`,
+    /// and npm deep imports read `lodash/merge`. Containment is required to
+    /// stop on a path separator, so `golang.org/x/net` does not swallow
+    /// `golang.org/x/nettools`.
+    fn stub_usage(&self, package: &PackageCoordinate) -> Vec<&MemberUsage> {
+        let key = package_key(package.ecosystem.as_str(), &package.name);
+        let nested = format!("{key}/");
         self.stubs
-            .get(&package_key(package.ecosystem.as_str(), &package.name))
-            .map(Vec::as_slice)
-            .unwrap_or_default()
+            // Every candidate starts with the key, so the range is a tight
+            // upper bound; the filter then enforces the segment boundary.
+            .range(key.clone()..)
+            .take_while(|(candidate, _)| candidate.starts_with(&key))
+            .filter(|(candidate, _)| **candidate == key || candidate.starts_with(&nested))
+            .flat_map(|(_, members)| members.iter())
+            .collect()
     }
 }
 
@@ -156,7 +217,7 @@ fn package_key(ecosystem: &str, name: &str) -> String {
 
 impl UsageOracle for GraphUsageOracle {
     fn first_party_usage(&self, package: &PackageCoordinate) -> bool {
-        self.stub_usage(package).iter().any(|(_, used, _)| *used)
+        self.stub_usage(package).iter().any(|usage| usage.used)
     }
 
     fn reachable_functions(
@@ -169,19 +230,60 @@ impl UsageOracle for GraphUsageOracle {
             .iter()
             .filter(|candidate| {
                 let wanted = final_segment(candidate);
-                reached.iter().any(|(member, used, _)| {
-                    *used && final_segment(member).eq_ignore_ascii_case(&wanted)
-                })
+                reached
+                    .iter()
+                    .any(|usage| usage.used && member_matches(&usage.member, &wanted))
             })
             .cloned()
             .collect()
     }
 
     fn dynamic_hazard(&self, package: &PackageCoordinate) -> bool {
-        self.stub_usage(package)
-            .iter()
-            .any(|(_, _, hazard)| *hazard)
+        self.stub_usage(package).iter().any(|usage| usage.hazard)
     }
+
+    fn call_sites(&self, package: &PackageCoordinate, candidates: &[String]) -> Vec<CallSite> {
+        let wanted: Vec<String> = candidates.iter().map(|name| final_segment(name)).collect();
+        // An advisory that names no functions cannot narrow the exposure, so
+        // every reached member is in scope. Narrowing to nothing instead would
+        // leave most findings with no location at all, since naming functions
+        // is the exception across advisory databases.
+        let unnarrowed = wanted.is_empty();
+        let mut sites: Vec<CallSite> = self
+            .stub_usage(package)
+            .iter()
+            .filter(|usage| {
+                usage.used
+                    && (unnarrowed
+                        || wanted
+                            .iter()
+                            .any(|candidate| member_matches(&usage.member, candidate)))
+            })
+            .flat_map(|usage| usage.sites.iter().cloned())
+            .collect();
+        sort_call_sites(&mut sites);
+        sites
+    }
+}
+
+/// Whether a stub member answers to an advisory-named function.
+fn member_matches(member: &str, wanted_final_segment: &str) -> bool {
+    final_segment(member).eq_ignore_ascii_case(wanted_final_segment)
+}
+
+/// Order call sites by location and drop exact duplicates.
+///
+/// Two edges can report the same line (one per relation kind), and a scan that
+/// listed a location twice would overstate the exposure.
+fn sort_call_sites(sites: &mut Vec<CallSite>) {
+    sites.sort_by(|left, right| {
+        left.file
+            .cmp(&right.file)
+            .then(left.line.cmp(&right.line))
+            .then(left.symbol.cmp(&right.symbol))
+            .then(left.member.cmp(&right.member))
+    });
+    sites.dedup();
 }
 
 /// `Sdk: cargo:serde_json#Value.get` -> (`cargo`, `serde_json`, `Value.get`).
@@ -231,6 +333,13 @@ pub struct ScanRequest<'a> {
     pub source: &'a dyn AdvisorySource,
     pub policy: Option<&'a VulnPolicy>,
     pub usage: &'a dyn UsageOracle,
+    /// Reverse-reachability index, when a graph is available. `None` leaves
+    /// findings without entry-point evidence rather than claiming there is
+    /// none.
+    pub reach: Option<&'a ReachIndex>,
+    /// Reverse-impact index for forecasting an upgrade. `None` leaves the
+    /// scope without a forecast rather than reporting an empty one.
+    pub impact: Option<&'a ImpactIndex>,
     pub validation_commands: Vec<String>,
     /// Today's date as `YYYY-MM-DD`, used to expire policy exceptions.
     pub today: String,
@@ -472,6 +581,31 @@ pub fn scan(request: &ScanRequest) -> Result<ScanReport, ScanError> {
                 let reachable_functions = request
                     .usage
                     .reachable_functions(package, &advisory_functions);
+                // Where the reaching actually happens. Gathered here rather
+                // than after the verdict because a `ReviewRequired` finding is
+                // exactly the one a reviewer needs the locations for.
+                let call_sites = request.usage.call_sites(package, &advisory_functions);
+                let entry_points = request
+                    .reach
+                    .map(|index| index.entry_points(&call_sites))
+                    .unwrap_or_default();
+                // Forecast from the calling symbols, so the blast radius is the
+                // one this upgrade actually carries rather than the package's
+                // whole dependent set.
+                let seed_ids: Vec<String> = call_sites
+                    .iter()
+                    .map(|site| site.symbol_id.clone())
+                    .collect();
+                let impact = request
+                    .impact
+                    .filter(|_| !seed_ids.is_empty())
+                    .map(|index| index.forecast(&seed_ids));
+                let scope = remediation_scope(
+                    &call_sites,
+                    &entry_points,
+                    impact.as_ref(),
+                    request.reach.is_some(),
+                );
                 // Reachability now comes from the resolved graph: a package is
                 // development-only when the lockfile says so outright, or when
                 // every path to it from a root runs through something a
@@ -560,6 +694,9 @@ pub fn scan(request: &ScanRequest) -> Result<ScanReport, ScanError> {
                         &request.validation_commands,
                     ),
                     references: advisory.references.clone(),
+                    call_sites,
+                    entry_points,
+                    scope,
                 });
             }
         }
@@ -638,6 +775,54 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
         ]
     }"#;
 
+    /// Same advisory, but naming the vulnerable function so reachability and
+    /// call sites can be decided from it.
+    const LEAF_ADVISORY_WITH_FUNCTIONS: &str = r#"{
+        "id": "RUSTSEC-2026-0001",
+        "summary": "leaf is vulnerable",
+        "severity": [
+            { "type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H" }
+        ],
+        "affected": [
+            {
+                "package": { "ecosystem": "crates.io", "name": "leaf" },
+                "ranges": [
+                    { "type": "SEMVER", "events": [{ "introduced": "0" }, { "fixed": "0.9.20" }] }
+                ],
+                "ecosystem_specific": { "affects": { "functions": ["leaf::parse"] } }
+            }
+        ]
+    }"#;
+
+    /// A graph where an HTTP route reaches `leaf::parse` through one handler.
+    fn reaching_graph() -> GraphData {
+        let mut route = source_node("route_items", false);
+        route.label = "/items".into();
+        route.source_file = String::new();
+        route
+            .extra
+            .insert("_node_type".into(), "route".to_string().into());
+        let mut handler = source_node("handle_items", false);
+        handler.label = "handle_items()".into();
+        handler.source_file = "src/api.rs".into();
+
+        graph_with(
+            vec![
+                stub_node("s_parse", "Sdk: cargo:leaf#parse"),
+                route,
+                handler,
+            ],
+            vec![
+                {
+                    let mut edge = edge("route_items", "handle_items");
+                    edge.relation = "handled_by".into();
+                    edge
+                },
+                edge_at("handle_items", "s_parse", "src/api.rs", Some("L31")),
+            ],
+        )
+    }
+
     fn corpus(documents: &[&str]) -> LocalDirSource {
         LocalDirSource::from_advisories(
             "test-corpus",
@@ -666,6 +851,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             source,
             policy,
             usage,
+            reach: None,
+            impact: None,
             validation_commands: vec!["cargo test".into()],
             today: "2026-08-05".into(),
             covered_ecosystems: [Ecosystem::Cargo].into_iter().collect(),
@@ -723,12 +910,219 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
         }
     }
 
+    fn edge_at(
+        source: &str,
+        target: &str,
+        file: &str,
+        location: Option<&str>,
+    ) -> synaptic_core::Edge {
+        let mut edge = edge(source, target);
+        edge.source_file = file.into();
+        edge.source_location = location.map(Into::into);
+        edge
+    }
+
     fn graph_with(nodes: Vec<synaptic_core::Node>, links: Vec<synaptic_core::Edge>) -> GraphData {
         GraphData {
             nodes,
             links,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_reached_member_reports_the_call_site_that_reached_it() {
+        let graph = graph_with(
+            vec![
+                stub_node("s1", "Sdk: cargo:serde#Value.get"),
+                source_node("caller", false),
+            ],
+            vec![edge_at("caller", "s1", "src/handler.rs", Some("L42"))],
+        );
+        let oracle = GraphUsageOracle::new(&graph);
+
+        let sites = oracle.call_sites(
+            &PackageCoordinate::new(Ecosystem::Cargo, "serde"),
+            &["serde::Value::get".to_string()],
+        );
+
+        assert_eq!(sites.len(), 1, "expected one call site, got {sites:?}");
+        assert_eq!(sites[0].file, "src/handler.rs");
+        assert_eq!(sites[0].line, Some(42));
+        assert_eq!(sites[0].symbol, "caller");
+        assert_eq!(sites[0].member, "Value.get");
+    }
+
+    #[test]
+    fn an_advisory_naming_no_functions_reports_every_site_touching_the_package() {
+        // Most advisories name no functions at all. Returning nothing here
+        // would leave the overwhelming majority of findings with no location
+        // to review, so an empty candidate list means "wherever it is used".
+        let graph = graph_with(
+            vec![
+                stub_node("s1", "Sdk: cargo:serde#Value.get"),
+                stub_node("s2", "Sdk: cargo:serde#from_str"),
+                source_node("caller", false),
+            ],
+            vec![
+                edge_at("caller", "s1", "src/a.rs", Some("L1")),
+                edge_at("caller", "s2", "src/b.rs", Some("L2")),
+            ],
+        );
+        let oracle = GraphUsageOracle::new(&graph);
+
+        let sites = oracle.call_sites(&PackageCoordinate::new(Ecosystem::Cargo, "serde"), &[]);
+
+        let files: Vec<_> = sites.iter().map(|site| site.file.as_str()).collect();
+        assert_eq!(files, vec!["src/a.rs", "src/b.rs"], "got {sites:?}");
+    }
+
+    #[test]
+    fn an_unreached_package_reports_no_sites_even_with_no_named_functions() {
+        let graph = graph_with(
+            vec![stub_node("s1", "Sdk: cargo:serde#Value.get")],
+            Vec::new(),
+        );
+        let oracle = GraphUsageOracle::new(&graph);
+
+        let sites = oracle.call_sites(&PackageCoordinate::new(Ecosystem::Cargo, "serde"), &[]);
+
+        assert!(sites.is_empty(), "unused package reported sites: {sites:?}");
+    }
+
+    #[test]
+    fn a_member_the_advisory_does_not_name_reports_no_call_site() {
+        let graph = graph_with(
+            vec![
+                stub_node("s1", "Sdk: cargo:serde#Value.get"),
+                source_node("caller", false),
+            ],
+            vec![edge_at("caller", "s1", "src/handler.rs", Some("L42"))],
+        );
+        let oracle = GraphUsageOracle::new(&graph);
+
+        let sites = oracle.call_sites(
+            &PackageCoordinate::new(Ecosystem::Cargo, "serde"),
+            &["serde::Value::take".to_string()],
+        );
+
+        assert!(sites.is_empty(), "unrelated member matched: {sites:?}");
+    }
+
+    #[test]
+    fn call_sites_are_reported_once_per_distinct_location() {
+        let graph = graph_with(
+            vec![
+                stub_node("s1", "Sdk: cargo:serde#Value.get"),
+                source_node("caller", false),
+            ],
+            vec![
+                edge_at("caller", "s1", "src/handler.rs", Some("L42")),
+                edge_at("caller", "s1", "src/handler.rs", Some("L42")),
+                edge_at("caller", "s1", "src/handler.rs", Some("L99")),
+            ],
+        );
+        let oracle = GraphUsageOracle::new(&graph);
+
+        let sites = oracle.call_sites(
+            &PackageCoordinate::new(Ecosystem::Cargo, "serde"),
+            &["Value.get".to_string()],
+        );
+
+        let lines: Vec<_> = sites.iter().map(|site| site.line).collect();
+        assert_eq!(lines, vec![Some(42), Some(99)], "got {sites:?}");
+    }
+
+    #[test]
+    fn a_stub_reached_only_from_another_stub_reports_no_call_site() {
+        let graph = graph_with(
+            vec![
+                stub_node("s1", "Sdk: cargo:serde#Value.get"),
+                stub_node("s2", "Sdk: cargo:other#thing"),
+            ],
+            vec![edge_at("s2", "s1", "", Some("L42"))],
+        );
+        let oracle = GraphUsageOracle::new(&graph);
+
+        let sites = oracle.call_sites(
+            &PackageCoordinate::new(Ecosystem::Cargo, "serde"),
+            &["Value.get".to_string()],
+        );
+
+        assert!(
+            sites.is_empty(),
+            "a stub-to-stub edge is not first-party evidence: {sites:?}"
+        );
+    }
+
+    #[test]
+    fn a_module_matches_a_stub_under_one_of_its_import_paths() {
+        // Go advisories and lockfiles name the MODULE (`golang.org/x/net`),
+        // while source imports name a PACKAGE inside it
+        // (`golang.org/x/net/http2/h2c`). Comparing them exactly hid every Go
+        // call site: observed live in gin, where `.Handler()` calls
+        // `h2c.NewHandler` at gin.go:249 against a vulnerable x/net.
+        let graph = graph_with(
+            vec![
+                stub_node("s1", "Sdk: go:golang.org/x/net/http2/h2c#NewHandler"),
+                source_node("caller", false),
+            ],
+            vec![edge_at("caller", "s1", "gin.go", Some("L249"))],
+        );
+        let oracle = GraphUsageOracle::new(&graph);
+        let package = PackageCoordinate::new(Ecosystem::Go, "golang.org/x/net");
+
+        assert!(
+            oracle.first_party_usage(&package),
+            "a module's import path must count as usage of the module"
+        );
+        let sites = oracle.call_sites(&package, &[]);
+        assert_eq!(sites.len(), 1, "got {sites:?}");
+        assert_eq!(sites[0].file, "gin.go");
+        assert_eq!(sites[0].line, Some(249));
+    }
+
+    #[test]
+    fn a_module_does_not_match_a_similarly_named_sibling_module() {
+        // `golang.org/x/net` must not swallow `golang.org/x/nettools`. Only a
+        // path-segment boundary counts as containment.
+        let graph = graph_with(
+            vec![
+                stub_node("s1", "Sdk: go:golang.org/x/nettools#Dial"),
+                source_node("caller", false),
+            ],
+            vec![edge_at("caller", "s1", "main.go", Some("L1"))],
+        );
+        let oracle = GraphUsageOracle::new(&graph);
+
+        assert!(
+            !oracle.first_party_usage(&PackageCoordinate::new(Ecosystem::Go, "golang.org/x/net")),
+            "a prefix without a path boundary is a different module"
+        );
+    }
+
+    #[test]
+    fn an_exact_package_match_still_wins_when_subpaths_also_exist() {
+        let graph = graph_with(
+            vec![
+                stub_node("s1", "Sdk: go:golang.org/x/net#Exact"),
+                stub_node("s2", "Sdk: go:golang.org/x/net/http2#Sub"),
+                source_node("caller", false),
+            ],
+            vec![
+                edge_at("caller", "s1", "a.go", Some("L1")),
+                edge_at("caller", "s2", "b.go", Some("L2")),
+            ],
+        );
+        let oracle = GraphUsageOracle::new(&graph);
+
+        let sites = oracle.call_sites(
+            &PackageCoordinate::new(Ecosystem::Go, "golang.org/x/net"),
+            &[],
+        );
+
+        let files: Vec<_> = sites.iter().map(|site| site.file.as_str()).collect();
+        assert_eq!(files, vec!["a.go", "b.go"], "got {sites:?}");
     }
 
     #[test]
@@ -871,6 +1265,92 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 
         assert!(!oracle.first_party_usage(&PackageCoordinate::new(Ecosystem::Cargo, "absent")));
         assert!(!oracle.dynamic_hazard(&PackageCoordinate::new(Ecosystem::Cargo, "absent")));
+    }
+
+    #[test]
+    fn a_finding_reports_the_call_site_that_reaches_the_vulnerable_function() {
+        let source = corpus(&[LEAF_ADVISORY_WITH_FUNCTIONS]);
+        let graph = reaching_graph();
+        let oracle = GraphUsageOracle::new(&graph);
+        let index = ReachIndex::new(&graph);
+        let packages = graph_of(LOCK);
+        let mut req = request(&source, &oracle, None, &[], &packages);
+        req.reach = Some(&index);
+
+        let report = scan(&req).unwrap();
+
+        let finding = &report.findings[0];
+        assert_eq!(finding.call_sites.len(), 1, "got {:?}", finding.call_sites);
+        assert_eq!(finding.call_sites[0].file, "src/api.rs");
+        assert_eq!(finding.call_sites[0].line, Some(31));
+        assert_eq!(finding.call_sites[0].symbol, "handle_items()");
+    }
+
+    #[test]
+    fn a_finding_reports_the_route_that_reaches_the_call_site() {
+        let source = corpus(&[LEAF_ADVISORY_WITH_FUNCTIONS]);
+        let graph = reaching_graph();
+        let oracle = GraphUsageOracle::new(&graph);
+        let index = ReachIndex::new(&graph);
+        let packages = graph_of(LOCK);
+        let mut req = request(&source, &oracle, None, &[], &packages);
+        req.reach = Some(&index);
+
+        let report = scan(&req).unwrap();
+
+        let finding = &report.findings[0];
+        assert_eq!(
+            finding.entry_points.len(),
+            1,
+            "got {:?}",
+            finding.entry_points
+        );
+        assert_eq!(finding.entry_points[0].label, "/items");
+        assert_eq!(
+            finding.entry_points[0].path,
+            vec!["/items", "handle_items()"]
+        );
+    }
+
+    #[test]
+    fn a_finding_reports_the_files_its_remediation_puts_in_scope() {
+        let source = corpus(&[LEAF_ADVISORY_WITH_FUNCTIONS]);
+        let graph = reaching_graph();
+        let oracle = GraphUsageOracle::new(&graph);
+        let index = ReachIndex::new(&graph);
+        let packages = graph_of(LOCK);
+        let mut req = request(&source, &oracle, None, &[], &packages);
+        req.reach = Some(&index);
+
+        let report = scan(&req).unwrap();
+
+        let scope = &report.findings[0].scope;
+        assert!(scope.graph_backed);
+        assert_eq!(scope.review_files, vec!["src/api.rs"]);
+        assert_eq!(scope.calling_symbols, 1);
+        assert_eq!(scope.exposed_entry_points, 1);
+    }
+
+    #[test]
+    fn a_scan_without_a_graph_marks_its_scope_as_unmeasured() {
+        // The absence of call sites here is ignorance, not a clean bill of
+        // health, and the report has to be able to tell the two apart.
+        let source = corpus(&[LEAF_ADVISORY_WITH_FUNCTIONS]);
+        let report = scan(&request(
+            &source,
+            &NoUsageEvidence,
+            None,
+            &[],
+            &graph_of(LOCK),
+        ))
+        .unwrap();
+
+        let finding = &report.findings[0];
+        assert!(finding.call_sites.is_empty());
+        assert!(
+            !finding.scope.graph_backed,
+            "an unmeasured scope must not look measured"
+        );
     }
 
     #[test]
@@ -1071,6 +1551,8 @@ approved_by = "security-review"
             source: &source,
             policy: Some(&policy),
             usage: &NoUsageEvidence,
+            reach: None,
+            impact: None,
             validation_commands: Vec::new(),
             today: "2026-08-06".into(),
             covered_ecosystems: [Ecosystem::Cargo].into_iter().collect(),
@@ -1093,6 +1575,8 @@ approved_by = "security-review"
             source: &source,
             policy: None,
             usage: &NoUsageEvidence,
+            reach: None,
+            impact: None,
             validation_commands: Vec::new(),
             today: "2026-08-06".into(),
             covered_ecosystems: [Ecosystem::Cargo].into_iter().collect(),

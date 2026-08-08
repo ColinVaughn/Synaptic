@@ -297,6 +297,9 @@ mod tests {
                 notes: Vec::new(),
             },
             references: Vec::new(),
+            call_sites: Vec::new(),
+            entry_points: Vec::new(),
+            scope: Default::default(),
         }
     }
 

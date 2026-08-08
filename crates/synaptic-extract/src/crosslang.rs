@@ -1649,6 +1649,48 @@ fn join_sdk_member(prefix: &str, suffix: &str) -> String {
     }
 }
 
+/// Reduce a JavaScript import specifier to the package it names.
+///
+/// Deno and edge runtimes address packages by scheme (`npm:pkg@1.2.3`,
+/// `jsr:@scope/pkg`) or by CDN URL (`https://esm.sh/pkg@14?target=deno`).
+/// Left raw, those never match a lockfile entry, so every call site inside a
+/// Supabase edge function was invisible to dependency analysis. A URL that is
+/// not a known npm CDN is returned unchanged, because it names a module on the
+/// web rather than a published package.
+fn js_package_coordinate(specifier: &str) -> String {
+    const CDN_PREFIXES: &[&str] = &[
+        "https://esm.sh/",
+        "http://esm.sh/",
+        "https://cdn.skypack.dev/",
+        "https://unpkg.com/",
+        "https://cdn.jsdelivr.net/npm/",
+    ];
+    let trimmed = specifier.trim();
+    let mut rest = trimmed;
+    for scheme in ["npm:", "jsr:"] {
+        if let Some(stripped) = rest.strip_prefix(scheme) {
+            rest = stripped;
+            break;
+        }
+    }
+    for prefix in CDN_PREFIXES {
+        if let Some(stripped) = rest.strip_prefix(prefix) {
+            rest = stripped;
+            break;
+        }
+    }
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    if rest.contains("://") {
+        return trimmed.to_string();
+    }
+    // Strip a trailing `@version`, but never the `@` that opens a scope.
+    let scope_offset = usize::from(rest.starts_with('@'));
+    match rest[scope_offset..].find('@') {
+        Some(index) => rest[..scope_offset + index].to_string(),
+        None => rest.to_string(),
+    }
+}
+
 fn collect_js_sdk_aliases(text: &str, aliases: &mut HashMap<String, SdkAlias>) {
     static DEFAULT: OnceLock<Regex> = OnceLock::new();
     let default_re = DEFAULT.get_or_init(|| {
@@ -1677,7 +1719,7 @@ fn collect_js_sdk_aliases(text: &str, aliases: &mut HashMap<String, SdkAlias>) {
             aliases.insert(
                 captures[1].to_string(),
                 SdkAlias {
-                    coordinate: package.to_string(),
+                    coordinate: js_package_coordinate(package),
                     imported_prefix: None,
                     direct_member: Some("default".to_string()),
                 },
@@ -1690,7 +1732,7 @@ fn collect_js_sdk_aliases(text: &str, aliases: &mut HashMap<String, SdkAlias>) {
             aliases.insert(
                 captures[1].to_string(),
                 SdkAlias {
-                    coordinate: package.to_string(),
+                    coordinate: js_package_coordinate(package),
                     imported_prefix: None,
                     direct_member: None,
                 },
@@ -1703,7 +1745,7 @@ fn collect_js_sdk_aliases(text: &str, aliases: &mut HashMap<String, SdkAlias>) {
             aliases.insert(
                 captures[1].to_string(),
                 SdkAlias {
-                    coordinate: package.to_string(),
+                    coordinate: js_package_coordinate(package),
                     imported_prefix: None,
                     direct_member: Some("default".to_string()),
                 },
@@ -1729,7 +1771,7 @@ fn collect_js_sdk_aliases(text: &str, aliases: &mut HashMap<String, SdkAlias>) {
             aliases.insert(
                 local.to_string(),
                 SdkAlias {
-                    coordinate: package.to_string(),
+                    coordinate: js_package_coordinate(package),
                     imported_prefix: Some(original.to_string()),
                     direct_member: Some(original.to_string()),
                 },
@@ -2222,8 +2264,14 @@ fn mask_with(text: &str, cfg: &MaskCfg) -> String {
         }
         if let Some(lc) = cfg.line.iter().find(|lc| region_is(b, i, lc.as_bytes())) {
             // `#` line comments only apply outside the string/char cases handled
-            // above, so a `#` here is a real comment.
-            let _ = lc;
+            // above, so a `#` here is a real comment -- unless it opens a PHP 8
+            // attribute. `#[Route(...)]` is code, and blanking it hid every
+            // attribute-routed endpoint (and every other attribute) from the
+            // scanners that run on the masked text.
+            if *lc == "#" && b.get(i + 1) == Some(&b'[') {
+                i += 1;
+                continue;
+            }
             let end = line_comment_end(b, i);
             blank(&mut out, i, end);
             i = end;
@@ -3535,6 +3583,8 @@ fn scan_http(ext: &str, path: &str, text: &str, result: &mut ExtractionResult) {
         "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" => {
             scan_express_routes(path, text, &prefixes, result);
             scan_nestjs_routes(path, text, result);
+            scan_nextjs_routes(path, text, result);
+            scan_supabase_functions(path, text, result);
             scan_verb_client(axios_re(), path, text, result);
             scan_fetch(path, text, result);
             scan_const_clients(ext, path, text, &consts, result);
@@ -3558,6 +3608,7 @@ fn scan_http(ext: &str, path: &str, text: &str, result: &mut ExtractionResult) {
         }
         "php" => {
             scan_php_routes(path, text, result);
+            scan_php_attribute_routes(path, text, result);
             scan_php_client(path, text, result);
         }
         "rb" => {
@@ -3617,6 +3668,114 @@ fn scan_php_routes(path: &str, text: &str, result: &mut ExtractionResult) {
         let line = line_of(text, caps.get(0).expect("group 0").start());
         emit_handler(result, path, line, &caps[2], &method);
     }
+}
+
+/// Symfony attribute routing: `#[Route('/path', methods: ['GET'])]`.
+///
+/// A class-level attribute prefixes every route its methods declare. The
+/// Laravel scanner above only sees the `Route::get(...)` facade, so an
+/// attribute-routed application reported no endpoints at all.
+fn scan_php_attribute_routes(path: &str, text: &str, result: &mut ExtractionResult) {
+    static ATTR: OnceLock<Regex> = OnceLock::new();
+    let attr = ATTR.get_or_init(|| {
+        Regex::new(r#"(?m)^[ \t]*#\[\s*Route\s*\(\s*(?:path\s*:\s*)?["']([^"']*)["'](.*)$"#)
+            .expect("symfony route attribute regex")
+    });
+    static CLASS: OnceLock<Regex> = OnceLock::new();
+    let class_re = CLASS.get_or_init(|| {
+        Regex::new(r"(?m)^[ \t]*(?:(?:final|abstract|readonly)[ \t]+)*class[ \t]+\w+")
+            .expect("php class regex")
+    });
+    static FUNCTION: OnceLock<Regex> = OnceLock::new();
+    let function_re = FUNCTION.get_or_init(|| {
+        Regex::new(
+            r"(?m)^[ \t]*(?:(?:public|protected|private|static|final|abstract)[ \t]+)*function[ \t]+\w+",
+        )
+        .expect("php function regex")
+    });
+
+    let mut class_prefix = String::new();
+    for caps in attr.captures_iter(text) {
+        let whole = caps.get(0).expect("group 0");
+        let after = &text[whole.end()..];
+        let next_class = class_re.find(after).map(|found| found.start());
+        let next_function = function_re.find(after).map(|found| found.start());
+
+        // Whichever declaration comes first is the one being annotated.
+        let annotates_class = match (next_class, next_function) {
+            (Some(class), Some(function)) => class < function,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if annotates_class {
+            class_prefix = caps[1].to_string();
+            continue;
+        }
+        let Some(offset) = next_function else {
+            continue;
+        };
+        // Report the method's own line, not the attribute's: the attribute sits
+        // above the method and outside its span, so `emit_handler` would
+        // resolve the handler to the file node instead.
+        let line = line_of(text, whole.end() + offset);
+        let http_path = symfony_route_path(&compose_prefix(&class_prefix, &caps[1]));
+        for method in symfony_route_methods(&caps[2]) {
+            emit_handler(result, path, line, &http_path, &method);
+        }
+    }
+}
+
+/// The verbs a Symfony route accepts; absent `methods:` means every verb.
+fn symfony_route_methods(tail: &str) -> Vec<String> {
+    let any = || vec!["ANY".to_string()];
+    let Some(keyword) = tail.find("methods") else {
+        return any();
+    };
+    let rest = &tail[keyword..];
+    let (Some(open), Some(close)) = (rest.find('['), rest.find(']')) else {
+        return any();
+    };
+    if close <= open {
+        return any();
+    }
+    let listed: Vec<String> = rest[open + 1..close]
+        .split(',')
+        .map(|entry| {
+            entry
+                .trim()
+                .trim_matches(['\'', '"'])
+                .trim()
+                .to_ascii_uppercase()
+        })
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    if listed.is_empty() {
+        any()
+    } else {
+        listed
+    }
+}
+
+/// Reduce Symfony placeholders to their names: `{slug:post}` maps the slug onto
+/// an entity, but the URL segment is still `{slug}`.
+fn symfony_route_path(raw: &str) -> String {
+    let mut out = String::new();
+    let mut rest = raw;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let Some(close) = rest[open..].find('}') else {
+            out.push_str(&rest[open..]);
+            return out;
+        };
+        let inner = &rest[open + 1..open + close];
+        let name = inner.split(':').next().unwrap_or(inner).trim();
+        out.push('{');
+        out.push_str(name);
+        out.push('}');
+        rest = &rest[open + close + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// PHP HTTP clients: Guzzle-style `->verb('http://...')` (absolute URL only,
@@ -4162,6 +4321,162 @@ fn flask_methods(tail: &str) -> String {
 
 /// `(app|router).VERB("/path"` style route registrations (Express). A receiver
 /// mounted via `app.use('/prefix', receiver)` gets its mount prefix composed.
+/// Next.js file-convention routing: the URL comes from the file's location,
+/// not from any call in its text.
+///
+/// App Router puts handlers in `app/**/route.ts` as exported functions named
+/// after the HTTP method; Pages Router puts a default export in
+/// `pages/api/**`. Neither registers a path anywhere a text scan could see,
+/// which is why a repository of real endpoints reported none.
+fn scan_nextjs_routes(path: &str, text: &str, result: &mut ExtractionResult) {
+    let Some(http_path) = nextjs_route_path(path) else {
+        return;
+    };
+
+    // App Router: one exported function per HTTP method.
+    static METHODS: OnceLock<Regex> = OnceLock::new();
+    // Indentation is matched with `[ \t]*`, never `\s*`: `\s` includes the
+    // newline, so a blank line before the export would be consumed and the
+    // match would start a line early. That put the reported line outside the
+    // handler's span, and `emit_handler` then fell back to the file node --
+    // which broke reverse reachability for every real Next.js route.
+    let methods = METHODS.get_or_init(|| {
+        Regex::new(
+            r"(?m)^[ \t]*export[ \t]+(?:async[ \t]+)?(?:function[ \t]+|const[ \t]+)(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b",
+        )
+        .expect("next route method regex")
+    });
+    let mut emitted = false;
+    for caps in methods.captures_iter(text) {
+        let method = &caps[1];
+        let line = line_of(text, caps.get(0).expect("group 0").start());
+        emit_handler(result, path, line, &http_path, method);
+        emitted = true;
+    }
+    if emitted {
+        return;
+    }
+
+    // Pages Router: a single default export serves every method.
+    static DEFAULT_EXPORT: OnceLock<Regex> = OnceLock::new();
+    let default_export = DEFAULT_EXPORT.get_or_init(|| {
+        Regex::new(r"(?m)^[ \t]*export[ \t]+default\b").expect("default export regex")
+    });
+    if let Some(found) = default_export.find(text) {
+        let line = line_of(text, found.start());
+        emit_handler(result, path, line, &http_path, "ANY");
+    }
+}
+
+/// The URL a Next.js file serves, from its location in the tree.
+///
+/// Returns `None` for files that are not route entry points, so co-located
+/// helpers and components never register endpoints.
+fn nextjs_route_path(path: &str) -> Option<String> {
+    let normalized = path.replace('\\', "/");
+    let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
+    let file = segments.last()?;
+    let (stem, ext) = file.rsplit_once('.')?;
+    if !matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs") {
+        return None;
+    }
+    let parents = &segments[..segments.len() - 1];
+
+    // App Router: `app/<segments>/route.ts`.
+    if stem == "route" {
+        let app = parents.iter().rposition(|segment| *segment == "app")?;
+        return compose_nextjs_path(&parents[app + 1..]);
+    }
+
+    // Pages Router: `pages/api/<segments>.ts`, where `index` names its folder.
+    let pages = parents.iter().rposition(|segment| *segment == "pages")?;
+    if parents.get(pages + 1) != Some(&"api") {
+        return None;
+    }
+    let mut between: Vec<&str> = parents[pages + 1..].to_vec();
+    if stem != "index" {
+        between.push(stem);
+    }
+    compose_nextjs_path(&between)
+}
+
+/// Join Next.js path segments, applying its folder conventions.
+fn compose_nextjs_path(segments: &[&str]) -> Option<String> {
+    let mut out = String::new();
+    for segment in segments {
+        // `_private` folders opt the whole subtree out of routing, so the file
+        // serves no URL at all.
+        if segment.starts_with('_') {
+            return None;
+        }
+        // `(group)` organises files without appearing in the URL; `@slot` is a
+        // parallel route, rendered into a page rather than addressed directly.
+        if segment.starts_with('@') || (segment.starts_with('(') && segment.ends_with(')')) {
+            continue;
+        }
+        out.push('/');
+        out.push_str(&nextjs_segment(segment));
+    }
+    if out.is_empty() {
+        out.push('/');
+    }
+    Some(out)
+}
+
+/// `[id]` -> `{id}`, `[...rest]` and `[[...rest]]` -> `{*rest}`.
+fn nextjs_segment(segment: &str) -> String {
+    if !(segment.starts_with('[') && segment.ends_with(']')) {
+        return segment.to_string();
+    }
+    let inner = segment.trim_start_matches('[').trim_end_matches(']');
+    match inner.strip_prefix("...") {
+        Some(name) => format!("{{*{name}}}"),
+        None => format!("{{{inner}}}"),
+    }
+}
+
+/// Supabase / Deno edge functions: `supabase/functions/<name>/index.ts`, where
+/// the directory name is the endpoint and `serve(...)` takes the handler.
+fn scan_supabase_functions(path: &str, text: &str, result: &mut ExtractionResult) {
+    let Some(http_path) = supabase_function_path(path) else {
+        return;
+    };
+    static SERVE: OnceLock<Regex> = OnceLock::new();
+    let serve = SERVE
+        .get_or_init(|| Regex::new(r"\b(?:Deno\s*\.\s*)?serve\s*\(").expect("deno serve regex"));
+    let Some(found) = serve.find(text) else {
+        return;
+    };
+    // A deployed function answers whatever method it inspects on the request,
+    // so no single verb can be claimed here.
+    emit_handler(
+        result,
+        path,
+        line_of(text, found.start()),
+        &http_path,
+        "ANY",
+    );
+}
+
+/// The endpoint a Supabase edge function serves: its directory name.
+fn supabase_function_path(path: &str) -> Option<String> {
+    let normalized = path.replace('\\', "/");
+    let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
+    let functions = segments
+        .iter()
+        .rposition(|segment| *segment == "functions")?;
+    if functions == 0 || segments.get(functions - 1) != Some(&"supabase") {
+        return None;
+    }
+    let name = segments.get(functions + 1)?;
+    // `_shared` and friends hold code imported by real functions; they are not
+    // themselves deployed, so they serve no URL.
+    if name.starts_with('_') || segments.len() <= functions + 2 {
+        return None;
+    }
+    Some(format!("/{name}"))
+}
+
 fn scan_express_routes(
     path: &str,
     text: &str,

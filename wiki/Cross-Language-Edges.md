@@ -108,6 +108,19 @@ the same-repo case. The HTTP method rides along as edge context.
 | Server route (`handled_by`) | Flask / FastAPI decorators (+ Blueprint/APIRouter prefixes), Django `urlpatterns`, aiohttp `add_get` | Express-style on any receiver (+ `app.use` mounts), NestJS `@Controller`/`@Get` | `net/http` `HandleFunc` (incl. Go 1.22 method patterns), gin/echo/chi/fiber verb methods, gorilla `.Methods` | axum `.route` (+ `.nest` prefixes, chained `get(h).post(h2)`), actix `#[get]` | Spring `@GetMapping`/`@RequestMapping` (+ class prefix), JAX-RS `@GET`+`@Path` | minimal-API `MapGet/...`, `[HttpVerb]` + `[Route("api/[controller]")]` | Laravel `Route::verb` | Sinatra / Rails-routes verbs | — |
 | Client call (`calls_service`) | `requests`/`httpx` (+f-strings, Session/Client instances), aiohttp, `urlopen` | `axios` (+ `axios.create` baseURL), `fetch` (+ options method, template literals, consts) | `http.Get/Post/Head/PostForm` | `reqwest::get`, builder `.verb("https://...")` | RestTemplate, `HttpRequest`+`URI.create`, OkHttp, Retrofit `@GET` | `HttpClient` verb `...Async`, `HttpRequestMessage` | Guzzle `->verb(absolute URL)`, `Http::` facade | `Net::HTTP`, Faraday, HTTParty | `curl` (`-X` honored), `wget` |
 
+### File-convention and attribute routes
+
+Next.js App Router handlers are discovered from `app/**/route.{ts,tsx,js,jsx}`
+and their exported HTTP-method functions; Pages Router API files are discovered
+from `pages/api/**` and their default export. Route groups are omitted from the
+URL, dynamic segments become `{name}`, and catch-alls become `{*name}`.
+
+Supabase/Deno edge functions under `supabase/functions/<name>/` attach a
+`serve(...)` or `Deno.serve(...)` handler to `/<name>`; `_shared` modules are
+not endpoints. Symfony `#[Route]` attributes support class-level path prefixes,
+explicit method lists, `ANY` when methods are absent, and mapped parameters
+such as `{slug:post}` normalized to `{slug}`.
+
 ### gRPC
 
 A gRPC service is keyed by its lowercased name, so every server and client
