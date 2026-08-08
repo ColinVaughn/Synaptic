@@ -5,7 +5,8 @@ Context Protocol. It speaks JSON-RPC 2.0 directly (no external MCP runtime
 dependency). The server is read-only over the graph; the PR and working-changes
 tools shell out to `gh`/`git` to read state but never write. It also opens the
 source root's durable repository-memory overlay. Memory queries are read-only;
-the sole writer is absent unless the operator enables `--allow-memory-write`.
+the sole memory writer is absent unless the operator enables
+`--allow-memory-write`.
 
 The graph is loaded once at startup from a `graph.json` and hot-reloads when that
 file changes on disk. It also keeps itself current as you edit source. By default,
@@ -261,20 +262,23 @@ size.
 
 ## MCP tools
 
-`tools/list` reports the 30 core tools plus five repository-memory query tools by
-default. `--allow-exec` adds `speculate`; `--allow-memory-write` adds
-`record_change_outcome`. Every tool documents its parameters in its input
-schema, and every tool carries annotations so a host knows how safe it is to
-run:
+`tools/list` reports 35 core, analysis, and vulnerability tools plus five
+repository-memory query tools by default. `--allow-exec` adds `speculate`;
+`--allow-memory-write` adds `record_change_outcome`. Every tool documents its
+parameters in its input schema, and every tool carries annotations so a host
+knows how safe it is to run:
 
 ```json
 "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": <bool> }
 ```
 
-All default tools are `readOnlyHint: true`. `openWorldHint` is `true` only for
-the tools that reach outside the graph by shelling out (`list_prs`,
-`get_pr_impact`, `triage_prs`, `working_changes_impact`, `predict_impact`,
-`affected_tests`, and `time_travel_diff`); it is `false` for the rest, including
+All default tools except `vuln_scan` are `readOnlyHint: true`. That tool is
+non-read-only because explicit `record: true` writes the audit ledger;
+otherwise it reads local corpora. `openWorldHint` is `true` for tools that may
+reach outside the graph: the `gh`/git tools (`list_prs`, `get_pr_impact`,
+`triage_prs`, `working_changes_impact`, `predict_impact`, `affected_tests`, and
+`time_travel_diff`), `vuln_check_dependency` (OSV by default), and `vuln_scan`
+(only with explicit `online: true`). It is `false` for the rest, including
 `predict_edit` (a pure in-memory graph query). `plan_rename` is plan-only and
 never edits source.
 
@@ -436,12 +440,13 @@ symbol the graph records a start line, so the window is `context_lines` from
 there (or stops at the symbol's end when a span is recorded).
 
 In a **federated/global graph**, a node's `source_file` is repo-prefixed
-(`<tag>/...`) and the member repos live in sibling directories outside any single
-`--source-root`. When the server is started on the global graph (a
-`global-manifest.json` sits next to it), `get_source` registers each member's own
-source root from the manifest and resolves a federated node under that root, so
-sources read correctly across repos. A co-located workspace build (members are
-subdirectories of one root) already resolves under the single `--source-root`.
+(`<tag>/...`) and member repos may live outside any single `--source-root`.
+Global graphs register roots from `global-manifest.json`. A normal `workspace
+build` registers local members and external `[[repos]] path` checkouts from
+`synaptic-workspace.toml`, plus Git members from
+`synaptic-out/workspace-repos/<tag>`. `get_source` then resolves a federated node
+under its real member root. Artifact-only `subgraph` members deliberately have
+no source root.
 
 When the source cannot be read, the message names the cause and the root it
 tried, instead of a bare "not available": no source root configured; the file was
@@ -993,6 +998,8 @@ Parameters:
   `cargo:serde`, `npm:@acme/sdk`, `pypi:requests`.
 - `version` (string) -- the version under consideration. Omit to ask for the
   lowest safe version instead.
+- `repo` (string) -- optional member tag from `list_repos`; use it when a
+  member-local advisory corpus should take precedence.
 
 Two honesty rules an agent cannot verify for itself: the returned constraint is
 `Unverified`, meaning the advisory says it fixes the issue but no registry was
@@ -1025,15 +1032,65 @@ Parameters:
 - `state` (string) -- filter by lifecycle state (`open`|`accepted`|
   `remediating`|`verified`|`pull_request_open`|`resolved`).
 - `limit` (integer, default 20) -- max findings to return.
+- `repo` (string) -- member tag from `list_repos`; required for a federated
+  graph so the correct ledger is read.
 
 ### vuln_explain
 
 Explain one finding: the full applicability evidence ladder, the dependency path
-from a workspace root, the remediation plan, and the decision history. Use it
-before acting on or accepting a finding.
+from a workspace root, the remediation plan, and the decision history. Its
+structured finding also carries the graph-backed `call_sites`, `entry_points`,
+and remediation `scope` when a recorded scan measured them. Use it before
+acting on or accepting a finding.
 
 Parameters:
 - `finding` (string, required) -- finding id, as returned by `vuln_findings`.
+- `repo` (string) -- member tag from `list_repos`; required for a federated
+  graph and must identify the ledger that produced the finding.
+
+### vuln_scan
+
+Audit every supported lockfile in the repository served by this MCP instance.
+The scan uses the server's graph snapshot to attach concrete call sites, inbound
+entry points, review files, and an impact forecast to findings.
+If a library repository has no supported lockfile, the tool reports that its
+dependencies are unpinned and directs the agent to generate/commit a lockfile
+or use `vuln_check_dependency` for each proposed dependency change.
+
+Parameters:
+- `record` (boolean, default `false`) -- persist findings to the auditable
+  ledger. Set this before calling `vuln_brief`.
+- `online` (boolean, default `false`) -- also query OSV for every resolved
+  package. This discloses the repository's dependency list, so the default uses
+  a configured/repository corpus or the shared synced cache only.
+- `repo` (string) -- member tag from `list_repos`; required for a federated
+  graph. The scan uses only that member's lockfiles, policy, identity, ledger,
+  and graph-backed usage evidence.
+
+An omitted or unknown federated `repo` fails closed and names the available
+tags. Workspace `path` members and Git clone-cache members use their real source
+roots. Artifact-only `subgraph` members report that they cannot be scanned;
+their absence of a lockfile is never interpreted as a clean result.
+
+If OSV cannot answer an explicitly online scan, its failure is returned in
+`online_error`; local-corpus findings remain useful but are not presented as a
+successful live lookup. `SYNAPTIC_OFFLINE=1` rejects the online attempt.
+Tool discovery marks this tool as non-read-only and open-world because its
+explicit `record: true` and `online: true` options may write the audit ledger
+or contact OSV; neither effect occurs by default.
+
+### vuln_brief
+
+Build a bounded repair hand-off for one recorded finding. It is available only
+when the finding is `Applicable` and carries a fixed upgrade target, preventing
+an agent from generating a patch for an unproven or unfixed issue. The response
+includes permitted files, source slices, evidence, blast radius, and required
+verification; it does not write a patch or change the repository.
+
+Parameters:
+- `finding` (string, required) -- finding id recorded by `vuln_scan`.
+- `repo` (string) -- member tag from `list_repos`; required for a federated
+  graph. Source slices are de-prefixed and jailed under that member checkout.
 
 ### audit_sql
 
@@ -1070,7 +1127,7 @@ Returns the findings as text + `structuredContent`.
 
 ### Structured output
 
-Sixteen tools declare an `outputSchema` and return a `structuredContent` object
+Eighteen tools declare an `outputSchema` and return a `structuredContent` object
 beside the text content, so a client can parse the result instead of scraping the
 formatted text:
 
@@ -1091,9 +1148,11 @@ formatted text:
 | `affected_tests` | `{ tests: [{ id, label, file, depth, via_relation }], total }` |
 | `readiness_audit` | `{ version, summary, counts_by_severity, groups, findings: [{ rule_id, severity, category, subsystem, title, detail, location, node_ids, evidence, remediation, confidence, impact }], skipped }` |
 | `audit_sql` / `advise_sql` | `{ version, summary, findings: [{ rule_id, severity, category, title, detail, location, remediation, confidence }] }` |
-| `vuln_check_dependency` | `{ verdict, package, requested_version, advisories, approved_constraint, constraint_availability, alternatives, reasons, corpus, degraded }` (`constraint_availability` is `unverified` offline; `degraded` names the failure when the answer fell back from the OSV API to a local corpus, and is null otherwise) |
-| `vuln_findings` | `{ total, findings: [{ id, state, priority, advisory_id, package, resolved_version, applicability, severity, recommended_version }] }` |
-| `vuln_explain` | `{ id, state, finding, decisions }` (`finding` carries the evidence ladder, dependency path and remediation plan) |
+| `vuln_check_dependency` | `{ repo, verdict, package, requested_version, advisories, approved_constraint, constraint_availability, alternatives, reasons, corpus, degraded }` (`constraint_availability` is `unverified` offline; `degraded` names the failure when the answer fell back from the OSV API to a local corpus, and is null otherwise) |
+| `vuln_findings` | `{ repo, total, findings: [{ id, state, priority, advisory_id, package, resolved_version, applicability, severity, recommended_version }] }` |
+| `vuln_explain` | `{ repo, id, state, finding, decisions }` (`finding` carries the evidence ladder, dependency path, remediation plan, call sites, entry points, and scope) |
+| `vuln_scan` | `{ repo, report, recorded, online, online_error }` (`report` is the full `ScanReport`, including advisory provenance, coverage, and member-scoped graph exposure evidence) |
+| `vuln_brief` | the full `RepairBrief` plus `repo`: event, applicability, usage bindings, permitted files/source slices, impact, evidence, and verification gates |
 
 The other tools return text only. A tool whose structured mirror cannot resolve
 its node (e.g. `get_neighbors` on an ambiguous label) omits `structuredContent`

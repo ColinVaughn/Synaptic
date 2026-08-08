@@ -268,25 +268,66 @@ fn relevant_change(p: &Path, canon_root: &Path, raw_root: &Path) -> bool {
     }
 }
 
-/// Build the `tag -> repo source root` map for a federated/global graph. The
-/// signal is a `global-manifest.json` next to the graph; each member's
-/// `source_path` points at its own `graph.json`, whose grandparent is that
-/// repo's source root (matching [`default_source_root`]). Returns an empty map
-/// for an ordinary single-repo graph, leaving the single source root in charge.
+/// Build the `tag -> repo source root` map for a federated/global graph.
+///
+/// A global graph obtains roots from its sibling `global-manifest.json`. A
+/// normal `workspace build` obtains them from `synaptic-workspace.toml`: local
+/// members use their resolved paths, `[[repos]] path` members use their external
+/// checkouts, and `git` members use the workspace clone cache. Artifact-only
+/// `subgraph` members deliberately have no root and remain source-unavailable.
+/// An ordinary single-repo graph has neither manifest and returns an empty map.
 fn federated_repo_roots(graph_path: &Path) -> HashMap<String, PathBuf> {
     let mut roots = HashMap::new();
     let Some(dir) = graph_path.parent() else {
         return roots;
     };
-    if !dir.join("global-manifest.json").exists() {
-        return roots;
+    if dir.join("global-manifest.json").exists() {
+        let store = synaptic_workspace::global::GlobalStore::at(dir.to_path_buf());
+        for (tag, entry) in store.list() {
+            let src = Path::new(&entry.source_path);
+            if let Some(repo_root) = src.parent().and_then(Path::parent) {
+                if !repo_root.as_os_str().is_empty() {
+                    let root = repo_root
+                        .canonicalize()
+                        .unwrap_or_else(|_| repo_root.to_path_buf());
+                    roots.insert(tag, root);
+                }
+            }
+        }
     }
-    let store = synaptic_workspace::global::GlobalStore::at(dir.to_path_buf());
-    for (tag, entry) in store.list() {
-        let src = Path::new(&entry.source_path);
-        if let Some(repo_root) = src.parent().and_then(Path::parent) {
-            if !repo_root.as_os_str().is_empty() {
-                roots.insert(tag, repo_root.to_path_buf());
+
+    let workspace_root = default_source_root(graph_path);
+    if workspace_root.join("synaptic-workspace.toml").is_file() {
+        if let Ok((members, repos)) =
+            synaptic_workspace::workspace_build::resolve_members(&workspace_root)
+        {
+            for member in members {
+                let root = member
+                    .path
+                    .canonicalize()
+                    .unwrap_or_else(|_| member.path.clone());
+                roots.insert(member.tag, root);
+            }
+            for repo in repos {
+                let Ok(tag) = repo.resolved_tag() else {
+                    continue;
+                };
+                let candidate = if let Some(path) = repo.path {
+                    Some(workspace_root.join(path))
+                } else if repo.git.is_some() {
+                    Some(
+                        workspace_root
+                            .join("synaptic-out")
+                            .join("workspace-repos")
+                            .join(&tag),
+                    )
+                } else {
+                    None
+                };
+                if let Some(candidate) = candidate.filter(|path| path.is_dir()) {
+                    let root = candidate.canonicalize().unwrap_or(candidate);
+                    roots.insert(tag, root);
+                }
             }
         }
     }
@@ -325,6 +366,76 @@ mod tests {
             default_source_root(Path::new("/proj/synaptic-out/graph.json")),
             PathBuf::from("/proj")
         );
+    }
+
+    #[test]
+    fn workspace_federation_registers_local_external_and_git_cached_roots() {
+        use synaptic_workspace::manifest::{
+            write_manifest, RepoMember, WorkspaceManifest, WorkspaceMeta,
+        };
+
+        let workspace = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let local = workspace.path().join("local");
+        let remote = workspace.path().join("synaptic-out/workspace-repos/remote");
+        fs::create_dir_all(&local).unwrap();
+        fs::write(
+            local.join("Cargo.toml"),
+            "[package]\nname='local'\nversion='0.1.0'\n",
+        )
+        .unwrap();
+        fs::create_dir_all(&remote).unwrap();
+        write_manifest(
+            workspace.path(),
+            &WorkspaceManifest {
+                workspace: WorkspaceMeta {
+                    name: "federated".into(),
+                    default_branch: "main".into(),
+                    members: vec!["local".into()],
+                },
+                repos: vec![
+                    RepoMember {
+                        name: "external".into(),
+                        tag: None,
+                        coordinate: None,
+                        git: None,
+                        rev: None,
+                        subgraph: None,
+                        path: Some(external.path().to_string_lossy().into_owned()),
+                    },
+                    RepoMember {
+                        name: "remote".into(),
+                        tag: None,
+                        coordinate: None,
+                        git: Some("https://example.invalid/remote.git".into()),
+                        rev: None,
+                        subgraph: None,
+                        path: None,
+                    },
+                    RepoMember {
+                        name: "hosted".into(),
+                        tag: None,
+                        coordinate: None,
+                        git: None,
+                        rev: None,
+                        subgraph: Some("https://example.invalid/hosted/graph.json".into()),
+                        path: None,
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        let graph_path = workspace.path().join("synaptic-out/graph.json");
+
+        let roots = federated_repo_roots(&graph_path);
+
+        assert_eq!(roots.get("local"), Some(&local.canonicalize().unwrap()));
+        assert_eq!(
+            roots.get("external"),
+            Some(&external.path().canonicalize().unwrap())
+        );
+        assert_eq!(roots.get("remote"), Some(&remote.canonicalize().unwrap()));
+        assert!(!roots.contains_key("hosted"));
     }
 
     #[test]

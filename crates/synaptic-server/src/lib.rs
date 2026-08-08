@@ -849,6 +849,12 @@ enum SourceLookup {
     Outside { root: PathBuf },
 }
 
+#[derive(Debug, Clone)]
+struct VulnerabilityScope {
+    root: PathBuf,
+    repo: Option<String>,
+}
+
 /// One `dynamic_hazards` row: `(repo, file, line, kind, key, host)`.
 type HazardRow = (String, String, u32, &'static str, Option<String>, String);
 
@@ -1143,6 +1149,90 @@ impl Server {
             self.repo_count_scans
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.provider.repo_counts()
+        })
+    }
+
+    /// Resolve a vulnerability operation onto one physical repository.
+    ///
+    /// Federated graphs intentionally require an explicit member for every
+    /// repository-state operation: silently scanning the federation's control
+    /// directory can miss every external checkout while looking successful.
+    /// Package-only checks may remain unscoped because they do not inspect a
+    /// lockfile, policy, ledger, or source tree.
+    fn vulnerability_scope(
+        &self,
+        requested_repo: Option<&str>,
+        member_required: bool,
+        source_required: bool,
+    ) -> Result<VulnerabilityScope, String> {
+        let repos = self.repo_counts();
+        if repos.is_empty() {
+            if let Some(repo) = requested_repo {
+                return Err(format!(
+                    "This is a single-repository graph, so repo={repo:?} is invalid; omit repo."
+                ));
+            }
+            let root = self
+                .source_root
+                .clone()
+                .or_else(|| vuln_tools::repository_root(self.graph_path.as_deref()))
+                .ok_or_else(|| {
+                    "Vulnerability tools need a repository root; configure --source-root or serve <root>/synaptic-out/graph.json."
+                        .to_string()
+                })?;
+            return Ok(VulnerabilityScope { root, repo: None });
+        }
+
+        let known = repos.keys().cloned().collect::<Vec<_>>();
+        let Some(repo) = requested_repo else {
+            if member_required {
+                return Err(format!(
+                    "This is a federated graph; pass repo with one member tag from list_repos: {}.",
+                    known.join(", ")
+                ));
+            }
+            let root = self
+                .source_root
+                .clone()
+                .or_else(|| vuln_tools::repository_root(self.graph_path.as_deref()))
+                .ok_or_else(|| {
+                    "Vulnerability tools need a repository root; configure --source-root."
+                        .to_string()
+                })?;
+            return Ok(VulnerabilityScope { root, repo: None });
+        };
+        if !repos.contains_key(repo) {
+            return Err(format!(
+                "Unknown federated repository {repo:?}; use one member tag from list_repos: {}.",
+                known.join(", ")
+            ));
+        }
+
+        let root = self.repo_roots.get(repo).cloned().or_else(|| {
+            self.source_root
+                .as_ref()
+                .map(|root| root.join(repo))
+                .filter(|candidate| candidate.is_dir())
+        });
+        let root = match root {
+            Some(root) => root,
+            None if !source_required => self
+                .source_root
+                .clone()
+                .or_else(|| vuln_tools::repository_root(self.graph_path.as_deref()))
+                .ok_or_else(|| {
+                    "Vulnerability tools need a repository root; configure --source-root."
+                        .to_string()
+                })?,
+            None => {
+                return Err(format!(
+                    "Federated repository {repo:?} has no registered source checkout and may be artifact-only. Artifact-only members cannot be scanned or use vulnerability ledgers/briefs; serve a source-backed checkout for this member."
+                ))
+            }
+        };
+        Ok(VulnerabilityScope {
+            root,
+            repo: Some(repo.to_string()),
         })
     }
 
@@ -5665,26 +5755,55 @@ Cross-repo: {} edge(s) span repositories{}",
         }
 
         if let Some(tool) = name.strip_prefix("vuln_") {
-            let root = vuln_tools::repository_root(self.graph_path.as_deref());
-            let Some(root) = root else {
-                return Err((
-                    -32602,
-                    "vulnerability tools need a repository root, which is derived from the                      graph path; serve a graph from <root>/synaptic-out/graph.json"
-                        .to_string(),
-                ));
-            };
+            let repository_state = tool != "check_dependency";
+            let scope =
+                match self.vulnerability_scope(opt("repo"), repository_state, repository_state) {
+                    Ok(scope) => scope,
+                    Err(message) => return Ok(tool_error_result(message)),
+                };
+            if tool == "scan" {
+                let outcome = vuln_tools::scan_tool(
+                    &scope.root,
+                    self.graph_path.as_deref(),
+                    scope.repo.as_deref(),
+                    b("record"),
+                    b("online"),
+                )
+                .map(|(text, structured)| {
+                    let (text, structured) =
+                        scope_vulnerability_output(scope.repo.as_deref(), text, structured);
+                    (text, Some(structured))
+                });
+                return Ok(tool_execution_result(outcome));
+            }
+            if tool == "brief" {
+                let outcome = vuln_tools::brief_tool(
+                    &scope.root,
+                    self.graph_path.as_deref(),
+                    scope.repo.as_deref(),
+                    &s("finding"),
+                )
+                .map(|(text, structured)| {
+                    let (text, structured) =
+                        scope_vulnerability_output(scope.repo.as_deref(), text, structured);
+                    (text, Some(structured))
+                });
+                return Ok(tool_execution_result(outcome));
+            }
             let (text, structured) = match tool {
                 "check_dependency" => {
-                    vuln_tools::check_dependency_tool(&root, &s("package"), opt("version"))
+                    vuln_tools::check_dependency_tool(&scope.root, &s("package"), opt("version"))
                 }
                 "findings" => {
-                    vuln_tools::findings_tool(&root, opt("state"), u("limit", 20) as usize)
+                    vuln_tools::findings_tool(&scope.root, opt("state"), u("limit", 20) as usize)
                 }
-                "explain" => vuln_tools::explain_tool(&root, &s("finding")),
+                "explain" => vuln_tools::explain_tool(&scope.root, &s("finding")),
                 other => {
                     return Err((-32601, format!("unknown vulnerability tool vuln_{other}")));
                 }
             };
+            let (text, structured) =
+                scope_vulnerability_output(scope.repo.as_deref(), text, structured);
             return Ok(json!({
                 "content": [{ "type": "text", "text": text }],
                 "structuredContent": structured,
@@ -6913,17 +7032,47 @@ fn build_tools_list(allow_exec: bool) -> Value {
         { "name": "vuln_check_dependency", "description": "Check a package is safe BEFORE writing it into a manifest. Returns allowed/constrained/blocked, the advisories behind it, and the version constraint to use instead. That constraint is advisory-derived, NOT registry-verified. No corpus configured means UNKNOWN, never safe.",
           "inputSchema": { "type": "object", "properties": {
               "package": { "type": "string", "description": "<ecosystem>:<name>, e.g. cargo:serde, npm:@acme/sdk, pypi:requests." },
-              "version": { "type": "string", "description": "Version under consideration; omit to ask for the lowest safe version." }
+              "version": { "type": "string", "description": "Version under consideration; omit to ask for the lowest safe version." },
+              "repo": { "type": "string", "description": "Member tag from list_repos." }
           }, "required": ["package"] } },
         { "name": "vuln_findings", "description": "List findings from this repo's vulnerability ledger with applicability, priority and recommended fix. Empty means no scan was recorded, NOT that the repo is clean.",
           "inputSchema": { "type": "object", "properties": {
               "state": { "type": "string", "enum": ["open","accepted","remediating","verified","pull_request_open","resolved"], "description": "Filter by lifecycle state." },
-              "limit": { "type": "integer", "description": "Max findings (default 20)." }
+              "limit": { "type": "integer", "description": "Max findings (default 20)." },
+              "repo": { "type": "string", "description": "Member tag from list_repos; required for federation." }
           } } },
         { "name": "vuln_explain", "description": "Explain one finding: applicability evidence ladder, dependency path from a workspace root, remediation plan, decision history. Use before acting on or accepting it.",
           "inputSchema": { "type": "object", "properties": {
-              "finding": { "type": "string", "description": "Finding id from vuln_findings." }
+              "finding": { "type": "string", "description": "Finding id from vuln_findings." },
+              "repo": { "type": "string", "description": "Member tag from list_repos; required for federation." }
           }, "required": ["finding"] } },
+        { "name": "vuln_scan", "description": "Audit lockfiles using local advisories; findings include graph-backed exposure. record writes the ledger; online queries OSV and reveals dependencies. Both default false.",
+          "inputSchema": { "type": "object", "properties": {
+              "record": { "type": "boolean", "description": "Write the ledger. Default false." },
+              "online": { "type": "boolean", "description": "Query OSV too; reveals dependencies. Default false." },
+              "repo": { "type": "string", "description": "Member tag from list_repos; required for federation." }
+          } },
+          "outputSchema": { "type": "object", "properties": {
+              "report": { "type": "object" },
+              "recorded": { "type": "boolean" },
+              "online": { "type": "boolean" },
+              "online_error": { "type": ["string", "null"] },
+              "repo": { "type": ["string", "null"] }
+          }, "required": ["report", "recorded", "online", "repo"] } },
+        { "name": "vuln_brief", "description": "Build a bounded repair brief for a recorded, Applicable finding with a fixed target. Never writes a patch.",
+          "inputSchema": { "type": "object", "properties": {
+              "finding": { "type": "string", "description": "Finding id recorded by vuln_scan." },
+              "repo": { "type": "string", "description": "Member tag from list_repos; required for federation." }
+          }, "required": ["finding"] },
+          "outputSchema": { "type": "object", "properties": {
+              "event": { "type": "object" },
+              "applicability": { "type": "object" },
+              "impact": { "type": "object" },
+              "allowed_files": { "type": "array", "items": { "type": "string" } },
+              "source_slices": { "type": "array" },
+              "required_tests": { "type": "array", "items": { "type": "string" } },
+              "repo": { "type": ["string", "null"] }
+          }, "required": ["event", "applicability", "repo"] } },
         { "name": "dynamic_hazards", "description": "List the reflection / dynamic-dispatch sites (by-name lookups, dispatch tables, eval, dynamic import, .NET/Python/JVM reflection) in the graph. Use it to judge a '0 dependents' answer: a symbol reached only by dynamic dispatch has no static dependents. A literal-key site is evidence-linked to its target; an opaque (computed-name) site cannot be and is cataloged here as residual risk. Filter by `repo`/`path_glob`/`kind`, or pass `target` for the sites that could reach one symbol.",
           "inputSchema": { "type": "object", "properties": {
               "repo": { "type": "string", "description": "Restrict to one federated member tag (as listed by list_repos)." },
@@ -7196,9 +7345,10 @@ fn build_tools_list(allow_exec: bool) -> Value {
             } }
         }));
     }
-    // Every read tool is a pure read; the PR tools and time_travel_diff
-    // additionally reach the environment (gh / git worktrees), so they carry
-    // openWorldHint. `speculate` is the lone non-read-only, open-world exception.
+    // The PR tools and time_travel_diff additionally reach the environment
+    // (gh / git worktrees), as does the live dependency checker. `vuln_scan`
+    // can explicitly write the audit ledger and disclose dependencies to OSV,
+    // so it must not be advertised as a harmless pure read.
     let open_world = [
         "list_prs",
         "get_pr_impact",
@@ -7207,15 +7357,17 @@ fn build_tools_list(allow_exec: bool) -> Value {
         "predict_impact",
         "affected_tests",
         "time_travel_diff",
+        "vuln_check_dependency",
+        "vuln_scan",
     ];
     for t in tools.as_array_mut().unwrap() {
         let name = t["name"].as_str().unwrap_or("").to_string();
-        if name == "speculate" {
+        if name == "speculate" || name == "vuln_scan" {
             t["annotations"] = json!({
                 "readOnlyHint": false,
                 "destructiveHint": false,
                 "idempotentHint": false,
-                "openWorldHint": true,
+                "openWorldHint": name == "speculate" || open_world.contains(&name.as_str()),
             });
         } else {
             t["annotations"] = json!({
@@ -7339,6 +7491,21 @@ fn tool_error_result(message: impl Into<String>) -> Value {
         "content": [{ "type": "text", "text": message.into() }],
         "isError": true
     })
+}
+
+fn scope_vulnerability_output(
+    repo: Option<&str>,
+    text: String,
+    mut structured: Value,
+) -> (String, Value) {
+    let scoped_text = repo.map_or(text.clone(), |repo| format!("Repository {repo}: {text}"));
+    if let Some(object) = structured.as_object_mut() {
+        object.insert(
+            "repo".to_string(),
+            repo.map_or(Value::Null, |repo| Value::String(repo.to_string())),
+        );
+    }
+    (scoped_text, structured)
 }
 
 /// Convert one fallible tool execution into the MCP tool-result shape. Protocol
@@ -7994,9 +8161,16 @@ mod tests {
             Some(graph_path),
         );
 
-        for name in ["vuln_findings", "vuln_explain", "vuln_check_dependency"] {
+        for name in [
+            "vuln_findings",
+            "vuln_explain",
+            "vuln_check_dependency",
+            "vuln_scan",
+            "vuln_brief",
+        ] {
             let args = match name {
                 "vuln_explain" => json!({ "finding": "vuln_finding_absent" }),
+                "vuln_brief" => json!({ "finding": "vuln_finding_absent" }),
                 "vuln_check_dependency" => json!({ "package": "cargo:serde" }),
                 _ => json!({}),
             };
@@ -8010,6 +8184,315 @@ mod tests {
                 .unwrap_or_default();
             assert!(!text.is_empty(), "{name} returned no text");
         }
+    }
+
+    #[test]
+    fn vuln_scan_records_graph_backed_evidence_that_vuln_brief_can_handoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"agent-vuln-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nleaf = \"0.9.18\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("Cargo.lock"),
+            "version = 3\n\n[[package]]\nname = \"agent-vuln-fixture\"\nversion = \"0.1.0\"\ndependencies = [\"leaf\"]\n\n[[package]]\nname = \"leaf\"\nversion = \"0.9.18\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n",
+        )
+        .unwrap();
+        let corpus = root.join(".synaptic/vuln/advisories");
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::write(
+            corpus.join("RUSTSEC-2026-0001.json"),
+            r#"{
+  "id": "RUSTSEC-2026-0001",
+  "modified": "2026-08-08T00:00:00Z",
+  "affected": [{
+    "package": { "ecosystem": "crates.io", "name": "leaf" },
+    "ranges": [{ "type": "SEMVER", "events": [
+      { "introduced": "0" }, { "fixed": "0.9.20" }
+    ]}]
+  }]
+}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn call_leaf() {}\n").unwrap();
+        let graph_path = root.join("synaptic-out/graph.json");
+        std::fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
+        let graph = GraphData {
+            nodes: vec![
+                synaptic_core::Node {
+                    id: NodeId("call_leaf".into()),
+                    label: "call_leaf()".into(),
+                    file_type: synaptic_core::FileType::Code,
+                    source_file: "src/main.rs".into(),
+                    source_location: None,
+                    community: None,
+                    repo: None,
+                    extra: Default::default(),
+                },
+                synaptic_core::Node {
+                    id: NodeId("leaf_parse".into()),
+                    label: "Sdk: cargo:leaf#parse".into(),
+                    file_type: synaptic_core::FileType::Code,
+                    source_file: String::new(),
+                    source_location: None,
+                    community: None,
+                    repo: None,
+                    extra: Default::default(),
+                },
+            ],
+            links: vec![synaptic_core::Edge {
+                source: NodeId("call_leaf".into()),
+                target: NodeId("leaf_parse".into()),
+                relation: "calls".into(),
+                confidence: synaptic_core::Confidence::Extracted,
+                source_file: "src/main.rs".into(),
+                source_location: Some("L1".into()),
+                confidence_score: None,
+                weight: 1.0,
+                context: None,
+                cross_repo: false,
+                extra: Default::default(),
+            }],
+            ..GraphData::default()
+        };
+        std::fs::write(&graph_path, serde_json::to_vec(&graph).unwrap()).unwrap();
+        let mut server = Server::from_graph_data(graph, Some(graph_path));
+
+        let scan = call_tool_full(&mut server, "vuln_scan", json!({ "record": true }));
+        assert_eq!(scan["result"]["isError"], json!(false), "{scan}");
+        let scan_text = scan["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            scan_text.contains("Advisory source:") && scan_text.contains("not proof"),
+            "scan response must explain the evidence boundary: {scan_text}"
+        );
+        let findings = scan["result"]["structuredContent"]["report"]["findings"]
+            .as_array()
+            .unwrap();
+        assert_eq!(findings.len(), 1, "{scan}");
+        assert_eq!(findings[0]["scope"]["graph_backed"], json!(true));
+        let finding_id = findings[0]["id"].as_str().unwrap();
+
+        let explanation = call_tool_full(
+            &mut server,
+            "vuln_explain",
+            json!({ "finding": finding_id }),
+        );
+        assert_eq!(
+            explanation["result"]["isError"],
+            json!(false),
+            "{explanation}"
+        );
+        assert_eq!(
+            explanation["result"]["structuredContent"]["finding"]["call_sites"][0]["file"],
+            json!("src/main.rs")
+        );
+        assert_eq!(
+            explanation["result"]["structuredContent"]["finding"]["scope"]["graph_backed"],
+            json!(true)
+        );
+
+        let brief = call_tool_full(&mut server, "vuln_brief", json!({ "finding": finding_id }));
+        assert_eq!(brief["result"]["isError"], json!(false), "{brief}");
+        assert_eq!(
+            brief["result"]["structuredContent"]["applicability"]["state"],
+            json!("applicable")
+        );
+        assert_eq!(
+            brief["result"]["structuredContent"]["event"]["release"],
+            json!("0.9.20")
+        );
+    }
+
+    #[test]
+    fn federated_vulnerability_tools_use_the_selected_member_root_and_ledger() {
+        let workspace = tempfile::tempdir().unwrap();
+        let billing = tempfile::tempdir().unwrap();
+        let inventory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            billing.path().join("Cargo.toml"),
+            "[package]\nname = \"billing\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nleaf = \"0.9.18\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            billing.path().join("Cargo.lock"),
+            "version = 3\n\n[[package]]\nname = \"billing\"\nversion = \"0.1.0\"\ndependencies = [\"leaf\"]\n\n[[package]]\nname = \"leaf\"\nversion = \"0.9.18\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n",
+        )
+        .unwrap();
+        let corpus = billing.path().join(".synaptic/vuln/advisories");
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::write(
+            corpus.join("RUSTSEC-2026-0001.json"),
+            r#"{
+  "id": "RUSTSEC-2026-0001",
+  "modified": "2026-08-08T00:00:00Z",
+  "affected": [{
+    "package": { "ecosystem": "crates.io", "name": "leaf" },
+    "ranges": [{ "type": "SEMVER", "events": [
+      { "introduced": "0" }, { "fixed": "0.9.20" }
+    ]}]
+  }]
+}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(billing.path().join("src")).unwrap();
+        std::fs::write(billing.path().join("src/main.rs"), "fn call_leaf() {}\n").unwrap();
+
+        let graph = GraphData {
+            nodes: vec![
+                synaptic_core::Node {
+                    id: NodeId("billing::call_leaf".into()),
+                    label: "call_leaf()".into(),
+                    file_type: synaptic_core::FileType::Code,
+                    source_file: "billing/src/main.rs".into(),
+                    source_location: None,
+                    community: None,
+                    repo: Some("billing".into()),
+                    extra: Default::default(),
+                },
+                synaptic_core::Node {
+                    id: NodeId("inventory::leaf_parse".into()),
+                    label: "Sdk: cargo:leaf#parse".into(),
+                    file_type: synaptic_core::FileType::Code,
+                    source_file: String::new(),
+                    source_location: None,
+                    community: None,
+                    // Federation deduplicates shared external SDK stubs onto
+                    // the first member that contributed them. Scoping billing
+                    // must retain this reached stub even when its repo tag was
+                    // inherited from another member.
+                    repo: Some("inventory".into()),
+                    extra: Default::default(),
+                },
+                synaptic_core::Node {
+                    id: NodeId("inventory::main".into()),
+                    label: "inventory_main()".into(),
+                    file_type: synaptic_core::FileType::Code,
+                    source_file: "inventory/src/main.rs".into(),
+                    source_location: None,
+                    community: None,
+                    repo: Some("inventory".into()),
+                    extra: Default::default(),
+                },
+            ],
+            links: vec![synaptic_core::Edge {
+                source: NodeId("billing::call_leaf".into()),
+                target: NodeId("inventory::leaf_parse".into()),
+                relation: "calls".into(),
+                confidence: synaptic_core::Confidence::Extracted,
+                source_file: "billing/src/main.rs".into(),
+                source_location: Some("L1".into()),
+                confidence_score: None,
+                weight: 1.0,
+                context: None,
+                cross_repo: false,
+                extra: Default::default(),
+            }],
+            ..GraphData::default()
+        };
+        let graph_path = workspace.path().join("synaptic-out/graph.json");
+        std::fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
+        std::fs::write(&graph_path, serde_json::to_vec(&graph).unwrap()).unwrap();
+        let roots = HashMap::from([
+            ("billing".to_string(), billing.path().to_path_buf()),
+            ("inventory".to_string(), inventory.path().to_path_buf()),
+        ]);
+        let mut server = Server::from_graph_data(graph, Some(graph_path))
+            .with_source_root(workspace.path().to_path_buf())
+            .with_repo_roots(roots);
+
+        let unscoped = call_tool_full(&mut server, "vuln_scan", json!({}));
+        assert_eq!(unscoped["result"]["isError"], json!(true), "{unscoped}");
+        let unscoped_text = unscoped["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(unscoped_text.contains("pass repo"), "{unscoped_text}");
+        assert!(unscoped_text.contains("billing"), "{unscoped_text}");
+
+        let scan = call_tool_full(
+            &mut server,
+            "vuln_scan",
+            json!({ "repo": "billing", "record": true }),
+        );
+        assert_eq!(scan["result"]["isError"], json!(false), "{scan}");
+        assert_eq!(scan["result"]["structuredContent"]["repo"], "billing");
+        let findings = scan["result"]["structuredContent"]["report"]["findings"]
+            .as_array()
+            .unwrap();
+        assert_eq!(findings.len(), 1, "{scan}");
+        assert_eq!(findings[0]["call_sites"][0]["file"], "src/main.rs");
+        let finding_id = findings[0]["id"].as_str().unwrap();
+
+        let billing_findings =
+            call_tool_full(&mut server, "vuln_findings", json!({ "repo": "billing" }));
+        assert_eq!(
+            billing_findings["result"]["structuredContent"]["repo"],
+            "billing"
+        );
+        assert_eq!(
+            billing_findings["result"]["structuredContent"]["findings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let inventory_findings =
+            call_tool_full(&mut server, "vuln_findings", json!({ "repo": "inventory" }));
+        assert!(
+            inventory_findings["result"]["structuredContent"]["findings"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!workspace.path().join(".synaptic/vuln/findings").exists());
+
+        let brief = call_tool_full(
+            &mut server,
+            "vuln_brief",
+            json!({ "repo": "billing", "finding": finding_id }),
+        );
+        assert_eq!(brief["result"]["isError"], json!(false), "{brief}");
+        assert_eq!(brief["result"]["structuredContent"]["repo"], "billing");
+        assert_eq!(
+            brief["result"]["structuredContent"]["source_slices"][0]["file"],
+            "src/main.rs"
+        );
+    }
+
+    #[test]
+    fn artifact_only_federated_member_is_explicitly_not_scannable() {
+        let workspace = tempfile::tempdir().unwrap();
+        let graph_path = workspace.path().join("synaptic-out/graph.json");
+        std::fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
+        let graph = GraphData {
+            nodes: vec![synaptic_core::Node {
+                id: NodeId("hosted::api".into()),
+                label: "hosted_api()".into(),
+                file_type: synaptic_core::FileType::Code,
+                source_file: "hosted/src/api.rs".into(),
+                source_location: None,
+                community: None,
+                repo: Some("hosted".into()),
+                extra: Default::default(),
+            }],
+            ..GraphData::default()
+        };
+        std::fs::write(&graph_path, serde_json::to_vec(&graph).unwrap()).unwrap();
+        let mut server = Server::from_graph_data(graph, Some(graph_path))
+            .with_source_root(workspace.path().to_path_buf());
+
+        let scan = call_tool_full(&mut server, "vuln_scan", json!({ "repo": "hosted" }));
+
+        assert_eq!(scan["result"]["isError"], json!(true), "{scan}");
+        let text = scan["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(text.contains("artifact-only"), "{text}");
+        assert!(text.contains("cannot be scanned"), "{text}");
     }
 
     /// `with_fresh_server` must not hold the read guard it used to decide a
@@ -8971,17 +9454,16 @@ mod tests {
             .expect("cl100k tokenizer")
             .encode_with_special_tokens(&encoded)
             .len();
-        // Budget re-baselined when the three vuln_* tools were added: 33 tools
-        // instead of 30. The guard exists to catch prose creep in existing
-        // descriptions, not to forbid new tools, so it is raised by roughly
-        // what three terse tool entries cost and no more.
+        // Budget re-baselined for the five compact federated `repo` selectors
+        // and the scan/brief scope fields. They make member isolation
+        // machine-discoverable while this guard still catches prose creep.
         assert!(
-            encoded.len() <= 35_600,
+            encoded.len() <= 37_400,
             "tools/list prose grew beyond the measured character budget: {}",
             encoded.len()
         );
         assert!(
-            tokens <= 7_900,
+            tokens <= 8_300,
             "tools/list prose grew beyond the measured token budget: {tokens}"
         );
     }
@@ -9334,7 +9816,7 @@ mod tests {
             .unwrap();
         assert_eq!(tools["result"]["resultType"], "complete", "{tools}");
         assert_eq!(tools["result"]["cacheScope"], "public", "{tools}");
-        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 33);
+        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 35);
         assert!(matches!(lifecycle, ConnectionLifecycle::New));
 
         // The final schema marks clientInfo as SHOULD/optional. Clients that
@@ -9789,7 +10271,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 33);
+        assert_eq!(names.len(), 35);
         for expected in [
             "query_graph",
             "get_node",
@@ -9824,6 +10306,39 @@ mod tests {
         ] {
             assert!(names.contains(&expected), "missing tool {expected}");
         }
+    }
+
+    #[test]
+    fn vulnerability_tool_metadata_describes_network_and_ledger_effects() {
+        let mut s = server();
+        let list = s
+            .handle_request(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
+            .unwrap();
+        let tools = list["result"]["tools"].as_array().unwrap();
+        let tool = |name| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("missing {name}"))
+        };
+
+        let scan = tool("vuln_scan");
+        assert_eq!(scan["annotations"]["readOnlyHint"], json!(false));
+        assert_eq!(scan["annotations"]["idempotentHint"], json!(false));
+        assert_eq!(scan["annotations"]["openWorldHint"], json!(true));
+        assert_eq!(
+            scan["outputSchema"]["required"],
+            json!(["report", "recorded", "online", "repo"])
+        );
+
+        let check = tool("vuln_check_dependency");
+        assert_eq!(check["annotations"]["openWorldHint"], json!(true));
+        let brief = tool("vuln_brief");
+        assert_eq!(brief["annotations"]["readOnlyHint"], json!(true));
+        assert_eq!(
+            brief["outputSchema"]["required"],
+            json!(["event", "applicability", "repo"])
+        );
     }
 
     #[test]
@@ -11241,12 +11756,12 @@ mod tests {
             .collect();
         assert_eq!(
             structured.len(),
-            16,
+            18,
             "runtime structured-tool count changed"
         );
 
         let wiki = include_str!("../../../wiki/MCP-Server.md");
-        assert!(wiki.contains("Sixteen tools declare an `outputSchema`"));
+        assert!(wiki.contains("Eighteen tools declare an `outputSchema`"));
         let table = wiki
             .split("### Structured output")
             .nth(1)
@@ -11370,20 +11885,23 @@ mod tests {
     }
 
     #[test]
-    fn every_tool_is_annotated_read_only() {
-        // The DEFAULT tool surface (no --allow-exec) must be strictly read-only.
+    fn every_tool_annotation_describes_its_effects() {
+        // The default surface is read-only except for the explicitly opt-in
+        // `vuln_scan { record: true }` ledger write.
         let tools = tools_list(false);
         for t in tools.as_array().unwrap() {
             let name = t["name"].as_str().unwrap();
             let ann = &t["annotations"];
             assert_eq!(
                 ann["readOnlyHint"],
-                json!(true),
-                "tool {name} must be read-only"
+                json!(name != "vuln_scan"),
+                "tool {name} readOnlyHint"
             );
             // PR + working-tree tools reach outside the graph (gh/git), and
             // time_travel_diff builds revisions in a worktree -> open world.
             // predict_impact shells out to `git diff` when `files` is omitted.
+            // The package check contacts OSV by default; scan can do so when
+            // explicitly asked with `online: true`.
             let open = matches!(
                 name,
                 "list_prs"
@@ -11393,6 +11911,8 @@ mod tests {
                     | "predict_impact"
                     | "affected_tests"
                     | "time_travel_diff"
+                    | "vuln_check_dependency"
+                    | "vuln_scan"
             );
             assert_eq!(
                 ann["openWorldHint"],

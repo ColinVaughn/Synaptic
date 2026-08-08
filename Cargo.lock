@@ -3403,6 +3403,7 @@ dependencies = [
  "ignore",
  "regex",
  "serde_json",
+ "synaptic-api",
  "synaptic-core",
  "synaptic-graph",
  "synaptic-history",

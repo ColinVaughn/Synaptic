@@ -5,13 +5,24 @@
 //!
 //! The ledger tools read local state only. `vuln_check_dependency` asks OSV
 //! about the one package it was given, unless an operator configured a corpus
-//! or set `SYNAPTIC_OFFLINE=1`, in which case it reads that instead. It is the
-//! only tool in the server that reaches the network.
+//! or set `SYNAPTIC_OFFLINE=1`, in which case it reads that instead.
+//! `vuln_scan` stays local by default and reaches OSV only when its explicit
+//! `online` argument is true.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
-use synaptic_vuln::{check_dependency, AdvisorySource, FindingStore, LocalDirSource, VulnPolicy};
+use synaptic_core::{EdgeSiteAccumulator, GraphData};
+use synaptic_graph::KnowledgeGraph;
+use synaptic_vuln::{
+    check_dependency, decision, discover_repository_files, feature_gated_in, is_sbom_source,
+    repair_inputs, scan, AdvisorySource, CompositeSource, CorpusCache, DecisionKind, Ecosystem,
+    FindingStore, GraphUsageOracle, ImpactIndex, LocalDirSource, NoUsageEvidence,
+    PackageCoordinate, PackageGraph, ReachIndex, ScanRequest, SystemOsvTransport, UsageOracle,
+    VulnPolicy,
+};
 
 /// Environment variable naming the OSV advisory directory.
 pub(crate) const ADVISORY_DIR_ENV: &str = "SYNAPTIC_VULN_ADVISORIES";
@@ -346,6 +357,459 @@ pub(crate) fn explain_tool(root: &Path, finding: &str) -> (String, Value) {
     (text, structured)
 }
 
+/// Scan the repository through the MCP server's trusted graph path.
+///
+/// This deliberately makes network use opt-in. A whole-repository scan reveals
+/// the dependency set to OSV, whereas the default local-corpus path does not.
+/// Recording is separate for the same reason: it is an auditable filesystem
+/// mutation, never an incidental effect of inspecting a repository.
+pub(crate) fn scan_tool(
+    root: &Path,
+    graph_path: Option<&Path>,
+    repo: Option<&str>,
+    record: bool,
+    online: bool,
+) -> Result<(String, Value), String> {
+    let discovered = discover_repository_files(root);
+    let (packages, reads) = PackageGraph::from_lockfiles(root, &discovered.lockfiles);
+    if reads.is_empty() {
+        return Err(format!(
+            "No supported lockfile was found under {}. vuln_scan cannot audit unpinned dependencies. Generate or commit a supported lockfile and retry; until then, use vuln_check_dependency for each dependency you intend to add or upgrade.",
+            root.display()
+        ));
+    }
+    let direct = synaptic_api::scan_dependencies(root)
+        .map_err(|error| format!("Cannot inventory direct dependencies: {error}"))?;
+
+    let mut ecosystems = reads
+        .iter()
+        .filter(|read| read.error.is_none())
+        .map(|read| read.kind.ecosystem())
+        .collect::<BTreeSet<_>>();
+    // Maven declarations and SBOMs are scan targets despite their lack of a
+    // conventional lockfile. This mirrors the CLI promotion rule exactly.
+    let declared_only = direct
+        .iter()
+        .filter(|dependency| dependency.resolved_version.is_some())
+        .filter(|dependency| {
+            dependency.package.ecosystem == Ecosystem::Maven
+                || is_sbom_source(&dependency.source_file)
+        })
+        .map(|dependency| dependency.package.ecosystem)
+        .filter(|ecosystem| !ecosystems.contains(ecosystem))
+        .collect::<BTreeSet<_>>();
+    ecosystems.extend(declared_only);
+
+    let mut source = CompositeSource::default();
+    let mut covered_ecosystems = BTreeSet::new();
+    if let Some(directory) = advisory_dir(root) {
+        let local = LocalDirSource::load(&directory).map_err(|error| {
+            format!(
+                "Cannot load advisory corpus at {}: {error}",
+                directory.display()
+            )
+        })?;
+        source.push(local);
+        // An explicitly configured corpus is trusted to cover the repository's
+        // ecosystems, just as CLI `--advisories` is.
+        covered_ecosystems = ecosystems.clone();
+    } else if let Some(cache) = CorpusCache::user_default() {
+        for ecosystem in &ecosystems {
+            let Some(directory) = cache.resolve(*ecosystem) else {
+                continue;
+            };
+            if let Ok(local) = LocalDirSource::load(&directory) {
+                source.push(local);
+                covered_ecosystems.insert(*ecosystem);
+            }
+        }
+    }
+
+    let mut online_error = None;
+    if online && synaptic_vuln::offline_forced() {
+        online_error = Some("SYNAPTIC_OFFLINE=1 disabled the requested OSV lookup".into());
+    } else if online {
+        let coordinates = scan_coordinates(&packages, &direct);
+        match SystemOsvTransport::new()
+            .map_err(|error| error.to_string())
+            .and_then(|transport| {
+                synaptic_vuln::fetch_advisories(
+                    &transport,
+                    &coordinates,
+                    CorpusCache::user_default()
+                        .map(|cache| cache.live_dir())
+                        .as_deref(),
+                )
+                .map_err(|error| error.to_string())
+            }) {
+            Ok(live) => {
+                source.push(live);
+                covered_ecosystems.extend(
+                    ecosystems.iter().copied().filter(|ecosystem| {
+                        synaptic_vuln::osv_ecosystem_name(*ecosystem).is_some()
+                    }),
+                );
+            }
+            Err(error) => online_error = Some(error),
+        }
+    }
+    if source.is_empty() {
+        return Err(
+            "No advisory corpus is available. Configure SYNAPTIC_VULN_ADVISORIES, add .synaptic/vuln/advisories, or run `synaptic vuln sync`. An empty corpus is not a clean scan."
+                .into(),
+        );
+    }
+
+    let corpus_names_something = packages.scan_targets().any(|resolved| {
+        !AdvisorySource::advisories_for(&source, &resolved.key.coordinate).is_empty()
+    }) || direct.iter().any(|dependency| {
+        dependency.resolved_version.is_some()
+            && !AdvisorySource::advisories_for(&source, &dependency.package).is_empty()
+    });
+    let graph_data = if corpus_names_something {
+        let path = graph_path.ok_or_else(|| {
+            "vuln_scan needs the graph it was served with; start the MCP server from <root>/synaptic-out/graph.json".to_string()
+        })?;
+        load_graph_data(path, repo)?
+    } else {
+        None
+    };
+    let graph_oracle = graph_data.as_ref().map(GraphUsageOracle::new);
+    let usage: &dyn UsageOracle = graph_oracle
+        .as_ref()
+        .map(|oracle| oracle as &dyn UsageOracle)
+        .unwrap_or(&NoUsageEvidence);
+    let reach_index = graph_data.as_ref().map(ReachIndex::new);
+    let impact_index =
+        graph_data.map(|data| ImpactIndex::new(KnowledgeGraph::from_graph_data(data)));
+    let policy = VulnPolicy::load(root)
+        .map_err(|error| format!("Cannot load vulnerability policy: {error}"))?;
+    let identity = repository_identity(root);
+    let report = scan(&ScanRequest {
+        repository_identity: &identity,
+        packages: &packages,
+        direct_dependencies: &direct,
+        source: &source,
+        policy: policy.as_ref(),
+        usage,
+        reach: reach_index.as_ref(),
+        impact: impact_index.as_ref(),
+        validation_commands: validation_commands(root),
+        today: today(),
+        covered_ecosystems,
+        feature_gated: feature_gated_in(&discovered.cargo_manifests),
+    })
+    .map_err(|error| format!("Vulnerability scan failed: {error}"))?;
+
+    if record {
+        let store = FindingStore::new(root);
+        let digest = policy.as_ref().map(VulnPolicy::digest).unwrap_or_default();
+        let base = base_sha(root);
+        for finding in &report.findings {
+            let existed = store
+                .get(&finding.id)
+                .map_err(|error| format!("Cannot read finding ledger: {error}"))?
+                .is_some();
+            store
+                .upsert(
+                    finding,
+                    &identity,
+                    &base,
+                    &digest,
+                    decision(
+                        if existed {
+                            DecisionKind::Redetected
+                        } else {
+                            DecisionKind::Detected
+                        },
+                        "synaptic MCP vuln_scan",
+                        format!("{} at {}", finding.advisory_id, finding.resolved_version),
+                    ),
+                )
+                .map_err(|error| format!("Cannot record finding: {error}"))?;
+        }
+    }
+
+    let mut text = format!(
+        "Vulnerability scan: {} package(s) scanned; {} finding(s), {} applicable.",
+        report.packages_scanned,
+        report.findings.len(),
+        report.applicable().count(),
+    );
+    text.push_str(&format!(
+        " Advisory source: {}. An empty result reflects this corpus, not proof the repository is clean.",
+        report.corpus.origin
+    ));
+    if record {
+        text.push_str(" Findings were recorded in the audit ledger.");
+    } else {
+        text.push_str(
+            " This result was not recorded; pass record=true before requesting vuln_brief.",
+        );
+    }
+    if report.packages_unaudited > 0 {
+        text.push_str(&format!(
+            " WARNING: {} package(s) were not audited because their ecosystem has no corpus.",
+            report.packages_unaudited
+        ));
+    }
+    if let Some(error) = &online_error {
+        text.push_str(&format!(
+            " WARNING: online OSV lookup failed ({error}); local corpora were used."
+        ));
+    }
+    Ok((
+        text,
+        json!({
+            "report": report,
+            "recorded": record,
+            "online": online,
+            "online_error": online_error,
+        }),
+    ))
+}
+
+/// Convert a recorded, proven vulnerability into the bounded repair brief an
+/// agent needs to generate a patch without inventing scope or verification.
+pub(crate) fn brief_tool(
+    root: &Path,
+    graph_path: Option<&Path>,
+    repo: Option<&str>,
+    finding_id: &str,
+) -> Result<(String, Value), String> {
+    let record = FindingStore::new(root)
+        .get(finding_id)
+        .map_err(|error| format!("Cannot read finding ledger: {error}"))?
+        .ok_or_else(|| {
+            format!(
+                "Finding {finding_id} is not in the ledger. Run vuln_scan with record=true first."
+            )
+        })?;
+    let inputs = repair_inputs(&record.finding, record.created_at).ok_or_else(|| {
+        format!(
+            "{finding_id} has no fixed upgrade target ({:?}); use a removal, replacement, or mitigation workflow instead.",
+            record.finding.remediation.kind
+        )
+    })?;
+    if inputs.assessment.state != synaptic_api::ApplicabilityState::Applicable {
+        return Err(format!(
+            "{finding_id} is {:?}, not Applicable. The repair brief refuses to patch an unproven finding.",
+            inputs.assessment.state
+        ));
+    }
+    let path = graph_path.ok_or_else(|| {
+        "vuln_brief needs the graph it was served with; start the MCP server from <root>/synaptic-out/graph.json".to_string()
+    })?;
+    let data = load_graph_data(path, repo)?.ok_or_else(|| {
+        "The current advisory corpus names no packages, so no graph-backed finding can be handed off.".to_string()
+    })?;
+    let repository_base = base_sha(root);
+    let base_sha = if repository_base.is_empty() {
+        data.built_at_commit
+            .clone()
+            .unwrap_or_else(|| "working-tree".into())
+    } else {
+        repository_base
+    };
+    let graph = KnowledgeGraph::from_graph_data(data);
+    let identity = repository_identity(root);
+    let brief = synaptic_api::build_repair_brief(synaptic_api::RepairBriefRequest {
+        repository_root: root,
+        repository_identity: &identity,
+        base_sha: &base_sha,
+        event: &inputs.event,
+        assessment: &inputs.assessment,
+        graph: &graph,
+        memory: &[],
+        budget: &synaptic_api::BriefBudget::default(),
+    })
+    .map_err(|error| format!("Cannot build repair brief: {error}"))?;
+    let text = format!(
+        "Repair brief {} for {}: {} -> {}; {} binding(s), {} permitted file(s), {} required test(s).",
+        brief.id,
+        record.finding.advisory_id,
+        record.finding.resolved_version,
+        inputs.event.release.as_deref().unwrap_or("unknown"),
+        brief.usage_bindings.len(),
+        brief.allowed_files.len(),
+        brief.required_tests.len(),
+    );
+    Ok((
+        text,
+        serde_json::to_value(brief).expect("repair brief is serializable"),
+    ))
+}
+
+fn scan_coordinates(
+    packages: &PackageGraph,
+    direct: &[synaptic_api::Dependency],
+) -> Vec<PackageCoordinate> {
+    packages
+        .packages()
+        .map(|package| package.key.coordinate.clone())
+        .chain(
+            direct
+                .iter()
+                .filter(|dependency| dependency.resolved_version.is_some())
+                .map(|dependency| dependency.package.clone()),
+        )
+        .collect()
+}
+
+/// Read the immutable graph snapshot the MCP server was started with.
+fn load_graph_data(path: &Path, repo: Option<&str>) -> Result<Option<GraphData>, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("Cannot read graph {}: {error}", path.display()))?;
+    let graph: GraphData = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("Cannot parse graph {}: {error}", path.display()))?;
+    Ok(Some(match repo {
+        Some(tag) => scope_graph_to_repo(graph, tag),
+        None => graph,
+    }))
+}
+
+/// Restrict a federated graph to one member and rewrite its repo-prefixed paths
+/// back to paths relative to that member's physical checkout.
+///
+/// Shared external SDK stubs are retained when a selected first-party node
+/// reaches them, even when external dedup assigned the stub another member's
+/// `repo` tag. Cross-repo first-party nodes are excluded: their files live under
+/// another jail and cannot be part of this member's patch brief.
+fn scope_graph_to_repo(mut graph: GraphData, tag: &str) -> GraphData {
+    let selected = graph
+        .nodes
+        .iter()
+        .filter(|node| node.repo.as_deref() == Some(tag) && !node.is_external_stub())
+        .map(|node| node.id.0.clone())
+        .collect::<BTreeSet<_>>();
+    let external = graph
+        .nodes
+        .iter()
+        .filter(|node| node.is_external_stub())
+        .map(|node| node.id.0.clone())
+        .collect::<BTreeSet<_>>();
+
+    graph.links.retain(|edge| {
+        let source_selected = selected.contains(&edge.source.0);
+        let target_selected = selected.contains(&edge.target.0);
+        (source_selected && (target_selected || external.contains(&edge.target.0)))
+            || (target_selected && (source_selected || external.contains(&edge.source.0)))
+    });
+    let mut kept = selected;
+    for edge in &graph.links {
+        kept.insert(edge.source.0.clone());
+        kept.insert(edge.target.0.clone());
+    }
+    graph.nodes.retain(|node| kept.contains(&node.id.0));
+    graph
+        .hyperedges
+        .retain(|hyperedge| hyperedge.nodes.iter().all(|node| kept.contains(&node.0)));
+
+    for node in &mut graph.nodes {
+        strip_repo_prefix(&mut node.source_file, tag);
+    }
+    for edge in &mut graph.links {
+        let mut aggregated_sites = edge
+            .extra
+            .contains_key("sites")
+            .then(|| EdgeSiteAccumulator::new(edge));
+        strip_repo_prefix(&mut edge.source_file, tag);
+        if let Some(sites) = &mut aggregated_sites {
+            sites.rewrite(|site| strip_repo_prefix(&mut site.source_file, tag));
+        }
+        if let Some(sites) = aggregated_sites {
+            sites.apply_to(edge);
+        }
+    }
+    graph
+}
+
+fn strip_repo_prefix(path: &mut String, tag: &str) {
+    if let Some(relative) = path.strip_prefix(&format!("{tag}/")) {
+        *path = relative.to_string();
+    }
+}
+
+fn repository_identity(root: &Path) -> String {
+    let remote = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(root)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
+    remote
+        .as_deref()
+        .and_then(normalize_remote_identity)
+        .unwrap_or_else(|| {
+            root.canonicalize()
+                .unwrap_or_else(|_| root.to_path_buf())
+                .to_string_lossy()
+                .into_owned()
+        })
+}
+
+fn normalize_remote_identity(url: &str) -> Option<String> {
+    let without_scheme = url
+        .trim()
+        .split_once("://")
+        .map_or(url.trim(), |(_, rest)| rest);
+    let without_user = without_scheme
+        .rsplit_once('@')
+        .map_or(without_scheme, |(_, rest)| rest);
+    let normalized = without_user.replacen(':', "/", 1);
+    let without_trailing_slash = normalized.trim_end_matches('/');
+    let trimmed = without_trailing_slash
+        .strip_suffix(".git")
+        .unwrap_or(without_trailing_slash);
+    let segments = trimmed
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    (segments.len() >= 3).then(|| segments.join("/"))
+}
+
+fn base_sha(root: &Path) -> String {
+    std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+fn validation_commands(root: &Path) -> Vec<String> {
+    root.join("Cargo.toml")
+        .exists()
+        .then(|| "cargo test --workspace --all-features --locked".to_string())
+        .into_iter()
+        .collect()
+}
+
+fn today() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or_default();
+    let (year, month, day) = civil_from_days(seconds.div_euclid(86_400));
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    (year + i64::from(month <= 2), month as u32, day as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,6 +1032,22 @@ mod tests {
         assert!(
             text.contains("not that the repository is clean"),
             "an empty ledger must not read as an all-clear: {text}"
+        );
+    }
+
+    #[test]
+    fn a_scan_without_a_lockfile_gives_an_agent_a_safe_next_step() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let error = scan_tool(dir.path(), None, None, false, false).unwrap_err();
+
+        assert!(
+            error.contains("cannot audit unpinned dependencies"),
+            "{error}"
+        );
+        assert!(
+            error.contains("vuln_check_dependency"),
+            "the fallback must be discoverable to an agent: {error}"
         );
     }
 

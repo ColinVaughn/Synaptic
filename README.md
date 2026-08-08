@@ -183,7 +183,8 @@ you want Synaptic to preserve history or maintain external contracts.
   generated-resource noise, and project metadata. The MCP `readiness_audit` tool exposes the
   same structured report.
 - **MCP server** (stateless protocol 2026-07-28 with legacy compatibility through
-  2025-11-25) exposing 30 core tools plus five read-only repository-memory tools over stdio or HTTP:
+  2025-11-25) exposing 30 core tools, five vulnerability tools, and five
+  read-only repository-memory tools over stdio or HTTP:
   subgraph search, source reading, reverse-impact, find-all-references, dynamic-dispatch hazards,
   PR/working-tree blast radius, change forecasting, predictive test selection, edit-impact prediction,
   structural search, time-travel diff, plan-only rename, and SQL audit/advise, plus prompts, completions,
@@ -210,8 +211,10 @@ you want Synaptic to preserve history or maintain external contracts.
   path, a CVSS-derived priority, graph-backed call sites and entry-point
   exposure, and a remediation plan; applicable findings with a fixed target can
   become bounded generation-ready repair briefs. Accepted risks are time-boxed
-  and expire on their own. Three MCP tools let assistants check a package before
-  writing it into a manifest. Analysis makes no network calls. See
+  and expire on their own. Five MCP tools let assistants check packages, run a
+  graph-backed scan, inspect exposure evidence, and request a bounded repair
+  hand-off. Whole-repository scans stay local by default; an agent must opt in
+  before the dependency list is sent to OSV. See
   [Vulnerability Management](https://github.com/ColinVaughn/Synaptic/wiki/Vulnerability-Management).
 - **Incremental rebuilds**, file watching, and git hooks keep the graph current. See
   [Incremental Updates](https://github.com/ColinVaughn/Synaptic/wiki/Incremental-Updates).
@@ -487,13 +490,21 @@ synaptic serve --graph promoted/graph.json --immutable-graph \
 synaptic serve --http 127.0.0.1:0 --ready-file /run/synaptic/ready.json # race-free child startup
 ```
 
-The server exposes 30 core tools plus five read-only repository-memory tools:
+The server exposes 30 core tools, five vulnerability tools, and five read-only
+repository-memory tools:
 graph navigation (`query_graph`, `get_node`,
 `get_source`, `get_neighbors`, `get_community`, `god_nodes`, `graph_stats`, `shortest_path`),
 impact analysis (`affected`, `find_callers`, `find_callees`, `find_references`, `dynamic_hazards`,
 `predict_impact`, `affected_tests`, `predict_edit`), federation (`list_repos`, `repo_stats`), change/PR review (`working_changes_impact`,
 `list_prs`, `get_pr_impact`, `triage_prs`), the advanced trio (`structural_search`,
 `time_travel_diff`, plan-only `plan_rename`), port/readiness audit (`readiness_audit`), and SQL auditing (`audit_sql`, `advise_sql`).
+Vulnerability work adds `vuln_check_dependency`, `vuln_findings`,
+`vuln_explain`, `vuln_scan`, and `vuln_brief`; a scan writes only with
+`record: true` and sends dependency coordinates to OSV only with `online: true`.
+On federated graphs, agents select a tag from `list_repos`; scans, findings,
+explanations, ledgers, and repair briefs are then isolated to that member,
+including external checkouts and Git-cached repositories. Artifact-only members
+are explicitly reported as not scannable.
 Memory retrieval adds `search_memory`, `explain_history`,
 `find_similar_change`, `known_pitfalls`, and `explain_decision`;
 `record_change_outcome` is advertised only with `--allow-memory-write`.

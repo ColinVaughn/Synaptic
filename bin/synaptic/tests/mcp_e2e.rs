@@ -120,7 +120,8 @@ fn mcp_stdio_conformance_over_the_real_binary() {
         &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
     );
 
-    // tools/list: every tool annotated read-only.
+    // tools/list: only the explicitly record-capable vulnerability scan is
+    // non-read-only on the default surface.
     send(
         &mut stdin,
         &json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
@@ -132,12 +133,14 @@ fn mcp_stdio_conformance_over_the_real_binary() {
         "expected the full tool set: {}",
         tools.len()
     );
-    assert!(
-        tools
-            .iter()
-            .all(|t| t["annotations"]["readOnlyHint"] == true),
-        "all tools must be annotated read-only"
-    );
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap_or_default();
+        assert_eq!(
+            tool["annotations"]["readOnlyHint"],
+            json!(name != "vuln_scan"),
+            "unexpected readOnlyHint for {name}"
+        );
+    }
 
     // graph_stats: structured content comes back over the wire.
     send(

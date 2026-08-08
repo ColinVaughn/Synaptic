@@ -24,6 +24,7 @@ synaptic-readiness = { workspace = true }
 synaptic-store = { workspace = true }
 synaptic-memory = { workspace = true }
 synaptic-vuln = { workspace = true }
+synaptic-api = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true, features = ["net", "time"] }
 futures-util = { workspace = true }

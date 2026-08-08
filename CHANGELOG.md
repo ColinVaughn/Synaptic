@@ -10,6 +10,33 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-08-08
+
+### Added
+- **Generation-ready remediation improvements.**
+  The same workflow is now agent-accessible over MCP: `vuln_scan` audits the
+  served repository and can explicitly record its results, while `vuln_brief`
+  returns the bounded repair hand-off. `online: true` is an explicit opt-in to
+  disclose the dependency list to OSV; the default scan reads local corpora.
+
+  MCP discovery now flags `vuln_scan` as potentially writing/networked and
+  declares structured output for scans and repair briefs; scan summaries name
+  their advisory source and make clear that an empty result is not proof of a
+  clean repository. A scan without a lockfile now names the unpinned-dependency
+  limitation and gives agents the safe per-package fallback.
+
+### Fixed
+
+- **Vulnerability workflows now operate on real federated repository roots.**
+  MCP agents select a member tag from `list_repos` and pass it as `repo` to
+  `vuln_scan`, `vuln_findings`, `vuln_explain`, or `vuln_brief`. Lockfiles,
+  policies, repository identities, ledgers, graph evidence, and repair source
+  slices are scoped to that member rather than the federation's control
+  directory. Normal workspace serving now registers co-located members,
+  external `[[repos]] path` checkouts, and Git clone-cache roots. Missing or
+  unknown scopes fail closed, per-member ledgers remain isolated, and
+  artifact-only members are explicitly reported as not scannable.
+
 ## [0.9.3] - 2026-08-08
 
 ### Added
@@ -31,6 +58,7 @@ All notable changes to Synaptic are documented here. The format is based on
   that are not proven applicable, or that lack a fixed version, are refused
   rather than asking an agent to invent a remediation.
 
+
 - **More served HTTP boundaries.** Cross-language extraction recognizes Next.js
   App Router and Pages Router endpoints, Supabase/Deno edge functions, and
   Symfony `#[Route]` attributes (including class prefixes, verb lists, dynamic
@@ -38,6 +66,7 @@ All notable changes to Synaptic are documented here. The format is based on
   service-boundary impact and in vulnerability entry-point evidence.
 
 ### Fixed
+
 
 - **Non-SemVer package versions are compared conservatively.** Version matching
   now normalizes common package-manager spellings: `v`-prefixed tags,
