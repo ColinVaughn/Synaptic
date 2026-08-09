@@ -10,6 +10,65 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-08-09
+
+### Fixed
+
+- **A vulnerability scan no longer rebuilds the impact graph once per finding.**
+  `ImpactIndex` was named an index but held only a `KnowledgeGraph`, so every
+  blast-radius forecast went through the unindexed walk, which rebuilds
+  `target -> [(source, relation)]` across every edge on each call. The scan asks
+  for one forecast per finding that has call sites, making the whole scan
+  O(findings x edges).
+
+  The cost is allocate-and-free rather than retained, so it does not read as a
+  leak in the code — but allocators cache freed blocks instead of returning
+  them, which turns the churn into monotonic growth against a container memory
+  limit. A hosted scan of a 25k-file monorepo climbed 3.5 → 6.1 → 9.8 → 13.5 GB
+  and was killed by its sandbox.
+
+  `forecast_nodes_with_index` already existed for exactly this shape ("indexed
+  variant for long-lived workers… a server that forecasts many changes against
+  one static graph"); it was simply never wired up. `ImpactIndex` now builds a
+  `ReverseImpactIndex` once and reuses it. Measured on a 379,212-node /
+  995,965-edge graph over 100 forecasts:
+
+  | | wall | allocated |
+  |---|---|---|
+  | rebuilt per call | 11.72 s | 2,539 MiB |
+  | built once, reused | 0.30 s | 121 MiB |
+
+  21x less allocation, 38.7x faster, identical results.
+
+  The indexed walk deliberately does **not** consult `opts.relations` — it uses
+  the relation set baked into the index — so the two must agree or every finding's
+  blast radius changes silently. Two tests pin that: one asserts the index
+  relations match the forecast default, the other checks the indexed result
+  against the per-call walk directly.
+
+### Added
+
+- **`cargo run --release --example forecastbench -- <graph.json> [rounds]`**,
+  the standing guard for the cost above: it runs the same forecasts both ways
+  behind a counting allocator and asserts the two agree.
+
+### Changed
+
+- `synaptic-predict` re-exports `ReverseImpactIndex` and
+  `DEFAULT_AFFECTED_RELATIONS`. `forecast_nodes_with_index` is public but took a
+  type callers could not name without also depending on `synaptic-query`, which
+  is a large part of why the indexed path went unused.
+
+### Known limitations
+
+- **Writing the shard store remains the largest single consumer of memory on a
+  large repository** — unchanged from 0.9.6, and now the dominant cost again now
+  that the scan path is fixed. `extract .` peaks at 10.05 GiB on the corpus above
+  versus 4.93 GiB with `--no-store`. The per-shard index callback clones the
+  shard's `GraphData` and builds a second full `KnowledgeGraph` from it, so a
+  corpus that produces a single shard duplicates the whole graph. `--no-store` is
+  still the workaround.
+
 ## [0.9.6] - 2026-08-08
 
 ### Changed
@@ -2108,7 +2167,8 @@ parameters), and `graph.json` gains only additive edge keys.
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.6...HEAD
+[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.7...HEAD
+[0.9.7]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.3...v0.9.4
