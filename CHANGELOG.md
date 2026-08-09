@@ -10,6 +10,95 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.8] - 2026-08-09
+
+Two retention bugs, both found by profiling rather than reading: a scan held one
+copy of a package's call sites per stub node instead of one per package member,
+and writing the shard store copied the entire graph twice. Together they were
+the reason a large repository needed far more memory than its graph.
+
+### Fixed
+
+- **A vulnerability scan no longer stores one copy of a package's call sites per
+  stub node.** `GraphUsageOracle::new` keyed its working map by
+  `(package, member)` but iterated `stub_nodes`, which is keyed by node id. Many
+  stub nodes name the same member, so each one cloned that member's entire
+  call-site list and stored its own copy.
+
+  Measured on a 25k-file TypeScript monorepo: 115,276 stub nodes collapse to
+  11,584 distinct pairs (10x), and storing per node held 449,489,960 call sites
+  for 115,276 distinct ones — a **3,899x amplification**, roughly 84 GiB of
+  intended allocation. The oracle is built once, before any advisory is read, so
+  this hit `--offline` scans too; no finding count could avoid it.
+
+  The duplicates were never observable: `call_sites` flat-maps every matching
+  member and `sort_call_sites` dedups, so they were built and immediately
+  discarded. Deduping at construction keeps the output identical — verified
+  byte-for-byte against the previous binary — and moves the sites out of the
+  working map rather than cloning them.
+
+  A `vuln scan --graph --offline` of that monorepo went from **dying at
+  14,414 MiB after 34 s to completing at 2,828 MiB in 18 s.**
+
+  This is the retention half of the problem whose churn half was fixed in 0.9.7.
+  The two look identical from the outside and needed different instruments: a
+  growth curve that stepped and held pointed here, not at the per-call rebuild.
+
+- **Writing the shard store no longer duplicates the graph twice.** This
+  resolves the limitation recorded against 0.9.6 and 0.9.7. Profiling the write
+  stages attributed 74% of the store's overhead to copying data the caller
+  already owned:
+
+  | stage | delta |
+  |---|---|
+  | `split()` into shards | +1,814 MiB |
+  | `shard.clone()` | +1,772 MiB |
+  | `QueryIndex::build` | +654 MiB |
+  | `QueryIndex::to_bytes` | +512 MiB |
+  | `ReverseImpactIndex::build` | +161 MiB |
+
+  `split` cloned every node and edge into per-repo shards; on a single-repo
+  repository that is the whole graph again, for nothing. It now takes the graph
+  by value and moves them, copying only a short id → repo string per node. The
+  index callback then cloned the shard a second time to build a throwaway
+  `KnowledgeGraph`, purely because both index builders required a
+  `&KnowledgeGraph`.
+
+  Measured on a 379,212-node / 995,965-edge repository, `extract .` peaks at
+  **5,617 MiB, down from 10,050 MiB**; the store's own cost falls from 5.1 GiB
+  to 0.69 GiB, an **87% reduction**. `--no-store` is no longer needed to fit,
+  and the graph it produces is unchanged.
+
+### Added
+
+- **`QueryIndex::build_from_parts` and `ReverseImpactIndex::build_from_parts`**,
+  which build from borrowed `&[&Node]` / `&[&Edge]` slices instead of requiring
+  an assembled `KnowledgeGraph`. Both `build` methods delegate to them, so the
+  two routes cannot drift.
+
+- **`cargo run --release --example scanprofile -- <graph.json>`**, which reports
+  a graph's stub-node/pair ratio and call-site storage amplification, and
+  **`cargo run --release --example storeprofile -- <graph.json>`**, which
+  attributes the store writer's cost stage by stage behind a counting allocator.
+  Both are how the two bugs above were located.
+
+### Changed
+
+- `synaptic_store::migrate::split`, `migrate_into`, `migrate_into_indexed` and
+  the CLI's `write_store` take `GraphData` by value. Every caller either already
+  owned the graph or was passing a temporary.
+
+### Known limitations
+
+- **Store index blobs are not byte-reproducible.** The equivalence test
+  `shard_index_matches_graph_built_index` compares the shard-built and
+  graph-built indexes as normalized values rather than bytes, because
+  `QueryIndex` stores token sets as `HashSet` and their serialization order is
+  unstable even for one graph indexed twice. This is pre-existing and harmless
+  today — the blobs are a derived cache keyed by `source_hash`, not part of it —
+  but reproducible store artifacts would require ordered maps there. The test
+  asserts the instability explicitly so a future fix has a place to start.
+
 ## [0.9.7] - 2026-08-09
 
 ### Fixed
@@ -2167,7 +2256,8 @@ parameters), and `graph.json` gains only additive edge keys.
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.7...HEAD
+[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.8...HEAD
+[0.9.8]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.4...v0.9.5

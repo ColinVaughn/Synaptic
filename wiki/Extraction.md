@@ -181,6 +181,31 @@ independently, and per-file results are merged in the original path-sorted order
 so the output stays deterministic. The Markdown structural pass runs in parallel
 the same way.
 
+## Memory on a large repository
+
+Peak memory tracks the size of the assembled graph rather than the repository's
+file count. The graph is fully resident from the moment it is built until the
+last artifact is written, and the write phase is where the peak lands.
+
+As a reference point, a 379,212-node / 995,965-edge repository holds a graph of
+roughly 1.8 GiB and `extract .` peaks at about 5.5 GiB. Budget several times the
+graph's own size — the export view, the shard store, and the indexes are all
+live at some point during the write phase.
+
+Knobs, in the order worth reaching for:
+
+| knob | effect |
+|---|---|
+| `.synapticignore` | Excluding generated trees and large data fixtures is usually the largest single win, because it removes nodes rather than deferring work. |
+| `--no-resources` / `--no-columns` | Fewer nodes in the graph itself, which is the term everything else scales against. |
+| `SYNAPTIC_EXTRACT_THREADS` (see [Configuration]) | Fewer workers means fewer per-file results in flight. Each worker also reserves 64 MiB of stack, so the pool has a fixed cost before any parsing. |
+| `--no-store` | Skips the shard store. Since 0.9.8 the store adds well under a gigabyte, so this is rarely the right lever — and the store is what shard-aware serving reads. |
+
+Whole-graph text exports (GraphML, Cypher, DOT, the 3D HTML viewer) are skipped
+above 150,000 nodes: they are unusable at that size and were producing
+multi-hundred-megabyte files. `graph.json` and the store are always written. See
+[Output-Formats].
+
 ## The AST cache
 
 Extraction uses an on-disk per-file cache so an unchanged file skips re-parsing
