@@ -103,7 +103,6 @@ fn resource_kind(path: &str) -> String {
 pub fn extract_resource_source(path: &str, source: &[u8]) -> ExtractionResult {
     let file_id = file_node_id(path);
     let mut file_extra = Map::new();
-    file_extra.insert("_origin".to_string(), Value::String("resource".to_string()));
     file_extra.insert(
         "_node_type".to_string(),
         Value::String("resource".to_string()),
@@ -130,6 +129,8 @@ pub fn extract_resource_source(path: &str, source: &[u8]) -> ExtractionResult {
         community: None,
         repo: None,
         extra: file_extra,
+        origin: Some("resource".into()),
+        ..Default::default()
     }];
     let mut edges = Vec::new();
 
@@ -144,8 +145,7 @@ pub fn extract_resource_source(path: &str, source: &[u8]) -> ExtractionResult {
         }
         let stub_id = NodeId(make_id(&["resref", &s]));
         if stub_ids.insert(stub_id.clone()) {
-            let mut stub_extra = Map::new();
-            stub_extra.insert("_origin".to_string(), Value::String("resource".to_string()));
+            let stub_extra = Map::new();
             nodes.push(Node {
                 id: stub_id.clone(),
                 label: s.clone(),
@@ -155,6 +155,8 @@ pub fn extract_resource_source(path: &str, source: &[u8]) -> ExtractionResult {
                 community: None,
                 repo: None,
                 extra: stub_extra,
+                origin: Some("resource".into()),
+                ..Default::default()
             });
         }
         edges.push(Edge {
@@ -457,8 +459,7 @@ pub fn resolve_resource_refs(nodes: &mut Vec<Node>, edges: &mut Vec<Edge>) -> Re
     // a bound edge now points at the real node and an unbound edge was removed).
     let referenced: HashSet<&NodeId> = edges.iter().flat_map(|e| [&e.source, &e.target]).collect();
     nodes.retain(|n| {
-        let is_stub = n.source_file.is_empty()
-            && n.extra.get("_origin").and_then(|v| v.as_str()) == Some("resource");
+        let is_stub = n.source_file.is_empty() && n.origin() == Some("resource");
         !is_stub || referenced.contains(&n.id)
     });
 
@@ -731,6 +732,7 @@ mod tests {
             community: None,
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         };
         n.set_kind(kind);
         n
@@ -743,10 +745,9 @@ mod tests {
     }
 
     fn has_live_resref_stub(nodes: &[Node]) -> bool {
-        nodes.iter().any(|n| {
-            n.source_file.is_empty()
-                && n.extra.get("_origin").and_then(|v| v.as_str()) == Some("resource")
-        })
+        nodes
+            .iter()
+            .any(|n| n.source_file.is_empty() && n.origin() == Some("resource"))
     }
 
     #[test]
@@ -905,10 +906,7 @@ mod tests {
             n.extra.get("_node_type").and_then(|v| v.as_str()),
             Some("resource")
         );
-        assert_eq!(
-            n.extra.get("_origin").and_then(|v| v.as_str()),
-            Some("resource")
-        );
+        assert_eq!(n.origin(), Some("resource"));
     }
 
     #[test]

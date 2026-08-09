@@ -349,6 +349,7 @@ mod tests {
             community: Some(0),
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         }
     }
 

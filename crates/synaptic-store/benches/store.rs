@@ -23,9 +23,9 @@ fn bench_graph() -> GraphData {
             "norm_label".into(),
             serde_json::json!(format!("handle_{i}")),
         );
-        extra.insert("_origin".into(), serde_json::json!("ast"));
-        extra.insert("kind".into(), serde_json::json!("function"));
-        nodes.push(Node {
+        // `kind` is a typed Node field; setting it through `extra` would model a
+        // node shape the extractors no longer produce and skew the benchmark.
+        let mut node = Node {
             id: NodeId(format!(
                 "crates/synaptic-{d}/src/module_{}.rs::handle_{i}",
                 i % 97
@@ -37,7 +37,11 @@ fn bench_graph() -> GraphData {
             community: Some((i % 40) as u32),
             repo: None,
             extra,
-        });
+            origin: Some("ast".into()),
+            ..Default::default()
+        };
+        node.set_kind(synaptic_core::NodeKind::Function);
+        nodes.push(node);
     }
     let mut links = Vec::with_capacity(EDGES);
     for i in 0..EDGES {

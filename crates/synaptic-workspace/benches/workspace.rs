@@ -29,6 +29,7 @@ fn node(id: String, label: String, source_file: String, repo: Option<String>) ->
         community: None,
         repo,
         extra: serde_json::Map::new(),
+        ..Default::default()
     }
 }
 

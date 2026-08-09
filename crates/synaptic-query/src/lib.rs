@@ -2271,6 +2271,7 @@ mod tests {
                     community: Some(0),
                     repo: None,
                     extra: Map::new(),
+                    ..Default::default()
                 })
                 .collect(),
             links: edges
@@ -2948,6 +2949,7 @@ mod tests {
             community: None,
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         };
         python.set_kind(NodeKind::Class);
         let mut rust = python.clone();
@@ -3011,6 +3013,7 @@ mod tests {
             community: None,
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         };
         lang.extra.insert(
             "_search_terms".into(),
@@ -3042,6 +3045,7 @@ mod tests {
             community: None,
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         };
         config
             .extra
@@ -3060,6 +3064,7 @@ mod tests {
                     community: None,
                     repo: None,
                     extra: Map::new(),
+                    ..Default::default()
                 },
                 Node {
                     id: NodeId("stub".into()),
@@ -3070,6 +3075,7 @@ mod tests {
                     community: None,
                     repo: None,
                     extra: Map::new(),
+                    ..Default::default()
                 },
                 config,
                 Node {
@@ -3081,6 +3087,7 @@ mod tests {
                     community: None,
                     repo: None,
                     extra: Map::new(),
+                    ..Default::default()
                 },
             ],
             links: vec![],
@@ -3108,6 +3115,7 @@ mod tests {
                 community: None,
                 repo: None,
                 extra: Map::new(),
+                ..Default::default()
             }],
             links: vec![],
             hyperedges: vec![],
@@ -3682,6 +3690,7 @@ mod tests {
                 community: None,
                 repo: None,
                 extra: Map::new(),
+                ..Default::default()
             };
             if let Some(k) = kind {
                 n.set_kind(k);
@@ -4012,6 +4021,7 @@ mod tests {
             community: None,
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         };
         let gd = GraphData {
             directed: true,

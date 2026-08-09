@@ -94,6 +94,7 @@ mod tests {
             community: None,
             repo: Some(repo.into()),
             extra: Map::new(),
+            ..Default::default()
         }
     }
 

@@ -70,7 +70,7 @@ pub fn build_from_parts(
 }
 
 fn is_ast(node: &Node) -> bool {
-    node.extra.get("_origin").and_then(|v| v.as_str()) == Some("ast")
+    node.is_ast_origin()
 }
 
 fn has_location(node: &Node) -> bool {
@@ -240,6 +240,7 @@ mod tests {
             community: None,
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         }
     }
 
@@ -493,7 +494,7 @@ mod tests {
 
     fn ast_node(id: &str, label: &str, sf: &str) -> Node {
         let mut n = node(id, label, sf);
-        n.extra.insert("_origin".into(), serde_json::json!("ast"));
+        n.set_origin("ast");
         n
     }
 

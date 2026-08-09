@@ -183,6 +183,7 @@ mod tests {
             community: None,
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         }
     }
 
@@ -198,6 +199,7 @@ mod tests {
             community: None,
             repo: None,
             extra,
+            ..Default::default()
         }
     }
 

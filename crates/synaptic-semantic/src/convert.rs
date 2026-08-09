@@ -44,7 +44,6 @@ fn value_to_node(v: &Value) -> Option<Node> {
     // Tag semantic provenance and carry non-core scalar fields (source_url,
     // author, etc.) through to graph.json.
     let mut extra = Map::new();
-    extra.insert("_origin".to_string(), Value::String("semantic".to_string()));
     if let Some(obj) = v.as_object() {
         for (k, val) in obj {
             if !CORE_NODE_KEYS.contains(&k.as_str()) && !val.is_null() {
@@ -62,6 +61,8 @@ fn value_to_node(v: &Value) -> Option<Node> {
         community: None,
         repo: None,
         extra,
+        origin: Some("semantic".into()),
+        ..Default::default()
     })
 }
 
@@ -120,10 +121,7 @@ mod tests {
         assert_eq!(auth.id, NodeId("doc_auth".into()));
         assert_eq!(auth.file_type, FileType::Concept);
         // Provenance tag, so it ghost-remaps instead of being treated as AST.
-        assert_eq!(
-            auth.extra.get("_origin").and_then(Value::as_str),
-            Some("semantic")
-        );
+        assert_eq!(auth.origin(), Some("semantic"));
         // Non-core fields carried into extra.
         assert_eq!(
             nodes[1].extra.get("author").and_then(Value::as_str),

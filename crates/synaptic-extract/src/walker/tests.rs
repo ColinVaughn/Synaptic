@@ -179,10 +179,7 @@ fn decorated_methods_stay_methods() {
 #[test]
 fn nodes_tagged_ast_origin() {
     let r = extract_python_source("fixtures/o.py", b"def f():\n    pass\n");
-    assert!(r
-        .nodes
-        .iter()
-        .all(|n| n.extra.get("_origin").and_then(|v| v.as_str()) == Some("ast")));
+    assert!(r.nodes.iter().all(|n| n.origin() == Some("ast")));
 }
 
 // imports

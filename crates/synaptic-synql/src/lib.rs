@@ -220,6 +220,7 @@ mod federated_tests {
             community: Some(community),
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         }
     }
 

@@ -286,6 +286,7 @@ fn bench_usage_oracle(criterion: &mut Criterion) {
             community: None,
             repo: None,
             extra: Default::default(),
+            ..Default::default()
         }
     }
 

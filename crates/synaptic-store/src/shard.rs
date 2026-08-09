@@ -377,6 +377,7 @@ mod tests {
                 community: Some((i % 3) as u32),
                 repo: None,
                 extra: Map::new(),
+                ..Default::default()
             })
             .collect();
         let links: Vec<Edge> = (0..n.saturating_sub(1))

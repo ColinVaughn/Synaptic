@@ -876,6 +876,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             community: None,
             repo: None,
             extra: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -889,6 +890,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             community: None,
             repo: None,
             extra: Default::default(),
+            ..Default::default()
         };
         node.set_dynamically_referenced(dynamic);
         node

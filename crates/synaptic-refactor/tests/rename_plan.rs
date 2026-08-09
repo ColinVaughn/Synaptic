@@ -126,6 +126,7 @@ fn plan_rename_surfaces_module_level_importer() {
         community: None,
         repo: None,
         extra: Map::new(),
+        ..Default::default()
     };
     let kg = KnowledgeGraph::from_graph_data(GraphData {
         directed: true,
@@ -298,6 +299,7 @@ fn cross_repo_reference_sites_carry_repo_tag() {
         community: None,
         repo: Some("lib".into()),
         extra: Map::new(),
+        ..Default::default()
     };
     def.set_kind(NodeKind::Class);
     def.set_span(Span {
@@ -315,6 +317,7 @@ fn cross_repo_reference_sites_carry_repo_tag() {
         community: None,
         repo: Some("app".into()),
         extra: Map::new(),
+        ..Default::default()
     };
     // A cross-repo reference (non-call) so the site is emitted straight from the edge.
     let edge = Edge {

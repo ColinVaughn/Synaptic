@@ -278,6 +278,7 @@ mod tests {
             community,
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         };
         n.set_kind(kind);
         n.set_visibility(Visibility::Public);

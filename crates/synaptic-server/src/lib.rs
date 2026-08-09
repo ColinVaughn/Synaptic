@@ -7881,6 +7881,7 @@ mod tests {
             community,
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         }
     }
 
@@ -8231,6 +8232,7 @@ mod tests {
                     community: None,
                     repo: None,
                     extra: Default::default(),
+                    ..Default::default()
                 },
                 synaptic_core::Node {
                     id: NodeId("leaf_parse".into()),
@@ -8241,6 +8243,7 @@ mod tests {
                     community: None,
                     repo: None,
                     extra: Default::default(),
+                    ..Default::default()
                 },
             ],
             links: vec![synaptic_core::Edge {
@@ -8353,6 +8356,7 @@ mod tests {
                     community: None,
                     repo: Some("billing".into()),
                     extra: Default::default(),
+                    ..Default::default()
                 },
                 synaptic_core::Node {
                     id: NodeId("inventory::leaf_parse".into()),
@@ -8367,6 +8371,7 @@ mod tests {
                     // inherited from another member.
                     repo: Some("inventory".into()),
                     extra: Default::default(),
+                    ..Default::default()
                 },
                 synaptic_core::Node {
                     id: NodeId("inventory::main".into()),
@@ -8377,6 +8382,7 @@ mod tests {
                     community: None,
                     repo: Some("inventory".into()),
                     extra: Default::default(),
+                    ..Default::default()
                 },
             ],
             links: vec![synaptic_core::Edge {
@@ -8478,6 +8484,7 @@ mod tests {
                 community: None,
                 repo: Some("hosted".into()),
                 extra: Default::default(),
+                ..Default::default()
             }],
             ..GraphData::default()
         };
@@ -12825,6 +12832,7 @@ mod tests {
             community: Some(0),
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         };
         let gd = GraphData {
             directed: true,
@@ -13313,6 +13321,7 @@ mod tests {
             community: Some(1),
             repo: Some(repo.into()),
             extra: serde_json::Map::new(),
+            ..Default::default()
         };
         let mke = |sr: &str, t: &str, cross: bool| synaptic_core::Edge {
             source: NodeId(sr.into()),
@@ -13387,6 +13396,7 @@ mod tests {
             community: Some(1),
             repo: Some(repo.into()),
             extra: serde_json::Map::new(),
+            ..Default::default()
         };
         let gd = |ids: &[(&str, &str)]| GraphData {
             directed: true,
@@ -13442,6 +13452,7 @@ mod tests {
             community: Some(1),
             repo: Some(repo.into()),
             extra: serde_json::Map::new(),
+            ..Default::default()
         };
         let mke = |sr: &str, t: &str, cross: bool| synaptic_core::Edge {
             source: NodeId(sr.into()),
@@ -13512,6 +13523,7 @@ mod tests {
             community: Some(1),
             repo: Some(repo.into()),
             extra: serde_json::Map::new(),
+            ..Default::default()
         };
         let mke = |sr: &str, t: &str, cross: bool| synaptic_core::Edge {
             source: NodeId(sr.into()),

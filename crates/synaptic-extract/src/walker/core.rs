@@ -31,17 +31,6 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         }
     }
 
-    /// `extra` with the AST-provenance tag, so the build-stage ghost remap can
-    /// distinguish AST nodes from (future) semantic nodes.
-    fn ast_origin() -> Map<String, serde_json::Value> {
-        let mut m = Map::new();
-        m.insert(
-            "_origin".to_string(),
-            serde_json::Value::String("ast".to_string()),
-        );
-        m
-    }
-
     pub(crate) fn add_node(&mut self, id: NodeId, label: String, line: usize) {
         if self.seen.insert(id.clone()) {
             self.nodes.push(Node {
@@ -52,7 +41,9 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                 source_location: Some(format!("L{line}")),
                 community: None,
                 repo: None,
-                extra: Self::ast_origin(),
+                extra: Map::new(),
+                origin: Some("ast".into()),
+                ..Default::default()
             });
         }
     }
@@ -77,7 +68,9 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                 source_location: Some(format!("L{}", node.start_position().row + 1)),
                 community: None,
                 repo: None,
-                extra: Self::ast_origin(),
+                extra: Map::new(),
+                origin: Some("ast".into()),
+                ..Default::default()
             };
             n.set_kind(kind);
             n.set_span(Self::span(node));
@@ -205,7 +198,9 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                 source_location: Some(format!("L{line}")),
                 community: None,
                 repo: None,
-                extra: Self::ast_origin(),
+                extra: Map::new(),
+                origin: Some("ast".into()),
+                ..Default::default()
             });
         }
         self.add_edge(rid, target, "rationale_for", line, None);
@@ -246,7 +241,9 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                 source_location: None,
                 community: None,
                 repo: None,
-                extra: Self::ast_origin(),
+                extra: Map::new(),
+                origin: Some("ast".into()),
+                ..Default::default()
             });
         }
     }

@@ -11,20 +11,20 @@ use crate::common::{confidence_str, file_type_str, xml_escape};
 
 /// Render the graph as a GraphML document string.
 pub fn to_graphml_string(kg: &KnowledgeGraph) -> String {
-    let gd = kg.to_graph_data();
-    let edgedefault = if gd.directed {
+    // Borrow the graph: `to_graph_data()` deep-cloned every node and edge
+    // (including their `extra` maps) purely to read them.
+    let edgedefault = if kg.directed {
         "directed"
     } else {
         "undirected"
     };
     // Federation attrs (`repo`, `cross_repo`) are declared + emitted ONLY for
     // federated graphs, so single-repo GraphML is unchanged.
-    let federated = gd.nodes.iter().any(|n| n.repo.is_some());
+    let federated = kg.nodes().any(|n| n.repo.is_some());
     // Enrichment attrs (kind/visibility/loc) are declared + emitted only when at
     // least one node carries them, so a graph built before enrichment is unchanged.
-    let enriched = gd
-        .nodes
-        .iter()
+    let enriched = kg
+        .nodes()
         .any(|n| n.kind().is_some() || n.visibility().is_some() || n.span().is_some());
     let mut s = String::new();
     s.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
@@ -52,7 +52,7 @@ pub fn to_graphml_string(kg: &KnowledgeGraph) -> String {
         ));
     }
     s.push_str(&format!("  <graph edgedefault=\"{edgedefault}\">\n"));
-    for n in &gd.nodes {
+    for n in kg.nodes() {
         s.push_str(&format!("    <node id=\"{}\">\n", xml_escape(&n.id.0)));
         s.push_str(&data("label", &xml_escape(&n.label)));
         s.push_str(&data(
@@ -82,7 +82,7 @@ pub fn to_graphml_string(kg: &KnowledgeGraph) -> String {
         }
         s.push_str("    </node>\n");
     }
-    for e in &gd.links {
+    for e in kg.edges() {
         s.push_str(&format!(
             "    <edge source=\"{}\" target=\"{}\">\n",
             xml_escape(&e.source.0),

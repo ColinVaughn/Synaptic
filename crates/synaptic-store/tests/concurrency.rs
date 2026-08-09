@@ -26,6 +26,7 @@ fn graph(ids: &[&str]) -> GraphData {
             community: None,
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         })
         .collect();
     gd

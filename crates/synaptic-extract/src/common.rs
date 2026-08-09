@@ -10,17 +10,6 @@ use synaptic_core::{make_id, Confidence, Edge, FileType, Node, NodeId};
 
 use crate::result::{ExtractionResult, ImportRecord, RawCall};
 
-/// `extra` carrying the AST-provenance tag (so the build-stage ghost remap can
-/// tell AST nodes from semantic ones).
-fn ast_origin() -> Map<String, serde_json::Value> {
-    let mut m = Map::new();
-    m.insert(
-        "_origin".to_string(),
-        serde_json::Value::String("ast".to_string()),
-    );
-    m
-}
-
 /// Accumulates nodes/edges/raw-calls/imports for one source file, deduping node
 /// ids via `seen`.
 pub(crate) struct Builder {
@@ -63,7 +52,9 @@ impl Builder {
                 source_location: Some(format!("L{line}")),
                 community: None,
                 repo: None,
-                extra: ast_origin(),
+                extra: Map::new(),
+                origin: Some("ast".into()),
+                ..Default::default()
             });
         }
     }
@@ -74,7 +65,7 @@ impl Builder {
     /// symbol (see `Node::is_code_symbol`). Deduped by id like [`add_node`].
     pub fn add_tagged_node(&mut self, id: NodeId, label: String, line: usize, node_type: &str) {
         if self.seen.insert(id.clone()) {
-            let mut extra = ast_origin();
+            let mut extra = Map::new();
             extra.insert(
                 "_node_type".to_string(),
                 serde_json::Value::String(node_type.to_string()),
@@ -88,6 +79,8 @@ impl Builder {
                 community: None,
                 repo: None,
                 extra,
+                origin: Some("ast".into()),
+                ..Default::default()
             });
         }
     }
@@ -120,7 +113,9 @@ impl Builder {
                 source_location: Some(format!("L{}", s.row + 1)),
                 community: None,
                 repo: None,
-                extra: ast_origin(),
+                extra: Map::new(),
+                origin: Some("ast".into()),
+                ..Default::default()
             };
             n.set_kind(kind);
             n.set_span(span);
@@ -170,7 +165,9 @@ impl Builder {
                 source_location: None,
                 community: None,
                 repo: None,
-                extra: ast_origin(),
+                extra: Map::new(),
+                origin: Some("ast".into()),
+                ..Default::default()
             });
         }
     }

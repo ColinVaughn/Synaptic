@@ -17,6 +17,7 @@ fn server(store: MemoryStore, write: bool) -> Server {
         community: Some(0),
         repo: None,
         extra: Map::new(),
+        ..Default::default()
     };
     Server::from_graph_data(
         GraphData {
@@ -435,6 +436,7 @@ fn multi_file_forecast_aggregates_deduplicated_memory_evidence() {
                 community: Some(0),
                 repo: None,
                 extra: Map::new(),
+                ..Default::default()
             },
             Node {
                 id: NodeId("render_invoice".into()),
@@ -445,6 +447,7 @@ fn multi_file_forecast_aggregates_deduplicated_memory_evidence() {
                 community: Some(1),
                 repo: None,
                 extra: Map::new(),
+                ..Default::default()
             },
         ],
         ..GraphData::default()
@@ -538,6 +541,7 @@ fn pull_request_impact_aggregates_memory_for_changed_files() {
             community: Some(0),
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         }],
         ..GraphData::default()
     };
@@ -615,6 +619,7 @@ fn working_changes_aggregate_memory_for_the_branch_file_set() {
             community: Some(0),
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         }],
         ..GraphData::default()
     };

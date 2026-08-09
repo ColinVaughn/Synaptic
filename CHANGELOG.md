@@ -10,6 +10,71 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- **Large-repository extraction allocates less and copies the graph far less.**
+  Graphing a 25k-file TypeScript monorepo (379,212 nodes / 995,965 edges) peaked
+  around 9 GiB. The audit found no leak — memory was released correctly — but a
+  per-node cost far above what the data warranted, multiplied by the whole graph
+  being copied repeatedly. Seven changes, none of which alter `graph.json` by a
+  byte (verified: a 25,969,515-byte graph written by the previous release
+  round-trips through the new code to identical bytes, and the monorepo above
+  still produces the same 379,212 nodes / 995,965 edges and the same
+  836,166,212-byte `graph.json`):
+
+  - `graph.json` is now written by streaming one node/edge at a time instead of
+    building a `serde_json::Value` tree over the whole graph and then a
+    whole-file `String`. Measured 3.30x the resident graph before, 1.00x after —
+    zero transient allocation. Elements are still converted individually so the
+    sorted (`BTreeMap`) key order the format has always used is preserved;
+    serializing the struct directly would have silently reordered every key.
+  - The GraphML, Cypher, DOT and Mermaid writers borrow the graph rather than
+    opening with a `to_graph_data()` deep clone of every node and edge.
+  - The dedup tiebreaker no longer clones the entire node set — and then the
+    entire edge set — before deciding whether it has anything to merge. It reads
+    from a borrowing iterator and consumes the graph only when a merge is
+    confirmed. This was the run's peak (4.4 → 8.7 GiB), and it merged 3 pairs.
+  - `raw_calls` and `imports` (one entry per call site in the corpus) are freed
+    immediately after symbol resolution instead of staying resident through
+    build, clustering, analysis and every output writer.
+  - Hot node metadata (`kind`, `visibility`, `span`, `signature`) is stored in
+    typed fields rather than as `serde_json::Value`s inside `extra`, which cost
+    2,220 bytes/node — 51% of all node memory. A 16-byte `Span` cost 698 bytes
+    as a JSON value. Measured 4,364 → 3,481 bytes/node.
+  - `_origin` and `_is_test` moved to typed fields as well, which leaves 65% of
+    nodes holding a genuinely *empty* `extra` map — the point being that an empty
+    `BTreeMap` allocates nothing, while one holding a single key costs a fixed
+    ~656-byte 11-slot leaf. `_node_type` was deliberately left alone: it would
+    add 1.3 percentage points for 146 call sites, because the nodes carrying it
+    carry 8-10 other keys anyway.
+  - A loaded graph no longer keeps `norm_label`. It is on every node in
+    `graph.json` and so defeated the above on the load path, but it is derived
+    from `label`, written only by the export path, and never read back.
+    `from_graph_data` drops it, taking a 14,378-node resident graph from
+    50.1 MiB to 43.9 MiB. (`BTreeMap::remove` does not release the allocation —
+    673 → 656 bytes measured — so the map is replaced outright.)
+  - Extraction worker stacks are capped at 1 GiB total. Rayon defaults to one
+    worker per core at 64 MiB each, reserving 4 GiB on a 64-core machine.
+    `SYNAPTIC_EXTRACT_THREADS` overrides the worker count.
+  - GraphML, Cypher, DOT and the 3-D force layout are skipped past 150,000 nodes.
+    They aggregate nothing, so the same corpus wrote 1 GB of artifacts no tool in
+    the chain can open. `graph.json` and `graph.html` are always written.
+
+  Measured back-to-back on one machine, same checkout, both with a cold AST
+  cache: peak private bytes 12.13 GiB → 9.92 GiB (−18%), producing byte-identical
+  output — the same 379,212 nodes / 995,965 edges and the same 836,166,212-byte
+  `graph.json` from both arms. Run-to-run variance on a workload this size is
+  around ±10%, so read the end-to-end figure as a stable improvement rather than
+  an exact one; the component measurements are deterministic (allocator-counted).
+  The dominant remaining cost is inherent: every node and edge is live at once
+  between extraction and build.
+
+### Fixed
+
+- **Hyperedges survived being silently dropped by the dedup tiebreaker.** When
+  the tiebreaker confirmed a merge, the graph was rebuilt with an empty hyperedge
+  list.
+
 ## [0.9.5] - 2026-08-08
 
 ### Fixed

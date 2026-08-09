@@ -108,6 +108,7 @@ fn make_pg_node(id: &str, label: &str, source_file: &str, kind: &str) -> Node {
         community: None,
         repo: None,
         extra,
+        ..Default::default()
     }
 }
 

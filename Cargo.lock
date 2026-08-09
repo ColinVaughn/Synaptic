@@ -3284,6 +3284,7 @@ version = "0.9.5"
 dependencies = [
  "criterion",
  "redis",
+ "serde",
  "serde_json",
  "synaptic-core",
  "synaptic-graph",

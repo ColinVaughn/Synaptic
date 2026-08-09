@@ -36,8 +36,9 @@ fn escape(s: &str) -> String {
 
 /// Render the graph in the DOT language.
 pub fn to_dot_string(kg: &KnowledgeGraph) -> String {
-    let gd = kg.to_graph_data();
-    let (keyword, arrow) = if gd.directed {
+    // Borrow the graph: `to_graph_data()` deep-cloned every node and edge
+    // (including their `extra` maps) purely to read them.
+    let (keyword, arrow) = if kg.directed {
         ("digraph", "->")
     } else {
         ("graph", "--")
@@ -47,7 +48,7 @@ pub fn to_dot_string(kg: &KnowledgeGraph) -> String {
         "  rankdir=LR;".to_string(),
         "  node [shape=box];".to_string(),
     ];
-    for n in &gd.nodes {
+    for n in kg.nodes() {
         lines.push(format!(
             "  \"{}\" [label=\"{}\", kind=\"{}\"];",
             escape(&n.id.0),
@@ -55,7 +56,7 @@ pub fn to_dot_string(kg: &KnowledgeGraph) -> String {
             escape(&file_type_str(&n.file_type)),
         ));
     }
-    for e in &gd.links {
+    for e in kg.edges() {
         lines.push(format!(
             "  \"{}\" {arrow} \"{}\" [label=\"{}\"];",
             escape(&e.source.0),

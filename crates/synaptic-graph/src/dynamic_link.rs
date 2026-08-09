@@ -146,6 +146,7 @@ mod tests {
             community: None,
             repo: repo.map(|s| s.to_string()),
             extra: Map::new(),
+            ..Default::default()
         };
         n.set_kind(NodeKind::Function);
         n

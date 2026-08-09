@@ -609,6 +609,7 @@ fn reusable_package_node(
         community: None,
         repo: None,
         extra: Map::new(),
+        ..Default::default()
     };
     let index = nodes.len();
     external_nodes_by_label
@@ -695,6 +696,7 @@ fn vendor_node(vendor: &VendorConfig) -> Node {
         community: None,
         repo: None,
         extra,
+        ..Default::default()
     }
 }
 
@@ -721,6 +723,7 @@ fn operation_node(anchor: &ApiOperationAnchor, authority: Option<&str>) -> Node 
         community: None,
         repo: None,
         extra,
+        ..Default::default()
     }
 }
 

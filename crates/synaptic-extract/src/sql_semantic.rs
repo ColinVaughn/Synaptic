@@ -208,6 +208,7 @@ fn add_node(
     id: NodeId,
     label: &str,
     kind: NodeKind,
+    origin: &str,
     extra: Map<String, Value>,
 ) {
     if result.nodes.iter().any(|n| n.id == id) {
@@ -222,8 +223,10 @@ fn add_node(
         community: None,
         repo: None,
         extra,
+        ..Default::default()
     };
     n.set_kind(kind);
+    n.set_origin(origin);
     result.nodes.push(n);
 }
 
@@ -314,7 +317,6 @@ fn enrich_columns(sql: &str, result: &mut ExtractionResult) {
                 .any(|o| matches!(o.option, ColumnOption::PrimaryKey(_)));
             let is_pk = inline_pk || pk_constraint_cols.contains(&name_lower);
             let mut extra = Map::new();
-            extra.insert("_origin".into(), json!("ast"));
             extra.insert("data_type".into(), json!(col.data_type.to_string()));
             extra.insert("nullable".into(), json!(!not_null && !is_pk));
             extra.insert("pk".into(), json!(is_pk));
@@ -334,7 +336,7 @@ fn enrich_columns(sql: &str, result: &mut ExtractionResult) {
                 extra.insert("fk_target".into(), json!(t));
             }
             let cid = col_id(&table_lower, &name_lower);
-            add_node(result, cid.clone(), &name, NodeKind::Column, extra);
+            add_node(result, cid.clone(), &name, NodeKind::Column, "ast", extra);
             add_edge(result, table_id.clone(), cid, "has_column", "column");
         }
     }
@@ -437,7 +439,6 @@ fn enrich_columns_tsql(sql: &str, result: &mut ExtractionResult) {
                 indexed.push(vec![name_lower.clone()]);
             }
             let mut extra = Map::new();
-            extra.insert("_origin".into(), json!("tsql"));
             extra.insert("data_type".into(), json!(dtype));
             extra.insert("nullable".into(), json!(nullable && !is_pk));
             extra.insert("pk".into(), json!(is_pk));
@@ -448,7 +449,7 @@ fn enrich_columns_tsql(sql: &str, result: &mut ExtractionResult) {
                 extra.insert("fk_target".into(), json!(t));
             }
             let cid = col_id(&table_lower, &name_lower);
-            add_node(result, cid.clone(), &name, NodeKind::Column, extra);
+            add_node(result, cid.clone(), &name, NodeKind::Column, "tsql", extra);
             add_edge(result, table_id.clone(), cid, "has_column", "column");
         }
 
@@ -459,9 +460,15 @@ fn enrich_columns_tsql(sql: &str, result: &mut ExtractionResult) {
             }
             let idx_label = format!("ix_{table_lower}_{i}");
             let idx_id = NodeId(make_id(&["sql", &table_lower, "idx", &idx_label]));
-            let mut extra = Map::new();
-            extra.insert("_origin".into(), json!("tsql"));
-            add_node(result, idx_id.clone(), &idx_label, NodeKind::Index, extra);
+            let extra = Map::new();
+            add_node(
+                result,
+                idx_id.clone(),
+                &idx_label,
+                NodeKind::Index,
+                "tsql",
+                extra,
+            );
             add_edge(
                 result,
                 table_id.clone(),
@@ -647,9 +654,15 @@ fn enrich_tsql_indexes(sql: &str, result: &mut ExtractionResult) {
             "idx",
             &idx_label.to_lowercase(),
         ]));
-        let mut extra = Map::new();
-        extra.insert("_origin".into(), json!("tsql"));
-        add_node(result, idx_id.clone(), &idx_label, NodeKind::Index, extra);
+        let extra = Map::new();
+        add_node(
+            result,
+            idx_id.clone(),
+            &idx_label,
+            NodeKind::Index,
+            "tsql",
+            extra,
+        );
         add_edge(result, table_id, idx_id.clone(), "has_index", "index");
         for c in split_top_level(&caps[3]) {
             let col = strip_brackets(c.split_whitespace().next().unwrap_or("")).to_lowercase();
@@ -687,9 +700,15 @@ fn enrich_indexes(sql: &str, result: &mut ExtractionResult) {
             &idx_label.to_lowercase(),
         ]));
         let mut extra = Map::new();
-        extra.insert("_origin".into(), json!("ast"));
         extra.insert("unique".into(), json!(ci.unique));
-        add_node(result, idx_id.clone(), &idx_label, NodeKind::Index, extra);
+        add_node(
+            result,
+            idx_id.clone(),
+            &idx_label,
+            NodeKind::Index,
+            "ast",
+            extra,
+        );
         add_edge(result, table_id, idx_id.clone(), "has_index", "index");
         for c in &ci.columns {
             let col_lower = index_column_name(&c.column.expr);
@@ -748,7 +767,6 @@ fn enrich_security(sql: &str, result: &mut ExtractionResult) {
         let table_lower = last_ident(&caps[2]);
         let body = &caps[3];
         let mut extra = Map::new();
-        extra.insert("_origin".into(), json!("ast"));
         if let Some(u) = USING_RE.captures(body) {
             extra.insert("using_expr".into(), json!(u[1].trim()));
         }
@@ -761,7 +779,14 @@ fn enrich_security(sql: &str, result: &mut ExtractionResult) {
             "policy",
             &pol_name.to_lowercase(),
         ]));
-        add_node(result, pid.clone(), &pol_name, NodeKind::Policy, extra);
+        add_node(
+            result,
+            pid.clone(),
+            &pol_name,
+            NodeKind::Policy,
+            "ast",
+            extra,
+        );
         let table_id = NodeId(make_id(&["sql", &table_lower]));
         add_edge(result, table_id, pid, "protected_by", "rls");
     }
@@ -771,7 +796,6 @@ fn enrich_security(sql: &str, result: &mut ExtractionResult) {
         let pol_name = caps[1].to_string();
         let table_lower = last_ident(&caps[2]);
         let mut extra = Map::new();
-        extra.insert("_origin".into(), json!("ast"));
         extra.insert("engine".into(), json!("sqlserver"));
         let pid = NodeId(make_id(&[
             "sql",
@@ -779,7 +803,14 @@ fn enrich_security(sql: &str, result: &mut ExtractionResult) {
             "secpol",
             &pol_name.to_lowercase(),
         ]));
-        add_node(result, pid.clone(), &pol_name, NodeKind::Policy, extra);
+        add_node(
+            result,
+            pid.clone(),
+            &pol_name,
+            NodeKind::Policy,
+            "ast",
+            extra,
+        );
         let table_id = NodeId(make_id(&["sql", &table_lower]));
         add_edge(result, table_id, pid, "protected_by", "security_policy");
     }
@@ -790,9 +821,8 @@ fn enrich_security(sql: &str, result: &mut ExtractionResult) {
         let table_lower = last_ident(&caps[2]);
         let role = caps[3].to_string();
         let rid = NodeId(make_id(&["sql", "role", &role.to_lowercase()]));
-        let mut extra = Map::new();
-        extra.insert("_origin".into(), json!("ast"));
-        add_node(result, rid.clone(), &role, NodeKind::Role, extra);
+        let extra = Map::new();
+        add_node(result, rid.clone(), &role, NodeKind::Role, "ast", extra);
         let table_id = NodeId(make_id(&["sql", &table_lower]));
         add_edge(result, rid, table_id, "grants", &priv_);
     }

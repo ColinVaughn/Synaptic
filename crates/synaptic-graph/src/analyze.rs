@@ -1252,6 +1252,7 @@ mod tests {
                     community: None,
                     repo: None,
                     extra: Map::new(),
+                    ..Default::default()
                 })
                 .collect(),
             links: edges
@@ -1606,6 +1607,7 @@ mod tests {
                         community: None,
                         repo: None,
                         extra: Map::new(),
+                        ..Default::default()
                     })
                     .collect(),
                 links: vec![
@@ -1690,6 +1692,7 @@ mod tests {
             community: None,
             repo: None,
             extra: serde_json::Map::new(),
+            ..Default::default()
         };
         let caller = mk("c", "deploy()", "d.py");
         let mut stub = mk("cmd::mytool", "mytool", "");

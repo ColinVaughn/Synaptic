@@ -20,6 +20,7 @@ fn code_node(id: &str, label: &str, sf: &str, repo: Option<&str>) -> Node {
         community: Some(2),
         repo: repo.map(|r| r.into()),
         extra: Map::new(),
+        ..Default::default()
     }
 }
 

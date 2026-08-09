@@ -72,6 +72,7 @@ fn runtime_targets_promote_dynamic_unknowns_without_becoming_impact_bindings() {
             );
             extra
         },
+        ..Default::default()
     };
     let graph = GraphData {
         nodes: vec![node],

@@ -472,6 +472,7 @@ pub(crate) fn test_node(id: &str) -> synaptic_core::Node {
         community: None,
         repo: None,
         extra: serde_json::Map::new(),
+        ..Default::default()
     }
 }
 

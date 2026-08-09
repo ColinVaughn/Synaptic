@@ -14,6 +14,7 @@ fn node(id: &str, label: &str, sf: &str) -> Node {
         community: None,
         repo: None,
         extra: Map::new(),
+        ..Default::default()
     }
 }
 

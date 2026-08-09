@@ -167,6 +167,7 @@ mod tests {
             community: None,
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         };
         n.set_kind(NodeKind::Function);
         n

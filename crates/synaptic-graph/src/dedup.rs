@@ -418,8 +418,8 @@ const TIEBREAK_LOW: f64 = 75.0;
 /// stage" vs "data processing stage"); LSH would never surface those to the
 /// tiebreaker. O(n²) is acceptable because this runs only on concept nodes (a
 /// small set), and the structural pass-2 merge already used LSH for the bulk.
-pub fn ambiguous_concept_pairs(
-    nodes: &[Node],
+pub fn ambiguous_concept_pairs<'a>(
+    nodes: impl IntoIterator<Item = &'a Node>,
     communities: &HashMap<NodeId, u32>,
 ) -> Vec<(NodeId, NodeId)> {
     let mut cand: Vec<&Node> = Vec::new();
@@ -522,8 +522,8 @@ pub fn deterministic_tiebreak(nodes: &[Node], pairs: &[(NodeId, NodeId)]) -> Vec
 /// multiset, so grouping by that key avoids materializing every fuzzy pair. The
 /// exhaustive all-pairs function remains available for an explicitly requested
 /// model/human review.
-pub fn deterministic_tiebreak_candidates(
-    nodes: &[Node],
+pub fn deterministic_tiebreak_candidates<'a>(
+    nodes: impl IntoIterator<Item = &'a Node>,
     communities: &HashMap<NodeId, u32>,
 ) -> Vec<(NodeId, NodeId)> {
     let mut groups: std::collections::BTreeMap<Vec<String>, Vec<(&Node, String)>> =
@@ -622,6 +622,7 @@ mod tests {
             community: None,
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         }
     }
 
@@ -776,6 +777,18 @@ mod tests {
             deterministic_tiebreak(&nodes, &ambiguous_concept_pairs(&nodes, &HashMap::new()));
         let indexed = deterministic_tiebreak_candidates(&nodes, &HashMap::new());
         assert_eq!(indexed, exhaustive);
+        // Same answer when fed a borrowing iterator rather than a slice: the
+        // caller must not have to clone every node out of a built graph.
+        assert_eq!(
+            deterministic_tiebreak_candidates(nodes.iter(), &HashMap::new()),
+            indexed,
+            "iterator input yields the same candidates as a slice"
+        );
+        assert_eq!(
+            ambiguous_concept_pairs(nodes.iter(), &HashMap::new()),
+            ambiguous_concept_pairs(&nodes, &HashMap::new()),
+            "iterator input yields the same ambiguous pairs as a slice"
+        );
         assert!(
             !indexed.is_empty(),
             "fixture must exercise a confirmed pair"
@@ -862,5 +875,44 @@ mod tests {
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].id, NodeId("known".into()));
         assert_eq!(rewired[0].source, NodeId("known".into()));
+    }
+
+    /// The extract pipeline applies a tiebreaker merge by consuming the graph,
+    /// merging, and rebuilding. Hyperedges must survive that round trip -- the
+    /// earlier rebuild passed `vec![]` and silently dropped every hyperedge
+    /// whenever the tiebreaker confirmed even one pair.
+    #[test]
+    fn merge_then_rebuild_preserves_hyperedges() {
+        use synaptic_core::Hyperedge;
+
+        let nodes = vec![
+            n("c1", "User Authentication Flow", FileType::Concept, ""),
+            n("c2", "Authentication User Flow", FileType::Concept, ""),
+        ];
+        let edges = vec![edge("c1", "c2")];
+        let hyperedges = vec![Hyperedge {
+            id: "he1".into(),
+            label: "auth cluster".into(),
+            nodes: vec![NodeId("c1".into()), NodeId("c2".into())],
+            relation: None,
+            confidence: None,
+        }];
+        let opts = crate::BuildOptions::default();
+
+        let kg = crate::build_from_parts(nodes, edges, hyperedges, &opts);
+        assert_eq!(kg.hyperedges.len(), 1, "precondition: hyperedge attached");
+
+        // Exactly what extract.rs does when the tiebreaker confirms a pair.
+        let confirmed = vec![(NodeId("c1".into()), NodeId("c2".into()))];
+        let gd = kg.into_graph_data();
+        let (mn, me) = merge_pairs(gd.nodes, gd.links, &confirmed);
+        let rebuilt = crate::build_from_parts(mn, me, gd.hyperedges, &opts);
+
+        assert_eq!(
+            rebuilt.hyperedges.len(),
+            1,
+            "hyperedges survive a tiebreaker merge + rebuild"
+        );
+        assert_eq!(rebuilt.node_count(), 1, "the confirmed pair merged");
     }
 }

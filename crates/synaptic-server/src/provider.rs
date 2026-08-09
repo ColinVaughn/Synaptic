@@ -1065,6 +1065,7 @@ mod tests {
                     community: None,
                     repo: None,
                     extra: Map::new(),
+                    ..Default::default()
                 },
                 Node {
                     id: NodeId("b".into()),
@@ -1075,6 +1076,7 @@ mod tests {
                     community: None,
                     repo: None,
                     extra: Map::new(),
+                    ..Default::default()
                 },
             ],
             links: vec![Edge {
@@ -1105,6 +1107,7 @@ mod tests {
             community: None,
             repo: repo.map(|r| r.into()),
             extra: Map::new(),
+            ..Default::default()
         }
     }
     fn redge(s: &str, t: &str) -> Edge {
@@ -1133,6 +1136,7 @@ mod tests {
             community: None,
             repo: Some(repo.into()),
             extra: Map::new(),
+            ..Default::default()
         }
     }
 
@@ -1146,6 +1150,7 @@ mod tests {
             community: Some(community),
             repo: Some(repo.into()),
             extra: Map::new(),
+            ..Default::default()
         }
     }
     fn xedge(s: &str, t: &str, rel: &str, conf: Confidence, cross: bool) -> Edge {

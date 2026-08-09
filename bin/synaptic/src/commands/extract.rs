@@ -20,8 +20,8 @@ use synaptic_llm::{
     build_client, default_concurrency, estimate_cost, resolve_backend, LlmClient, SemanticCache,
 };
 use synaptic_output::{
-    to_cypher, to_dot, to_force3d, to_graphml, to_html, to_json, to_mermaid, to_obsidian, to_svg,
-    to_tree_html, to_wiki,
+    bulk_export_is_viable, to_cypher, to_dot, to_force3d, to_graphml, to_html, to_json, to_mermaid,
+    to_obsidian, to_svg, to_tree_html, to_wiki, BULK_EXPORT_MAX_NODES,
 };
 use synaptic_report::write_report;
 use synaptic_semantic::{label_communities, llm_tiebreak, run_semantic_pass};
@@ -275,6 +275,17 @@ pub(crate) fn run_extract(
     if !resolved.is_empty() {
         println!("Resolved {} cross-file call edge(s)", resolved.len());
     }
+    // Seed the per-file called-name sidecar so the FIRST incremental update can
+    // already ripple-re-resolve new definitions against unchanged callers. Built
+    // here, right after the only other consumer, so the raw-call and import
+    // vectors -- one entry per call site in the whole corpus -- are released
+    // before the build/cluster/analyse/write stages instead of staying resident
+    // for the rest of the run. `from_raw_calls` is a pure fold over the same
+    // input, so moving it earlier cannot change the sidecar.
+    let callnames = synaptic_incremental::from_raw_calls(&raw_calls);
+    drop(raw_calls);
+    drop(imports);
+
     let mut parts = kg.into_graph_data();
     parts.links.extend(resolved);
     let n = parts.nodes;
@@ -400,19 +411,45 @@ pub(crate) fn run_extract(
     // decides each pair; offline a conservative deterministic rule merges only
     // word-reorderings/duplications and flags the genuinely ambiguous rest for
     // review (auto-merging the band offline would risk corrupting the graph).
+    //
+    // Candidates are computed from BORROWED nodes and the graph is CONSUMED to
+    // apply a merge. The previous version cloned every node unconditionally --
+    // and then every edge -- while `kg` was still alive, so three full copies of
+    // the graph existed at once even when it went on to merge nothing. On a
+    // 379k-node corpus that clone-and-rebuild was the run's peak (4.4 -> 8.7 GiB)
+    // and it merged 3 pairs.
     {
-        let nodes_vec: Vec<_> = kg.nodes().cloned().collect();
-        if let (Some(client), Some(rt)) = (&llm, &rt) {
-            let pairs = ambiguous_concept_pairs(&nodes_vec, &std::collections::HashMap::new());
-            if !pairs.is_empty() {
+        let no_communities = std::collections::HashMap::new();
+        let (confirmed, total) = match (&llm, &rt) {
+            (Some(client), Some(rt)) => {
+                let pairs = ambiguous_concept_pairs(kg.nodes(), &no_communities);
                 let total = pairs.len();
-                let confirmed = rt.block_on(llm_tiebreak(client.as_ref(), &nodes_vec, pairs));
-                let flagged = total - confirmed.len();
-                if !confirmed.is_empty() {
-                    let edges_vec: Vec<_> = kg.edges().cloned().collect();
-                    let (mn, me) = merge_pairs(nodes_vec, edges_vec, &confirmed);
-                    kg = build_from_parts(mn, me, vec![], &opts);
+                if pairs.is_empty() {
+                    (Vec::new(), 0)
+                } else {
+                    // The LLM tiebreaker needs an owned slice; only pay for the
+                    // clone when there is actually something ambiguous to judge.
+                    let nodes_vec: Vec<_> = kg.nodes().cloned().collect();
+                    let confirmed = rt.block_on(llm_tiebreak(client.as_ref(), &nodes_vec, pairs));
+                    (confirmed, total)
                 }
+            }
+            _ => {
+                let confirmed = deterministic_tiebreak_candidates(kg.nodes(), &no_communities);
+                let total = confirmed.len();
+                (confirmed, total)
+            }
+        };
+
+        if !confirmed.is_empty() {
+            let gd = kg.into_graph_data();
+            let (mn, me) = merge_pairs(gd.nodes, gd.links, &confirmed);
+            kg = build_from_parts(mn, me, gd.hyperedges, &opts);
+        }
+
+        if total > 0 {
+            if llm.is_some() {
+                let flagged = total - confirmed.len();
                 println!(
                     "Dedup tiebreaker (LLM): merged {} of {total} ambiguous concept pair(s){}",
                     confirmed.len(),
@@ -422,14 +459,7 @@ pub(crate) fn run_extract(
                         String::new()
                     }
                 );
-            }
-        } else {
-            let confirmed =
-                deterministic_tiebreak_candidates(&nodes_vec, &std::collections::HashMap::new());
-            if !confirmed.is_empty() {
-                let edges_vec: Vec<_> = kg.edges().cloned().collect();
-                let (mn, me) = merge_pairs(nodes_vec, edges_vec, &confirmed);
-                kg = build_from_parts(mn, me, vec![], &opts);
+            } else if !confirmed.is_empty() {
                 println!(
                     "Dedup tiebreaker (deterministic indexed): merged {} confirmed pair(s)",
                     confirmed.len()
@@ -459,10 +489,14 @@ pub(crate) fn run_extract(
         obsidian,
         wiki,
     )?;
+    // ONE export view, shared by the coverage refresh and the store writer
+    // below. Each `to_graph_data()` deep-clones every node and edge -- about
+    // 1.8 GiB on a 379k-node graph -- and this path used to pay for it twice.
+    let export = kg.to_graph_data();
     let coverage = crate::commands::api::refresh_coverage_artifact_with_inventory(
         &root,
         &out_dir,
-        &kg.to_graph_data(),
+        &export,
         &dependencies,
         &sbom,
     )?;
@@ -525,16 +559,14 @@ pub(crate) fn run_extract(
     if let Err(e) = manifest_snapshot.save(&synaptic_incremental::manifest_path(&out_dir)) {
         eprintln!("note: could not write serve provenance manifest: {e}");
     }
-    // Seed the per-file called-name sidecar so the FIRST incremental update can
-    // already ripple-re-resolve new definitions against unchanged callers.
-    let callnames = synaptic_incremental::from_raw_calls(&raw_calls);
+    // Sidecar was built right after symbol resolution (see above), so the
+    // raw-call vector could be freed before the heavy stages.
     if let Err(e) = synaptic_incremental::save_callnames(&out_dir, &callnames) {
         eprintln!("note: could not write call-name sidecar: {e}");
     }
     println!("Wrote {}/{{{}}}", out_dir.display(), extras);
     if store {
-        let report =
-            crate::commands::common::write_store(&kg.to_graph_data(), &out_dir.join("store"))?;
+        let report = crate::commands::common::write_store(&export, &out_dir.join("store"))?;
         println!(
             "Wrote {}/store ({} shard(s){})",
             out_dir.display(),
@@ -605,14 +637,29 @@ pub(crate) fn write_outputs(
         &out_dir.join("GRAPH_REPORT.md"),
     )
     .context("writing GRAPH_REPORT.md")?;
-    to_graphml(kg, &out_dir.join("graph.graphml")).context("writing graph.graphml")?;
-    to_cypher(kg, &out_dir.join("graph.cypher")).context("writing graph.cypher")?;
     to_mermaid(kg, &out_dir.join("callflow.html")).context("writing callflow.html")?;
     to_tree_html(kg, &out_dir.join("tree.html")).context("writing tree.html")?;
     to_svg(kg, &out_dir.join("graph.svg")).context("writing graph.svg")?;
-    to_dot(kg, &out_dir.join("graph.dot")).context("writing graph.dot")?;
-    to_force3d(kg, &out_dir.join("graph-3d.html")).context("writing graph-3d.html")?;
-    let mut extras = String::from("graph.json, graph.html, GRAPH_REPORT.md, graph.graphml, graph.cypher, graph.dot, callflow.html, tree.html, graph.svg, graph-3d.html");
+    let mut extras = String::from(
+        "graph.json, graph.html, GRAPH_REPORT.md, callflow.html, tree.html, graph.svg",
+    );
+
+    // Whole-graph text exports aggregate nothing, so their size tracks the graph
+    // exactly and they stop being openable long before they stop being written.
+    if bulk_export_is_viable(kg.node_count()) {
+        to_graphml(kg, &out_dir.join("graph.graphml")).context("writing graph.graphml")?;
+        to_cypher(kg, &out_dir.join("graph.cypher")).context("writing graph.cypher")?;
+        to_dot(kg, &out_dir.join("graph.dot")).context("writing graph.dot")?;
+        to_force3d(kg, &out_dir.join("graph-3d.html")).context("writing graph-3d.html")?;
+        extras.push_str(", graph.graphml, graph.cypher, graph.dot, graph-3d.html");
+    } else {
+        println!(
+            "note: {} nodes exceeds the {BULK_EXPORT_MAX_NODES}-node bulk-export cap; \
+             skipped graph.graphml, graph.cypher, graph.dot and graph-3d.html \
+             (graph.json and graph.html are always written)",
+            kg.node_count()
+        );
+    }
     if obsidian {
         let n = to_obsidian(kg, community_labels, &out_dir.join("obsidian"))
             .context("writing Obsidian vault")?;

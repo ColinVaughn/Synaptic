@@ -16,6 +16,7 @@ push = ["dep:redis"]
 [dependencies]
 synaptic-core = { workspace = true }
 synaptic-graph = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 redis = { workspace = true, optional = true }
 

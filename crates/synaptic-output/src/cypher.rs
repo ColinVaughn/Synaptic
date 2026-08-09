@@ -59,9 +59,10 @@ fn ident(raw: &str, fallback: &str) -> String {
 /// DB push, via `SET n += $props`); the static `graph.cypher` script stays lean
 /// (id/label only).
 pub fn cypher_statements(kg: &KnowledgeGraph, rich: bool) -> Vec<String> {
-    let gd = kg.to_graph_data();
-    let mut out = Vec::with_capacity(gd.nodes.len() + gd.links.len());
-    for n in &gd.nodes {
+    // Borrow the graph: `to_graph_data()` deep-cloned every node and edge
+    // (including their `extra` maps) purely to read them.
+    let mut out = Vec::with_capacity(kg.node_count() + kg.edge_count());
+    for n in kg.nodes() {
         let ftype = ident(&capitalize(&file_type_str(&n.file_type)), "Entity");
         let mut sets = format!("n.label = '{}'", escape(&n.label));
         if rich {
@@ -86,7 +87,7 @@ pub fn cypher_statements(kg: &KnowledgeGraph, rich: bool) -> Vec<String> {
             escape(&n.id.0)
         ));
     }
-    for e in &gd.links {
+    for e in kg.edges() {
         let rel = ident(&e.relation.to_uppercase(), "RELATES_TO");
         out.push(format!(
             "MATCH (a {{id: '{}'}}), (b {{id: '{}'}}) MERGE (a)-[r:{rel}]->(b) SET r.confidence = '{}'",
@@ -208,6 +209,7 @@ mod tests {
             community: None,
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         }
     }
 }

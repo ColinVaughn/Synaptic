@@ -11,8 +11,38 @@ use std::sync::LazyLock;
 /// `RUST_MIN_STACK`, applies deterministically without requiring user setup.
 const EXTRACTION_STACK_BYTES: usize = 64 * 1024 * 1024;
 
+/// Ceiling on `workers * EXTRACTION_STACK_BYTES`. Rayon defaults to one worker
+/// per core, so the pool reserved 64 MiB x core-count of stack before parsing a
+/// single file -- 1 GiB on a 16-core box, 4 GiB on a 64-core one. Reservation is
+/// not resident memory, but it is charged against the Windows commit limit and
+/// shows up in every memory profile, so the worker count is capped instead of
+/// the per-worker stack (which large generated fixtures genuinely need).
+const MAX_TOTAL_STACK_BYTES: usize = 1024 * 1024 * 1024;
+
+/// Explicit worker-count override: `SYNAPTIC_EXTRACT_THREADS`. `None` for unset,
+/// zero, or unparseable, so a bad value falls back to the computed default
+/// rather than deadlocking a zero-thread pool.
+fn parse_thread_override(raw: Option<String>) -> Option<usize> {
+    raw.and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+}
+
+/// Worker count for the extraction pool: one per core, capped so total stack
+/// reservation stays under [`MAX_TOTAL_STACK_BYTES`], and always at least one.
+fn extraction_threads() -> usize {
+    if let Some(n) = parse_thread_override(std::env::var("SYNAPTIC_EXTRACT_THREADS").ok()) {
+        return n;
+    }
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let cap = (MAX_TOTAL_STACK_BYTES / EXTRACTION_STACK_BYTES).max(1);
+    cores.min(cap).max(1)
+}
+
 static EXTRACTION_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
     rayon::ThreadPoolBuilder::new()
+        .num_threads(extraction_threads())
         .stack_size(EXTRACTION_STACK_BYTES)
         .thread_name(|index| format!("synaptic-extract-{index}"))
         .build()
@@ -333,6 +363,32 @@ mod tests {
     #[test]
     fn extraction_pool_executes_work() {
         assert_eq!(with_extraction_pool(|| 6 * 7), 42);
+    }
+
+    /// 64 MiB per worker times one worker per core reserved 4 GiB on a 64-core
+    /// machine. Total reservation must stay bounded regardless of core count.
+    #[test]
+    fn extraction_pool_bounds_total_stack_reservation() {
+        let threads = extraction_threads();
+        assert!(threads >= 1, "at least one worker");
+        assert!(
+            threads * EXTRACTION_STACK_BYTES <= MAX_TOTAL_STACK_BYTES,
+            "total reserved stack {} exceeds the {} cap ({threads} workers)",
+            threads * EXTRACTION_STACK_BYTES,
+            MAX_TOTAL_STACK_BYTES
+        );
+    }
+
+    /// A bad override must fall back to the computed default, never to a
+    /// zero-thread pool.
+    #[test]
+    fn extraction_thread_override_rejects_zero_and_garbage() {
+        assert_eq!(parse_thread_override(Some("4".into())), Some(4));
+        assert_eq!(parse_thread_override(Some("  8 ".into())), Some(8));
+        assert_eq!(parse_thread_override(Some("0".into())), None);
+        assert_eq!(parse_thread_override(Some("nonsense".into())), None);
+        assert_eq!(parse_thread_override(Some(String::new())), None);
+        assert_eq!(parse_thread_override(None), None);
     }
 
     #[cfg(feature = "lang-json")]

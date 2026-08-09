@@ -386,6 +386,7 @@ mod tests {
             community: None,
             repo: None,
             extra: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -636,7 +637,7 @@ mod tests {
             .extra
             .insert("visibility".into(), "public".to_string().into());
         let mut test_caller = node("t1", "helper_works()", "tests/helper_test.rs");
-        test_caller.extra.insert("_is_test".into(), true.into());
+        test_caller.set_test(true);
 
         graph(
             vec![

@@ -243,6 +243,7 @@ mod fed_tests {
             community: None,
             repo: None,
             extra: Default::default(),
+            ..Default::default()
         };
         if let Some(k) = kind {
             n.set_kind(k);

@@ -367,6 +367,7 @@ fn make_scip_node(
         community: None,
         repo: None,
         extra,
+        ..Default::default()
     }
 }
 

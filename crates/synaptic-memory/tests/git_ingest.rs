@@ -44,6 +44,7 @@ fn rename_ingest_retains_old_and_new_paths_for_history_lookup() {
         community: Some(0),
         repo: None,
         extra: Map::new(),
+        ..Default::default()
     };
     let graph = KnowledgeGraph::from_graph_data(GraphData {
         directed: true,
@@ -107,6 +108,7 @@ fn symbol_rename_is_revision_aware_and_searchable_by_both_names() {
             community: Some(0),
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         }],
         built_at_commit: Some(sha.clone()),
         ..GraphData::default()
@@ -160,6 +162,7 @@ fn reingesting_a_commit_does_not_conflict_when_new_enrichment_is_available() {
             community: Some(0),
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         }],
         ..GraphData::default()
     });
@@ -196,6 +199,7 @@ fn ingests_a_commit_and_anchors_changed_graph_symbols_idempotently() {
         community: Some(0),
         repo: None,
         extra: Map::new(),
+        ..Default::default()
     };
     let graph = KnowledgeGraph::from_graph_data(GraphData {
         directed: true,

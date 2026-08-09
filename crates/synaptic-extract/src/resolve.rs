@@ -235,7 +235,6 @@ fn make_asset_node(canonical: &str, kind: &'static str) -> Node {
         FileType::Document
     };
     let mut extra: Map<String, Value> = Map::new();
-    extra.insert("_origin".to_string(), json!("ast"));
     extra.insert("asset_kind".to_string(), json!(kind));
     Node {
         id: file_node_id(canonical),
@@ -246,6 +245,8 @@ fn make_asset_node(canonical: &str, kind: &'static str) -> Node {
         community: None,
         repo: None,
         extra,
+        origin: Some("ast".into()),
+        ..Default::default()
     }
 }
 

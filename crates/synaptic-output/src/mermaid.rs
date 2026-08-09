@@ -63,10 +63,10 @@ fn sanitize_mermaid_id(raw: &str) -> String {
 
 /// Render a Mermaid call-flow HTML page.
 pub fn to_mermaid_string(kg: &KnowledgeGraph) -> String {
-    let gd = kg.to_graph_data();
+    // Borrow the graph: `to_graph_data()` deep-cloned every node and edge
+    // (including their `extra` maps) purely to read them.
     let label_of = |id: &synaptic_core::NodeId| -> String {
-        gd.nodes
-            .iter()
+        kg.nodes()
             .find(|n| &n.id == id)
             .map(|n| n.label.clone())
             .unwrap_or_else(|| id.0.clone())
@@ -77,7 +77,7 @@ pub fn to_mermaid_string(kg: &KnowledgeGraph) -> String {
     // node declarations and edge endpoints always use the same valid identifier.
     let mut mid: HashMap<NodeId, String> = HashMap::new();
     let mut used: HashSet<String> = HashSet::new();
-    for n in &gd.nodes {
+    for n in kg.nodes() {
         let base = sanitize_mermaid_id(&n.id.0);
         let mut m = base.clone();
         let mut i = 2;
@@ -93,11 +93,11 @@ pub fn to_mermaid_string(kg: &KnowledgeGraph) -> String {
             .unwrap_or_else(|| sanitize_mermaid_id(&id.0))
     };
 
-    let total = gd.links.len();
+    let total = kg.edge_count();
     let shown = total.min(MAX_EDGES);
     let mut diagram = String::from("graph LR\n");
     let mut emitted_nodes: HashSet<NodeId> = HashSet::new();
-    for e in gd.links.iter().take(shown) {
+    for e in kg.edges().take(shown) {
         for ep in [&e.source, &e.target] {
             if emitted_nodes.insert(ep.clone()) {
                 diagram.push_str(&format!(
@@ -143,7 +143,7 @@ pub fn to_mermaid_string(kg: &KnowledgeGraph) -> String {
 </body>
 </html>
 "#,
-        node_count = gd.nodes.len(),
+        node_count = kg.node_count(),
         edge_count = total,
         note = note,
         diagram = diagram,

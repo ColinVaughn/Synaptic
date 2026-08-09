@@ -23,6 +23,7 @@ fn code_node(id: &str, label: &str, file: &str, kind: NodeKind) -> Node {
         community: None,
         repo: None,
         extra: Map::new(),
+        ..Default::default()
     };
     n.set_kind(kind);
     n.set_span(Span {

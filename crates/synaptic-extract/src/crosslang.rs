@@ -2913,7 +2913,6 @@ fn emit_pyo3_module(result: &mut ExtractionResult, module: &str, registers: &[St
         return;
     }
     let mut extra = Map::new();
-    extra.insert("_origin".to_string(), json!("ast"));
     extra.insert("_node_type".to_string(), json!("pyo3_module"));
     extra.insert("_pyo3_registers".to_string(), json!(registers));
     result.nodes.push(Node {
@@ -2925,6 +2924,8 @@ fn emit_pyo3_module(result: &mut ExtractionResult, module: &str, registers: &[St
         community: None,
         repo: None,
         extra,
+        origin: Some("ast".into()),
+        ..Default::default()
     });
 }
 
@@ -6533,7 +6534,6 @@ fn ensure_target(result: &mut ExtractionResult, id: &NodeId, label: &str, node_t
         return;
     }
     let mut extra = Map::new();
-    extra.insert("_origin".to_string(), json!("ast"));
     extra.insert("_node_type".to_string(), json!(node_type));
     result.nodes.push(Node {
         id: id.clone(),
@@ -6544,6 +6544,8 @@ fn ensure_target(result: &mut ExtractionResult, id: &NodeId, label: &str, node_t
         community: None,
         repo: None,
         extra,
+        origin: Some("ast".into()),
+        ..Default::default()
     });
 }
 
@@ -6593,8 +6595,7 @@ pub(crate) fn attach_dynamic_site(
 pub(crate) fn ensure_file_node(result: &mut ExtractionResult, path: &str) -> NodeId {
     let id = file_node_id(path);
     if !result.nodes.iter().any(|n| n.id == id) {
-        let mut extra = Map::new();
-        extra.insert("_origin".to_string(), json!("ast"));
+        let extra = Map::new();
         result.nodes.push(Node {
             id: id.clone(),
             label: path.to_string(),
@@ -6604,6 +6605,8 @@ pub(crate) fn ensure_file_node(result: &mut ExtractionResult, path: &str) -> Nod
             community: None,
             repo: None,
             extra,
+            origin: Some("ast".into()),
+            ..Default::default()
         });
     }
     id

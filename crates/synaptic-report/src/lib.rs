@@ -353,6 +353,7 @@ mod tests {
             community: None,
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         };
         let edge = |s: &str, t: &str| Edge {
             source: NodeId(s.into()),
@@ -408,6 +409,7 @@ mod tests {
             community: None,
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         };
         let edge = |s: &str, t: &str, c: Confidence, score: Option<f32>| Edge {
             source: NodeId(s.into()),

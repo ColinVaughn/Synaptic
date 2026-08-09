@@ -17,6 +17,7 @@ fn synthetic(n: usize) -> KnowledgeGraph {
             community: Some((i % 16) as u32),
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         };
         node.set_kind(if i % 3 == 0 {
             NodeKind::Class

@@ -53,7 +53,7 @@ use synaptic_graph::{
 /// AST-extracted node — origin stamped by the extractors (`_origin == "ast"`).
 /// Semantic/concept nodes are NOT ast and so survive an AST-only rebuild.
 fn is_ast(node: &Node) -> bool {
-    node.extra.get("_origin").and_then(|v| v.as_str()) == Some("ast")
+    node.is_ast_origin()
 }
 
 /// Merge a fresh AST extraction into the existing graph:
@@ -771,14 +771,10 @@ pub fn rebuild_with_detect(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Map};
+    use serde_json::Map;
     use synaptic_core::{Confidence, FileType as CoreFt};
 
     fn node(id: &str, label: &str, sf: &str, origin: Option<&str>) -> Node {
-        let mut extra = Map::new();
-        if let Some(o) = origin {
-            extra.insert("_origin".into(), json!(o));
-        }
         Node {
             id: NodeId(id.into()),
             label: label.into(),
@@ -787,7 +783,9 @@ mod tests {
             source_location: Some("L1".into()),
             community: Some(0),
             repo: None,
-            extra,
+            extra: Map::new(),
+            origin: origin.map(Into::into),
+            ..Default::default()
         }
     }
 

@@ -80,6 +80,7 @@ mod tests {
             community: None,
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         }
     }
 
@@ -119,10 +120,10 @@ mod tests {
     fn node_with_flattened_extra_survives() {
         let mut n = node("x");
         n.extra.insert("norm_label".into(), serde_json::json!("x"));
-        n.extra.insert("_origin".into(), serde_json::json!("ast"));
+        n.set_origin("ast");
         let back: Node = decode(&encode(&n).unwrap()).unwrap();
         assert_eq!(back.extra.get("norm_label").unwrap(), "x");
-        assert_eq!(back.extra.get("_origin").unwrap(), "ast");
+        assert_eq!(back.origin(), Some("ast"));
     }
 
     #[test]

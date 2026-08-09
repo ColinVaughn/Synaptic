@@ -25,6 +25,8 @@ pub mod tree;
 pub mod wiki;
 
 #[cfg(test)]
+mod golden;
+#[cfg(test)]
 mod tests_support;
 
 pub use cypher::{to_cypher, to_cypher_string};
@@ -43,9 +45,11 @@ fn norm_label(label: &str) -> String {
     label.to_lowercase()
 }
 
-/// Build the export-ready `graph.json` value: node-link with `norm_label` added
-/// to each node and `confidence_score` defaulted on each link.
-pub fn to_json_value(kg: &KnowledgeGraph) -> Value {
+/// The export-ready `GraphData`: node-link with `norm_label` added to each node
+/// and `confidence_score` defaulted on each link. Shared by the streaming
+/// [`to_json`] and the `Value`-producing [`to_json_value`] so the two cannot
+/// drift apart.
+fn export_graph_data(kg: &KnowledgeGraph) -> synaptic_core::GraphData {
     let mut gd = kg.to_graph_data();
     for node in &mut gd.nodes {
         let norm = norm_label(&node.label);
@@ -57,16 +61,123 @@ pub fn to_json_value(kg: &KnowledgeGraph) -> Value {
             link.confidence_score = Some(link.confidence.default_score());
         }
     }
-    serde_json::to_value(&gd).expect("GraphData serializes")
+    gd
+}
+
+/// Build the export-ready `graph.json` value: node-link with `norm_label` added
+/// to each node and `confidence_score` defaulted on each link.
+pub fn to_json_value(kg: &KnowledgeGraph) -> Value {
+    serde_json::to_value(export_graph_data(kg)).expect("GraphData serializes")
+}
+
+/// A `Vec<T>` serialized one element at a time, each routed through
+/// `serde_json::to_value` so its keys come out in the sorted (BTreeMap) order
+/// `graph.json` has always used. Only one element's `Value` is alive at a time,
+/// where the old path built a `Value` tree over the entire graph.
+struct SortedElements<'a, T>(&'a [T]);
+
+impl<T: serde::Serialize> serde::Serialize for SortedElements<'_, T> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(Some(self.0.len()))?;
+        for item in self.0 {
+            let value = serde_json::to_value(item).map_err(serde::ser::Error::custom)?;
+            seq.serialize_element(&value)?;
+        }
+        seq.end()
+    }
+}
+
+/// The graph's nodes, each converted to a `Value` on the fly with `norm_label`
+/// injected — the enrichment `export_graph_data` applies to a cloned `GraphData`.
+/// Doing it per node means `to_json` never clones the node set at all.
+struct ExportNodes<'a>(&'a KnowledgeGraph);
+
+impl serde::Serialize for ExportNodes<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(Some(self.0.node_count()))?;
+        for node in self.0.nodes() {
+            let mut value = serde_json::to_value(node).map_err(serde::ser::Error::custom)?;
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert(
+                    "norm_label".to_string(),
+                    Value::String(norm_label(&node.label)),
+                );
+            }
+            seq.serialize_element(&value)?;
+        }
+        seq.end()
+    }
+}
+
+/// The graph's edges, each converted to a `Value` on the fly with
+/// `confidence_score` defaulted, matching `export_graph_data`.
+struct ExportLinks<'a>(&'a KnowledgeGraph);
+
+impl serde::Serialize for ExportLinks<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(Some(self.0.edge_count()))?;
+        for edge in self.0.edges() {
+            let mut value = serde_json::to_value(edge).map_err(serde::ser::Error::custom)?;
+            if edge.confidence_score.is_none() {
+                if let Some(obj) = value.as_object_mut() {
+                    let score = edge.confidence.default_score();
+                    obj.insert(
+                        "confidence_score".to_string(),
+                        serde_json::to_value(score).map_err(serde::ser::Error::custom)?,
+                    );
+                }
+            }
+            seq.serialize_element(&value)?;
+        }
+        seq.end()
+    }
+}
+
+/// The graph serialized byte-for-byte as `to_value` + `to_string_pretty`
+/// produced it: top-level keys and per-element keys in sorted order, because
+/// `serde_json::Value` is backed by a `BTreeMap`. Plain struct serialization
+/// would emit declaration order instead and silently reorder every key in a
+/// committed `graph.json`.
+struct SortedExport<'a>(&'a KnowledgeGraph);
+
+impl serde::Serialize for SortedExport<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let kg = self.0;
+        let len = 6 + usize::from(kg.built_at_commit.is_some());
+        let mut m = s.serialize_map(Some(len))?;
+        // Alphabetical, matching serde_json::Value's BTreeMap iteration order.
+        if let Some(commit) = &kg.built_at_commit {
+            m.serialize_entry("built_at_commit", commit)?;
+        }
+        m.serialize_entry("directed", &kg.directed)?;
+        m.serialize_entry("graph", &serde_json::Map::new())?;
+        m.serialize_entry("hyperedges", &SortedElements(&kg.hyperedges))?;
+        m.serialize_entry("links", &ExportLinks(kg))?;
+        m.serialize_entry("multigraph", &false)?;
+        m.serialize_entry("nodes", &ExportNodes(kg))?;
+        m.end()
+    }
 }
 
 /// Write `graph.json` (pretty-printed node-link) atomically.
+///
+/// Streams into the target file, converting one node/edge to a `serde_json::Value`
+/// at a time rather than building a `Value` tree over the whole graph and then a
+/// whole-file `String`. The buffered path held the graph, a clone, the tree and
+/// the printed text simultaneously — measured at 3.3x the resident graph (8.3x
+/// the output file), which is ~6.9 GiB for an 836 MB `graph.json`. Output is
+/// byte-identical; `golden::to_json_file_matches_pretty_printed_value` proves it.
 pub fn to_json(kg: &KnowledgeGraph, path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let value = to_json_value(kg);
-    synaptic_core::write_atomic(path, serde_json::to_string_pretty(&value)?.as_bytes())
+    synaptic_core::write_atomic_with(path, |w| {
+        serde_json::to_writer_pretty(w, &SortedExport(kg)).map_err(io::Error::other)
+    })
 }
 
 /// Render an interactive `graph.html` (vis-network from CDN; embeds the graph
@@ -77,6 +188,20 @@ pub fn to_json(kg: &KnowledgeGraph, path: &Path) -> io::Result<()> {
 /// super-node per community) instead of every node, so the browser stays
 /// responsive; the full node-level view stays available in `graph-3d.html`.
 const HTML_AGGREGATE_THRESHOLD: usize = 5000;
+
+/// Node ceiling for the whole-graph text exports (GraphML / Cypher / DOT / the
+/// 3-D force layout). Unlike `graph.html` and `graph.svg`, these formats
+/// aggregate nothing: they emit every node and every edge, so their size tracks
+/// the graph exactly. A 379k-node corpus produced a 342 MB `graph.graphml`, a
+/// 259 MB `graph-3d.html`, a 229 MB `graph.cypher` and a 163 MB `graph.dot` --
+/// none of which any tool in the chain can open. Past this they are skipped and
+/// the caller says so. `graph.json` is never skipped: it is the contract.
+pub const BULK_EXPORT_MAX_NODES: usize = 150_000;
+
+/// True when the whole-graph text exports are worth writing at this node count.
+pub fn bulk_export_is_viable(node_count: usize) -> bool {
+    node_count <= BULK_EXPORT_MAX_NODES
+}
 
 /// vis-network shape for a node kind (table → diamond, column → dot, view →
 /// triangle, index/class → square, procedure → hexagon, trigger → star, code →
@@ -124,18 +249,20 @@ fn html_node_title(n: &synaptic_core::Node, kind: &str) -> String {
 
 pub fn to_html_string(kg: &KnowledgeGraph) -> String {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
-    let gd = kg.to_graph_data();
+    // Borrow the graph: `to_graph_data()` deep-cloned every node and edge
+    // (~1.8 GiB on a 379k-node graph) purely to read them. The vis output is
+    // bounded by aggregation, but the clone never was.
 
     // Degree per node (self-loops ignored), drives node size and the degree filter.
     let mut deg: HashMap<&str, usize> = HashMap::new();
-    for e in &gd.links {
+    for e in kg.edges() {
         if e.source != e.target {
             *deg.entry(e.source.0.as_str()).or_default() += 1;
             *deg.entry(e.target.0.as_str()).or_default() += 1;
         }
     }
 
-    let aggregated = gd.nodes.len() > HTML_AGGREGATE_THRESHOLD;
+    let aggregated = kg.node_count() > HTML_AGGREGATE_THRESHOLD;
     let mut vis_nodes = Vec::new();
     let mut vis_edges = Vec::new();
     let mut relations: BTreeSet<String> = BTreeSet::new();
@@ -148,7 +275,7 @@ pub fn to_html_string(kg: &KnowledgeGraph) -> String {
         // Collapse each community to one super-node + inter-community edges.
         let mut members: BTreeMap<i64, usize> = BTreeMap::new();
         let mut node_comm: HashMap<&str, i64> = HashMap::new();
-        for n in &gd.nodes {
+        for n in kg.nodes() {
             let c = n.community.map(|c| c as i64).unwrap_or(-1);
             *members.entry(c).or_default() += 1;
             node_comm.insert(n.id.0.as_str(), c);
@@ -163,7 +290,7 @@ pub fn to_html_string(kg: &KnowledgeGraph) -> String {
             }));
         }
         let mut pair: BTreeMap<(i64, i64), usize> = BTreeMap::new();
-        for e in &gd.links {
+        for e in kg.edges() {
             let (Some(&a), Some(&b)) = (
                 node_comm.get(e.source.0.as_str()),
                 node_comm.get(e.target.0.as_str()),
@@ -187,12 +314,12 @@ pub fn to_html_string(kg: &KnowledgeGraph) -> String {
         notice = format!(
             "Graph has {} nodes (over {}); showing {} community super-nodes. \
              Open graph-3d.html for the full node-level view.",
-            gd.nodes.len(),
+            kg.node_count(),
             HTML_AGGREGATE_THRESHOLD,
             members.len()
         );
     } else {
-        for n in &gd.nodes {
+        for n in kg.nodes() {
             let d = deg.get(n.id.0.as_str()).copied().unwrap_or(0);
             max_deg = max_deg.max(d);
             let group = n.community.map(|c| c as i64).unwrap_or(-1);
@@ -206,7 +333,7 @@ pub fn to_html_string(kg: &KnowledgeGraph) -> String {
                 "title": html_node_title(n, kind),
             }));
         }
-        for (i, e) in gd.links.iter().enumerate() {
+        for (i, e) in kg.edges().enumerate() {
             relations.insert(e.relation.clone());
             // Color by relation so SQL structure and code->SQL bridges stand out.
             let color = crate::common::relation_color(&e.relation);
@@ -397,8 +524,8 @@ pub fn to_html_string(kg: &KnowledgeGraph) -> String {
 </body>
 </html>
 "#,
-        node_count = gd.nodes.len(),
-        edge_count = gd.links.len(),
+        node_count = kg.node_count(),
+        edge_count = kg.edge_count(),
         max_deg = max_deg,
         community_opts = community_opts,
         notice_html = notice_html,
@@ -442,6 +569,7 @@ mod tests {
             community: None,
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         };
         let edge = |s: &str, t: &str, c: Confidence| Edge {
             source: NodeId(s.into()),
@@ -569,6 +697,7 @@ mod tests {
             community: Some(0),
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         };
         n.community = Some(0);
         let gd = GraphData {
@@ -646,6 +775,7 @@ mod tests {
                 community: Some((i % 4) as u32),
                 repo: None,
                 extra: Map::new(),
+                ..Default::default()
             })
             .collect();
         let gd = GraphData {

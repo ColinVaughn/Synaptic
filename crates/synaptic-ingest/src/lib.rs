@@ -93,6 +93,7 @@ pub(crate) fn make_node(
         community: None,
         repo: None,
         extra,
+        ..Default::default()
     }
 }
 

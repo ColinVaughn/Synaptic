@@ -34,8 +34,7 @@ const SCALES: [usize; 3] = [100, 1_000, 10_000];
 // Synthetic, deterministic fixtures
 
 fn node(i: usize) -> Node {
-    let mut extra = serde_json::Map::new();
-    extra.insert("_origin".into(), serde_json::Value::String("ast".into()));
+    let extra = serde_json::Map::new();
     Node {
         id: NodeId(format!("n{i}")),
         label: format!("func_{i}"),
@@ -45,6 +44,8 @@ fn node(i: usize) -> Node {
         community: None,
         repo: None,
         extra,
+        origin: Some("ast".into()),
+        ..Default::default()
     }
 }
 
@@ -145,6 +146,7 @@ fn synthetic_dedup_parts(n: usize) -> (Vec<Node>, Vec<Edge>) {
                 community: None,
                 repo: None,
                 extra: serde_json::Map::new(),
+                ..Default::default()
             }
         })
         .collect();

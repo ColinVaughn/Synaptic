@@ -193,6 +193,7 @@ mod tests {
             community: None,
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         }
     }
     fn e(s: &str, t: &str, rel: &str) -> Edge {

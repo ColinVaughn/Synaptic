@@ -30,6 +30,7 @@ fn node(i: usize, id_prefix: &str) -> Node {
         community: None,
         repo: None,
         extra: serde_json::Map::new(),
+        ..Default::default()
     }
 }
 

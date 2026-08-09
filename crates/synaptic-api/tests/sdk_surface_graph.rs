@@ -12,6 +12,7 @@ fn symbol(id: &str, label: &str, file: &str, visibility: Visibility, raw: &str) 
         community: None,
         repo: None,
         extra: Map::new(),
+        ..Default::default()
     };
     node.set_visibility(visibility);
     node.set_signature(Signature {
@@ -75,7 +76,9 @@ fn duplicate_or_signatureless_public_symbols_are_retained_as_losses() {
         Visibility::Public,
         "(id string)",
     );
-    first.extra.remove("signature");
+    // `signature` is a typed Node field: clearing it via `extra` would be a
+    // silent no-op.
+    first.signature = None;
     let second = symbol(
         "java:method:Open",
         "Open",

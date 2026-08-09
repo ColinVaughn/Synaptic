@@ -674,6 +674,7 @@ mod tests {
             community: None,
             repo: None,
             extra,
+            ..Default::default()
         }
     }
 
@@ -687,6 +688,7 @@ mod tests {
             community: None,
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         }
     }
 
@@ -758,6 +760,7 @@ mod tests {
             community: None,
             repo: None,
             extra,
+            ..Default::default()
         }
     }
 
@@ -907,6 +910,7 @@ mod tests {
             community: None,
             repo: None,
             extra,
+            ..Default::default()
         }
     }
 
@@ -1120,6 +1124,7 @@ mod tests {
             community: None,
             repo: Some("repoa".into()),
             extra: Map::new(),
+            ..Default::default()
         };
         stub.extra.insert("_node_type".into(), json!("table"));
         let mut real = file_node("repob::schema_orders", "orders", "repob/schema.sql");
@@ -1155,6 +1160,7 @@ mod tests {
             community: None,
             repo: None,
             extra,
+            ..Default::default()
         }
     }
 
@@ -1292,6 +1298,7 @@ mod tests {
             community: None,
             repo: None,
             extra: serde_json::Map::new(),
+            ..Default::default()
         };
         real.set_kind(synaptic_core::NodeKind::Table);
         let stub = Node {
@@ -1303,6 +1310,7 @@ mod tests {
             community: None,
             repo: None,
             extra: serde_json::Map::new(),
+            ..Default::default()
         };
         let edge = Edge {
             source: NodeId("app.list".into()),

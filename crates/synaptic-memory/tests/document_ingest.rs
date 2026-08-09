@@ -16,6 +16,7 @@ fn graph() -> KnowledgeGraph {
             community: Some(0),
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         }],
         ..GraphData::default()
     })

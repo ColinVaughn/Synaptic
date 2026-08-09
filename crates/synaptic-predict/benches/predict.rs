@@ -41,6 +41,7 @@ fn synthetic_graph(n: usize) -> KnowledgeGraph {
             community: Some((i % 10) as u32),
             repo: None,
             extra: Map::new(),
+            ..Default::default()
         });
         if i > 0 {
             links.push(edge(&format!("n{i}"), &format!("n{}", i - 1), "calls"));

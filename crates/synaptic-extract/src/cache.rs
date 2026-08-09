@@ -186,16 +186,17 @@ mod msgpack_format_tests {
 
     fn sample_result() -> ExtractionResult {
         let mut node_extra = serde_json::Map::new();
-        node_extra.insert("kind".into(), serde_json::json!("class"));
-        node_extra.insert("_origin".into(), serde_json::json!("ast"));
-        // Nested object + array + a float inside the flattened extra map.
+        // Nested object + array + a float inside the flattened extra map. The key
+        // is deliberately NOT one of the typed Node fields (`kind`, `span`,
+        // `visibility`, `signature`): those are no longer free-form, and the
+        // point here is that ARBITRARY extra JSON survives the binary codec.
         node_extra.insert(
-            "span".into(),
+            "metrics".into(),
             serde_json::json!({"start_line": 1, "end_line": 9, "ratio": 0.3333333333333333}),
         );
         node_extra.insert("tags".into(), serde_json::json!(["a", "b", 3]));
 
-        let node = Node {
+        let mut node = Node {
             id: NodeId("auth".into()),
             label: "AuthService".into(),
             file_type: FileType::Code,
@@ -204,7 +205,17 @@ mod msgpack_format_tests {
             community: Some(7),
             repo: None,
             extra: node_extra,
+            origin: Some("ast".into()),
+            ..Default::default()
         };
+        // Typed metadata goes through the typed API; it must survive the codec too.
+        node.set_kind(synaptic_core::NodeKind::Class);
+        node.set_span(synaptic_core::Span {
+            start_line: 1,
+            start_col: 1,
+            end_line: 9,
+            end_col: 2,
+        });
 
         let mut edge_extra = serde_json::Map::new();
         edge_extra.insert("note".into(), serde_json::json!("via trait"));
@@ -247,11 +258,10 @@ mod msgpack_format_tests {
         // code metadata: a bool that decoded as a string, or a dropped flatten key,
         // would silently corrupt the SQL audit on a warm cache.
         let mut table_extra = serde_json::Map::new();
-        table_extra.insert("kind".into(), serde_json::json!("table"));
         table_extra.insert("dialect".into(), serde_json::json!("sqlserver"));
         table_extra.insert("rls_enabled".into(), serde_json::json!(true));
         table_extra.insert("rls_forced".into(), serde_json::json!(false));
-        let table = Node {
+        let mut table = Node {
             id: NodeId("sql:orders".into()),
             label: "orders".into(),
             file_type: FileType::Code,
@@ -260,14 +270,15 @@ mod msgpack_format_tests {
             community: Some(0),
             repo: None,
             extra: table_extra,
+            ..Default::default()
         };
+        table.set_kind(synaptic_core::NodeKind::Table);
 
         let mut col_extra = serde_json::Map::new();
-        col_extra.insert("kind".into(), serde_json::json!("column"));
         col_extra.insert("data_type".into(), serde_json::json!("uuid"));
         col_extra.insert("pk".into(), serde_json::json!(true));
         col_extra.insert("fk_target".into(), serde_json::json!("customers"));
-        let col = Node {
+        let mut col = Node {
             id: NodeId("sql:orders:col:id".into()),
             label: "id".into(),
             file_type: FileType::Code,
@@ -276,7 +287,9 @@ mod msgpack_format_tests {
             community: Some(0),
             repo: None,
             extra: col_extra,
+            ..Default::default()
         };
+        col.set_kind(synaptic_core::NodeKind::Column);
 
         let result = ExtractionResult {
             nodes: vec![table, col],

@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 /// Note: this is the *node-schema* set (includes `Rationale` and `Concept`);
 /// the *detection-time* set in `synaptic-detect` instead has `Video` and no
 /// rationale/concept.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FileType {
+    #[default]
     Code,
     Document,
     Paper,

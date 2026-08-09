@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
+use synaptic_core::{Confidence, Edge, FileType, GraphData, KindValue, Node, NodeId};
 
 use crate::{
     BehavioralRegressionCandidate, Dependency, DependencyScope, ExternalServiceEvidence,
@@ -305,6 +305,15 @@ pub fn attach_api_coverage_with_evidence(
         for reserved in ["id", "source_file", "source_location"] {
             extra.remove(reserved);
         }
+        // `kind` is a typed Node field too, but this layer writes its own
+        // vocabulary through it (`sdk`, `http`, `dynamic_dispatch`, …), which is
+        // why the field is a `KindValue` rather than a bare `NodeKind`. Move the
+        // value onto the field instead of leaving a duplicate in `extra`; it
+        // serializes to the same top-level `kind` key either way.
+        let observation_kind = extra
+            .remove("kind")
+            .and_then(|v| v.as_str().map(str::to_string))
+            .map(KindValue::Other);
         extra.insert("_node_type".into(), json!(EXTERNAL_SURFACE_NODE_TYPE));
         extra.insert("coverage_state".into(), json!(observation.state));
         nodes.push(Node {
@@ -315,7 +324,9 @@ pub fn attach_api_coverage_with_evidence(
             source_location: None,
             community: None,
             repo: None,
+            kind: observation_kind,
             extra,
+            ..Default::default()
         });
         let Some(source) = observation
             .source_node_id

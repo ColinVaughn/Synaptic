@@ -30,6 +30,7 @@ fn node(id: &str, label: &str, node_type: Option<&str>) -> Node {
         community: None,
         repo: None,
         extra,
+        ..Default::default()
     }
 }
 

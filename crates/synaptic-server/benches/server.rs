@@ -29,6 +29,7 @@ fn node(i: usize) -> Node {
         community: Some((i % 8) as u32),
         repo: None,
         extra: serde_json::Map::new(),
+        ..Default::default()
     }
 }
 

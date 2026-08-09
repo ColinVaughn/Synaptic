@@ -15,6 +15,7 @@ fn node(id: &str, file: &str, community: u32) -> Node {
         community: Some(community),
         repo: None,
         extra: Map::new(),
+        ..Default::default()
     }
 }
 

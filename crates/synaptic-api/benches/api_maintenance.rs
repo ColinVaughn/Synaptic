@@ -313,6 +313,7 @@ fn dependency_binding_fixture(
             community: None,
             repo: None,
             extra: serde_json::Map::new(),
+            ..Default::default()
         })
         .collect();
     let package_names = (0..dependency_count)

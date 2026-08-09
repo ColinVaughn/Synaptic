@@ -19,6 +19,7 @@ fn node(id: &str, file: &str) -> Node {
         community: None,
         repo: None,
         extra: Map::new(),
+        ..Default::default()
     }
 }
 

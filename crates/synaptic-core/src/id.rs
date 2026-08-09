@@ -12,7 +12,7 @@ static MULTI_UNDERSCORE: LazyLock<Regex> =
 
 /// Stable, namespaced node identifier. Serializes transparently as a string so
 /// `graph.json` node/edge endpoints stay plain strings.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct NodeId(pub String);
 
