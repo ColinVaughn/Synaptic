@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use synaptic_api::{Dependency, DependencyScope, Ecosystem, PackageCoordinate};
@@ -164,15 +164,34 @@ impl GraphUsageOracle {
             }
         }
 
-        let mut stubs: BTreeMap<String, Vec<MemberUsage>> = BTreeMap::new();
+        // Distinct (package, member) pairs, not stub NODES.
+        //
+        // `stub_nodes` is keyed by node id and many nodes share one pair -- a
+        // measured 10x on a large TypeScript monorepo, where 115,276 stub nodes
+        // collapse to 11,584 pairs. Iterating nodes and cloning the pair's whole
+        // site list for each stored the same evidence once per node: on that
+        // repository 449,489,960 call sites for 115,276 distinct ones, a 3,899x
+        // amplification that exhausted memory before a single advisory was read.
+        //
+        // The duplicates were never observable: `call_sites` flat-maps every
+        // matching member and `sort_call_sites` dedups, so they were built and
+        // then discarded. Deduping here instead keeps the output identical.
+        let mut pairs: BTreeSet<(&str, &str)> = BTreeSet::new();
         for (key, member) in stub_nodes.values() {
-            let (used, hazard, mut sites) = reached
-                .get(&(key.as_str(), member.as_str()))
-                .cloned()
-                .unwrap_or((false, false, Vec::new()));
+            pairs.insert((key.as_str(), member.as_str()));
+        }
+
+        let mut stubs: BTreeMap<String, Vec<MemberUsage>> = BTreeMap::new();
+        for (key, member) in pairs {
+            // Move the sites out of `reached` rather than cloning them; nothing
+            // reads the entry again.
+            let (used, hazard, mut sites) =
+                reached
+                    .remove(&(key, member))
+                    .unwrap_or((false, false, Vec::new()));
             sort_call_sites(&mut sites);
-            stubs.entry(key.clone()).or_default().push(MemberUsage {
-                member: member.clone(),
+            stubs.entry(key.to_string()).or_default().push(MemberUsage {
+                member: member.to_string(),
                 used,
                 hazard,
                 sites,
@@ -977,6 +996,46 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 
         let files: Vec<_> = sites.iter().map(|site| site.file.as_str()).collect();
         assert_eq!(files, vec!["src/a.rs", "src/b.rs"], "got {sites:?}");
+    }
+
+    /// Several stub nodes routinely name the same (package, member) -- 115,276
+    /// nodes collapsed to 11,584 pairs on a large TypeScript monorepo. The
+    /// oracle must hold ONE entry per pair; holding one per node stored that
+    /// pair's whole site list once per node (a measured 3,899x amplification)
+    /// only for `sort_call_sites` to dedup it away later.
+    #[test]
+    fn stub_nodes_sharing_a_member_are_held_once_not_once_per_node() {
+        let graph = graph_with(
+            vec![
+                stub_node("s1", "Sdk: cargo:serde#Value.get"),
+                stub_node("s2", "Sdk: cargo:serde#Value.get"),
+                stub_node("s3", "Sdk: cargo:serde#Value.get"),
+                source_node("caller", false),
+            ],
+            vec![
+                edge_at("caller", "s1", "src/a.rs", Some("L1")),
+                edge_at("caller", "s2", "src/b.rs", Some("L2")),
+                edge_at("caller", "s3", "src/c.rs", Some("L3")),
+            ],
+        );
+        let oracle = GraphUsageOracle::new(&graph);
+        let package = PackageCoordinate::new(Ecosystem::Cargo, "serde");
+
+        let members = oracle.stub_usage(&package);
+        assert_eq!(
+            members.len(),
+            1,
+            "three stub nodes name one member; got {members:?}"
+        );
+
+        // The evidence itself is unchanged: every distinct location still shows.
+        let sites = oracle.call_sites(&package, &[]);
+        let files: Vec<_> = sites.iter().map(|s| s.file.as_str()).collect();
+        assert_eq!(
+            files,
+            vec!["src/a.rs", "src/b.rs", "src/c.rs"],
+            "got {sites:?}"
+        );
     }
 
     #[test]
