@@ -3,10 +3,10 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use synaptic_api::{
-    publish_verified_change_request, publish_verified_draft, ChangeRequestKind,
-    ChangeRequestProvider, CommandOutput, DraftPublishRequest, GateOutcome, GateResult,
-    PublishAction, PublishCommandRunner, PublishContext, PublishError, RepairBrief,
-    VerificationReport,
+    publish_verified_change_request, publish_verified_draft,
+    publish_verified_vulnerability_change_request, ChangeRequestKind, ChangeRequestProvider,
+    CommandOutput, DraftPublishRequest, GateOutcome, GateResult, PublishAction,
+    PublishCommandRunner, PublishContext, PublishError, RepairBrief, VerificationReport,
 };
 
 struct MockRunner {
@@ -17,6 +17,8 @@ struct MockRunner {
 
 struct LocalGitRunner {
     gh_calls: Mutex<Vec<(Vec<String>, String)>>,
+    git_calls: Mutex<Vec<Vec<String>>>,
+    list_output: String,
 }
 
 impl PublishCommandRunner for LocalGitRunner {
@@ -33,7 +35,7 @@ impl PublishCommandRunner for LocalGitRunner {
                 .unwrap()
                 .push((args.to_vec(), stdin.into()));
             let stdout = if args.starts_with(&["pr".into(), "list".into()]) {
-                "[]\n"
+                self.list_output.as_str()
             } else {
                 "https://github.example/pr/local-only\n"
             };
@@ -42,6 +44,10 @@ impl PublishCommandRunner for LocalGitRunner {
                 stdout: stdout.into(),
                 stderr: String::new(),
             });
+        }
+
+        if program == "git" {
+            self.git_calls.lock().unwrap().push(args.to_vec());
         }
 
         let output = Command::new(program).args(args).current_dir(cwd).output()?;
@@ -80,7 +86,14 @@ impl PublishCommandRunner for MockRunner {
             .unwrap()
             .push((program.into(), args.to_vec(), stdin.into()));
         let stdout = if program == "git" && args.iter().any(|arg| arg == "ls-remote") {
-            format!("{}\trefs/heads/main\n", self.remote_base)
+            if args
+                .last()
+                .is_some_and(|reference| reference == "refs/heads/main")
+            {
+                format!("{}\trefs/heads/main\n", self.remote_base)
+            } else {
+                String::new()
+            }
         } else if program == "git" && args.iter().any(|arg| arg == "status") {
             " M src/client.ts\n".into()
         } else if (program == "gh" && args.starts_with(&["pr".into(), "list".into()]))
@@ -164,6 +177,53 @@ fn verified_publish_commits_pushes_and_creates_one_draft_with_marker() {
     assert!(create.2.contains("computed SDK member at src/dynamic.ts:4"));
     assert!(create.2.contains("human review is required"));
     assert!(!create.2.contains("publish-secret"));
+}
+
+#[test]
+fn vulnerability_publish_uses_its_own_branch_marker_and_review_body() {
+    let runner = MockRunner {
+        list_output: "[]".into(),
+        remote_base: "a".repeat(40),
+        calls: Mutex::new(Vec::new()),
+    };
+    let mut repair = brief();
+    repair.event.id = "vuln_finding_abc".into();
+    repair.event.vendor = "cargo:leaf".into();
+    repair.event.release = Some("0.9.20".into());
+    repair.event.source.revision = "RUSTSEC-2026-0001".into();
+    repair.applicability.event_id = repair.event.id.clone();
+    repair.applicability.vendor = repair.event.vendor.clone();
+    repair.applicability.observed_versions = vec!["0.9.18".into()];
+    let request = DraftPublishRequest {
+        worktree: Path::new(".").into(),
+        branch: "synaptic/vuln/vuln_finding_abc".into(),
+        brief: repair,
+        verification: verification(),
+        labels: vec![],
+        reviewers: vec![],
+    };
+
+    let result = publish_verified_vulnerability_change_request(
+        &request,
+        &PublishContext::default(),
+        &runner,
+    )
+    .unwrap();
+
+    assert_eq!(result.action, PublishAction::Created);
+    assert_eq!(result.branch, "synaptic/vuln/vuln_finding_abc");
+    let calls = runner.calls.lock().unwrap();
+    let create = calls
+        .iter()
+        .find(|(program, args, _)| program == "gh" && args.iter().any(|arg| arg == "create"))
+        .expect("draft vulnerability PR create command");
+    assert!(create.1.iter().any(|arg| arg == "--draft"));
+    assert!(create.2.contains("Synaptic vulnerability remediation"));
+    assert!(create.2.contains("RUSTSEC-2026-0001"));
+    assert!(create.2.contains("`0.9.18` -> `0.9.20`"));
+    assert!(create.2.contains(
+        "<!-- synaptic-vulnerability-finding:vuln_finding_abc base:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->"
+    ));
 }
 
 #[test]
@@ -269,6 +329,8 @@ fn verified_publish_uses_real_git_against_a_local_remote_only() {
 
     let runner = LocalGitRunner {
         gh_calls: Mutex::new(Vec::new()),
+        git_calls: Mutex::new(Vec::new()),
+        list_output: "[]\n".into(),
     };
     let mut repair_brief = brief();
     repair_brief.base_sha = base_sha;
@@ -305,6 +367,97 @@ fn verified_publish_uses_real_git_against_a_local_remote_only() {
         .expect("draft PR create command");
     assert!(create.0.iter().any(|arg| arg == "--draft"));
     assert!(create.1.contains("<!-- synaptic-api-event:event_123 base:"));
+}
+
+#[test]
+fn replay_with_the_same_verified_tree_does_not_overwrite_the_remote_branch() {
+    let directory = tempfile::tempdir().unwrap();
+    let remote = directory.path().join("remote.git");
+    let worktree = directory.path().join("worktree");
+    std::fs::create_dir_all(worktree.join("src")).unwrap();
+    git(
+        directory.path(),
+        &["init", "--bare", remote.to_str().unwrap()],
+    );
+    git(directory.path(), &["init", worktree.to_str().unwrap()]);
+    git(&worktree, &["config", "user.name", "Synaptic Test"]);
+    git(
+        &worktree,
+        &["config", "user.email", "synaptic-test@example.invalid"],
+    );
+    std::fs::write(
+        worktree.join("src/client.ts"),
+        "export const version = 1;\n",
+    )
+    .unwrap();
+    git(&worktree, &["add", "src/client.ts"]);
+    git(&worktree, &["commit", "--no-gpg-sign", "-m", "base"]);
+    git(
+        &worktree,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    let base_sha = git(&worktree, &["rev-parse", "HEAD"]);
+    git(&worktree, &["push", "origin", "HEAD:refs/heads/main"]);
+    std::fs::write(
+        worktree.join("src/client.ts"),
+        "export const version = 2;\n",
+    )
+    .unwrap();
+    git(&worktree, &["add", "src/client.ts"]);
+    git(
+        &worktree,
+        &[
+            "commit",
+            "--no-gpg-sign",
+            "-m",
+            "first verified repair",
+            "-m",
+            "Synaptic-API-Event: event_123",
+        ],
+    );
+    git(
+        &worktree,
+        &[
+            "push",
+            "origin",
+            "HEAD:refs/heads/synaptic/api/acme/event_123",
+        ],
+    );
+    git(&worktree, &["reset", "--hard", &base_sha]);
+    std::fs::write(
+        worktree.join("src/client.ts"),
+        "export const version = 2;\n",
+    )
+    .unwrap();
+
+    let runner = LocalGitRunner {
+        gh_calls: Mutex::new(Vec::new()),
+        git_calls: Mutex::new(Vec::new()),
+        list_output: r#"[{"number":12,"url":"https://github.example/pr/12","headRefName":"synaptic/api/acme/event_123","body":"<!-- synaptic-api-event:event_123 base:BASE -->"}]"#
+            .replace("BASE", &base_sha),
+    };
+    let mut repair_brief = brief();
+    repair_brief.base_sha = base_sha;
+    let result = publish_verified_draft(
+        &DraftPublishRequest {
+            worktree: worktree.clone(),
+            branch: "synaptic/api/acme/event_123".into(),
+            brief: repair_brief,
+            verification: verification(),
+            labels: vec![],
+            reviewers: vec![],
+        },
+        &runner,
+    )
+    .unwrap();
+
+    assert_eq!(result.action, PublishAction::Updated);
+    assert!(!runner
+        .git_calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|args| args.first().is_some_and(|argument| argument == "push")));
 }
 
 #[test]

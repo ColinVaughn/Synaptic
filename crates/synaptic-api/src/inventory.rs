@@ -181,6 +181,23 @@ pub fn scan_dependencies_and_sbom_evidence(
     ))
 }
 
+/// Collect dependency and SBOM evidence for non-authoritative graph enrichment.
+///
+/// Repository walks still fail on I/O errors, but a malformed individual
+/// manifest is skipped with a warning. Security inventory and vulnerability
+/// scanning deliberately use the strict APIs above; graph extraction must not
+/// be prevented by tracked syntax fixtures or examples that only happen to use
+/// a recognized manifest name.
+pub fn scan_graph_dependency_evidence(
+    root: &Path,
+) -> Result<(Vec<Dependency>, SbomEvidenceReport), InventoryError> {
+    let manifests = dependency_manifests(root)?;
+    Ok((
+        scan_dependencies_from_manifests_best_effort(root, &manifests),
+        scan_sbom_evidence_from_manifests_best_effort(root, &manifests),
+    ))
+}
+
 fn dependency_manifests(root: &Path) -> Result<Vec<PathBuf>, InventoryError> {
     if !root.is_dir() {
         return Err(InventoryError::InvalidRoot(root.to_path_buf()));
@@ -214,51 +231,77 @@ fn scan_dependencies_from_manifests(
     let cargo_locks = CargoLockCache::default();
     let mut dependencies = Vec::new();
     for manifest in manifests {
-        let name = manifest
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default();
-        match name {
-            _ if is_sbom_manifest(name) => dependencies.extend(scan_sbom(root, manifest)?),
-            "package.json" => dependencies.extend(scan_package_json(root, manifest)?),
-            "pyproject.toml" => dependencies.extend(scan_pyproject(root, manifest)?),
-            "go.mod" => dependencies.extend(scan_go_mod(root, manifest)?),
-            "Cargo.toml" => dependencies.extend(scan_cargo_toml(root, manifest, &cargo_locks)?),
-            "pom.xml" => dependencies.extend(scan_maven_pom(root, manifest)?),
-            "build.gradle" | "build.gradle.kts" => {
-                dependencies.extend(scan_gradle(root, manifest)?)
-            }
-            "packages.config" => dependencies.extend(scan_packages_config(root, manifest)?),
-            "composer.json" => dependencies.extend(scan_composer(root, manifest)?),
-            "Gemfile" => dependencies.extend(scan_gemfile(root, manifest)?),
-            "Package.swift" => dependencies.extend(scan_swift_package(root, manifest)?),
-            "pubspec.yaml" => dependencies.extend(scan_pubspec(root, manifest)?),
-            "mix.exs" => dependencies.extend(scan_mix(root, manifest)?),
-            "Project.toml" => dependencies.extend(scan_julia_project(root, manifest)?),
-            "build.zig.zon" => dependencies.extend(scan_zig_package(root, manifest)?),
-            "Podfile" => dependencies.extend(scan_podfile(root, manifest)?),
-            "conanfile.txt" | "conanfile.py" => dependencies.extend(scan_conan(root, manifest)?),
-            "vcpkg.json" => dependencies.extend(scan_vcpkg(root, manifest)?),
-            "fpm.toml" => dependencies.extend(scan_fpm(root, manifest)?),
-            "qlpack.yml" | "qlpack.yaml" => dependencies.extend(scan_qlpack(root, manifest)?),
-            "sfdx-project.json" => dependencies.extend(scan_salesforce(root, manifest)?),
-            _ if manifest.extension().is_some_and(|ext| ext == "csproj")
-                || name == "Directory.Packages.props" =>
-            {
-                dependencies.extend(scan_msbuild_packages(root, manifest)?)
-            }
-            _ if is_requirements_file(name) => {
-                dependencies.extend(scan_requirements(root, manifest)?)
-            }
-            _ if manifest.extension().is_some_and(|ext| ext == "rockspec") => {
-                dependencies.extend(scan_rockspec(root, manifest)?)
-            }
-            _ if manifest.extension().is_some_and(|ext| ext == "psd1") => {
-                dependencies.extend(scan_powershell_manifest(root, manifest)?)
-            }
-            _ => {}
+        dependencies.extend(scan_dependency_manifest(root, manifest, &cargo_locks)?);
+    }
+    Ok(finalize_dependencies(dependencies))
+}
+
+fn scan_dependencies_from_manifests_best_effort(
+    root: &Path,
+    manifests: &[PathBuf],
+) -> Vec<Dependency> {
+    let cargo_locks = CargoLockCache::default();
+    let mut dependencies = Vec::new();
+    for manifest in manifests {
+        match scan_dependency_manifest(root, manifest, &cargo_locks) {
+            Ok(found) => dependencies.extend(found),
+            Err(error) => eprintln!(
+                "warning: skipping dependency evidence from {} during graph extraction: {error}",
+                relative(root, manifest)
+            ),
         }
     }
+    finalize_dependencies(dependencies)
+}
+
+fn scan_dependency_manifest(
+    root: &Path,
+    manifest: &Path,
+    cargo_locks: &CargoLockCache,
+) -> Result<Vec<Dependency>, InventoryError> {
+    let name = manifest
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    match name {
+        _ if is_sbom_manifest(name) => scan_sbom(root, manifest),
+        "package.json" => scan_package_json(root, manifest),
+        "pyproject.toml" => scan_pyproject(root, manifest),
+        "go.mod" => scan_go_mod(root, manifest),
+        "Cargo.toml" => scan_cargo_toml(root, manifest, cargo_locks),
+        "pom.xml" => scan_maven_pom(root, manifest),
+        "build.gradle" | "build.gradle.kts" => scan_gradle(root, manifest),
+        "packages.config" => scan_packages_config(root, manifest),
+        "composer.json" => scan_composer(root, manifest),
+        "Gemfile" => scan_gemfile(root, manifest),
+        "Package.swift" => scan_swift_package(root, manifest),
+        "pubspec.yaml" => scan_pubspec(root, manifest),
+        "mix.exs" => scan_mix(root, manifest),
+        "Project.toml" => scan_julia_project(root, manifest),
+        "build.zig.zon" => scan_zig_package(root, manifest),
+        "Podfile" => scan_podfile(root, manifest),
+        "conanfile.txt" | "conanfile.py" => scan_conan(root, manifest),
+        "vcpkg.json" => scan_vcpkg(root, manifest),
+        "fpm.toml" => scan_fpm(root, manifest),
+        "qlpack.yml" | "qlpack.yaml" => scan_qlpack(root, manifest),
+        "sfdx-project.json" => scan_salesforce(root, manifest),
+        _ if manifest.extension().is_some_and(|ext| ext == "csproj")
+            || name == "Directory.Packages.props" =>
+        {
+            scan_msbuild_packages(root, manifest)
+        }
+        _ if is_requirements_file(name) => scan_requirements(root, manifest),
+        _ if manifest.extension().is_some_and(|ext| ext == "rockspec") => {
+            scan_rockspec(root, manifest)
+        }
+        _ if manifest.extension().is_some_and(|ext| ext == "psd1") => {
+            scan_powershell_manifest(root, manifest)
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn finalize_dependencies(mut dependencies: Vec<Dependency>) -> Vec<Dependency> {
     let mut seen = BTreeSet::new();
     dependencies.retain(|dependency| {
         seen.insert((
@@ -268,7 +311,7 @@ fn scan_dependencies_from_manifests(
         ))
     });
     dependencies.sort_by_key(dependency_key);
-    Ok(dependencies)
+    dependencies
 }
 
 /// Read SBOM coverage declarations and external-service records independently
@@ -309,6 +352,45 @@ fn scan_sbom_evidence_from_manifests(
         .services
         .dedup_by(|left, right| left.evidence_digest == right.evidence_digest);
     Ok(report)
+}
+
+fn scan_sbom_evidence_from_manifests_best_effort(
+    root: &Path,
+    manifests: &[PathBuf],
+) -> SbomEvidenceReport {
+    let mut report = SbomEvidenceReport {
+        version: SbomEvidenceReport::VERSION,
+        ..SbomEvidenceReport::default()
+    };
+    for manifest in manifests.iter().filter(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(is_sbom_manifest)
+    }) {
+        match scan_sbom_document_evidence(root, manifest) {
+            Ok((document, mut services)) => {
+                report.documents.push(document);
+                report.services.append(&mut services);
+            }
+            Err(error) => eprintln!(
+                "warning: skipping SBOM evidence from {} during graph extraction: {error}",
+                relative(root, manifest)
+            ),
+        }
+    }
+    report
+        .documents
+        .sort_by(|left, right| left.source_file.cmp(&right.source_file));
+    report.services.sort_by(|left, right| {
+        left.source_file
+            .cmp(&right.source_file)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.evidence_digest.cmp(&right.evidence_digest))
+    });
+    report
+        .services
+        .dedup_by(|left, right| left.evidence_digest == right.evidence_digest);
+    report
 }
 
 fn dependency_key(dependency: &Dependency) -> (PackageCoordinate, String, DependencyScope) {
@@ -2422,6 +2504,31 @@ pub enum InventoryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_evidence_skips_a_malformed_manifest_but_strict_inventory_rejects_it() {
+        let repository = tempfile::tempdir().unwrap();
+        fs::write(
+            repository.path().join("package.json"),
+            r#"{"dependencies":{"lodash":"4.17.21"}}"#,
+        )
+        .unwrap();
+        let fixture = repository.path().join("tests/syntax/highlighted");
+        fs::create_dir_all(&fixture).unwrap();
+        fs::write(
+            fixture.join("Cargo.toml"),
+            "\u{1b}[31mnot valid toml\u{1b}[0m",
+        )
+        .unwrap();
+
+        let strict = scan_dependencies(repository.path()).unwrap_err();
+        assert!(matches!(strict, InventoryError::Toml { .. }));
+
+        let (dependencies, _) = scan_graph_dependency_evidence(repository.path()).unwrap();
+        assert!(dependencies.iter().any(|dependency| {
+            dependency.package.ecosystem == Ecosystem::Npm && dependency.package.name == "lodash"
+        }));
+    }
 
     #[test]
     fn parses_pep_508_names_extras_and_markers() {

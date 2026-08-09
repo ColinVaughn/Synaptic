@@ -158,16 +158,6 @@ pub(crate) fn run_extract(
         stats.assets,
         stats.asset_nodes,
     );
-    // Bind resource-file references to real nodes (or drop them) and flag any
-    // generated resource that shadows a hand-authored one, over the full corpus.
-    let res_stats = synaptic_extract::resolve_resource_refs(&mut nodes, &mut edges);
-    if res_stats.bound + res_stats.dropped + res_stats.shadows > 0 {
-        println!(
-            "Resources: {} reference(s) bound, {} dropped, {} generated-shadow edge(s)",
-            res_stats.bound, res_stats.dropped, res_stats.shadows
-        );
-    }
-
     // Markdown structure: heading hierarchy -> `document` nodes + `contains`
     // edges. Deterministic + cheap (a line scan), so it runs unconditionally,
     // independent of the opt-in LLM semantic pass, which still adds concepts on
@@ -217,6 +207,18 @@ pub(crate) fn run_extract(
                 println!("Markdown structure: +{md_nodes} heading/file node(s)");
             }
         }
+    }
+
+    // Bind resource-file references only after Markdown file nodes have joined
+    // the corpus. Incremental rebuilds already resolve over code + Markdown
+    // together; keeping the full extractor in the same order prevents valid
+    // references to README/docs files from being dropped in only one pipeline.
+    let res_stats = synaptic_extract::resolve_resource_refs(&mut nodes, &mut edges);
+    if res_stats.bound + res_stats.dropped + res_stats.shadows > 0 {
+        println!(
+            "Resources: {} reference(s) bound, {} dropped, {} generated-shadow edge(s)",
+            res_stats.bound, res_stats.dropped, res_stats.shadows
+        );
     }
 
     // Semantic pass: documents/papers -> concept nodes/edges via the LLM, merged
@@ -373,7 +375,7 @@ pub(crate) fn run_extract(
     // entity dedup. Missing config is an opt-out; malformed opted-in config is a
     // hard error. The incremental pipeline calls the same pure binder here.
     let registry = synaptic_api::load_optional_registry(&root)?;
-    let (dependencies, sbom) = synaptic_api::scan_dependencies_and_sbom_evidence(&root)?;
+    let (dependencies, sbom) = synaptic_api::scan_graph_dependency_evidence(&root)?;
     if let Some(registry) = registry.as_ref() {
         let report = synaptic_api::bind_repository_api_usages_with_dependencies(
             &mut n,

@@ -50,7 +50,7 @@ impl ExceptionRule {
 }
 
 /// Repository vulnerability policy.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VulnPolicy {
     pub schema: u32,
     #[serde(default)]
@@ -59,6 +59,17 @@ pub struct VulnPolicy {
     pub pin: Vec<PinRule>,
     #[serde(default)]
     pub exception: Vec<ExceptionRule>,
+}
+
+impl Default for VulnPolicy {
+    fn default() -> Self {
+        Self {
+            schema: Self::SCHEMA,
+            deny: Vec::new(),
+            pin: Vec::new(),
+            exception: Vec::new(),
+        }
+    }
 }
 
 impl VulnPolicy {
@@ -287,5 +298,17 @@ approved_by = "someone"
         assert!(policy.deny.is_empty());
         assert!(policy.pin.is_empty());
         assert!(policy.exception.is_empty());
+    }
+
+    #[test]
+    fn the_default_policy_has_a_stable_nonempty_identity() {
+        let policy = VulnPolicy::default();
+
+        assert_eq!(policy.schema, VulnPolicy::SCHEMA);
+        assert_eq!(policy.digest().len(), 64);
+        assert_eq!(
+            policy.digest(),
+            VulnPolicy::parse("schema = 1").unwrap().digest()
+        );
     }
 }

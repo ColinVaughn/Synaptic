@@ -1106,6 +1106,108 @@ pub(crate) enum VulnAction {
         #[arg(long)]
         json: bool,
     },
+    /// Generate and conclusively verify a bounded repair in an isolated worktree.
+    Repair {
+        /// Applicable finding id from the vulnerability ledger.
+        finding: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Graph snapshot (default: <root>/synaptic-out/graph.json).
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        /// Stop after emitting the repair brief; never invoke an agent.
+        #[arg(long)]
+        dry_run: bool,
+        /// Agent command template; must contain `{request}` and emit patch JSON.
+        #[arg(long)]
+        agent_command: Option<String>,
+        /// Pre-generated patch JSON from a credential-separated agent stage.
+        #[arg(long, conflicts_with = "agent_command")]
+        candidate: Option<PathBuf>,
+        /// Canonical provider namespace/repository identity recorded in the handoff.
+        #[arg(long)]
+        repository_identity: Option<String>,
+        /// Network-isolation guard argv, repeated in order.
+        #[arg(long = "network-guard", allow_hyphen_values = true)]
+        network_guard: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revalidate the evidence and patch digest for a vulnerability repair run.
+    Verify {
+        #[arg(long)]
+        run: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Publish one verified vulnerability repair as a draft PR or MR.
+    Publish {
+        #[arg(long)]
+        run: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, default_value = "github")]
+        provider: String,
+        #[arg(long)]
+        provider_base_url: Option<String>,
+        #[arg(long)]
+        repository: Option<String>,
+        #[arg(long)]
+        target_branch: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Repair, verify, and optionally publish one vulnerability finding.
+    Run {
+        finding: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        agent_command: Option<String>,
+        #[arg(long = "network-guard", allow_hyphen_values = true)]
+        network_guard: Vec<String>,
+        /// Verify the repair but leave draft publication to a separated stage.
+        #[arg(long)]
+        defer_publish: bool,
+        #[arg(long, default_value = "github")]
+        provider: String,
+        #[arg(long)]
+        provider_base_url: Option<String>,
+        #[arg(long)]
+        repository: Option<String>,
+        #[arg(long)]
+        target_branch: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export a verified vulnerability run for credential-separated publication.
+    ExportRun {
+        #[arg(long)]
+        run: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Import and revalidate a verified vulnerability handoff.
+    ImportRun {
+        #[arg(long)]
+        bundle: PathBuf,
+        #[arg(long)]
+        expected_digest: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Ask whether a package is safe to use, and at what version.
     Check {
         /// Package coordinate, for example `cargo:serde` or `npm:@acme/sdk`.

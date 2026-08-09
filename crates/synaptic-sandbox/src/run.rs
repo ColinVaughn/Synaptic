@@ -69,7 +69,7 @@ pub struct CommandResult {
     /// why it failed).
     pub output: String,
     /// Wall-clock duration in milliseconds (non-deterministic; informational).
-    pub duration_ms: u128,
+    pub duration_ms: u64,
 }
 
 impl CommandResult {
@@ -243,7 +243,7 @@ pub fn run_command_with_policy(
                 status: CommandStatus::Failed,
                 exit_code: None,
                 output: format!("failed to spawn `{}`: {e}", redact_command_output(command)),
-                duration_ms: started.elapsed().as_millis(),
+                duration_ms: elapsed_millis(started.elapsed()),
             };
         }
     };
@@ -339,8 +339,12 @@ pub fn run_command_with_policy(
         status,
         exit_code,
         output: tail_lines(&redact_command_output(&combined), max_output_lines),
-        duration_ms: started.elapsed().as_millis(),
+        duration_ms: elapsed_millis(started.elapsed()),
     }
+}
+
+fn elapsed_millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 fn redact_command_output(input: &str) -> String {

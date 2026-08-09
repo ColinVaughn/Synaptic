@@ -10,6 +10,39 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.9] - 2026-08-09
+
+### Added
+
+- **Verified vulnerability repair and draft publication.** Applicable findings
+  with a fixed target can now run through bounded `repair`, `verify`, `publish`,
+  and composed `run` commands. Repairs execute in disposable worktrees, retain
+  authoritative run state, run dependency, graph, repository, and forecast
+  gates, and create or update one deterministic draft GitHub PR or GitLab MR
+  without approving or merging it.
+- **Credential-separated vulnerability handoffs.** Verified runs can be
+  checksummed with `vuln export-run`, revalidated with `vuln import-run`, and
+  published in a separate provider-credential stage.
+
+### Changed
+
+- Vulnerability repair scopes now include ecosystem companion manifests and
+  lockfiles, including nested Go modules, and fail closed when the mandatory
+  dependency files exceed the bounded file budget.
+- Non-authoritative graph dependency enrichment skips an individually malformed
+  tracked fixture while authoritative vulnerability inventory remains strict.
+
+### Fixed
+
+- Repair publication now validates the authoritative workflow ledger before
+  generated artifacts and rejects planned, interrupted, or failed runs.
+- Repair result durations serialize portably instead of relying on unsupported
+  `u128` JSON values.
+- Full extraction and incremental rebuilds now agree on resource binding and
+  punctuation-only nested JSON paths without duplicate shadow or self edges.
+- Windows repair worktree cleanup supports long paths, and a provider failure
+  no longer deletes the already verified publication branch needed for retry.
+
 ## [0.9.8] - 2026-08-09
 
 Two retention bugs, both found by profiling rather than reading: a scan held one

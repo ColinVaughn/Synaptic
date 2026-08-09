@@ -52,7 +52,7 @@ pub struct GateResult {
     pub gate: String,
     pub outcome: GateOutcome,
     pub detail: String,
-    pub duration_ms: u128,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

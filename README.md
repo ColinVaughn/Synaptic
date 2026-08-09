@@ -210,8 +210,11 @@ you want Synaptic to preserve history or maintain external contracts.
   stopping at a version match. Findings carry an evidence ladder, a dependency
   path, a CVSS-derived priority, graph-backed call sites and entry-point
   exposure, and a remediation plan; applicable findings with a fixed target can
-  become bounded generation-ready repair briefs. Accepted risks are time-boxed
-  and expire on their own. Five MCP tools let assistants check packages, run a
+  become bounded, isolated repairs whose patched dependency resolution and
+  repository tests must pass before Synaptic can create one deterministic draft
+  GitHub PR or GitLab MR. Checksummed export/import keeps repair and provider
+  credentials separated, and Synaptic never approves or merges. Accepted risks
+  are time-boxed and expire on their own. Five MCP tools let assistants check packages, run a
   graph-backed scan, inspect exposure evidence, and request a bounded repair
   hand-off. Whole-repository scans stay local by default; an agent must opt in
   before the dependency list is sent to OSV. See

@@ -84,8 +84,9 @@ pub use handoff::{HandoffError, VerifiedRunHandoff};
 pub use invariants::{verify_api_invariants, ApiInvariantReport, InvariantCheck};
 pub use inventory::{
     inventory, is_sbom_manifest, scan_dependencies, scan_dependencies_and_sbom_evidence,
-    scan_sbom_evidence, AmbiguousVendorDependency, ApiInventory, ExternalServiceEvidence,
-    InventoryError, SbomCompleteness, SbomDocumentEvidence, SbomEvidenceReport, VendorDependency,
+    scan_graph_dependency_evidence, scan_sbom_evidence, AmbiguousVendorDependency, ApiInventory,
+    ExternalServiceEvidence, InventoryError, SbomCompleteness, SbomDocumentEvidence,
+    SbomEvidenceReport, VendorDependency,
 };
 pub use ledger::{ApiRunRecord, ApiRunStore, LedgerError, RunState};
 pub use model::{
@@ -93,9 +94,10 @@ pub use model::{
 };
 pub use patch_policy::{validate_patch, PatchInspection, PatchPolicy, PatchPolicyError};
 pub use publisher::{
-    deterministic_branch, publish_verified_change_request, publish_verified_draft,
-    ChangeRequestKind, ChangeRequestProvider, CommandOutput, DraftPublishRequest, PublishAction,
-    PublishCommandRunner, PublishContext, PublishError, PublishResult, SystemPublishCommandRunner,
+    deterministic_branch, deterministic_vulnerability_branch, publish_verified_change_request,
+    publish_verified_draft, publish_verified_vulnerability_change_request, ChangeRequestKind,
+    ChangeRequestProvider, CommandOutput, DraftPublishRequest, PublishAction, PublishCommandRunner,
+    PublishContext, PublishError, PublishResult, SystemPublishCommandRunner,
 };
 pub use relevance::{
     evaluate_relevance, usage_bindings, ApiUsageBinding, ApplicabilityReason, ApplicabilityState,

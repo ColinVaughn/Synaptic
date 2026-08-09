@@ -133,6 +133,18 @@ pub fn deterministic_branch(vendor: &str, event_id: &str) -> Result<String, Publ
     ))
 }
 
+/// The stable branch used for one verified dependency-vulnerability repair.
+///
+/// Finding ids already bind the repository, advisory, package, and resolved
+/// version, so the finding itself is the complete collision-resistant subject.
+pub fn deterministic_vulnerability_branch(finding_id: &str) -> Result<String, PublishError> {
+    let finding = safe_component(finding_id)?;
+    Ok(format!(
+        "synaptic/vuln/{}",
+        finding.chars().take(40).collect::<String>()
+    ))
+}
+
 pub fn publish_verified_draft(
     request: &DraftPublishRequest,
     runner: &dyn PublishCommandRunner,
@@ -145,12 +157,87 @@ pub fn publish_verified_change_request(
     context: &PublishContext,
     runner: &dyn PublishCommandRunner,
 ) -> Result<PublishResult, PublishError> {
+    let expected_branch =
+        deterministic_branch(&request.brief.event.vendor, &request.brief.event.id)?;
+    let marker = format!(
+        "<!-- synaptic-api-event:{} base:{} -->",
+        request.brief.event.id, request.brief.base_sha
+    );
+    let title = format!(
+        "Migrate {} API usage for {}",
+        request.brief.event.vendor,
+        request
+            .brief
+            .event
+            .release
+            .as_deref()
+            .unwrap_or(&request.brief.event.id)
+    );
+    let body = render_pr_body(request, &marker);
+    publish_verified_change_request_with_content(
+        request,
+        context,
+        runner,
+        expected_branch,
+        marker,
+        title,
+        body,
+        format!("Synaptic-API-Event: {}", request.brief.event.id),
+    )
+}
+
+/// Publish a verified dependency-vulnerability repair as one draft PR/MR.
+///
+/// This shares the API publisher's stale-base, duplicate-detection, provider,
+/// and draft-only controls while using a separate branch and durable marker.
+pub fn publish_verified_vulnerability_change_request(
+    request: &DraftPublishRequest,
+    context: &PublishContext,
+    runner: &dyn PublishCommandRunner,
+) -> Result<PublishResult, PublishError> {
+    let expected_branch = deterministic_vulnerability_branch(&request.brief.event.id)?;
+    let marker = format!(
+        "<!-- synaptic-vulnerability-finding:{} base:{} -->",
+        request.brief.event.id, request.brief.base_sha
+    );
+    let target = request
+        .brief
+        .event
+        .release
+        .as_deref()
+        .unwrap_or("fixed version");
+    let title = format!(
+        "Upgrade {} to {} for {}",
+        request.brief.event.vendor, target, request.brief.event.source.revision
+    );
+    let body = render_vulnerability_pr_body(request, &marker);
+    publish_verified_change_request_with_content(
+        request,
+        context,
+        runner,
+        expected_branch,
+        marker,
+        title,
+        body,
+        format!("Synaptic-Vulnerability-Finding: {}", request.brief.event.id),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_verified_change_request_with_content(
+    request: &DraftPublishRequest,
+    context: &PublishContext,
+    runner: &dyn PublishCommandRunner,
+    expected_branch: String,
+    marker: String,
+    title: String,
+    body: String,
+    commit_trailer: String,
+) -> Result<PublishResult, PublishError> {
     if !request.verification.verified {
         return Err(PublishError::NotVerified);
     }
     validate_publish_context(context)?;
-    let expected_branch =
-        deterministic_branch(&request.brief.event.vendor, &request.brief.event.id)?;
     if request.branch != expected_branch {
         return Err(PublishError::Branch {
             expected: expected_branch,
@@ -201,21 +288,7 @@ pub fn publish_verified_change_request(
             actual: remote_base.to_ascii_lowercase(),
         });
     }
-    let marker = format!(
-        "<!-- synaptic-api-event:{} base:{} -->",
-        request.brief.event.id, request.brief.base_sha
-    );
-    let title = format!(
-        "Migrate {} API usage for {}",
-        request.brief.event.vendor,
-        request
-            .brief
-            .event
-            .release
-            .as_deref()
-            .unwrap_or(&request.brief.event.id)
-    );
-    let body = crate::redaction::redact_sensitive_text(&render_pr_body(request, &marker));
+    let body = crate::redaction::redact_sensitive_text(&body);
 
     let status = run_checked(
         runner,
@@ -237,24 +310,98 @@ pub fn publish_verified_change_request(
                 "-m".into(),
                 title.clone(),
                 "-m".into(),
-                format!("Synaptic-API-Event: {}", request.brief.event.id),
+                commit_trailer,
             ],
             &request.worktree,
             "",
         )?;
     }
-    run_checked(
+    let source_reference = format!("refs/heads/{}", request.branch);
+    let existing_source = run_checked(
         runner,
         "git",
         &[
-            "push".into(),
-            "--set-upstream".into(),
+            "ls-remote".into(),
+            "--refs".into(),
             "origin".into(),
-            format!("HEAD:refs/heads/{}", request.branch),
+            source_reference.clone(),
         ],
         &request.worktree,
         "",
     )?;
+    let source_lines = existing_source
+        .stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    if source_lines.len() > 1 {
+        return Err(PublishError::UnsafeContext(
+            "source branch lookup returned an ambiguous result".into(),
+        ));
+    }
+    let identical_remote_tree = if let Some(line) = source_lines.first() {
+        let mut fields = line.split_whitespace();
+        let remote_source = fields.next().unwrap_or_default();
+        let remote_reference = fields.next().unwrap_or_default();
+        if fields.next().is_some()
+            || remote_reference != source_reference
+            || !matches!(remote_source.len(), 40 | 64)
+            || !remote_source
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        {
+            return Err(PublishError::UnsafeContext(
+                "source branch lookup returned an invalid identity".into(),
+            ));
+        }
+        run_checked(
+            runner,
+            "git",
+            &[
+                "fetch".into(),
+                "--no-tags".into(),
+                "origin".into(),
+                remote_source.into(),
+            ],
+            &request.worktree,
+            "",
+        )?;
+        let local_tree = run_checked(
+            runner,
+            "git",
+            &["rev-parse".into(), "HEAD^{tree}".into()],
+            &request.worktree,
+            "",
+        )?;
+        let remote_tree = run_checked(
+            runner,
+            "git",
+            &["rev-parse".into(), format!("{remote_source}^{{tree}}")],
+            &request.worktree,
+            "",
+        )?;
+        !local_tree.stdout.trim().is_empty()
+            && local_tree
+                .stdout
+                .trim()
+                .eq_ignore_ascii_case(remote_tree.stdout.trim())
+    } else {
+        false
+    };
+    if !identical_remote_tree {
+        run_checked(
+            runner,
+            "git",
+            &[
+                "push".into(),
+                "--set-upstream".into(),
+                "origin".into(),
+                format!("HEAD:{source_reference}"),
+            ],
+            &request.worktree,
+            "",
+        )?;
+    }
 
     match context.provider {
         ChangeRequestProvider::Github => {
@@ -625,6 +772,66 @@ fn render_pr_body(request: &DraftPublishRequest, marker: &str) -> String {
     }
     body.push_str(
         "- This is intentionally a draft: human review is required, and normal CI and branch protections remain authoritative.\n\n",
+    );
+    body.push_str(marker);
+    body.push('\n');
+    body
+}
+
+fn render_vulnerability_pr_body(request: &DraftPublishRequest, marker: &str) -> String {
+    let target = request.brief.event.release.as_deref().unwrap_or("unknown");
+    let current = request.brief.applicability.observed_versions.join(", ");
+    let mut body = format!(
+        "## Synaptic vulnerability remediation\n\nFinding: `{}`\n\nAdvisory: `{}`\n\nPackage: `{}`\n\nUpgrade: `{}` -> `{}`\n\nAdvisory source: {}\n\nGraph blast radius: {} node(s)\n\n",
+        request.brief.event.id,
+        request.brief.event.source.revision,
+        request.brief.event.vendor,
+        current,
+        target,
+        request.brief.event.source.uri,
+        request.brief.impact.blast_radius_total,
+    );
+    body.push_str("### Why this repository is affected\n\n");
+    body.push_str(&format!(
+        "- Repository: `{}`\n- Applicable usage bindings: {}\n- Advisory evidence digest: `{}`\n\n",
+        request.brief.repository_identity,
+        request.brief.usage_bindings.len(),
+        request.brief.event.source.content_digest,
+    ));
+    body.push_str("### Reachable usage\n\n");
+    if request.brief.usage_bindings.is_empty() {
+        body.push_str("- No concrete usage binding was retained.\n");
+    }
+    for binding in &request.brief.usage_bindings {
+        let location = binding
+            .source_location
+            .as_deref()
+            .unwrap_or(&binding.source_file);
+        body.push_str(&format!(
+            "- `{location}` via `{}`; confidence {:.2}\n",
+            binding.operation_node_id, binding.confidence,
+        ));
+    }
+    body.push_str("\n### Files in scope\n\n");
+    for file in &request.brief.allowed_files {
+        body.push_str(&format!("- `{file}`\n"));
+    }
+    body.push_str("\n### Verification\n\n");
+    for gate in &request.verification.gates {
+        body.push_str(&format!(
+            "- `{:?}` {}: {}\n",
+            gate.outcome, gate.gate, gate.detail
+        ));
+    }
+    if !request.brief.required_tests.is_empty() {
+        body.push_str("\nTests selected by graph:\n");
+        for test in &request.brief.required_tests {
+            body.push_str(&format!("- `{test}`\n"));
+        }
+    }
+    body.push_str("\n### Human review\n\n");
+    body.push_str(
+        "- Confirm the resolved dependency and lockfile both moved to the fixed version.\n- Review compatibility-sensitive call sites and upstream release notes.\n- This change request is intentionally a draft; normal CI and branch protection remain authoritative.\n\n",
     );
     body.push_str(marker);
     body.push('\n');

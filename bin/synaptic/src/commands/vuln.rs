@@ -52,6 +52,90 @@ pub(crate) fn run_vuln(action: VulnAction) -> Result<()> {
             graph,
             json,
         } => run_brief(&finding, &root, graph, json),
+        VulnAction::Repair {
+            finding,
+            root,
+            graph,
+            dry_run,
+            agent_command,
+            candidate,
+            repository_identity,
+            network_guard,
+            json,
+        } => run_repair(
+            &finding,
+            &root,
+            graph,
+            dry_run,
+            agent_command.as_deref(),
+            candidate.as_deref(),
+            repository_identity.as_deref(),
+            network_guard,
+            json,
+            true,
+        )
+        .map(|_| ()),
+        VulnAction::Verify { run, root, json } => run_verify(&run, &root, json),
+        VulnAction::Publish {
+            run,
+            root,
+            provider,
+            provider_base_url,
+            repository,
+            target_branch,
+            json,
+        } => run_publish(
+            &run,
+            &root,
+            json,
+            crate::commands::api::PublishOptions {
+                provider,
+                provider_base_url,
+                repository,
+                target_branch,
+            },
+        ),
+        VulnAction::Run {
+            finding,
+            root,
+            graph,
+            dry_run,
+            agent_command,
+            network_guard,
+            defer_publish,
+            provider,
+            provider_base_url,
+            repository,
+            target_branch,
+            json,
+        } => run_composed(
+            &finding,
+            &root,
+            graph,
+            dry_run,
+            agent_command.as_deref(),
+            network_guard,
+            defer_publish,
+            crate::commands::api::PublishOptions {
+                provider,
+                provider_base_url,
+                repository,
+                target_branch,
+            },
+            json,
+        ),
+        VulnAction::ExportRun {
+            run,
+            root,
+            output,
+            json,
+        } => run_export(&run, &root, &output, json),
+        VulnAction::ImportRun {
+            bundle,
+            expected_digest,
+            root,
+            json,
+        } => run_import(&bundle, &expected_digest, &root, json),
         VulnAction::Sync {
             ecosystem,
             max_bytes,
@@ -477,7 +561,7 @@ fn run_scan(
 
     if record {
         let store = FindingStore::new(root);
-        let digest = policy.as_ref().map(VulnPolicy::digest).unwrap_or_default();
+        let digest = policy.as_ref().cloned().unwrap_or_default().digest();
         let base = base_sha(root);
         for finding in &report.findings {
             let existed = store.get(&finding.id)?.is_some();
@@ -715,48 +799,11 @@ fn run_explain(finding: &str, root: &Path, json: bool) -> Result<()> {
 /// patch for something never shown to be reachable would spend an agent's
 /// budget on a guess. Anything short of that reports what is missing instead.
 fn run_brief(finding_id: &str, root: &Path, graph: Option<PathBuf>, json: bool) -> Result<()> {
-    let record = FindingStore::new(root)
-        .get(finding_id)?
-        .with_context(|| format!("finding {finding_id} is not in the ledger"))?;
-
-    // The record's creation time, not the wall clock, so the same finding
-    // always converts to the same event.
-    let Some(inputs) = repair_inputs(&record.finding, record.created_at) else {
-        bail!(
-            "{finding_id} has no fixed version to upgrade to ({:?}); \
-             remediation requires removing, replacing, or mitigating the dependency",
-            record.finding.remediation.kind
-        );
-    };
-
-    if inputs.assessment.state != synaptic_api::ApplicabilityState::Applicable {
-        bail!(
-            "{finding_id} is {:?}, not applicable; the repair loop only patches findings shown \
-             to be reachable. Run `synaptic vuln explain {finding_id}` for the evidence.",
-            inputs.assessment.state
-        );
-    }
-
-    let graph_path = graph.unwrap_or_else(|| root.join("synaptic-out/graph.json"));
-    let data = load_graph_data(&graph_path, None)
-        .with_context(|| format!("loading graph {}", graph_path.display()))?;
-    let base_sha = data
-        .built_at_commit
-        .clone()
-        .unwrap_or_else(|| "working-tree".into());
-    let knowledge = synaptic_graph::KnowledgeGraph::from_graph_data(data);
-    let identity = repository_identity(root);
-
-    let brief = synaptic_api::build_repair_brief(synaptic_api::RepairBriefRequest {
-        repository_root: root,
-        repository_identity: &identity,
-        base_sha: &base_sha,
-        event: &inputs.event,
-        assessment: &inputs.assessment,
-        graph: &knowledge,
-        memory: &[],
-        budget: &synaptic_api::BriefBudget::default(),
-    })?;
+    let (record, context) = prepare_repair_context(finding_id, root, graph, None)?;
+    let brief = context
+        .brief
+        .as_ref()
+        .expect("an applicable vulnerability repair always has a brief");
 
     if json {
         println!("{}", serde_json::to_string_pretty(&brief)?);
@@ -768,7 +815,7 @@ fn run_brief(finding_id: &str, root: &Path, graph: Option<PathBuf>, json: bool) 
     println!(
         "  upgrade:   {} -> {}",
         record.finding.resolved_version,
-        inputs.event.release.as_deref().unwrap_or("?")
+        context.event.release.as_deref().unwrap_or("?")
     );
     println!("  base sha:  {}", brief.base_sha);
     println!("  bindings:  {}", brief.usage_bindings.len());
@@ -792,6 +839,746 @@ fn run_brief(finding_id: &str, root: &Path, graph: Option<PathBuf>, json: bool) 
     }
     println!("\nrun `synaptic vuln brief {finding_id} --json` for the full generation input");
     Ok(())
+}
+
+fn vulnerability_repair_config() -> synaptic_api::ApiMaintenanceConfig {
+    synaptic_api::ApiMaintenanceConfig {
+        schema: synaptic_api::ApiMaintenanceConfig::SCHEMA,
+        mode: synaptic_api::MaintenanceMode::DraftPr,
+        base_branch: "main".into(),
+        max_files: 12,
+        max_changed_lines: 800,
+        max_attempts: 3,
+        max_risk_score: 80,
+        allowed_paths: Vec::new(),
+        allow_workflow_changes: false,
+        allow_generated_changes: false,
+        require_resolved_version: true,
+        require_graph_invariants: true,
+        require_tests: true,
+        commands: synaptic_api::CommandPolicy::default(),
+        publish: synaptic_api::PublishPolicy::default(),
+        coverage: synaptic_api::CoveragePolicy::default(),
+        vendors: Vec::new(),
+    }
+}
+
+fn repository_relative(root: &Path, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(root).ok()?;
+    let value = relative.to_string_lossy().replace('\\', "/");
+    (!value.is_empty() && !value.starts_with("../")).then_some(value)
+}
+
+fn add_dependency_files(
+    root: &Path,
+    finding: &Finding,
+    assessment: &mut synaptic_api::RelevanceAssessment,
+) -> Vec<String> {
+    let mut files = synaptic_api::scan_dependencies(root)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|dependency| dependency.package == finding.package)
+        .map(|dependency| dependency.source_file)
+        .collect::<Vec<_>>();
+    let discovered = discover_repository_files(root);
+    for path in discovered.lockfiles {
+        let matches_ecosystem = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(LockfileKind::for_file_name)
+            .is_some_and(|kind| kind.ecosystem() == finding.package.ecosystem);
+        if matches_ecosystem {
+            if let Some(relative) = repository_relative(root, &path) {
+                files.push(relative);
+            }
+        }
+    }
+    if finding.package.ecosystem == Ecosystem::Cargo {
+        files.extend(
+            discovered
+                .cargo_manifests
+                .iter()
+                .filter_map(|path| repository_relative(root, path)),
+        );
+    }
+    let selected = files.clone();
+    for file in selected {
+        files.extend(companion_dependency_files(root, &file));
+    }
+    files.sort();
+    files.dedup();
+
+    // Dependency manifests and their companion locks are mandatory repair
+    // inputs. Put them first so the bounded brief cannot spend its file budget
+    // on graph-adjacent source files before including consistency-critical files.
+    let existing = std::mem::take(&mut assessment.bindings);
+    let mut prioritized = Vec::with_capacity(existing.len() + files.len());
+    for file in &files {
+        if let Some(binding) = existing.iter().find(|binding| binding.source_file == *file) {
+            prioritized.push(binding.clone());
+        } else {
+            prioritized.push(synaptic_api::ApiUsageBinding {
+                vendor: assessment.vendor.clone(),
+                operation_node_id: format!("{}#dependency", assessment.vendor),
+                caller_node_id: format!("dependency-file:{file}"),
+                source_file: file.clone(),
+                source_location: None,
+                sdk_package: Some(finding.package.name.clone()),
+                sdk_member: None,
+                sdk_version: Some(finding.resolved_version.clone()),
+                api_version: None,
+                basis: synaptic_api::BindingBasis::Unknown,
+                confidence: 1.0,
+            });
+        }
+    }
+    prioritized.extend(
+        existing
+            .into_iter()
+            .filter(|binding| !files.contains(&binding.source_file)),
+    );
+    assessment.bindings = prioritized;
+    files
+}
+
+fn companion_dependency_files(root: &Path, file: &str) -> Vec<String> {
+    let path = Path::new(file);
+    let directory = path.parent().unwrap_or_else(|| Path::new(""));
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let companions: &[&str] = match name {
+        "package.json" | "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock" => &[
+            "package.json",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+        ],
+        "pyproject.toml" | "poetry.lock" | "uv.lock" => {
+            &["pyproject.toml", "poetry.lock", "uv.lock"]
+        }
+        "Cargo.toml" | "Cargo.lock" => &["Cargo.toml", "Cargo.lock"],
+        "go.mod" | "go.sum" => &["go.mod", "go.sum"],
+        "composer.json" | "composer.lock" => &["composer.json", "composer.lock"],
+        "Gemfile" | "Gemfile.lock" => &["Gemfile", "Gemfile.lock"],
+        "Package.swift" | "Package.resolved" => &["Package.swift", "Package.resolved"],
+        "pubspec.yaml" | "pubspec.lock" => &["pubspec.yaml", "pubspec.lock"],
+        "mix.exs" | "mix.lock" => &["mix.exs", "mix.lock"],
+        "Podfile" | "Podfile.lock" => &["Podfile", "Podfile.lock"],
+        _ => &[],
+    };
+    companions
+        .iter()
+        .map(|companion| directory.join(companion))
+        .filter(|candidate| root.join(candidate).is_file())
+        .map(|candidate| candidate.to_string_lossy().replace('\\', "/"))
+        .collect()
+}
+
+fn prepare_repair_context(
+    finding_id: &str,
+    root: &Path,
+    graph: Option<PathBuf>,
+    explicit_repository_identity: Option<&str>,
+) -> Result<(
+    synaptic_vuln::FindingRecord,
+    crate::commands::api::ImpactContext,
+)> {
+    let record = FindingStore::new(root)
+        .get(finding_id)?
+        .with_context(|| format!("finding {finding_id} is not in the ledger"))?;
+    if record.version != synaptic_vuln::FindingRecord::VERSION
+        || record.id != finding_id
+        || record.finding.id != finding_id
+    {
+        bail!("finding {finding_id} has inconsistent ledger identity");
+    }
+    let Some(mut inputs) = repair_inputs(&record.finding, record.created_at) else {
+        bail!(
+            "{finding_id} has no fixed version to upgrade to ({:?}); remediation requires \
+             removing, replacing, or mitigating the dependency",
+            record.finding.remediation.kind
+        );
+    };
+    if inputs.assessment.state != synaptic_api::ApplicabilityState::Applicable {
+        bail!(
+            "{finding_id} is {:?}, not applicable; the repair loop only patches findings shown \
+             to be reachable. Run `synaptic vuln explain {finding_id}` for the evidence.",
+            inputs.assessment.state
+        );
+    }
+    let dependency_files = add_dependency_files(root, &record.finding, &mut inputs.assessment);
+    let graph_path = graph.unwrap_or_else(|| root.join("synaptic-out/graph.json"));
+    let data = load_graph_data(&graph_path, None)
+        .with_context(|| format!("loading graph {}", graph_path.display()))?;
+    let current_base = base_sha(root);
+    if current_base.is_empty() {
+        bail!("vulnerability repair requires a repository with a resolvable HEAD commit");
+    }
+    if record.base_sha != current_base {
+        bail!(
+            "finding {finding_id} was recorded at {}, but repository HEAD is {}; rerun \
+             `synaptic vuln scan --record` before repairing",
+            record.base_sha,
+            current_base
+        );
+    }
+    let current_policy_digest = VulnPolicy::load(root)?.unwrap_or_default().digest();
+    if record.policy_digest != current_policy_digest {
+        bail!(
+            "finding {finding_id} was recorded under a different vulnerability policy; rerun \
+             `synaptic vuln scan --record` before repairing"
+        );
+    }
+    if data
+        .built_at_commit
+        .as_deref()
+        .is_some_and(|commit| commit != current_base)
+    {
+        bail!(
+            "vulnerability graph was built at a different commit; rebuild with `synaptic extract .`"
+        );
+    }
+    let base = current_base;
+    let knowledge = synaptic_graph::KnowledgeGraph::from_graph_data(data);
+    let identity = explicit_repository_identity
+        .map(str::to_string)
+        .unwrap_or_else(|| repository_identity(root));
+    if record.repository_identity != identity {
+        bail!(
+            "finding {finding_id} belongs to repository {}, not {identity}",
+            record.repository_identity
+        );
+    }
+    let config = vulnerability_repair_config();
+    if dependency_files.len() > config.max_files {
+        bail!(
+            "repair requires {} dependency manifest/lock files, exceeding the {}-file safety budget",
+            dependency_files.len(),
+            config.max_files
+        );
+    }
+    let mut brief = synaptic_api::build_repair_brief(synaptic_api::RepairBriefRequest {
+        repository_root: root,
+        repository_identity: &identity,
+        base_sha: &base,
+        event: &inputs.event,
+        assessment: &inputs.assessment,
+        graph: &knowledge,
+        memory: &[],
+        budget: &synaptic_api::BriefBudget {
+            max_files: config.max_files,
+            ..synaptic_api::BriefBudget::default()
+        },
+    })?;
+    let missing_dependency_files = dependency_files
+        .iter()
+        .filter(|file| !brief.allowed_files.contains(file))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing_dependency_files.is_empty() {
+        bail!(
+            "repair brief omitted required dependency files: {}",
+            missing_dependency_files.join(", ")
+        );
+    }
+    brief.verification.insert(
+        0,
+        synaptic_api::VerificationRequirement {
+            gate: "vulnerability_resolution".into(),
+            description:
+                "Every audited resolution of the package is outside the advisory's affected range"
+                    .into(),
+            required: true,
+        },
+    );
+    Ok((
+        record.clone(),
+        crate::commands::api::ImpactContext {
+            config,
+            event: inputs.event,
+            assessment: inputs.assessment,
+            graph: knowledge,
+            brief: Some(brief),
+            policy_digest: record.policy_digest.clone(),
+        },
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_repair(
+    finding_id: &str,
+    root: &Path,
+    graph: Option<PathBuf>,
+    dry_run: bool,
+    agent_command: Option<&str>,
+    candidate: Option<&Path>,
+    explicit_repository_identity: Option<&str>,
+    network_guard: Vec<String>,
+    json: bool,
+    emit: bool,
+) -> Result<Option<String>> {
+    let (record, context) =
+        prepare_repair_context(finding_id, root, graph, explicit_repository_identity)?;
+    let store = FindingStore::new(root);
+    if !dry_run
+        && !matches!(
+            record.state,
+            FindingState::Remediating | FindingState::Verified | FindingState::PullRequestOpen
+        )
+    {
+        store.transition(
+            finding_id,
+            FindingState::Remediating,
+            decision(
+                DecisionKind::RemediationPlanned,
+                "synaptic vuln repair",
+                format!(
+                    "bounded upgrade to {}",
+                    record
+                        .finding
+                        .remediation
+                        .recommended_version
+                        .as_deref()
+                        .unwrap_or("the fixed version")
+                ),
+            ),
+        )?;
+    }
+    let result = crate::commands::api::repair_prepared(
+        context,
+        crate::commands::api::RepairWorkflow::Vulnerability,
+        root,
+        dry_run,
+        agent_command,
+        candidate,
+        explicit_repository_identity,
+        network_guard,
+        json,
+        emit,
+    );
+    let run_id = match result {
+        Ok(run_id) => run_id,
+        Err(error) => {
+            if !dry_run {
+                let current = store.get(finding_id)?;
+                if current.is_some_and(|finding| finding.state == FindingState::Remediating) {
+                    store.transition(
+                        finding_id,
+                        FindingState::Open,
+                        decision(
+                            DecisionKind::RemediationFailed,
+                            "synaptic vuln repair",
+                            error.to_string(),
+                        ),
+                    )?;
+                }
+            }
+            return Err(error);
+        }
+    };
+    if dry_run {
+        return Ok(run_id);
+    }
+    let Some(run_id) = run_id else {
+        return Ok(None);
+    };
+    let run = synaptic_api::ApiRunStore::vulnerability(root).load(&run_id)?;
+    let current = store
+        .get(finding_id)?
+        .with_context(|| format!("finding {finding_id} disappeared during repair"))?;
+    if run.state == synaptic_api::RunState::Verified
+        && current.state != FindingState::Verified
+        && current.state != FindingState::PullRequestOpen
+    {
+        store.transition(
+            finding_id,
+            FindingState::Verified,
+            decision(
+                DecisionKind::RemediationVerified,
+                "synaptic vuln repair",
+                format!("repair run {run_id} passed every required gate"),
+            ),
+        )?;
+    } else if matches!(
+        run.state,
+        synaptic_api::RunState::RepairFailed
+            | synaptic_api::RunState::VerificationFailed
+            | synaptic_api::RunState::Inconclusive
+    ) && current.state == FindingState::Remediating
+    {
+        store.transition(
+            finding_id,
+            FindingState::Open,
+            decision(
+                DecisionKind::RemediationFailed,
+                "synaptic vuln repair",
+                format!("repair run {run_id} ended in {:?}", run.state),
+            ),
+        )?;
+    }
+    Ok(Some(run_id))
+}
+
+fn run_verify(run_id: &str, root: &Path, json: bool) -> Result<()> {
+    let (verification, patch_digest) = crate::commands::api::validate_repair_run(
+        run_id,
+        root,
+        crate::commands::api::RepairWorkflow::Vulnerability,
+    )?;
+    let run = synaptic_api::ApiRunStore::vulnerability(root).load(run_id)?;
+    validate_finding_run(root, &run)?;
+    crate::commands::api::emit_json_or_text(
+        json,
+        &serde_json::json!({
+            "version": 1,
+            "run": run_id,
+            "finding": run.event_id,
+            "verification": verification,
+            "patch_digest": patch_digest
+        }),
+        &format!("Vulnerability run {run_id} is conclusively verified"),
+    )
+}
+
+fn run_publish(
+    run_id: &str,
+    root: &Path,
+    json: bool,
+    options: crate::commands::api::PublishOptions,
+) -> Result<()> {
+    let _ = crate::commands::api::validate_repair_run(
+        run_id,
+        root,
+        crate::commands::api::RepairWorkflow::Vulnerability,
+    )?;
+    let directory = crate::commands::api::repair_run_directory(
+        root,
+        run_id,
+        crate::commands::api::RepairWorkflow::Vulnerability,
+    )?;
+    let manifest: crate::commands::api::RepairManifest =
+        crate::commands::api::read_json(directory.join("run.json"))?;
+    let brief: synaptic_api::RepairBrief =
+        crate::commands::api::read_json(directory.join("repair-brief.json"))?;
+    let verification: synaptic_api::VerificationReport =
+        crate::commands::api::read_json(directory.join("verification.json"))?;
+    let context = crate::commands::api::publish_context(&options, "main")?;
+    let ledger = synaptic_api::ApiRunStore::vulnerability(root);
+    let mut run = ledger.load(run_id)?;
+    validate_finding_run(root, &run)?;
+    if !matches!(
+        run.state,
+        synaptic_api::RunState::Verified | synaptic_api::RunState::PrOpen
+    ) {
+        bail!(
+            "vulnerability run {run_id} is {:?}, not publishable",
+            run.state
+        );
+    }
+    if run.event_id != brief.event.id || manifest.event_id != run.event_id {
+        bail!("vulnerability publication artifacts disagree on the finding id");
+    }
+    let mut session = synaptic_sandbox::RepairSession::create_vulnerability(
+        root,
+        &manifest.branch,
+        &brief.event.id,
+    )?;
+    session.preserve_branch_on_cleanup();
+    let result = synaptic_api::publish_verified_vulnerability_change_request(
+        &synaptic_api::DraftPublishRequest {
+            worktree: session.path().to_path_buf(),
+            branch: manifest.branch.clone(),
+            brief,
+            verification,
+            labels: Vec::new(),
+            reviewers: Vec::new(),
+        },
+        &context,
+        &synaptic_api::SystemPublishCommandRunner,
+    )?;
+    let _branch = session.retain_verified_branch()?;
+    crate::commands::api::write_pretty(directory.join("change-request.json"), &result)?;
+    if run.state == synaptic_api::RunState::Verified {
+        ledger.transition(
+            &mut run,
+            synaptic_api::RunState::PrOpen,
+            None,
+            Some(result.url.clone()),
+        )?;
+    }
+    let findings = FindingStore::new(root);
+    let finding = findings
+        .get(&run.event_id)?
+        .with_context(|| format!("finding {} is not in the ledger", run.event_id))?;
+    if finding.state != FindingState::PullRequestOpen {
+        if finding.state != FindingState::Verified {
+            bail!(
+                "finding {} is {:?}, not verified for publication",
+                finding.id,
+                finding.state
+            );
+        }
+        findings.transition(
+            &finding.id,
+            FindingState::PullRequestOpen,
+            decision(
+                DecisionKind::PullRequestOpened,
+                "synaptic vuln publish",
+                result.url.clone(),
+            ),
+        )?;
+    }
+    crate::commands::api::emit_json_or_text(
+        json,
+        &serde_json::json!({"version":1,"run":run,"finding":finding.id,"publish":result}),
+        &format!(
+            "Draft change request for vulnerability run {run_id}: {}",
+            result.url
+        ),
+    )
+}
+
+fn run_export(run_id: &str, root: &Path, output: &Path, json: bool) -> Result<()> {
+    let (verification, _) = crate::commands::api::validate_repair_run(
+        run_id,
+        root,
+        crate::commands::api::RepairWorkflow::Vulnerability,
+    )?;
+    let directory = crate::commands::api::repair_run_directory(
+        root,
+        run_id,
+        crate::commands::api::RepairWorkflow::Vulnerability,
+    )?;
+    let run = synaptic_api::ApiRunStore::vulnerability(root).load(run_id)?;
+    let finding = FindingStore::new(root)
+        .get(&run.event_id)?
+        .with_context(|| format!("finding {} is not in the ledger", run.event_id))?;
+    validate_finding_run(root, &run)?;
+    if finding.state != FindingState::Verified {
+        bail!(
+            "finding {} is {:?}, not exportable",
+            finding.id,
+            finding.state
+        );
+    }
+    let event = crate::commands::api::read_json(directory.join("event.json"))?;
+    let brief = crate::commands::api::read_json(directory.join("repair-brief.json"))?;
+    let outcome = crate::commands::api::read_json(directory.join("repair-outcome.json"))?;
+    let patch = std::fs::read_to_string(directory.join("proposed.patch"))?;
+    let handoff = synaptic_vuln::VerifiedVulnerabilityRunHandoff::new(
+        run,
+        finding,
+        event,
+        brief,
+        outcome,
+        verification,
+        patch,
+    )?;
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    crate::commands::api::write_pretty(output.to_path_buf(), &handoff)?;
+    crate::commands::api::emit_json_or_text(
+        json,
+        &serde_json::json!({
+            "version":1,
+            "run":run_id,
+            "output":output,
+            "bundle_digest":handoff.bundle_digest,
+            "patch_digest":handoff.patch_digest
+        }),
+        &format!(
+            "Exported verified vulnerability run {run_id} to {}",
+            output.display()
+        ),
+    )
+}
+
+fn validate_finding_run(
+    root: &Path,
+    run: &synaptic_api::ApiRunRecord,
+) -> Result<synaptic_vuln::FindingRecord> {
+    let finding = FindingStore::new(root)
+        .get(&run.event_id)?
+        .with_context(|| format!("vulnerability run {} has no matching finding", run.id))?;
+    if finding.id != finding.finding.id
+        || finding.id != run.event_id
+        || finding.base_sha != run.base_sha
+        || finding.policy_digest != run.policy_digest
+    {
+        bail!(
+            "vulnerability run {} and finding {} identities disagree",
+            run.id,
+            run.event_id
+        );
+    }
+    if !matches!(
+        finding.state,
+        FindingState::Verified | FindingState::PullRequestOpen
+    ) {
+        bail!(
+            "finding {} is {:?}, not verified",
+            finding.id,
+            finding.state
+        );
+    }
+    Ok(finding)
+}
+
+fn run_import(bundle: &Path, expected_digest: &str, root: &Path, json: bool) -> Result<()> {
+    const MAX_HANDOFF_BYTES: u64 = 64 * 1024 * 1024;
+    let metadata = std::fs::metadata(bundle)
+        .with_context(|| format!("inspect vulnerability handoff {}", bundle.display()))?;
+    if metadata.len() > MAX_HANDOFF_BYTES {
+        bail!("vulnerability handoff exceeds the 64 MiB limit");
+    }
+    let handoff: synaptic_vuln::VerifiedVulnerabilityRunHandoff =
+        crate::commands::api::read_json(bundle.to_path_buf())?;
+    handoff.verify()?;
+    if handoff.bundle_digest != expected_digest {
+        bail!("vulnerability handoff digest does not match --expected-digest");
+    }
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("canonicalize publication checkout {}", root.display()))?;
+    let head = base_sha(&root);
+    if head != handoff.run.base_sha {
+        bail!(
+            "publication checkout HEAD {head} does not match verified base {}",
+            handoff.run.base_sha
+        );
+    }
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&root)
+        .output()?;
+    if !status.status.success() || !status.stdout.is_empty() {
+        bail!("publication checkout must be clean before importing a vulnerability run");
+    }
+    let policy_digest = VulnPolicy::load(&root)?.unwrap_or_default().digest();
+    if policy_digest != handoff.run.policy_digest {
+        bail!("publication checkout vulnerability policy differs from the verified run");
+    }
+    let config = vulnerability_repair_config();
+    let policy = synaptic_api::PatchPolicy {
+        allowed_files: handoff.brief.allowed_files.clone(),
+        max_files: config.max_files,
+        max_changed_lines: config.max_changed_lines,
+        allow_workflows: false,
+        allow_generated: false,
+        ..synaptic_api::PatchPolicy::default()
+    };
+    let inspection = synaptic_api::validate_patch(&root, &handoff.patch, &policy)?;
+    let session = synaptic_sandbox::RepairSession::create_vulnerability(
+        &root,
+        &handoff.run.base_sha,
+        &handoff.finding.id,
+    )?;
+    if session.branch() != handoff.branch {
+        bail!("vulnerability handoff branch does not match the repair session");
+    }
+    session.apply_patch(handoff.patch.as_bytes())?;
+    let title = format!(
+        "Upgrade {} for {}",
+        handoff.event.vendor, handoff.finding.finding.advisory_id
+    );
+    let commit = session.commit_verified_vulnerability(
+        &title,
+        &handoff.finding.id,
+        &inspection.changed_files,
+    )?;
+    let branch = session.retain_verified_branch()?;
+    FindingStore::new(&root).import_verified(&handoff.finding)?;
+    let directory = crate::commands::api::repair_run_directory(
+        &root,
+        &handoff.run.id,
+        crate::commands::api::RepairWorkflow::Vulnerability,
+    )?;
+    std::fs::create_dir_all(&directory)?;
+    crate::commands::api::write_pretty(directory.join("event.json"), &handoff.event)?;
+    crate::commands::api::write_pretty(directory.join("repair-brief.json"), &handoff.brief)?;
+    crate::commands::api::write_pretty(directory.join("repair-outcome.json"), &handoff.outcome)?;
+    crate::commands::api::write_pretty(directory.join("verification.json"), &handoff.verification)?;
+    std::fs::write(directory.join("proposed.patch"), &handoff.patch)?;
+    crate::commands::api::write_pretty(
+        directory.join("run.json"),
+        &crate::commands::api::RepairManifest {
+            version: 1,
+            run_id: handoff.run.id.clone(),
+            event_id: handoff.finding.id.clone(),
+            branch,
+            commit,
+        },
+    )?;
+    synaptic_api::ApiRunStore::vulnerability(&root).import_verified(&handoff.run)?;
+    crate::commands::api::emit_json_or_text(
+        json,
+        &serde_json::json!({
+            "version":1,
+            "run":handoff.run.id,
+            "finding":handoff.finding.id,
+            "branch":handoff.branch,
+            "bundle_digest":handoff.bundle_digest,
+            "patch_digest":handoff.patch_digest
+        }),
+        &format!("Imported verified vulnerability run {}", handoff.run.id),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_composed(
+    finding_id: &str,
+    root: &Path,
+    graph: Option<PathBuf>,
+    dry_run: bool,
+    agent_command: Option<&str>,
+    network_guard: Vec<String>,
+    defer_publish: bool,
+    options: crate::commands::api::PublishOptions,
+    json: bool,
+) -> Result<()> {
+    let run_id = run_repair(
+        finding_id,
+        root,
+        graph,
+        dry_run,
+        agent_command,
+        None,
+        options.repository.as_deref(),
+        network_guard,
+        false,
+        false,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("vulnerability repair produced no run"))?;
+    let mut published = false;
+    if !dry_run && !defer_publish {
+        let run = synaptic_api::ApiRunStore::vulnerability(root).load(&run_id)?;
+        if run.state == synaptic_api::RunState::Verified {
+            run_publish(&run_id, root, false, options)?;
+            published = true;
+        }
+    }
+    let run = synaptic_api::ApiRunStore::vulnerability(root).load(&run_id)?;
+    crate::commands::api::emit_json_or_text(
+        json,
+        &serde_json::json!({
+            "version":1,
+            "finding":finding_id,
+            "run":run_id,
+            "state":run.state,
+            "base_sha":run.base_sha,
+            "policy_digest":run.policy_digest,
+            "dry_run":dry_run,
+            "publication_deferred":defer_publish,
+            "published":published
+        }),
+        &format!("Vulnerability maintenance run {run_id}: {:?}", run.state),
+    )
 }
 
 fn run_check(
@@ -1403,5 +2190,26 @@ mod tests {
             FindingState::PullRequestOpen
         );
         assert!(parse_state("nonsense").is_err());
+    }
+
+    #[test]
+    fn nested_go_module_includes_its_companion_sum() {
+        let repository = tempfile::tempdir().unwrap();
+        let module = repository.path().join("cmd/docker/publisher");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(module.join("go.mod"), "module example.test/publisher\n").unwrap();
+        std::fs::write(
+            module.join("go.sum"),
+            "example.test/dependency v1.0.0 h1:test\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            companion_dependency_files(repository.path(), "cmd/docker/publisher/go.mod"),
+            vec![
+                "cmd/docker/publisher/go.mod".to_string(),
+                "cmd/docker/publisher/go.sum".to_string(),
+            ]
+        );
     }
 }

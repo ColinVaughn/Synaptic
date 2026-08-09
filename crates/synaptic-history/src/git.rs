@@ -62,7 +62,16 @@ pub fn worktree_add(repo_root: &Path, dest: &Path, sha: &str) -> Result<(), Hist
     let dest_s = deverbatim(dest);
     run(
         repo_root,
-        &["worktree", "add", "--detach", "--force", &dest_s, sha],
+        &[
+            "-c",
+            "core.longpaths=true",
+            "worktree",
+            "add",
+            "--detach",
+            "--force",
+            &dest_s,
+            sha,
+        ],
     )?;
     Ok(())
 }
@@ -70,7 +79,17 @@ pub fn worktree_add(repo_root: &Path, dest: &Path, sha: &str) -> Result<(), Hist
 /// Remove a worktree previously added at `dest`.
 pub fn worktree_remove(repo_root: &Path, dest: &Path) -> Result<(), HistoryError> {
     let dest_s = deverbatim(dest);
-    run(repo_root, &["worktree", "remove", "--force", &dest_s])?;
+    run(
+        repo_root,
+        &[
+            "-c",
+            "core.longpaths=true",
+            "worktree",
+            "remove",
+            "--force",
+            &dest_s,
+        ],
+    )?;
     Ok(())
 }
 

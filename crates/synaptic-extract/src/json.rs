@@ -178,6 +178,12 @@ pub fn extract_json_source(path: &str, source: &[u8]) -> ExtractionResult {
                 }
                 let cline = child.start_position().row + 1;
                 let child_nid = NodeId(make_id(&["jsonkey", path, &key, &ck]));
+                // Sanitization can collapse punctuation-only child keys (for
+                // example `comments.{"//": ...}`) onto their parent id. Do
+                // not emit a meaningless self-edge or duplicate node.
+                if child_nid == key_nid {
+                    continue;
+                }
                 b.add_tagged_node(child_nid.clone(), ck, cline, "config_key");
                 b.add_edge(
                     key_nid.clone(),
@@ -370,6 +376,16 @@ mod tests {
                 n.label
             );
         }
+    }
+
+    #[test]
+    fn punctuation_only_nested_config_key_does_not_create_a_self_edge() {
+        let result = extract_json_source(
+            "package.json",
+            br#"{"name":"app","comments":{"//":"explanation"}}"#,
+        );
+
+        assert!(result.edges.iter().all(|edge| edge.source != edge.target));
     }
 
     use crate::resource::RESOURCE_TEST_LOCK;

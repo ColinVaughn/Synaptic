@@ -674,7 +674,7 @@ pub fn rebuild_with_detect(
     let (n, e) = link_dynamic_refs(n, e);
     let (mut n, mut e) = deduplicate_entities(n, e, &HashMap::new());
     let registry = synaptic_api::load_optional_registry(root)?;
-    let (dependencies, sbom) = synaptic_api::scan_dependencies_and_sbom_evidence(root)
+    let (dependencies, sbom) = synaptic_api::scan_graph_dependency_evidence(root)
         .map_err(|error| IncrementalError::ApiInventory(Box::new(error)))?;
     if let Some(registry) = registry.as_ref() {
         synaptic_api::bind_repository_api_usages_with_dependencies(

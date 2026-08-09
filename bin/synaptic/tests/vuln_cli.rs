@@ -83,3 +83,38 @@ fn reports_a_stable_reason_when_no_dependency_version_is_auditable() {
     assert!(String::from_utf8_lossy(&output.stderr)
         .contains("[synaptic:vuln:no-auditable-dependencies]"));
 }
+
+#[test]
+fn exposes_the_verified_vulnerability_repair_and_draft_publication_lifecycle() {
+    let output = Command::cargo_bin("synaptic")
+        .unwrap()
+        .args(["vuln", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    for command in [
+        "repair",
+        "verify",
+        "publish",
+        "run",
+        "export-run",
+        "import-run",
+    ] {
+        assert!(
+            help.contains(command),
+            "vulnerability help omitted {command}"
+        );
+    }
+
+    let publish = Command::cargo_bin("synaptic")
+        .unwrap()
+        .args(["vuln", "publish", "--help"])
+        .output()
+        .unwrap();
+    assert!(publish.status.success());
+    let publish_help = String::from_utf8_lossy(&publish.stdout);
+    assert!(publish_help.contains("draft PR or MR"));
+    assert!(publish_help.contains("--provider"));
+    assert!(publish_help.contains("--target-branch"));
+}

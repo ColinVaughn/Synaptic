@@ -47,12 +47,25 @@ pub struct ApiRunRecord {
 #[derive(Debug, Clone)]
 pub struct ApiRunStore {
     root: PathBuf,
+    id_prefix: &'static str,
 }
 
 impl ApiRunStore {
     pub fn new(repository_root: &Path) -> Self {
         Self {
             root: repository_root.join(".synaptic/api-maintenance/runs"),
+            id_prefix: "api_run",
+        }
+    }
+
+    /// A repair-run ledger scoped to dependency vulnerability findings.
+    ///
+    /// The record contract is shared with API repair because both workflows
+    /// use the same verifier, but storage and stable ids remain separate.
+    pub fn vulnerability(repository_root: &Path) -> Self {
+        Self {
+            root: repository_root.join(".synaptic/vuln/runs"),
+            id_prefix: "vuln_run",
         }
     }
 
@@ -68,7 +81,7 @@ impl ApiRunStore {
         let identity =
             serde_json::to_vec(&(repository_identity, base_sha, event_id, policy_digest))?;
         let digest = blake3::hash(&identity).to_hex().to_string();
-        let id = format!("api_run_{}", &digest[..24]);
+        let id = format!("{}_{}", self.id_prefix, &digest[..24]);
         let path = self.path(&id)?;
         if path.exists() {
             let record = read_record(&path)?;
@@ -191,7 +204,7 @@ impl ApiRunStore {
             &record.policy_digest,
         ))?;
         let digest = blake3::hash(&identity).to_hex().to_string();
-        let expected_id = format!("api_run_{}", &digest[..24]);
+        let expected_id = format!("{}_{}", self.id_prefix, &digest[..24]);
         if record.id != expected_id {
             return Err(LedgerError::Integrity(format!(
                 "run id {} does not match its identity fields",

@@ -197,13 +197,51 @@ fn run_check_plan(root: PathBuf, json: bool, require_complete: bool) -> Result<(
     Ok(())
 }
 
-struct ImpactContext {
-    registry: synaptic_api::VendorRegistry,
-    event: synaptic_api::ApiChangeEvent,
-    assessment: synaptic_api::RelevanceAssessment,
-    graph: synaptic_graph::KnowledgeGraph,
-    brief: Option<synaptic_api::RepairBrief>,
-    policy_digest: String,
+pub(crate) struct ImpactContext {
+    pub(crate) config: synaptic_api::ApiMaintenanceConfig,
+    pub(crate) event: synaptic_api::ApiChangeEvent,
+    pub(crate) assessment: synaptic_api::RelevanceAssessment,
+    pub(crate) graph: synaptic_graph::KnowledgeGraph,
+    pub(crate) brief: Option<synaptic_api::RepairBrief>,
+    pub(crate) policy_digest: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RepairWorkflow {
+    Api,
+    Vulnerability,
+}
+
+impl RepairWorkflow {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Api => "API",
+            Self::Vulnerability => "vulnerability",
+        }
+    }
+
+    fn run_store(self, root: &Path) -> synaptic_api::ApiRunStore {
+        match self {
+            Self::Api => synaptic_api::ApiRunStore::new(root),
+            Self::Vulnerability => synaptic_api::ApiRunStore::vulnerability(root),
+        }
+    }
+
+    fn session(
+        self,
+        root: &Path,
+        base: &str,
+        event: &synaptic_api::ApiChangeEvent,
+    ) -> Result<synaptic_sandbox::RepairSession> {
+        Ok(match self {
+            Self::Api => {
+                synaptic_sandbox::RepairSession::create(root, base, &event.vendor, &event.id)?
+            }
+            Self::Vulnerability => {
+                synaptic_sandbox::RepairSession::create_vulnerability(root, base, &event.id)?
+            }
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -318,6 +356,7 @@ struct CliPatchVerifier<'a> {
     required_tests: &'a [String],
     baseline_project_gate: synaptic_api::GateResult,
     execution: synaptic_sandbox::ExecutionPolicy,
+    workflow: RepairWorkflow,
 }
 
 impl PatchVerifier for CliPatchVerifier<'_> {
@@ -353,8 +392,18 @@ impl PatchVerifier for CliPatchVerifier<'_> {
                 inspection.changed_files.len(),
                 inspection.added_lines + inspection.removed_lines
             ),
-            duration_ms: started.elapsed().as_millis(),
+            duration_ms: elapsed_millis(started.elapsed()),
         });
+
+        if self.workflow == RepairWorkflow::Vulnerability {
+            let resolution = vulnerability_resolution_gate(self.session.path(), self.event);
+            let passed = resolution.outcome == synaptic_api::GateOutcome::Passed;
+            gates.push(resolution);
+            if !passed {
+                let _ = self.session.reset_attempt();
+                return synaptic_api::VerificationReport::from_gates(gates);
+            }
+        }
 
         let rebuild_started = std::time::Instant::now();
         let options = synaptic_incremental::RebuildOptions {
@@ -400,7 +449,7 @@ impl PatchVerifier for CliPatchVerifier<'_> {
                         .map(|check| format!("{}={}: {}", check.name, check.passed, check.detail))
                         .collect::<Vec<_>>()
                         .join("; "),
-                    duration_ms: rebuild_started.elapsed().as_millis(),
+                    duration_ms: elapsed_millis(rebuild_started.elapsed()),
                 });
                 incremental.kg
             }
@@ -513,8 +562,9 @@ fn prepare_impact(
         None
     };
     let policy_digest = synaptic_api::maintenance_policy_digest(registry.config())?;
+    let config = registry.config().clone();
     Ok(ImpactContext {
-        registry,
+        config,
         event,
         assessment,
         graph,
@@ -593,13 +643,41 @@ fn repair_event(
     emit: bool,
 ) -> Result<Option<String>> {
     let context = prepare_impact(root, event_id, graph_path, config_path, Vec::new())?;
+    repair_prepared(
+        context,
+        RepairWorkflow::Api,
+        root,
+        dry_run,
+        agent_command,
+        candidate,
+        repository_identity,
+        network_guard,
+        json,
+        emit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn repair_prepared(
+    context: ImpactContext,
+    workflow: RepairWorkflow,
+    root: &Path,
+    dry_run: bool,
+    agent_command: Option<&str>,
+    candidate: Option<&Path>,
+    repository_identity: Option<&str>,
+    network_guard: Vec<String>,
+    json: bool,
+    emit: bool,
+) -> Result<Option<String>> {
+    let event_id = context.event.id.as_str();
     let repository_identity = maintenance_repository_identity(repository_identity, root)?;
     let base_sha = context
         .brief
         .as_ref()
         .map(|brief| brief.base_sha.as_str())
         .unwrap_or("no-base");
-    let ledger = synaptic_api::ApiRunStore::new(root);
+    let ledger = workflow.run_store(root);
     let mut run = ledger.begin(
         &repository_identity,
         base_sha,
@@ -621,13 +699,17 @@ fn repair_event(
             emit_json_or_text(
                 json,
                 &serde_json::json!({"version":1,"run":run,"assessment":context.assessment}),
-                &format!("API event {event_id}: {:?}", context.assessment.state),
+                &format!(
+                    "{} event {event_id}: {:?}",
+                    workflow.label(),
+                    context.assessment.state
+                ),
             )?;
         }
         return Ok(Some(run.id));
     };
     brief.id = run.id.clone();
-    let directory = run_directory(root, &run.id)?;
+    let directory = repair_run_directory(root, &run.id, workflow)?;
     std::fs::create_dir_all(&directory)?;
     write_pretty(directory.join("event.json"), &context.event)?;
     write_pretty(directory.join("impact.json"), &context.assessment)?;
@@ -637,7 +719,12 @@ fn repair_event(
             emit_json_or_text(
                 json,
                 &serde_json::json!({"version":1,"run":run,"repair_brief":brief,"dry_run":true}),
-                &format!("Dry run {} produced repair brief {}", run.id, brief.id),
+                &format!(
+                    "{} dry run {} produced repair brief {}",
+                    workflow.label(),
+                    run.id,
+                    brief.id
+                ),
             )?;
         }
         return Ok(Some(run.id));
@@ -650,7 +737,12 @@ fn repair_event(
             emit_json_or_text(
                 json,
                 &serde_json::json!({"version":1,"run":run,"reused":true}),
-                &format!("Reusing completed API run {} ({:?})", run.id, run.state),
+                &format!(
+                    "Reusing completed {} run {} ({:?})",
+                    workflow.label(),
+                    run.id,
+                    run.state
+                ),
             )?;
         }
         return Ok(Some(run.id));
@@ -662,12 +754,7 @@ fn repair_event(
         bail!("--agent-command or --candidate is required unless --dry-run is used");
     }
     ledger.transition(&mut run, synaptic_api::RunState::Repairing, None, None)?;
-    let session = synaptic_sandbox::RepairSession::create(
-        root,
-        &brief.base_sha,
-        &context.event.vendor,
-        &context.event.id,
-    )?;
+    let session = workflow.session(root, &brief.base_sha, &context.event)?;
     let execution = synaptic_sandbox::ExecutionPolicy {
         network: synaptic_sandbox::NetworkPolicy::Disabled,
         network_guard: (!network_guard.is_empty()).then_some(network_guard),
@@ -691,13 +778,13 @@ fn repair_event(
                     command: agent_command.unwrap_or_default().into(),
                     execution: execution.clone(),
                 }),
-                context.registry.config().max_attempts,
+                context.config.max_attempts,
             )
         };
     let baseline_project_gate = run_project_gate(
         "baseline_tests_and_build",
         session.path(),
-        context.registry.config(),
+        &context.config,
         &brief.required_tests,
         &brief.allowed_files,
         &execution,
@@ -739,7 +826,8 @@ fn repair_event(
                     "agent_invoked":false
                 }),
                 &format!(
-                    "API repair {} stopped because the baseline build/test gate did not pass",
+                    "{} repair {} stopped because the baseline build/test gate did not pass",
+                    workflow.label(),
                     run.id
                 ),
             )?;
@@ -751,17 +839,18 @@ fn repair_event(
         before: &context.graph,
         event: &context.event,
         assessment: &context.assessment,
-        config: context.registry.config(),
+        config: &context.config,
         required_tests: &brief.required_tests,
         baseline_project_gate,
         execution,
+        workflow,
     };
     let policy = synaptic_api::PatchPolicy {
         allowed_files: brief.allowed_files.clone(),
-        max_files: context.registry.config().max_files,
-        max_changed_lines: context.registry.config().max_changed_lines,
-        allow_workflows: context.registry.config().allow_workflow_changes,
-        allow_generated: context.registry.config().allow_generated_changes,
+        max_files: context.config.max_files,
+        max_changed_lines: context.config.max_changed_lines,
+        allow_workflows: context.config.allow_workflow_changes,
+        allow_generated: context.config.allow_generated_changes,
         ..synaptic_api::PatchPolicy::default()
     };
     let outcome = match synaptic_api::run_repair_attempts(
@@ -817,7 +906,7 @@ fn repair_event(
             emit_json_or_text(
                 json,
                 &serde_json::json!({"version":1,"run":run,"outcome":outcome}),
-                &format!("API repair {} failed verification", run.id),
+                &format!("{} repair {} failed verification", workflow.label(), run.id),
             )?;
         }
         return Ok(Some(run.id));
@@ -838,11 +927,22 @@ fn repair_event(
         .ok_or_else(|| anyhow::anyhow!("verified outcome has no patch inspection"))?;
     std::fs::write(directory.join("proposed.patch"), &patch.unified_diff)?;
     write_pretty(directory.join("verification.json"), &verification)?;
-    let title = format!(
-        "Migrate {} API for {}",
-        context.event.vendor, context.event.id
-    );
-    let commit = session.commit_verified(&title, &context.event.id, &files)?;
+    let title = match workflow {
+        RepairWorkflow::Api => format!(
+            "Migrate {} API for {}",
+            context.event.vendor, context.event.id
+        ),
+        RepairWorkflow::Vulnerability => format!(
+            "Upgrade {} for {}",
+            context.event.vendor, context.event.source.revision
+        ),
+    };
+    let commit = match workflow {
+        RepairWorkflow::Api => session.commit_verified(&title, &context.event.id, &files)?,
+        RepairWorkflow::Vulnerability => {
+            session.commit_verified_vulnerability(&title, &context.event.id, &files)?
+        }
+    };
     let branch = session.retain_verified_branch()?;
     let manifest = RepairManifest {
         version: 1,
@@ -864,7 +964,7 @@ fn repair_event(
         &run,
         synaptic_memory::MemoryKind::AgentTask,
         synaptic_memory::VerificationStatus::Passed,
-        "API repair verified locally",
+        &format!("{} repair verified locally", workflow.label()),
         None,
     );
     if emit {
@@ -872,8 +972,10 @@ fn repair_event(
             json,
             &serde_json::json!({"version":1,"run":run,"manifest":manifest,"outcome":outcome}),
             &format!(
-                "Verified API repair {} on branch {}",
-                run.id, manifest.branch
+                "Verified {} repair {} on branch {}",
+                workflow.label(),
+                run.id,
+                manifest.branch
             ),
         )?;
     }
@@ -1235,20 +1337,20 @@ fn run_scan(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct RepairManifest {
-    version: u32,
-    run_id: String,
-    event_id: String,
-    branch: String,
-    commit: String,
+pub(crate) struct RepairManifest {
+    pub(crate) version: u32,
+    pub(crate) run_id: String,
+    pub(crate) event_id: String,
+    pub(crate) branch: String,
+    pub(crate) commit: String,
 }
 
 #[derive(Debug, Clone)]
-struct PublishOptions {
-    provider: String,
-    provider_base_url: Option<String>,
-    repository: Option<String>,
-    target_branch: Option<String>,
+pub(crate) struct PublishOptions {
+    pub(crate) provider: String,
+    pub(crate) provider_base_url: Option<String>,
+    pub(crate) repository: Option<String>,
+    pub(crate) target_branch: Option<String>,
 }
 
 impl Default for PublishOptions {
@@ -1262,7 +1364,7 @@ impl Default for PublishOptions {
     }
 }
 
-fn publish_context(
+pub(crate) fn publish_context(
     options: &PublishOptions,
     configured_base_branch: &str,
 ) -> Result<synaptic_api::PublishContext> {
@@ -1290,7 +1392,7 @@ fn publish_context(
 }
 
 fn run_verify(run_id: String, root: PathBuf, json: bool) -> Result<()> {
-    let (verification, digest) = validate_run(&run_id, &root)?;
+    let (verification, digest) = validate_repair_run(&run_id, &root, RepairWorkflow::Api)?;
     emit_json_or_text(
         json,
         &serde_json::json!({"version":1,"run":run_id,"verification":verification,"patch_digest":digest}),
@@ -1298,8 +1400,27 @@ fn run_verify(run_id: String, root: PathBuf, json: bool) -> Result<()> {
     )
 }
 
-fn validate_run(run_id: &str, root: &Path) -> Result<(synaptic_api::VerificationReport, String)> {
-    let directory = run_directory(root, run_id)?;
+pub(crate) fn validate_repair_run(
+    run_id: &str,
+    root: &Path,
+    workflow: RepairWorkflow,
+) -> Result<(synaptic_api::VerificationReport, String)> {
+    // Consult the authoritative run ledger before opening generated artifacts.
+    // Planned, interrupted, and failed runs may not have those files at all;
+    // reporting their state is both clearer and prevents a corrupt/missing
+    // artifact from obscuring the fail-closed publication decision.
+    let store = match workflow {
+        RepairWorkflow::Api => synaptic_api::ApiRunStore::new(root),
+        RepairWorkflow::Vulnerability => synaptic_api::ApiRunStore::vulnerability(root),
+    };
+    let run = store.load(run_id)?;
+    if !matches!(
+        run.state,
+        synaptic_api::RunState::Verified | synaptic_api::RunState::PrOpen
+    ) {
+        bail!("run {run_id} is {:?}, not conclusively verified", run.state);
+    }
+    let directory = repair_run_directory(root, run_id, workflow)?;
     let outcome: synaptic_api::RepairOutcome = read_json(directory.join("repair-outcome.json"))?;
     let verification: synaptic_api::VerificationReport =
         read_json(directory.join("verification.json"))?;
@@ -1325,7 +1446,7 @@ fn validate_run(run_id: &str, root: &Path) -> Result<(synaptic_api::Verification
 }
 
 fn run_publish(run_id: String, root: PathBuf, json: bool, options: PublishOptions) -> Result<()> {
-    let _ = validate_run(&run_id, &root)?;
+    let _ = validate_repair_run(&run_id, &root, RepairWorkflow::Api)?;
     let directory = run_directory(&root, &run_id)?;
     let manifest: RepairManifest = read_json(directory.join("run.json"))?;
     let brief: synaptic_api::RepairBrief = read_json(directory.join("repair-brief.json"))?;
@@ -1341,12 +1462,13 @@ fn run_publish(run_id: String, root: PathBuf, json: bool, options: PublishOption
     ) {
         bail!("run {run_id} is {:?}, not publishable", run.state);
     }
-    let session = synaptic_sandbox::RepairSession::create(
+    let mut session = synaptic_sandbox::RepairSession::create(
         &root,
         &manifest.branch,
         &brief.event.vendor,
         &brief.event.id,
     )?;
+    session.preserve_branch_on_cleanup();
     let result = synaptic_api::publish_verified_change_request(
         &synaptic_api::DraftPublishRequest {
             worktree: session.path().to_path_buf(),
@@ -1388,7 +1510,7 @@ fn run_publish(run_id: String, root: PathBuf, json: bool, options: PublishOption
 }
 
 fn run_export(run_id: String, root: PathBuf, output: PathBuf, json: bool) -> Result<()> {
-    let (verification, _) = validate_run(&run_id, &root)?;
+    let (verification, _) = validate_repair_run(&run_id, &root, RepairWorkflow::Api)?;
     let directory = run_directory(&root, &run_id)?;
     let run = synaptic_api::ApiRunStore::new(&root).load(&run_id)?;
     let event: synaptic_api::ApiChangeEvent = read_json(directory.join("event.json"))?;
@@ -1628,6 +1750,93 @@ fn gate(
     }
 }
 
+fn elapsed_millis(duration: std::time::Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn vulnerability_resolution_gate(
+    root: &Path,
+    event: &synaptic_api::ApiChangeEvent,
+) -> synaptic_api::GateResult {
+    let package = match event.vendor.parse::<synaptic_api::PackageCoordinate>() {
+        Ok(package) => package,
+        Err(error) => {
+            return gate(
+                "vulnerability_resolution",
+                synaptic_api::GateOutcome::Failed,
+                format!("repair event has an invalid package coordinate: {error}"),
+            )
+        }
+    };
+    let affected = match event.changes.first() {
+        Some(change) => &change.affected_versions,
+        None => {
+            return gate(
+                "vulnerability_resolution",
+                synaptic_api::GateOutcome::Failed,
+                "repair event has no affected version range".into(),
+            )
+        }
+    };
+    let (locked, reads) = synaptic_vuln::PackageGraph::from_repository(root);
+    if reads
+        .iter()
+        .any(|read| read.error.is_some() && read.kind.ecosystem() == package.ecosystem)
+    {
+        return gate(
+            "vulnerability_resolution",
+            synaptic_api::GateOutcome::Inconclusive,
+            "a relevant lockfile could not be parsed after the repair".into(),
+        );
+    }
+    let mut versions = locked
+        .packages()
+        .filter(|resolved| resolved.key.coordinate == package)
+        .map(|resolved| resolved.key.version.clone())
+        .collect::<Vec<_>>();
+    if let Ok(direct) = synaptic_api::scan_dependencies(root) {
+        versions.extend(
+            direct
+                .into_iter()
+                .filter(|dependency| dependency.package == package)
+                .filter_map(|dependency| dependency.resolved_version),
+        );
+    }
+    versions.sort();
+    versions.dedup();
+    if versions.is_empty() {
+        return gate(
+            "vulnerability_resolution",
+            synaptic_api::GateOutcome::Inconclusive,
+            format!("{package} has no auditable resolved version after the repair"),
+        );
+    }
+    let uncleared = versions
+        .iter()
+        .filter(|version| affected.contains(version) != Some(false))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !uncleared.is_empty() {
+        return gate(
+            "vulnerability_resolution",
+            synaptic_api::GateOutcome::Failed,
+            format!(
+                "{package} still resolves to affected or unorderable version(s): {}",
+                uncleared.join(", ")
+            ),
+        );
+    }
+    gate(
+        "vulnerability_resolution",
+        synaptic_api::GateOutcome::Passed,
+        format!(
+            "{package} resolves outside {} at {}",
+            affected,
+            versions.join(", ")
+        ),
+    )
+}
+
 fn run_project_gate(
     gate_name: &str,
     root: &Path,
@@ -1864,18 +2073,55 @@ fn dependency_consistency(
         ("cargo.toml", &["cargo.lock"][..]),
         ("go.mod", &["go.sum"][..]),
     ] {
-        if changed.iter().any(|path| path.ends_with(manifest)) {
-            let existing_lock = locks.iter().find(|lock| root.join(lock).exists());
-            if let Some(lock) = existing_lock {
-                if !changed.iter().any(|path| path.ends_with(lock)) {
+        for changed_manifest in inspection.changed_files.iter().filter(|path| {
+            Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case(manifest))
+        }) {
+            let search_ancestors = manifest == "cargo.toml";
+            if let Some(lock) =
+                existing_companion_lock(root, Path::new(changed_manifest), locks, search_ancestors)
+            {
+                let normalized = lock
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .to_ascii_lowercase();
+                if !changed.contains(&normalized) {
                     return Err(format!(
-                        "{manifest} changed without its existing lockfile {lock}"
+                        "{changed_manifest} changed without its existing lockfile {}",
+                        lock.to_string_lossy().replace('\\', "/")
                     ));
                 }
             }
         }
     }
     Ok(())
+}
+
+fn existing_companion_lock(
+    root: &Path,
+    manifest: &Path,
+    lock_names: &[&str],
+    search_ancestors: bool,
+) -> Option<PathBuf> {
+    let manifest = root.join(manifest);
+    let mut directory = manifest.parent()?;
+    loop {
+        if let Some(lock) = lock_names
+            .iter()
+            .map(|name| directory.join(name))
+            .find(|candidate| candidate.is_file())
+        {
+            return lock.strip_prefix(root).ok().map(Path::to_path_buf);
+        }
+        if !search_ancestors || directory == root {
+            return None;
+        }
+        directory = directory
+            .parent()
+            .filter(|parent| parent.starts_with(root))?;
+    }
 }
 
 fn load_registry(
@@ -1908,6 +2154,14 @@ fn load_registry(
 }
 
 fn run_directory(root: &Path, run_id: &str) -> Result<PathBuf> {
+    repair_run_directory(root, run_id, RepairWorkflow::Api)
+}
+
+pub(crate) fn repair_run_directory(
+    root: &Path,
+    run_id: &str,
+    workflow: RepairWorkflow,
+) -> Result<PathBuf> {
     if run_id.is_empty()
         || !run_id
             .chars()
@@ -1915,10 +2169,14 @@ fn run_directory(root: &Path, run_id: &str) -> Result<PathBuf> {
     {
         bail!("invalid API run id {run_id:?}");
     }
-    Ok(root.join("synaptic-out/api-maintenance").join(run_id))
+    let family = match workflow {
+        RepairWorkflow::Api => "api-maintenance",
+        RepairWorkflow::Vulnerability => "vulnerability-maintenance",
+    };
+    Ok(root.join("synaptic-out").join(family).join(run_id))
 }
 
-fn write_pretty(path: PathBuf, value: &impl Serialize) -> Result<()> {
+pub(crate) fn write_pretty(path: PathBuf, value: &impl Serialize) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1928,12 +2186,12 @@ fn write_pretty(path: PathBuf, value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
-fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T> {
+pub(crate) fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T> {
     serde_json::from_slice(&std::fs::read(&path)?)
         .with_context(|| format!("reading {}", path.display()))
 }
 
-fn emit_json_or_text(json: bool, value: &serde_json::Value, text: &str) -> Result<()> {
+pub(crate) fn emit_json_or_text(json: bool, value: &serde_json::Value, text: &str) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(value)?);
     } else {
@@ -2150,6 +2408,34 @@ fn render_coverage(report: &synaptic_api::ApiCoverageReport) {
 mod tests {
     use super::*;
 
+    fn vulnerability_event() -> synaptic_api::ApiChangeEvent {
+        serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "id": "vuln_finding_fixture",
+            "vendor": "npm:lodash",
+            "occurred_at": 1,
+            "source": {
+                "uri": "osv://GHSA-fixture",
+                "revision": "1",
+                "content_digest": "fixture",
+                "fetched_at": 1,
+                "adapter_version": 1,
+                "evidence_kind": "osv"
+            },
+            "changes": [{
+                "change_id": "vulnerability:GHSA-fixture",
+                "kind": "minimum_supported_version_raised",
+                "affected_versions": {"requirement": ">=0, <4.17.21"},
+                "old_sdk_symbols": [],
+                "new_sdk_symbols": [],
+                "migration_summary": "upgrade lodash",
+                "evidence": [],
+                "confidence": 1.0
+            }]
+        }))
+        .unwrap()
+    }
+
     fn execution() -> synaptic_sandbox::ExecutionPolicy {
         synaptic_sandbox::ExecutionPolicy {
             network: synaptic_sandbox::NetworkPolicy::Allow,
@@ -2196,5 +2482,71 @@ test = "exit 0"
         );
         assert_eq!(gate.outcome, synaptic_api::GateOutcome::Inconclusive);
         assert!(gate.detail.contains("unresolved"));
+    }
+
+    #[test]
+    fn dependency_consistency_requires_a_nested_go_sum() {
+        let repository = tempfile::tempdir().unwrap();
+        let module = repository.path().join("cmd/docker/publisher");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(module.join("go.mod"), "module example.test/publisher\n").unwrap();
+        std::fs::write(
+            module.join("go.sum"),
+            "example.test/dependency v1.0.0 h1:test\n",
+        )
+        .unwrap();
+        let inspection = synaptic_api::PatchInspection {
+            version: 1,
+            changed_files: vec!["cmd/docker/publisher/go.mod".into()],
+            added_lines: 1,
+            removed_lines: 1,
+            expansion_reasons: std::collections::BTreeMap::new(),
+        };
+
+        let error = dependency_consistency(repository.path(), &inspection).unwrap_err();
+        assert!(error.contains("cmd/docker/publisher/go.sum"), "{error}");
+
+        let mut consistent = inspection;
+        consistent
+            .changed_files
+            .push("cmd/docker/publisher/go.sum".into());
+        dependency_consistency(repository.path(), &consistent).unwrap();
+    }
+
+    #[test]
+    fn vulnerability_resolution_gate_requires_every_resolution_to_be_fixed() {
+        let repository = tempfile::tempdir().unwrap();
+        let lockfile = |version: &str| {
+            format!(
+                r#"{{
+  "name": "fixture",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "packages": {{
+    "": {{ "name": "fixture", "version": "1.0.0", "dependencies": {{ "lodash": "{version}" }} }},
+    "node_modules/lodash": {{ "version": "{version}" }}
+  }}
+}}"#
+            )
+        };
+        std::fs::write(
+            repository.path().join("package-lock.json"),
+            lockfile("4.17.20"),
+        )
+        .unwrap();
+        let affected = vulnerability_resolution_gate(repository.path(), &vulnerability_event());
+        assert_eq!(affected.outcome, synaptic_api::GateOutcome::Failed);
+
+        std::fs::write(
+            repository.path().join("package-lock.json"),
+            lockfile("4.17.21"),
+        )
+        .unwrap();
+        let fixed = vulnerability_resolution_gate(repository.path(), &vulnerability_event());
+        assert_eq!(fixed.outcome, synaptic_api::GateOutcome::Passed);
+
+        std::fs::write(repository.path().join("package-lock.json"), "{ invalid").unwrap();
+        let unreadable = vulnerability_resolution_gate(repository.path(), &vulnerability_event());
+        assert_eq!(unreadable.outcome, synaptic_api::GateOutcome::Inconclusive);
     }
 }

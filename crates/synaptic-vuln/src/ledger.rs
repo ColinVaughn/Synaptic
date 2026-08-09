@@ -188,6 +188,32 @@ impl FindingStore {
         write_record(&record_path(&self.root, id)?, &record)?;
         Ok(record)
     }
+
+    /// Restore an exact finding record from a verified, checksummed handoff.
+    pub fn import_verified(&self, record: &FindingRecord) -> Result<(), LedgerError> {
+        if record.version != FindingRecord::VERSION
+            || record.id != record.finding.id
+            || record.state != FindingState::Verified
+        {
+            return Err(LedgerError::Integrity(
+                "imported finding is not an exact verified record".into(),
+            ));
+        }
+        let path = record_path(&self.root, &record.id)?;
+        if path.exists() {
+            let existing = self
+                .get(&record.id)?
+                .ok_or_else(|| LedgerError::Unknown(record.id.clone()))?;
+            if existing == *record {
+                return Ok(());
+            }
+            return Err(LedgerError::Integrity(format!(
+                "finding {} already exists with different content",
+                record.id
+            )));
+        }
+        write_record(&path, record)
+    }
 }
 
 /// A decision stamped with the current wall-clock time.
@@ -221,6 +247,8 @@ pub enum LedgerError {
     Unknown(String),
     #[error("finding id {0:?} is not a valid record name")]
     InvalidId(String),
+    #[error("finding ledger integrity error: {0}")]
+    Integrity(String),
 }
 
 /// Write a record through a temporary file so an interrupted write cannot

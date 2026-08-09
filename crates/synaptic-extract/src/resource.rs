@@ -391,6 +391,11 @@ pub fn resolve_resource_refs(nodes: &mut Vec<Node>, edges: &mut Vec<Edge>) -> Re
         .iter()
         .map(|n| (n.id.clone(), n.label.clone()))
         .collect();
+    let unresolved_stubs: HashSet<NodeId> = nodes
+        .iter()
+        .filter(|node| node.source_file.is_empty() && node.origin() == Some("resource"))
+        .map(|node| node.id.clone())
+        .collect();
 
     // (a) real file/resource/code-file nodes by normalized posix path.
     let mut file_by_path: HashMap<String, NodeId> = HashMap::new();
@@ -431,6 +436,14 @@ pub fn resolve_resource_refs(nodes: &mut Vec<Node>, edges: &mut Vec<Edge>) -> Re
             keep.push(true);
             continue;
         }
+        // Incremental rebuilds run this pass over the complete merged graph.
+        // A preserved edge may therefore already target a concrete node from a
+        // prior pass. Keep that binding instead of interpreting the target's
+        // display label as though it were the original reference stub.
+        if label_of.contains_key(&e.target) && !unresolved_stubs.contains(&e.target) {
+            keep.push(true);
+            continue;
+        }
         let resolved = label_of.get(&e.target).and_then(|s| {
             let dir = e.source_file.replace('\\', "/");
             let dir = dir.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
@@ -463,7 +476,15 @@ pub fn resolve_resource_refs(nodes: &mut Vec<Node>, edges: &mut Vec<Edge>) -> Re
         !is_stub || referenced.contains(&n.id)
     });
 
-    let shadows = detect_generated_shadows(nodes);
+    let existing_shadows: HashSet<(NodeId, NodeId)> = edges
+        .iter()
+        .filter(|edge| edge.relation == "shadows")
+        .map(|edge| (edge.source.clone(), edge.target.clone()))
+        .collect();
+    let shadows = detect_generated_shadows(nodes)
+        .into_iter()
+        .filter(|edge| !existing_shadows.contains(&(edge.source.clone(), edge.target.clone())))
+        .collect::<Vec<_>>();
     stats.shadows = shadows.len();
     edges.extend(shadows);
 
@@ -777,6 +798,30 @@ mod tests {
         resolve_resource_refs(&mut nodes, &mut edges);
         let other_id = file_node_id("data/mymod/other.json");
         assert!(resref_edges(&edges).any(|e| e.target == other_id));
+    }
+
+    #[test]
+    fn resolving_an_already_bound_reference_is_idempotent() {
+        let referencing = extract_resource_source(
+            "cypress.json",
+            br#"{"pluginsFile":"test/e2e/plugins/index.js"}"#,
+        );
+        let target_id = file_node_id("test/e2e/plugins/index.js");
+        let target = code_node(
+            target_id.as_str(),
+            "index.js",
+            NodeKind::Module,
+            "test/e2e/plugins/index.js",
+        );
+        let (mut nodes, mut edges) = aggregate(vec![referencing]);
+        nodes.push(target);
+
+        resolve_resource_refs(&mut nodes, &mut edges);
+        assert!(resref_edges(&edges).any(|edge| edge.target == target_id));
+        let once = edges.clone();
+
+        resolve_resource_refs(&mut nodes, &mut edges);
+        assert_eq!(edges, once, "a second global resolution pass is a no-op");
     }
 
     #[test]

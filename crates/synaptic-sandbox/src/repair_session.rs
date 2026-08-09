@@ -12,6 +12,7 @@ static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// its branch is retained only after an explicit verified handoff.
 pub struct RepairSession {
     repo_root: PathBuf,
+    session_root: PathBuf,
     path: PathBuf,
     branch: String,
     base_sha: String,
@@ -26,21 +27,47 @@ impl RepairSession {
         vendor: &str,
         event_id: &str,
     ) -> Result<Self, SandboxError> {
+        Self::create_scoped(repo_root, base, "api", Some(vendor), event_id)
+    }
+
+    /// Create an isolated worktree on the deterministic vulnerability branch.
+    pub fn create_vulnerability(
+        repo_root: &Path,
+        base: &str,
+        finding_id: &str,
+    ) -> Result<Self, SandboxError> {
+        Self::create_scoped(repo_root, base, "vuln", None, finding_id)
+    }
+
+    fn create_scoped(
+        repo_root: &Path,
+        base: &str,
+        namespace: &str,
+        subject: Option<&str>,
+        event_id: &str,
+    ) -> Result<Self, SandboxError> {
         let repo_root = repo_root.canonicalize()?;
-        let vendor = safe_component(vendor)?;
+        let namespace = safe_component(namespace)?;
+        let subject = subject.map(safe_component).transpose()?;
         let event = safe_component(event_id)?;
         let base_sha = git::rev_parse(&repo_root, base)
             .map_err(|error| SandboxError::Git(error.to_string()))?;
         git::worktree_prune(&repo_root);
         let short_event = event.chars().take(16).collect::<String>();
-        let branch = format!("synaptic/api/{vendor}/{short_event}");
+        let branch = match subject {
+            Some(subject) => format!("synaptic/{namespace}/{subject}/{short_event}"),
+            None => format!(
+                "synaptic/{namespace}/{}",
+                event.chars().take(40).collect::<String>()
+            ),
+        };
         let nonce = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = repo_root
+        let session_root = repo_root
             .join("synaptic-out")
-            .join("api-maintenance")
-            .join("worktrees")
-            .join(format!("{short_event}-{}-{nonce}", std::process::id()));
-        validate_session_path(&repo_root, &path)?;
+            .join(format!("{namespace}-maintenance"))
+            .join("worktrees");
+        let path = session_root.join(format!("{short_event}-{}-{nonce}", std::process::id()));
+        validate_session_path(&repo_root, &session_root, &path)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -52,6 +79,7 @@ impl RepairSession {
         }
         Ok(Self {
             repo_root,
+            session_root,
             path,
             branch,
             base_sha,
@@ -70,6 +98,16 @@ impl RepairSession {
 
     pub fn base_sha(&self) -> &str {
         &self.base_sha
+    }
+
+    /// Keep an already-verified branch if a later publication step fails.
+    ///
+    /// Repair sessions default to deleting their temporary branch on drop. A
+    /// publisher checks out a branch that is itself the verified handoff, so a
+    /// provider outage must remove only the disposable worktree and leave that
+    /// branch available for a safe retry.
+    pub fn preserve_branch_on_cleanup(&mut self) {
+        self.retain_branch = true;
     }
 
     /// Apply a pre-validated unified diff without invoking a project command.
@@ -123,6 +161,31 @@ impl RepairSession {
         event_id: &str,
         files: &[String],
     ) -> Result<String, SandboxError> {
+        self.commit_verified_with_trailer(title, "Synaptic-API-Event", event_id, files)
+    }
+
+    /// Commit a verified dependency-vulnerability patch with its finding id.
+    pub fn commit_verified_vulnerability(
+        &self,
+        title: &str,
+        finding_id: &str,
+        files: &[String],
+    ) -> Result<String, SandboxError> {
+        self.commit_verified_with_trailer(
+            title,
+            "Synaptic-Vulnerability-Finding",
+            finding_id,
+            files,
+        )
+    }
+
+    fn commit_verified_with_trailer(
+        &self,
+        title: &str,
+        trailer: &str,
+        event_id: &str,
+        files: &[String],
+    ) -> Result<String, SandboxError> {
         if files.is_empty() {
             return Err(SandboxError::Apply("verified patch has no files".into()));
         }
@@ -144,7 +207,7 @@ impl RepairSession {
                 "-m",
                 title,
                 "-m",
-                &format!("Synaptic-API-Event: {event_id}"),
+                &format!("{trailer}: {event_id}"),
             ])
             .env("GIT_AUTHOR_NAME", "Synaptic API Maintainer")
             .env("GIT_AUTHOR_EMAIL", "synaptic@localhost")
@@ -171,7 +234,7 @@ impl RepairSession {
         if self.removed {
             return Ok(());
         }
-        validate_session_path(&self.repo_root, &self.path)?;
+        validate_session_path(&self.repo_root, &self.session_root, &self.path)?;
         git::worktree_remove(&self.repo_root, &self.path)
             .map_err(|error| SandboxError::Git(error.to_string()))?;
         self.removed = true;
@@ -206,12 +269,18 @@ fn safe_component(value: &str) -> Result<String, SandboxError> {
     Ok(value)
 }
 
-fn validate_session_path(repo_root: &Path, path: &Path) -> Result<(), SandboxError> {
-    let expected = repo_root
-        .join("synaptic-out")
-        .join("api-maintenance")
-        .join("worktrees");
-    if !path.starts_with(&expected) || path == expected {
+fn validate_session_path(
+    repo_root: &Path,
+    session_root: &Path,
+    path: &Path,
+) -> Result<(), SandboxError> {
+    let maintenance_root = repo_root.join("synaptic-out");
+    if !session_root.starts_with(&maintenance_root)
+        || session_root == maintenance_root
+        || session_root.file_name().and_then(|name| name.to_str()) != Some("worktrees")
+        || !path.starts_with(session_root)
+        || path == session_root
+    {
         return Err(SandboxError::Git(format!(
             "repair worktree path escaped its root: {}",
             path.display()
@@ -224,6 +293,7 @@ fn git_command(directory: &Path, args: &[&str]) -> Result<(), SandboxError> {
     let output = Command::new("git")
         .arg("-C")
         .arg(directory)
+        .args(["-c", "core.longpaths=true"])
         .args(args)
         .output()?;
     if output.status.success() {
@@ -324,5 +394,81 @@ mod tests {
             .output()
             .unwrap();
         assert!(!String::from_utf8_lossy(&branches.stdout).trim().is_empty());
+    }
+
+    #[test]
+    fn publication_cleanup_preserves_an_existing_verified_branch() {
+        let repo = repository();
+        let branch;
+        let path;
+        {
+            let mut session =
+                RepairSession::create_vulnerability(repo.path(), "HEAD", "finding_publish")
+                    .unwrap();
+            branch = session.branch().to_string();
+            path = session.path().to_path_buf();
+            session.preserve_branch_on_cleanup();
+        }
+
+        assert!(
+            !path.exists(),
+            "the disposable publication checkout is removed"
+        );
+        let branches = Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["branch", "--list", &branch])
+            .output()
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&branches.stdout).trim().is_empty(),
+            "provider failure must leave the verified branch retryable"
+        );
+    }
+
+    #[test]
+    fn vulnerability_session_uses_its_separate_validated_namespace() {
+        let repo = repository();
+        let session = RepairSession::create_vulnerability(
+            repo.path(),
+            "HEAD",
+            "vuln_finding_abcdef0123456789",
+        )
+        .unwrap();
+
+        assert!(session.path().starts_with(
+            repo.path()
+                .canonicalize()
+                .unwrap()
+                .join("synaptic-out/vuln-maintenance/worktrees")
+        ));
+        assert_eq!(
+            session.branch(),
+            "synaptic/vuln/vuln_finding_abcdef0123456789"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_removes_untracked_paths_longer_than_max_path() {
+        let repo = repository();
+        let worktree;
+        {
+            let session =
+                RepairSession::create_vulnerability(repo.path(), "HEAD", "finding_longpath")
+                    .unwrap();
+            worktree = session.path().to_path_buf();
+            let mut deep = worktree.clone();
+            while deep.to_string_lossy().len() < 300 {
+                deep.push("dependency-with-a-deliberately-long-directory-name");
+            }
+            std::fs::create_dir_all(&deep).unwrap();
+            std::fs::write(deep.join("artifact.txt"), "temporary\n").unwrap();
+        }
+
+        assert!(
+            !worktree.exists(),
+            "long disposable paths must not strand a repair worktree"
+        );
     }
 }

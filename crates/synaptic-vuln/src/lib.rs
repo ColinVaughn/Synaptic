@@ -12,6 +12,7 @@ mod check;
 mod cvss4;
 mod features;
 mod finding;
+mod handoff;
 mod ledger;
 mod lockfiles;
 mod lockgraph;
@@ -39,6 +40,7 @@ pub use features::{
     feature_gated_dependencies, feature_gated_in, manifest_features, ManifestFeatures,
 };
 pub use finding::{finding_id, Finding};
+pub use handoff::{VerifiedVulnerabilityRunHandoff, VulnerabilityHandoffError};
 pub use ledger::{
     decision, Decision, DecisionKind, FindingRecord, FindingState, FindingStore, LedgerError,
 };
