@@ -10,6 +10,8 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-08-08
+
 ### Changed
 
 - **Large-repository extraction allocates less and copies the graph far less.**
@@ -59,15 +61,40 @@ All notable changes to Synaptic are documented here. The format is based on
   - GraphML, Cypher, DOT and the 3-D force layout are skipped past 150,000 nodes.
     They aggregate nothing, so the same corpus wrote 1 GB of artifacts no tool in
     the chain can open. `graph.json` and `graph.html` are always written.
+  - `graph.html` borrows the graph too. Its *output* was already bounded by
+    community aggregation above 5,000 nodes, but the `to_graph_data()` clone
+    feeding it never was: +1,572 MiB on the 379k-node graph.
 
   Measured back-to-back on one machine, same checkout, both with a cold AST
   cache: peak private bytes 12.13 GiB → 9.92 GiB (−18%), producing byte-identical
   output — the same 379,212 nodes / 995,965 edges and the same 836,166,212-byte
-  `graph.json` from both arms. Run-to-run variance on a workload this size is
-  around ±10%, so read the end-to-end figure as a stable improvement rather than
-  an exact one; the component measurements are deterministic (allocator-counted).
-  The dominant remaining cost is inherent: every node and edge is live at once
-  between extraction and build.
+  `graph.json` from both arms.
+
+### Added
+
+- **`cargo run --release --example memprofile -- <repo>`: a deterministic
+  allocation profile of the extract pipeline.** OS counters are the wrong
+  instrument for this work — they vary ~10% run to run and, on Windows, report a
+  high-water mark that includes heap the process has already freed — so "peak
+  RSS" cannot attribute cost to a stage. This walks the same stages behind a
+  counting global allocator and reports exact, reproducible per-stage live and
+  peak bytes.
+
+  It earned its place immediately by falsifying three plausible theories, each of
+  which would have been a convincing but useless fix: switching to mimalloc
+  (−3%), cutting extraction workers from 16 to 4 (no change), and removing the
+  last whole-graph clones (no change).
+
+### Known limitations
+
+- **Writing the shard store is the single largest consumer of memory on a large
+  repository — roughly half the peak.** On the 379k-node corpus above,
+  `extract .` peaks at 10.05 GiB while `extract . --no-store` peaks at 4.93 GiB.
+  The per-shard index callback clones the shard's `GraphData`, builds a second
+  full `KnowledgeGraph` from it, then builds and serializes two indexes, all
+  while the original graph and the export view are still live; a corpus that
+  produces a single shard therefore duplicates the entire graph rather than a
+  slice of it. `--no-store` is the workaround until this is addressed.
 
 ### Fixed
 
@@ -2081,7 +2108,8 @@ parameters), and `graph.json` gains only additive edge keys.
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.5...HEAD
+[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.6...HEAD
+[0.9.6]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.2...v0.9.3

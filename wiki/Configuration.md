@@ -79,6 +79,7 @@ OpenAI, DeepSeek, Azure OpenAI, Bedrock, Ollama. Set `SYNAPTIC_BACKEND` to force
 | `SYNAPTIC_MAX_SHARD_NODES` | Node cap per store shard (default 5000000; `0` disables) |
 | `SYNAPTIC_MAX_GRAPH_MB` | Byte cap (in MiB) on `graph.json`/`export-surface.json` files loaded by the merge driver, federation, the global store, and remote subgraph fetches. Default 50; `0` disables the cap. `extract`/`update` warn when they write a file over the cap |
 | `SYNAPTIC_MAX_NODES` | Node cap on loaded or merged graphs on the same paths. Default 100000; `0` disables the cap |
+| `SYNAPTIC_EXTRACT_THREADS` | Worker count for parallel extraction. Unset = one per core, capped so the pool's total reserved stack stays under 1 GiB (each worker reserves 64 MiB for deeply nested generated files). Zero or unparseable values fall back to that default |
 | `SYNAPTIC_SKIP_HOOK` | Skip the installed git hook for one invocation (`1`) |
 | `SYNAPTIC_UPDATE_CHECK` | Set to `0` to force the opt-in background update notice off, regardless of config. See [Updating](Updating) |
 | `GITHUB_TOKEN` | Optional. Raises the GitHub API rate limit for the `self-update` release lookup |

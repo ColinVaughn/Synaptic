@@ -22,6 +22,17 @@ graph-3d.html
 
 `--obsidian` additionally writes `synaptic-out/obsidian/` and `--wiki` writes `synaptic-out/wiki/`. Neither is produced by default.
 
+### Bulk exports are skipped on very large graphs
+
+`graph.graphml`, `graph.cypher`, `graph.dot` and `graph-3d.html` emit every node and
+every edge with no aggregation, so their size tracks the graph exactly. Past **150,000
+nodes** they are skipped and `extract` says so, because at that scale they are large
+enough that no tool in the chain will open them (a 379k-node graph produced a 342 MB
+GraphML and a 259 MB `graph-3d.html`).
+
+`graph.json` and `graph.html` are always written: `graph.json` is the canonical contract,
+and `graph.html` aggregates by community above 5,000 nodes so it stays responsive.
+
 ## The `export` command
 
 ```
