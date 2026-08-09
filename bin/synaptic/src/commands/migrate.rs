@@ -20,7 +20,7 @@ pub(crate) fn run_migrate(graph: Option<PathBuf>, store: Option<PathBuf>) -> Res
     })?;
     let gd: GraphData = serde_json::from_str(&text).context("parsing graph.json")?;
 
-    let report = write_store(&gd, &store_dir)?;
+    let report = write_store(gd, &store_dir)?;
 
     let bridge_note = if report.bridge_edges > 0 {
         format!(", {} cross-repo bridge edge(s)", report.bridge_edges)

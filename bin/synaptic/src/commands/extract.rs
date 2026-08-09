@@ -566,7 +566,7 @@ pub(crate) fn run_extract(
     }
     println!("Wrote {}/{{{}}}", out_dir.display(), extras);
     if store {
-        let report = crate::commands::common::write_store(&export, &out_dir.join("store"))?;
+        let report = crate::commands::common::write_store(export, &out_dir.join("store"))?;
         println!(
             "Wrote {}/store ({} shard(s){})",
             out_dir.display(),

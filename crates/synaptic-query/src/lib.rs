@@ -14,7 +14,7 @@ pub use dynamic::{dependents_caveat, DynamicCaveat, DynamicHazardIndex, SiteRef}
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
-use synaptic_core::{FileType, Node, NodeId, NodeKind};
+use synaptic_core::{Edge, FileType, Node, NodeId, NodeKind};
 use synaptic_graph::KnowledgeGraph;
 
 pub use describe::{describe_node, NodeDescription};
@@ -379,11 +379,17 @@ fn search_tokens(node: &Node) -> HashSet<String> {
 }
 
 fn undirected_adjacency(kg: &KnowledgeGraph) -> HashMap<NodeId, Vec<NodeId>> {
+    let nodes: Vec<&Node> = kg.nodes().collect();
+    let edges: Vec<&Edge> = kg.edges().collect();
+    undirected_adjacency_parts(&nodes, &edges)
+}
+
+fn undirected_adjacency_parts(nodes: &[&Node], edges: &[&Edge]) -> HashMap<NodeId, Vec<NodeId>> {
     let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-    for n in kg.nodes() {
+    for n in nodes {
         adj.entry(n.id.clone()).or_default();
     }
-    for e in kg.edges() {
+    for e in edges {
         if e.source == e.target {
             continue;
         }
@@ -568,7 +574,21 @@ impl QueryIndex {
 
     /// Build the index from a graph (the query-independent work).
     pub fn build(kg: &KnowledgeGraph) -> Self {
-        let n = kg.node_count().max(1) as f64;
+        let nodes: Vec<&Node> = kg.nodes().collect();
+        let edges: Vec<&Edge> = kg.edges().collect();
+        Self::build_from_parts(&nodes, &edges)
+    }
+
+    /// Build from borrowed node/edge slices, so a caller that already holds a
+    /// `GraphData` does not have to clone it into a second `KnowledgeGraph`
+    /// first. The store writer indexes each shard this way: constructing that
+    /// throwaway graph cost +1,772 MiB on a 379k-node shard.
+    ///
+    /// `build` delegates here, so the two cannot drift; a shard from a built
+    /// graph has no duplicate ids and no dangling edges, which is what makes the
+    /// two inputs equivalent (`shard_index_matches_graph_built_index` pins it).
+    pub fn build_from_parts(nodes: &[&Node], edges: &[&Edge]) -> Self {
+        let n = nodes.len().max(1) as f64;
         let mut node_tokens: HashMap<NodeId, HashSet<String>> = HashMap::new();
         let mut node_path_tokens: HashMap<NodeId, HashSet<String>> = HashMap::new();
         let mut node_search_tokens: HashMap<NodeId, HashSet<String>> = HashMap::new();
@@ -576,10 +596,10 @@ impl QueryIndex {
         let mut priors: HashMap<NodeId, f64> = HashMap::new();
         let mut df: HashMap<String, usize> = HashMap::new();
         let mut label_counts: HashMap<String, usize> = HashMap::new();
-        for node in kg.nodes() {
+        for node in nodes {
             *label_counts.entry(node.label.to_lowercase()).or_default() += 1;
         }
-        for node in kg.nodes() {
+        for node in nodes {
             let toks: HashSet<String> = tokenize(&node.label).into_iter().collect();
             let path_toks = tokenize_path(&node.source_file);
             let search_toks = search_tokens(node);
@@ -597,8 +617,8 @@ impl QueryIndex {
             node_search_tokens.insert(node.id.clone(), search_toks);
             node_tokens.insert(node.id.clone(), toks);
         }
-        let neighbor_prior = kg
-            .nodes()
+        let neighbor_prior = nodes
+            .iter()
             .map(|node| {
                 let count = label_counts
                     .get(&node.label.to_lowercase())
@@ -607,7 +627,7 @@ impl QueryIndex {
                 (node.id.clone(), repeated_label_neighbor_prior(count))
             })
             .collect();
-        let adjacency = undirected_adjacency(kg);
+        let adjacency = undirected_adjacency_parts(nodes, edges);
         let avg_degree = if adjacency.is_empty() {
             0.0
         } else {
@@ -2158,9 +2178,17 @@ impl ReverseImpactIndex {
     /// [`DEFAULT_AFFECTED_RELATIONS`]). Self-loops and edges whose relation is not
     /// in the set are skipped.
     pub fn build(kg: &KnowledgeGraph, relations: &[&str]) -> Self {
+        let edges: Vec<&Edge> = kg.edges().collect();
+        Self::build_from_parts(&edges, relations)
+    }
+
+    /// Build from borrowed edges, so a caller holding a `GraphData` need not
+    /// clone it into a `KnowledgeGraph` just to index it. `build` delegates
+    /// here so the two cannot drift.
+    pub fn build_from_parts(edges: &[&Edge], relations: &[&str]) -> Self {
         let relation_set: HashSet<&str> = relations.iter().copied().collect();
         let mut rev: HashMap<NodeId, Vec<(NodeId, String)>> = HashMap::new();
-        for e in kg.edges() {
+        for e in edges {
             if e.source == e.target || !relation_set.contains(e.relation.as_str()) {
                 continue;
             }
@@ -2294,6 +2322,88 @@ mod tests {
             built_at_commit: None,
         };
         KnowledgeGraph::from_graph_data(gd)
+    }
+
+    /// The store writer indexes a shard from its borrowed `GraphData` rather
+    /// than cloning it into a `KnowledgeGraph`. Both routes must produce the
+    /// same blob, or a store written by one path would disagree with a graph
+    /// queried through the other.
+    #[test]
+    fn shard_index_matches_graph_built_index() {
+        let nodes = &[
+            ("api", "list_orders()"),
+            ("db", "fetch_rows()"),
+            ("tbl", "orders"),
+        ];
+        let edges = &[
+            ("api", "db", "calls"),
+            ("db", "tbl", "queries"),
+            ("api", "tbl", "references"),
+        ];
+        let kg = build(nodes, edges);
+        let gd = kg.to_graph_data();
+
+        // Compare as normalized values, not bytes. The index stores token sets
+        // as `HashSet`, so their serialized order is not stable even for one
+        // index built twice; sorting every array compares the sets themselves.
+        fn normalize(mut v: serde_json::Value) -> serde_json::Value {
+            match &mut v {
+                serde_json::Value::Array(items) => {
+                    let mut sorted: Vec<serde_json::Value> =
+                        items.drain(..).map(normalize).collect();
+                    sorted.sort_by_key(|x| x.to_string());
+                    serde_json::Value::Array(sorted)
+                }
+                serde_json::Value::Object(map) => {
+                    let entries: Vec<(String, serde_json::Value)> = map
+                        .iter()
+                        .map(|(k, val)| (k.clone(), normalize(val.clone())))
+                        .collect();
+                    serde_json::Value::Object(entries.into_iter().collect())
+                }
+                _ => v,
+            }
+        }
+        let as_value =
+            |b: Vec<u8>| -> serde_json::Value { normalize(serde_json::from_slice(&b).unwrap()) };
+        let from_graph = as_value(QueryIndex::build(&kg).to_bytes().unwrap());
+        let node_refs: Vec<&Node> = gd.nodes.iter().collect();
+        let edge_refs: Vec<&Edge> = gd.links.iter().collect();
+        let from_parts = as_value(
+            QueryIndex::build_from_parts(&node_refs, &edge_refs)
+                .to_bytes()
+                .unwrap(),
+        );
+        assert_eq!(
+            from_graph, from_parts,
+            "query index differs between the graph and parts routes"
+        );
+
+        // The ordering instability is pre-existing, not introduced by the parts
+        // route: the same graph indexed twice already serializes differently,
+        // and only agrees once normalized.
+        let twice_a = QueryIndex::build(&kg).to_bytes().unwrap();
+        let twice_b = QueryIndex::build(&kg).to_bytes().unwrap();
+        assert_eq!(
+            as_value(twice_a),
+            as_value(twice_b),
+            "one graph indexed twice must agree as a set"
+        );
+
+        let impact_graph = as_value(
+            ReverseImpactIndex::build(&kg, DEFAULT_AFFECTED_RELATIONS)
+                .to_bytes()
+                .unwrap(),
+        );
+        let impact_parts = as_value(
+            ReverseImpactIndex::build_from_parts(&edge_refs, DEFAULT_AFFECTED_RELATIONS)
+                .to_bytes()
+                .unwrap(),
+        );
+        assert_eq!(
+            impact_graph, impact_parts,
+            "reverse-impact index differs between the graph and parts routes"
+        );
     }
 
     /// E3 (2026-07 audit): schema-change blast radius -- code that queries a

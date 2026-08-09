@@ -195,7 +195,7 @@ pub(crate) fn run_update(
     // falls back to parsing graph.json, exactly as the warning says.
     let store_dir = out_dir.join("store");
     if store_dir.join("manifest.json").exists() {
-        match super::common::write_store(&outcome.kg.to_graph_data(), &store_dir) {
+        match super::common::write_store(outcome.kg.to_graph_data(), &store_dir) {
             Ok(report) => println!(
                 "Refreshed {}/store ({} shard(s))",
                 out_dir.display(),

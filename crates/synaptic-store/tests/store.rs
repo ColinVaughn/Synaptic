@@ -83,20 +83,20 @@ fn remigrate_skips_unchanged_shard_and_rewrites_changed() {
 
     let g1 = graph(&["a", "b"]);
     let mut store = ShardStore::open(&store_dir).unwrap();
-    let r1 = migrate::migrate_into(&mut store, &g1).unwrap();
+    let r1 = migrate::migrate_into(&mut store, g1.clone()).unwrap();
     assert_eq!(r1.skipped, 0, "first migrate writes everything");
     let file1 = store.list_shards()[0].file.clone();
 
     // Re-migrate identical content: the shard is skipped, its file unchanged.
     let mut store = ShardStore::open(&store_dir).unwrap();
-    let r2 = migrate::migrate_into(&mut store, &g1).unwrap();
+    let r2 = migrate::migrate_into(&mut store, g1.clone()).unwrap();
     assert_eq!(r2.skipped, 1, "unchanged shard is skipped");
     assert_eq!(store.list_shards()[0].file, file1, "file not rewritten");
 
     // Migrate changed content: the shard is rewritten (new versioned file).
     let g2 = graph(&["a", "b", "c"]);
     let mut store = ShardStore::open(&store_dir).unwrap();
-    let r3 = migrate::migrate_into(&mut store, &g2).unwrap();
+    let r3 = migrate::migrate_into(&mut store, g2.clone()).unwrap();
     assert_eq!(r3.skipped, 0, "changed shard is not skipped");
     assert_ne!(
         store.list_shards()[0].file,
@@ -112,7 +112,7 @@ fn legacy_shard_is_rewritten_even_when_hash_matches() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = ShardStore::open(dir.path()).unwrap();
     let g = graph(&["a", "b"]);
-    migrate::migrate_into(&mut store, &g).unwrap();
+    migrate::migrate_into(&mut store, g.clone()).unwrap();
 
     // Simulate a legacy v1 shard left by an old synaptic: the manifest hash
     // still matches, but the file is a redb database this build cannot read.
@@ -125,7 +125,7 @@ fn legacy_shard_is_rewritten_even_when_hash_matches() {
 
     // Re-migrating identical content must rewrite the legacy file, not skip it.
     let mut store = ShardStore::open(dir.path()).unwrap();
-    let rep = migrate::migrate_into(&mut store, &g).unwrap();
+    let rep = migrate::migrate_into(&mut store, g.clone()).unwrap();
     assert_eq!(rep.skipped, 0, "legacy-format shard must be rewritten");
     assert_eq!(store.materialize("local").unwrap().node_count(), 2);
 }

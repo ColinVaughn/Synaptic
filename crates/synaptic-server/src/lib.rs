@@ -13352,7 +13352,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store_dir = dir.path().join("store");
         let mut store = ShardStore::open(&store_dir).unwrap();
-        migrate::migrate_into(&mut store, &gd).unwrap();
+        migrate::migrate_into(&mut store, gd.clone()).unwrap();
         let server = Server::from_shard_store(ShardStore::open(&store_dir).unwrap(), None);
 
         let stats = server.tool_graph_stats();
@@ -13411,7 +13411,7 @@ mod tests {
         let graph_path = dir.path().join("graph.json");
         let store_dir = dir.path().join("store");
         let mut store = ShardStore::open(&store_dir).unwrap();
-        migrate::migrate_into(&mut store, &gd(&[("a", "billing"), ("b", "web")])).unwrap();
+        migrate::migrate_into(&mut store, gd(&[("a", "billing"), ("b", "web")])).unwrap();
         let mut server =
             Server::from_shard_store(ShardStore::open(&store_dir).unwrap(), Some(graph_path));
         assert!(server.tool_graph_stats().contains("2 nodes"));
@@ -13422,7 +13422,7 @@ mod tests {
         let mut store = ShardStore::open(&store_dir).unwrap();
         migrate::migrate_into(
             &mut store,
-            &gd(&[("a", "billing"), ("b", "web"), ("c", "web")]),
+            gd(&[("a", "billing"), ("b", "web"), ("c", "web")]),
         )
         .unwrap();
 
@@ -13483,7 +13483,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store_dir = dir.path().join("store");
         let mut store = ShardStore::open(&store_dir).unwrap();
-        migrate::migrate_into(&mut store, &gd).unwrap();
+        migrate::migrate_into(&mut store, gd.clone()).unwrap();
         let server = Server::from_provider(
             provider::GraphProvider::from_store(ShardStore::open(&store_dir).unwrap()),
             None,
@@ -13554,7 +13554,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store_dir = dir.path().join("store");
         let mut store = ShardStore::open(&store_dir).unwrap();
-        migrate::migrate_into(&mut store, &gd).unwrap();
+        migrate::migrate_into(&mut store, gd.clone()).unwrap();
         let server = Server::from_provider(
             provider::GraphProvider::from_store(ShardStore::open(&store_dir).unwrap())
                 .with_cross_repo(false),

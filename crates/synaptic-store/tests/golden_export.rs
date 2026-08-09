@@ -76,7 +76,7 @@ fn single_repo_migrate_export_is_byte_identical() {
     let store_dir = dir.path().join("store");
     let gd: GraphData = serde_json::from_value(original_value.clone()).unwrap();
     let mut store = ShardStore::open(&store_dir).unwrap();
-    migrate::migrate_into(&mut store, &gd).unwrap();
+    migrate::migrate_into(&mut store, gd.clone()).unwrap();
     assert_eq!(store.list_shards().len(), 1);
     assert_eq!(store.list_shards()[0].tag, "local");
 
@@ -114,7 +114,7 @@ fn multi_repo_splits_into_shards_with_bridge() {
         built_at_commit: None,
     };
 
-    let split = migrate::split(&gd);
+    let split = migrate::split(gd.clone());
     assert_eq!(split.shards.len(), 2);
     let billing = &split.shards.iter().find(|(t, _)| t == "billing").unwrap().1;
     let web = &split.shards.iter().find(|(t, _)| t == "web").unwrap().1;
@@ -146,7 +146,7 @@ fn cross_repo_bridge_is_opt_in() {
     };
 
     let mut store = ShardStore::open(&store_dir).unwrap();
-    migrate::migrate_into(&mut store, &gd).unwrap();
+    migrate::migrate_into(&mut store, gd.clone()).unwrap();
     let store = ShardStore::open(&store_dir).unwrap();
 
     // Isolation default: the cross-repo edge is not present.
@@ -193,7 +193,7 @@ proptest! {
 
         let dir = tempfile::tempdir().unwrap();
         let mut store = ShardStore::open(&dir.path().join("store")).unwrap();
-        migrate::migrate_into(&mut store, &original).unwrap();
+        migrate::migrate_into(&mut store, original.clone()).unwrap();
         let back = store.export_graph(&Scope::All).unwrap();
 
         prop_assert_eq!(back.node_count(), original.nodes.len());

@@ -84,7 +84,7 @@ fn write_bench(c: &mut Criterion) {
             |dir| {
                 let d = dir.as_ref().unwrap().path().join("store");
                 let mut store = ShardStore::open(&d).unwrap();
-                black_box(migrate::migrate_into(&mut store, &gd).unwrap());
+                black_box(migrate::migrate_into(&mut store, gd.clone()).unwrap());
                 dir
             },
             BatchSize::PerIteration,
@@ -94,7 +94,7 @@ fn write_bench(c: &mut Criterion) {
     let dir = tempfile::tempdir().unwrap();
     let store_dir = dir.path().join("store");
     let mut store = ShardStore::open(&store_dir).unwrap();
-    migrate::migrate_into(&mut store, &gd).unwrap();
+    migrate::migrate_into(&mut store, gd.clone()).unwrap();
     let tag = store.list_shards()[0].tag.clone();
     g.bench_function("read_graph_data_20k_30k", |b| {
         let store = ShardStore::open(&store_dir).unwrap();

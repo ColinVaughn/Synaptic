@@ -79,7 +79,7 @@ fn maybe_write_store(
     }
     let out_dir = root.join("synaptic-out");
     let report = crate::commands::common::write_store(
-        &build.federated.to_graph_data(),
+        build.federated.to_graph_data(),
         &out_dir.join("store"),
     )?;
     println!(

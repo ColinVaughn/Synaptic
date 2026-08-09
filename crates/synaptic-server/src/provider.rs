@@ -1219,7 +1219,7 @@ mod tests {
         let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
         let store_dir = dir.path().join("store");
         let mut store = ShardStore::open(&store_dir).unwrap();
-        migrate::migrate_into(&mut store, gd).unwrap();
+        migrate::migrate_into(&mut store, gd.clone()).unwrap();
         GraphProvider::from_store(ShardStore::open(&store_dir).unwrap())
     }
 
@@ -1528,7 +1528,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store_dir = dir.path().join("store");
         let mut store = ShardStore::open(&store_dir).unwrap();
-        migrate::migrate_into(&mut store, &gd).unwrap();
+        migrate::migrate_into(&mut store, gd.clone()).unwrap();
         let p = GraphProvider::from_store(ShardStore::open(&store_dir).unwrap());
 
         // unique to one shard -> Unique with that tag
@@ -1568,7 +1568,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store_dir = dir.path().join("store");
         let mut store = ShardStore::open(&store_dir).unwrap();
-        migrate::migrate_into(&mut store, &gd).unwrap();
+        migrate::migrate_into(&mut store, gd.clone()).unwrap();
         let store = ShardStore::open(&store_dir).unwrap();
 
         let p = GraphProvider::from_store(store);

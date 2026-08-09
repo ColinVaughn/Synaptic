@@ -145,7 +145,7 @@ pub(crate) fn load_graph_data(graph_path: &Path, repo: Option<&str>) -> Result<G
 /// pre-build its per-shard indexes. Shared by `synaptic migrate` and the
 /// `--store` build flag so the two never drift.
 pub(crate) fn write_store(
-    gd: &GraphData,
+    gd: GraphData,
     store_dir: &Path,
 ) -> Result<synaptic_store::migrate::MigrateReport> {
     let mut store = ShardStore::open(store_dir)
@@ -162,12 +162,16 @@ pub(crate) fn write_store(
     // shard's single write pass; the old flow re-read every fresh shard from
     // disk just to index it, then reopened the file twice more for the blobs.
     let report = synaptic_store::migrate::migrate_into_indexed(&mut store, gd, |_tag, shard_gd| {
-        let kg = synaptic_graph::KnowledgeGraph::from_graph_data(shard_gd.clone());
+        // Index the shard where it already is. Cloning it into a throwaway
+        // `KnowledgeGraph` first cost +1,772 MiB on a 379k-node shard, on top of
+        // the shard itself.
+        let nodes: Vec<&synaptic_core::Node> = shard_gd.nodes.iter().collect();
+        let edges: Vec<&synaptic_core::Edge> = shard_gd.links.iter().collect();
         let codec_err = |e: String| synaptic_store::StoreError::Codec(e);
-        let qi = QueryIndex::build(&kg)
+        let qi = QueryIndex::build_from_parts(&nodes, &edges)
             .to_bytes()
             .map_err(|e| codec_err(e.to_string()))?;
-        let ai = ReverseImpactIndex::build(&kg, DEFAULT_AFFECTED_RELATIONS)
+        let ai = ReverseImpactIndex::build_from_parts(&edges, DEFAULT_AFFECTED_RELATIONS)
             .to_bytes()
             .map_err(|e| codec_err(e.to_string()))?;
         Ok(vec![
@@ -432,7 +436,7 @@ mod tests {
         let gd: GraphData =
             serde_json::from_str(&fs::read_to_string(&graph_path).unwrap()).unwrap();
         let mut store = ShardStore::open(&store_dir).unwrap();
-        synaptic_store::migrate::migrate_into(&mut store, &gd).unwrap();
+        synaptic_store::migrate::migrate_into(&mut store, gd.clone()).unwrap();
 
         let j = load_graph_data_backend(StoreBackend::Json, &graph_path, &store_dir, None).unwrap();
         let r =
