@@ -13,6 +13,7 @@ pub use dynamic::{dependents_caveat, DynamicCaveat, DynamicHazardIndex, SiteRef}
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize};
 use synaptic_core::{Edge, FileType, Node, NodeId, NodeKind};
 use synaptic_graph::KnowledgeGraph;
@@ -464,6 +465,63 @@ pub fn query(kg: &KnowledgeGraph, query_text: &str, max_nodes: usize) -> QueryRe
     query_modal(kg, query_text, max_nodes, TraversalMode::Bfs)
 }
 
+/// Serialize a `HashMap` in key order without changing the in-memory lookup
+/// representation. Store indexes are large and query-heavy, so paying for tree
+/// nodes on every lookup would be wasteful; sorting borrowed entries only while
+/// writing makes the persisted cache reproducible with modest temporary memory.
+fn serialize_ordered_map<S, K, V>(map: &HashMap<K, V>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+    K: Ord + Serialize,
+    V: Serialize,
+{
+    let mut entries: Vec<_> = map.iter().collect();
+    entries.sort_unstable_by_key(|(key, _)| *key);
+    let mut out = serializer.serialize_map(Some(entries.len()))?;
+    for (key, value) in entries {
+        out.serialize_entry(key, value)?;
+    }
+    out.end()
+}
+
+struct OrderedSet<'a, T>(&'a HashSet<T>);
+
+impl<T> Serialize for OrderedSet<'_, T>
+where
+    T: Ord + Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut values: Vec<_> = self.0.iter().collect();
+        values.sort_unstable();
+        let mut out = serializer.serialize_seq(Some(values.len()))?;
+        for value in values {
+            out.serialize_element(value)?;
+        }
+        out.end()
+    }
+}
+
+fn serialize_ordered_set_map<S, K, V>(
+    map: &HashMap<K, HashSet<V>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+    K: Ord + Serialize,
+    V: Ord + Serialize,
+{
+    let mut entries: Vec<_> = map.iter().collect();
+    entries.sort_unstable_by_key(|(key, _)| *key);
+    let mut out = serializer.serialize_map(Some(entries.len()))?;
+    for (key, values) in entries {
+        out.serialize_entry(key, &OrderedSet(values))?;
+    }
+    out.end()
+}
+
 /// Precomputed, **query-independent** index for [`query_modal`]: per-node label
 /// tokens, their document frequencies, and the undirected adjacency. Building it
 /// is O(nodes·label + edges); the per-query [`query`](QueryIndex::query) then
@@ -475,35 +533,38 @@ pub struct QueryIndex {
     /// `node_count().max(1)` as the IDF denominator base.
     n: f64,
     /// Each node's set of label tokens.
+    #[serde(serialize_with = "serialize_ordered_set_map")]
     node_tokens: HashMap<NodeId, HashSet<String>>,
     /// Architectural tokens from the node's source path. Kept separate so path
     /// evidence can be weighted below direct symbol-name evidence.
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_ordered_set_map")]
     node_path_tokens: HashMap<NodeId, HashSet<String>>,
     /// Extractor-provided search aliases (for example localization identifiers).
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_ordered_set_map")]
     node_search_tokens: HashMap<NodeId, HashSet<String>>,
     /// Normalized exact label for each node. Retained so merged shard indexes
     /// can recompute repeated-label priors over the full graph rather than
     /// inheriting shard-local counts.
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_ordered_map")]
     node_label_keys: HashMap<NodeId, String>,
     /// How many nodes contain each token (document frequency).
+    #[serde(serialize_with = "serialize_ordered_map")]
     df: HashMap<String, usize>,
     /// Undirected adjacency (sorted, deduped) for subgraph expansion.
+    #[serde(serialize_with = "serialize_ordered_map")]
     adjacency: HashMap<NodeId, Vec<NodeId>>,
     /// Mean undirected degree, used to normalise the hub penalty so it is
     /// graph-relative (a "hub" is a node whose degree dwarfs the average).
     avg_degree: f64,
     /// Query-independent source-quality prior. Missing entries (including old
     /// serialized indexes from before this field existed) are neutral `1.0`.
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_ordered_map")]
     node_prior: HashMap<NodeId, f64>,
     /// Query-independent penalty applied only when a node is reached as a
     /// non-matching neighbour. Repeated labels such as `render()` should not
     /// crowd out specific downstream nodes, but remain full-strength seeds when
     /// the user asks for them directly.
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_ordered_map")]
     neighbor_prior: HashMap<NodeId, f64>,
 }
 
@@ -2160,6 +2221,7 @@ pub fn affected_including_members(
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReverseImpactIndex {
     /// target -> [(source, relation)] over the chosen impact relations.
+    #[serde(serialize_with = "serialize_ordered_map")]
     rev: HashMap<NodeId, Vec<(NodeId, String)>>,
 }
 
@@ -2195,6 +2257,9 @@ impl ReverseImpactIndex {
             rev.entry(e.target.clone())
                 .or_default()
                 .push((e.source.clone(), e.relation.clone()));
+        }
+        for incoming in rev.values_mut() {
+            incoming.sort_unstable();
         }
         ReverseImpactIndex { rev }
     }
@@ -2326,8 +2391,7 @@ mod tests {
 
     /// The store writer indexes a shard from its borrowed `GraphData` rather
     /// than cloning it into a `KnowledgeGraph`. Both routes must produce the
-    /// same blob, or a store written by one path would disagree with a graph
-    /// queried through the other.
+    /// same bytes so store artifacts remain reproducible.
     #[test]
     fn shard_index_matches_graph_built_index() {
         let nodes = &[
@@ -2337,72 +2401,69 @@ mod tests {
         ];
         let edges = &[
             ("api", "db", "calls"),
-            ("db", "tbl", "queries"),
+            ("db", "tbl", "references"),
             ("api", "tbl", "references"),
         ];
         let kg = build(nodes, edges);
         let gd = kg.to_graph_data();
 
-        // Compare as normalized values, not bytes. The index stores token sets
-        // as `HashSet`, so their serialized order is not stable even for one
-        // index built twice; sorting every array compares the sets themselves.
-        fn normalize(mut v: serde_json::Value) -> serde_json::Value {
-            match &mut v {
-                serde_json::Value::Array(items) => {
-                    let mut sorted: Vec<serde_json::Value> =
-                        items.drain(..).map(normalize).collect();
-                    sorted.sort_by_key(|x| x.to_string());
-                    serde_json::Value::Array(sorted)
-                }
-                serde_json::Value::Object(map) => {
-                    let entries: Vec<(String, serde_json::Value)> = map
-                        .iter()
-                        .map(|(k, val)| (k.clone(), normalize(val.clone())))
-                        .collect();
-                    serde_json::Value::Object(entries.into_iter().collect())
-                }
-                _ => v,
-            }
-        }
-        let as_value =
-            |b: Vec<u8>| -> serde_json::Value { normalize(serde_json::from_slice(&b).unwrap()) };
-        let from_graph = as_value(QueryIndex::build(&kg).to_bytes().unwrap());
+        let from_graph = QueryIndex::build(&kg).to_bytes().unwrap();
         let node_refs: Vec<&Node> = gd.nodes.iter().collect();
         let edge_refs: Vec<&Edge> = gd.links.iter().collect();
-        let from_parts = as_value(
-            QueryIndex::build_from_parts(&node_refs, &edge_refs)
-                .to_bytes()
-                .unwrap(),
-        );
+        let from_parts = QueryIndex::build_from_parts(&node_refs, &edge_refs)
+            .to_bytes()
+            .unwrap();
         assert_eq!(
             from_graph, from_parts,
-            "query index differs between the graph and parts routes"
+            "query-index bytes differ between the graph and parts routes"
         );
 
-        // The ordering instability is pre-existing, not introduced by the parts
-        // route: the same graph indexed twice already serializes differently,
-        // and only agrees once normalized.
         let twice_a = QueryIndex::build(&kg).to_bytes().unwrap();
         let twice_b = QueryIndex::build(&kg).to_bytes().unwrap();
         assert_eq!(
-            as_value(twice_a),
-            as_value(twice_b),
-            "one graph indexed twice must agree as a set"
+            twice_a, twice_b,
+            "one graph indexed twice must be byte-reproducible"
         );
 
-        let impact_graph = as_value(
+        let impact_graph = ReverseImpactIndex::build(&kg, DEFAULT_AFFECTED_RELATIONS)
+            .to_bytes()
+            .unwrap();
+        let impact_parts =
+            ReverseImpactIndex::build_from_parts(&edge_refs, DEFAULT_AFFECTED_RELATIONS)
+                .to_bytes()
+                .unwrap();
+        assert_eq!(
+            impact_graph, impact_parts,
+            "reverse-impact-index bytes differ between the graph and parts routes"
+        );
+
+        // `source_hash` is independent of row order, so its cached blobs must
+        // be as well. This also pins ordering inside reverse-impact rows.
+        let reordered = build(
+            &[
+                ("tbl", "orders"),
+                ("db", "fetch_rows()"),
+                ("api", "list_orders()"),
+            ],
+            &[
+                ("api", "tbl", "references"),
+                ("db", "tbl", "references"),
+                ("api", "db", "calls"),
+            ],
+        );
+        assert_eq!(
+            QueryIndex::build(&kg).to_bytes().unwrap(),
+            QueryIndex::build(&reordered).to_bytes().unwrap(),
+            "query-index bytes must not depend on graph row order"
+        );
+        assert_eq!(
             ReverseImpactIndex::build(&kg, DEFAULT_AFFECTED_RELATIONS)
                 .to_bytes()
                 .unwrap(),
-        );
-        let impact_parts = as_value(
-            ReverseImpactIndex::build_from_parts(&edge_refs, DEFAULT_AFFECTED_RELATIONS)
+            ReverseImpactIndex::build(&reordered, DEFAULT_AFFECTED_RELATIONS)
                 .to_bytes()
                 .unwrap(),
-        );
-        assert_eq!(
-            impact_graph, impact_parts,
-            "reverse-impact index differs between the graph and parts routes"
+            "reverse-impact-index bytes must not depend on graph row order"
         );
     }
 

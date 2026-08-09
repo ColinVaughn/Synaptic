@@ -19,6 +19,13 @@ the reason a large repository needed far more memory than its graph.
 
 ### Fixed
 
+- **Store index blobs are now byte-reproducible.** `QueryIndex` and
+  `ReverseImpactIndex` keep hash-based collections for query performance, but
+  serialize map keys and token sets in sorted order. Equivalent graphs now
+  produce identical cache bytes through both the graph-built and shard-built
+  paths. Existing blobs remain readable; blob identity is still deliberately
+  excluded from the shard `source_hash` cache key.
+
 - **A vulnerability scan no longer stores one copy of a package's call sites per
   stub node.** `GraphUsageOracle::new` keyed its working map by
   `(package, member)` but iterated `stub_nodes`, which is keyed by node id. Many
@@ -87,17 +94,6 @@ the reason a large repository needed far more memory than its graph.
 - `synaptic_store::migrate::split`, `migrate_into`, `migrate_into_indexed` and
   the CLI's `write_store` take `GraphData` by value. Every caller either already
   owned the graph or was passing a temporary.
-
-### Known limitations
-
-- **Store index blobs are not byte-reproducible.** The equivalence test
-  `shard_index_matches_graph_built_index` compares the shard-built and
-  graph-built indexes as normalized values rather than bytes, because
-  `QueryIndex` stores token sets as `HashSet` and their serialization order is
-  unstable even for one graph indexed twice. This is pre-existing and harmless
-  today — the blobs are a derived cache keyed by `source_hash`, not part of it —
-  but reproducible store artifacts would require ordered maps there. The test
-  asserts the instability explicitly so a future fix has a place to start.
 
 ## [0.9.7] - 2026-08-09
 
