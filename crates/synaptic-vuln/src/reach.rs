@@ -10,7 +10,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::{Deserialize, Serialize};
 use synaptic_core::{GraphData, NodeId};
 use synaptic_graph::KnowledgeGraph;
-use synaptic_predict::{forecast_nodes, ForecastOptions};
+use synaptic_predict::{
+    forecast_nodes_with_index, ForecastOptions, ReverseImpactIndex, DEFAULT_AFFECTED_RELATIONS,
+};
 
 /// How far back the reverse walk looks for an entry point.
 ///
@@ -145,14 +147,27 @@ pub struct ImpactForecast {
 ///
 /// Held separately from [`ReachIndex`] because it owns a `KnowledgeGraph`,
 /// which consumes the `GraphData` it is built from.
+///
+/// The reverse adjacency is built ONCE here and reused for every forecast. A
+/// scan calls [`Self::forecast`] once per finding that has call sites, and the
+/// unindexed walk rebuilds `target -> [(source, relation)]` across every edge on
+/// each call: O(findings x edges) instead of O(edges + reached). On a
+/// 996k-edge graph that is a large allocate-and-free per finding, which reads as
+/// unbounded growth to a container memory limit rather than as transient churn.
+///
+/// The index fixes its relation set at build time and
+/// [`forecast_nodes_with_index`] does not consult `opts.relations`, so the two
+/// must agree; `index_relations_match_the_forecast_default` pins that.
 #[derive(Debug)]
 pub struct ImpactIndex {
     graph: KnowledgeGraph,
+    reverse: ReverseImpactIndex,
 }
 
 impl ImpactIndex {
     pub fn new(graph: KnowledgeGraph) -> Self {
-        Self { graph }
+        let reverse = ReverseImpactIndex::build(&graph, DEFAULT_AFFECTED_RELATIONS);
+        Self { graph, reverse }
     }
 
     /// Forecast the blast radius of changing these symbols.
@@ -161,7 +176,12 @@ impl ImpactIndex {
             .iter()
             .map(|id| NodeId(id.clone()))
             .collect();
-        let forecast = forecast_nodes(&self.graph, &seeds, &ForecastOptions::default());
+        let forecast = forecast_nodes_with_index(
+            &self.graph,
+            &self.reverse,
+            &seeds,
+            &ForecastOptions::default(),
+        );
 
         ImpactForecast {
             // The true count, not the display-capped list: a scope that
@@ -375,6 +395,9 @@ impl ReachIndex {
 mod tests {
     use super::*;
     use synaptic_core::{Confidence, Edge, FileType, Node, NodeId};
+    // The per-call walk, kept out of the production path on purpose: it exists
+    // here only as the oracle the indexed walk is checked against.
+    use synaptic_predict::forecast_nodes;
 
     fn node(id: &str, label: &str, file: &str) -> Node {
         Node {
@@ -780,5 +803,68 @@ mod tests {
     fn an_absent_or_unparseable_location_yields_no_line() {
         assert_eq!(parse_line(None), None);
         assert_eq!(parse_line(Some("somewhere")), None);
+    }
+
+    /// The prebuilt index must produce exactly what rebuilding the adjacency per
+    /// call produced. This is the whole safety argument for reusing it: the scan
+    /// loop calls `forecast` once per finding, so the two paths have to agree.
+    #[test]
+    fn prebuilt_index_forecast_matches_the_per_call_walk() {
+        let graph = KnowledgeGraph::from_graph_data(impact_graph());
+        let seeds: Vec<NodeId> = vec![NodeId("helper".into())];
+
+        let per_call = forecast_nodes(&graph, &seeds, &ForecastOptions::default());
+        let reused = impact_index().forecast(&["helper".to_string()]);
+
+        assert_eq!(
+            reused.dependent_symbols, per_call.blast_radius_total,
+            "blast radius must not change when the adjacency is reused"
+        );
+        let expected_tests: Vec<String> = per_call
+            .at_risk_tests
+            .iter()
+            .map(|hit| hit.label.clone())
+            .collect();
+        assert_eq!(reused.at_risk_tests, expected_tests);
+        let expected_api: Vec<String> = per_call
+            .public_api_breaks
+            .iter()
+            .map(|node| node.label.clone())
+            .collect();
+        assert_eq!(reused.public_api_touched, expected_api);
+        assert!(
+            reused.dependent_symbols > 0,
+            "fixture must exercise a real walk"
+        );
+    }
+
+    /// Load-bearing invariant. `forecast_nodes_with_index` does NOT consult
+    /// `opts.relations` -- it walks whatever relations the index was built with.
+    /// If the forecast default ever diverges from the set `ImpactIndex` builds,
+    /// every finding's blast radius changes silently. Pin them together.
+    #[test]
+    fn index_relations_match_the_forecast_default() {
+        let defaults = ForecastOptions::default().relations;
+        let indexed: Vec<String> = DEFAULT_AFFECTED_RELATIONS
+            .iter()
+            .map(|r| (*r).to_string())
+            .collect();
+        assert_eq!(
+            defaults, indexed,
+            "ImpactIndex builds its adjacency over DEFAULT_AFFECTED_RELATIONS, but the              forecast default walks a different set; the indexed walk would silently              disagree with the per-call walk"
+        );
+    }
+
+    /// Repeated forecasts against one index stay stable -- the scan loop reuses a
+    /// single `ImpactIndex` across every finding.
+    #[test]
+    fn repeated_forecasts_are_stable() {
+        let index = impact_index();
+        let first = index.forecast(&["helper".to_string()]);
+        let second = index.forecast(&["helper".to_string()]);
+        let third = index.forecast(&["caller".to_string()]);
+        assert_eq!(first.dependent_symbols, second.dependent_symbols);
+        assert_eq!(first.at_risk_tests, second.at_risk_tests);
+        assert!(third.dependent_symbols <= first.dependent_symbols);
     }
 }

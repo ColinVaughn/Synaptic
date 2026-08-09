@@ -25,8 +25,13 @@ pub use forecast::{
     DependencyDelta, ForecastFold, ForecastOptions, ImpactHit, NodeRef, VerifyStep,
     FORECAST_VERSION,
 };
+// `forecast_nodes_with_index` takes a `&ReverseImpactIndex` and the walk it does
+// is fixed to the relations the index was built with, so a caller outside this
+// crate needs both the type and that relation set. Re-exported here rather than
+// forcing every caller to also depend on `synaptic-query`.
 pub use render::{render_edit_markdown, render_markdown};
 pub use risk::{assess_risk, RiskFactors, RiskScore};
+pub use synaptic_query::{ReverseImpactIndex, DEFAULT_AFFECTED_RELATIONS};
 
 /// Errors the prediction pipeline can surface.
 #[derive(Debug, thiserror::Error)]

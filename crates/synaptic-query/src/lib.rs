@@ -2137,7 +2137,7 @@ pub fn affected_including_members(
 /// forecasts many changes against a static graph can build it once per graph load
 /// rather than per request. The relation set is fixed at build time; rebuild the
 /// index whenever the graph or the relation set changes.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ReverseImpactIndex {
     /// target -> [(source, relation)] over the chosen impact relations.
     rev: HashMap<NodeId, Vec<(NodeId, String)>>,
