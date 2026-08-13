@@ -12,6 +12,8 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ### Changed
 
+- The project is now licensed under `AGPL-3.0-or-later`. Historical releases
+  retain the licenses under which they were received.
 - The workspace now targets Rust 1.97.1, MSRV 1.97, and Edition 2024 with the
   matching Rustfmt style across local builds, CI, releases, audits, and Docker
   images. All-target, all-feature Clippy runs warning-free without lint

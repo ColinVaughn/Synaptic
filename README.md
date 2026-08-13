@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="https://discord.gg/ytX7R2PbNz"><img src="https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&logoColor=white&style=for-the-badge" alt="Join our Discord"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-FSL--1.1--ALv2-orange?style=for-the-badge" alt="License: FSL-1.1-ALv2"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue?style=for-the-badge" alt="License: AGPL-3.0-or-later"></a>
   <a href="https://github.com/ColinVaughn/Synaptic/releases"><img src="https://img.shields.io/github/v/release/ColinVaughn/Synaptic?style=for-the-badge" alt="Latest release"></a>
 </p>
 
@@ -571,10 +571,10 @@ Questions, ideas, or want to show what you built? Join us on
 
 ## License
 
-Functional Source License, Version 1.1, ALv2 Future License
-(`FSL-1.1-ALv2`), see [LICENSE](LICENSE) and [NOTICE](NOTICE). You may use,
-modify, and redistribute Synaptic for any purpose other than a Competing Use as
-defined by the license. Each version automatically becomes available under
-Apache License 2.0 on the second anniversary of the date that version was made
-available. The separately maintained private Synaptic Platform site and B2B
-control plane are proprietary and are not covered by this repository's license.
+GNU Affero General Public License, version 3 or later
+(`AGPL-3.0-or-later`), see [LICENSE](LICENSE) and [NOTICE](NOTICE). If you modify
+Synaptic and let users interact with it over a network, the license requires you
+to offer those users the corresponding source. Historical releases remain
+available under the licenses under which they were received. The separately
+maintained private Synaptic Platform site and B2B control plane are proprietary
+and are not covered by this repository's license.

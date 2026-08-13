@@ -1,8 +1,7 @@
 # Public engine container artifacts
 
-Both Dockerfiles build only the FSL-1.1-ALv2-licensed, source-available
-Synaptic Engine from the locked Rust workspace. They never include the
-proprietary Platform source.
+Both Dockerfiles build only the AGPL-3.0-or-later-licensed Synaptic Engine from
+the locked Rust workspace. They never include the proprietary Platform source.
 
 - `synaptic-engine.Dockerfile` produces the glibc engine on a non-root
   distroless runtime for the hosted runtime image.

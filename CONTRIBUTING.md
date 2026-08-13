@@ -5,11 +5,10 @@ Thank you for contributing to Synaptic.
 ## License for contributions
 
 Unless you conspicuously state otherwise before submission, any contribution
-you intentionally submit for inclusion in Synaptic is provided under the
-Functional Source License, Version 1.1, ALv2 Future License
-(`FSL-1.1-ALv2`), without additional terms or conditions. This is an
-inbound-equals-outbound model: contributions receive the same non-competing-use
-grant and automatic Apache 2.0 future license as the rest of Synaptic.
+you intentionally submit for inclusion in Synaptic is provided under the GNU
+Affero General Public License, version 3 or later (`AGPL-3.0-or-later`), without
+additional terms or conditions. This is an inbound-equals-outbound model:
+contributions use the same license as the rest of Synaptic.
 
 By contributing, you represent that you have the legal right to submit the
 work. If your employer or another organization may own the work, obtain its

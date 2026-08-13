@@ -1,5 +1,5 @@
 accepted = [
-  "FSL-1.1-ALv2",
+  "AGPL-3.0-or-later",
   "Apache-2.0",
   "Apache-2.0 WITH LLVM-exception",
   "MIT",

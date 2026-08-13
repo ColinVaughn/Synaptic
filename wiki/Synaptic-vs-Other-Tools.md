@@ -16,7 +16,7 @@ claim could not be confirmed from a primary source, it is not made here.
 
 | Tool | What it is for | How it models code | Languages | Runs where | AI / LLM role | License |
 |---|---|---|---|---|---|---|
-| **Synaptic** | Persistent code knowledge graph plus source-grounded repository memory that you query, diff across git history, forecast changes against, and refactor against, instead of re-reading source | Symbols + typed edges, clustered into communities; every edge tagged `Extracted` / `Inferred` / `Ambiguous`; nodes carry kind/visibility/line-spans; plus boundary edges across language / process / repo (HTTP, FFI, WebSocket, IPC, event bus), flagged dynamic-dispatch sites, and revision-aware memory anchors | tree-sitter, 30+ languages | Single static binary, local, offline by default | MCP server (30 core tools plus five memory-query tools) over the graph and temporal overlay, incl. content search, history/pitfalls/decisions, find-all-references, dynamic-dispatch hazards, change forecasting, predictive test selection, edit-impact prediction, readiness audit, structural search, describe-node, time-travel diff, and plan-only rename | FSL-1.1-ALv2, source available; Apache-2.0 after two years |
+| **Synaptic** | Persistent code knowledge graph plus source-grounded repository memory that you query, diff across git history, forecast changes against, and refactor against, instead of re-reading source | Symbols + typed edges, clustered into communities; every edge tagged `Extracted` / `Inferred` / `Ambiguous`; nodes carry kind/visibility/line-spans; plus boundary edges across language / process / repo (HTTP, FFI, WebSocket, IPC, event bus), flagged dynamic-dispatch sites, and revision-aware memory anchors | tree-sitter, 30+ languages | Single static binary, local, offline by default | MCP server (30 core tools plus five memory-query tools) over the graph and temporal overlay, incl. content search, history/pitfalls/decisions, find-all-references, dynamic-dispatch hazards, change forecasting, predictive test selection, edit-impact prediction, readiness audit, structural search, describe-node, time-travel diff, and plan-only rename | AGPL-3.0-or-later, open source |
 | **Sourcegraph / Cody** | Org-scale code search and navigation; Cody is its AI assistant | Search index, plus precise navigation from uploaded SCIP indexes (opt-in) [2][3] | Search works broadly; precise nav has SCIP indexers for ~8 languages [11] | Self-hosted (Kubernetes / Docker) or Sourcegraph Cloud [4] | Cody answers and edits using search + code-graph context [7] | Main product not open source; enterprise pricing [5][9] |
 | **CodeQL** | Semantic analysis to find security vulnerabilities and their variants [12] | Relational "CodeQL database" queried with the QL language [13] | C/C++, C#, Go, Java, Kotlin, JS, TS, Python, Ruby, Rust, Swift, GitHub Actions [14] | CLI; compiled languages need a build observed during extraction [13] | None; it is a query engine (powers GitHub code scanning) [12] | Free on open-source/public code; paid for private code [15][16] |
 | **Joern** | Static analysis for vulnerability discovery via code property graphs [17] | Code Property Graph (AST + control-flow + data-flow in one graph), Scala-based query language [18] | C/C++, Java, JS, Python, Kotlin, PHP, Go, Ruby, Swift, C#, JVM bytecode, x86/x64 [17] | Local shell/CLI; imports code even without a working build [17] | None | Apache-2.0, open source [19] |
@@ -110,7 +110,7 @@ compile-time information, [3] so cross-repository "go to definition" is more acc
 Synaptic's tree-sitter heuristics for the languages they cover.
 
 **Where Synaptic differs.** Synaptic is a single local binary that runs offline with no
-server to operate, and its engine is source available under FSL-1.1-ALv2; the main
+server to operate, and its engine is open source under AGPL-3.0-or-later; the main
 Sourcegraph repository moved to a private monorepo and its public snapshot was archived in
 September 2024 as "primarily non-OSS-licensed," [5] with pricing now centered on an
 Enterprise plan. [9]
@@ -259,9 +259,8 @@ forecasting with predictive test selection and speculative worktree verification
 across process boundaries (WebSocket / IPC / event bus), explicit dynamic-dispatch hazard
 flagging, and a SQL performance and security auditor — the capabilities detailed in
 [What's distinctive about Synaptic](#whats-distinctive-about-synaptic). The two are also licensed
-differently: current Synaptic versions use FSL-1.1-ALv2 (non-competing use,
-including a patent grant, then Apache-2.0 after two years), while graphify is
-MIT (permissive). [26]
+differently: current Synaptic versions use AGPL-3.0-or-later (network copyleft),
+while graphify is MIT (permissive). [26]
 
 Both tools ingest non-code material as well, and both run code extraction fully offline with
 tree-sitter, so neither has a clear edge on corpus breadth or offline operation. The practical
