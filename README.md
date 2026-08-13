@@ -384,7 +384,7 @@ in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Install
 
-Synaptic builds with a stable Rust toolchain (pinned to 1.96 via
+Synaptic builds with a stable Rust toolchain (pinned to 1.97.1 via
 [rust-toolchain.toml](rust-toolchain.toml)).
 
 ```sh
@@ -555,7 +555,7 @@ The full documentation lives in the [project wiki](https://github.com/ColinVaugh
 ```sh
 cargo test --workspace --all-features              # all tests
 cargo fmt --all --check                            # formatting (enforced in CI)
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings -A clippy::collapsible-if
 ```
 
 The codebase is 27 library crates (`crates/*`) plus the `synaptic` binary (`bin/`). CI

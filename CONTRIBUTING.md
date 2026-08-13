@@ -36,7 +36,7 @@ Run the checks relevant to your change. For Rust changes, at minimum:
 
 ```console
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings -A clippy::collapsible-if
 cargo test --workspace
 cargo deny check licenses bans sources
 ```

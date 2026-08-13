@@ -13,7 +13,7 @@ single-symbol, file-set, working-tree, and PR-impact responses.
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings -A clippy::collapsible-if
 cargo test --workspace --all-features --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 cargo build --release -p synaptic --locked

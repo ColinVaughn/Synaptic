@@ -504,29 +504,29 @@ fn graph_shadow_findings(kg: &KnowledgeGraph, repo: Option<&str>) -> Vec<Finding
     kg.edges()
         .filter(|e| e.relation == "shadows")
         .filter_map(|e| {
-            let gen = kg.node(&e.source)?;
+            let generated = kg.node(&e.source)?;
             let src = kg.node(&e.target)?;
-            if !repo_matches(gen, repo) {
+            if !repo_matches(generated, repo) {
                 return None;
             }
             Some(Finding {
                 rule_id: "READY-RESOURCE-SHADOW".into(),
                 severity: Severity::Medium,
                 category: Category::Correctness,
-                subsystem: subsystem_for(&gen.source_file, &gen.label),
+                subsystem: subsystem_for(&generated.source_file, &generated.label),
                 title: "Generated resource shadows a source resource".into(),
                 detail: format!(
                     "`{}` is generated, but a hand-authored resource at the same logical path already exists. The generated copy may silently win or conflict at build time.",
-                    normalize_path(&gen.source_file)
+                    normalize_path(&generated.source_file)
                 ),
-                location: Some(normalize_path(&gen.source_file)),
-                node_ids: vec![gen.id.0.clone(), src.id.0.clone()],
+                location: Some(normalize_path(&generated.source_file)),
+                node_ids: vec![generated.id.0.clone(), src.id.0.clone()],
                 evidence: Some(normalize_path(&src.source_file)),
                 remediation:
                     "Remove the stale hand-authored resource or exclude it from datagen so a single authority owns the resource."
                         .into(),
                 confidence: 0.8,
-                impact: node_impact(kg, gen, false, Severity::Medium),
+                impact: node_impact(kg, generated, false, Severity::Medium),
             })
         })
         .collect()
@@ -1138,13 +1138,13 @@ mod tests {
     fn placeholders_group_and_generated_is_downranked() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src/content/rocket/Rocket.ts");
-        let gen = dir
+        let generated = dir
             .path()
             .join("src/main/generated/data/mod/recipe/pipe.json");
         fs::create_dir_all(src.parent().unwrap()).unwrap();
-        fs::create_dir_all(gen.parent().unwrap()).unwrap();
+        fs::create_dir_all(generated.parent().unwrap()).unwrap();
         fs::write(&src, "class R {\n // TODO launch flow\n}\n").unwrap();
-        fs::write(&gen, "{ \"pattern\": [\"XXX\"] }\n").unwrap();
+        fs::write(&generated, "{ \"pattern\": [\"XXX\"] }\n").unwrap();
         let graph = kg(
             vec![node(
                 "rocket",
@@ -1294,7 +1294,7 @@ mod tests {
 
     #[test]
     fn shadows_edge_becomes_resource_shadow_finding() {
-        let gen = node(
+        let generated = node(
             "gen",
             "x.json",
             "src/main/generated/assets/mymod/models/x.json",
@@ -1308,7 +1308,7 @@ mod tests {
             1,
             1,
         );
-        let graph = kg(vec![gen, src], vec![shadows_edge("gen", "src")]);
+        let graph = kg(vec![generated, src], vec![shadows_edge("gen", "src")]);
         let report = audit(&graph, &AuditOptions::default());
         let f = report
             .findings

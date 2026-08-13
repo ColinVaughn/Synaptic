@@ -908,8 +908,9 @@ mod tests {
     #[test]
     fn emits_shadows_edge_when_generated_duplicates_source() {
         let src = extract_resource_source("src/main/resources/assets/mymod/models/x.json", b"{}");
-        let gen = extract_resource_source("src/main/generated/assets/mymod/models/x.json", b"{}");
-        let (mut nodes, mut edges) = aggregate(vec![src, gen]);
+        let generated =
+            extract_resource_source("src/main/generated/assets/mymod/models/x.json", b"{}");
+        let (mut nodes, mut edges) = aggregate(vec![src, generated]);
         let stats = resolve_resource_refs(&mut nodes, &mut edges);
         let src_id = file_node_id("src/main/resources/assets/mymod/models/x.json");
         let gen_id = file_node_id("src/main/generated/assets/mymod/models/x.json");

@@ -79,15 +79,18 @@ pub fn check_dependency(
     let mut floor: Option<semver::Version> = None;
     let mut floor_text: Option<String> = None;
     let mut raise_floor = |candidate: &str, safety: &mut DependencySafety| {
-        if let Some(parsed) = parse_version_for_ordering(candidate) {
-            if floor.as_ref().is_none_or(|current| &parsed > current) {
-                floor = Some(parsed);
-                floor_text = Some(candidate.to_string());
+        match parse_version_for_ordering(candidate) {
+            Some(parsed) => {
+                if floor.as_ref().is_none_or(|current| &parsed > current) {
+                    floor = Some(parsed);
+                    floor_text = Some(candidate.to_string());
+                }
             }
-        } else {
-            safety.reasons.push(format!(
-                "a required version {candidate:?} could not be ordered"
-            ));
+            None => {
+                safety.reasons.push(format!(
+                    "a required version {candidate:?} could not be ordered"
+                ));
+            }
         }
     };
 

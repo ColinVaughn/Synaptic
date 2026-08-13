@@ -84,7 +84,7 @@ impl KnowledgeGraph {
     /// via the petgraph adjacency rather than a full edge scan. Empty when `id`
     /// is absent. A self-loop is yielded once (skipped on the incoming pass), so
     /// the set equals `edges().filter(|e| e.source == id || e.target == id)`.
-    pub fn incident_edges(&self, id: &NodeId) -> impl Iterator<Item = &Edge> + '_ {
+    pub fn incident_edges(&self, id: &NodeId) -> impl Iterator<Item = &Edge> + '_ + use<'_> {
         self.index.get(id).into_iter().flat_map(move |&ix| {
             self.graph
                 .edges_directed(ix, Direction::Outgoing)

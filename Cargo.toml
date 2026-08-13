@@ -1,12 +1,12 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = ["crates/*", "bin/*"]
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
 version = "0.9.10"
 license = "FSL-1.1-ALv2"
-rust-version = "1.96"
+rust-version = "1.97"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

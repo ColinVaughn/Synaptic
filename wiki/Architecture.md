@@ -1,7 +1,7 @@
 # Architecture
 
 Synaptic is a Rust workspace: **27 library crates** under `crates/*` plus the `synaptic`
-CLI under `bin/`. The workspace uses edition 2021 and a pinned Rust 1.96 toolchain, with
+CLI under `bin/`. The workspace uses edition 2024 and a pinned Rust 1.97.1 toolchain, with
 dependencies centralized in the root `Cargo.toml`.
 
 ## The pipeline

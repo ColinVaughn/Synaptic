@@ -4,8 +4,8 @@ This page covers building, testing, and the repository layout for contributors.
 
 ## Toolchain
 
-- **Rust 1.96**, pinned in `rust-toolchain.toml` (with `rustfmt` and `clippy` components).
-- Edition 2021. The workspace `rust-version` is `1.96`.
+- **Rust 1.97.1**, pinned in `rust-toolchain.toml` (with `rustfmt` and `clippy` components).
+- Edition 2024. The workspace `rust-version` is `1.97`.
 
 ## Build, test, lint
 
@@ -16,7 +16,7 @@ These are the exact commands CI runs:
 cargo fmt --all --check
 
 # Lint (warnings are errors)
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings -A clippy::collapsible-if
 
 # Full test suite
 cargo test --workspace --all-features

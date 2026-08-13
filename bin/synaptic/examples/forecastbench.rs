@@ -25,7 +25,7 @@ static PEAK: AtomicUsize = AtomicUsize::new(0);
 struct Counting;
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-        let p = System.alloc(l);
+        let p = unsafe { System.alloc(l) };
         if !p.is_null() {
             ALLOCATED.fetch_add(l.size(), Ordering::Relaxed);
             let now = LIVE.fetch_add(l.size(), Ordering::Relaxed) + l.size();
@@ -35,10 +35,10 @@ unsafe impl GlobalAlloc for Counting {
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         LIVE.fetch_sub(l.size(), Ordering::Relaxed);
-        System.dealloc(p, l)
+        unsafe { System.dealloc(p, l) }
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
-        let q = System.realloc(p, l, new);
+        let q = unsafe { System.realloc(p, l, new) };
         if !q.is_null() {
             if new >= l.size() {
                 let d = new - l.size();
