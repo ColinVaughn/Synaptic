@@ -110,6 +110,20 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         for child in Self::children(node) {
             if child.kind() == "import_clause" {
                 imported.extend(self.import_records(child, &stem, line));
+                let mut stack = vec![child];
+                while let Some(part) = stack.pop() {
+                    if part.kind() == "namespace_import"
+                        && let Some(local) = Self::children(part)
+                            .into_iter()
+                            .find(|node| node.kind() == "identifier")
+                            .map(|node| self.text(node))
+                    {
+                        imported.push("*".to_string());
+                        self.push_import_record(local, "*".to_string(), stem.clone(), line);
+                    } else {
+                        stack.extend(Self::children(part));
+                    }
+                }
                 if let Some(default) = Self::children(child)
                     .into_iter()
                     .find(|child| child.kind() == "identifier")

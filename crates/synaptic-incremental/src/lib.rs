@@ -658,6 +658,7 @@ pub fn rebuild_with_detect(
     // Bind resource references + emit generated-shadow edges over the full merged
     // set, matching the full-extract pipeline (parity is asserted in tests).
     synaptic_extract::resolve_resource_refs(&mut nodes, &mut edges);
+    synaptic_extract::attach_cpp_methods(&mut nodes, &mut edges);
 
     let build_opts = BuildOptions {
         directed: opts.directed,

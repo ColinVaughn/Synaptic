@@ -70,9 +70,22 @@ fn clean_type(raw: &str) -> String {
 }
 
 fn param_container(node: TsNode) -> Option<TsNode> {
-    PARAM_CONTAINER_FIELDS
+    find_param_container(node, 0)
+}
+
+fn find_param_container(node: TsNode, depth: usize) -> Option<TsNode> {
+    if let Some(container) = PARAM_CONTAINER_FIELDS
         .iter()
-        .find_map(|f| node.child_by_field_name(f))
+        .find_map(|field| node.child_by_field_name(field))
+    {
+        return Some(container);
+    }
+    if depth == 16 {
+        return None;
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .find_map(|child| find_param_container(child, depth + 1))
 }
 
 fn collect_params(container: TsNode, src: &[u8]) -> Vec<Param> {
@@ -120,6 +133,9 @@ fn param_names(param: TsNode, src: &[u8]) -> Vec<String> {
     if let Some(n) = param.child_by_field_name("pattern") {
         return vec![node_text(n, src)];
     }
+    if let Some(n) = declarator_name(param) {
+        return vec![node_text(n, src)];
+    }
     let mut cursor2 = param.walk();
     for child in param.named_children(&mut cursor2) {
         if is_identifier_kind(child.kind()) {
@@ -127,6 +143,25 @@ fn param_names(param: TsNode, src: &[u8]) -> Vec<String> {
         }
     }
     Vec::new()
+}
+
+/// C/C++ parameter names sit under pointer/reference/function declarators
+/// rather than on the `parameter_declaration` itself.
+fn declarator_name(mut node: TsNode) -> Option<TsNode> {
+    node = node.child_by_field_name("declarator")?;
+    find_identifier(node, 0)
+}
+
+fn find_identifier(node: TsNode, depth: usize) -> Option<TsNode> {
+    if is_identifier_kind(node.kind()) {
+        return Some(node);
+    }
+    if depth == 16 {
+        return None;
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .find_map(|child| find_identifier(child, depth + 1))
 }
 
 fn is_identifier_kind(kind: &str) -> bool {

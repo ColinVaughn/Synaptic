@@ -174,7 +174,7 @@ pub use cache::{AST_CACHE_VERSION, cached_extract_source};
 pub use config::{ImportStyle, LanguageConfig, TypeRefStyle};
 #[cfg(feature = "cross-language")]
 pub use crosslang::prune_local_sdk_candidates;
-pub use resolve::{ResolveStats, resolve_imports, resolve_relative_imports};
+pub use resolve::{ResolveStats, attach_cpp_methods, resolve_imports, resolve_relative_imports};
 #[cfg(feature = "lang-json")]
 pub use resource::{
     ResourceResolveStats, emit_resources, extract_resource_source, resolve_resource_refs,
@@ -185,6 +185,38 @@ pub use result::{ExtractionResult, ImportRecord, RawCall};
 pub use sql_semantic::{emit_sql_columns, set_emit_sql_columns};
 pub use tsconfig::{AliasResolver, load_alias_resolver};
 pub use walker::extract_with_config;
+
+/// `.h` is shared by C and C++. Prefer C++ only when the source contains a
+/// declaration form C cannot express; plain C headers keep the C grammar.
+#[cfg(feature = "lang-cpp")]
+fn looks_like_cpp_header(source: &[u8]) -> bool {
+    String::from_utf8_lossy(source).lines().any(|line| {
+        let line = line.trim_start();
+        if line.starts_with("//") || line.starts_with("/*") || line.starts_with('*') {
+            return false;
+        }
+        line.starts_with("class ")
+            || line.starts_with("struct ")
+            || line.starts_with("namespace ")
+            || line.starts_with("template<")
+            || line.starts_with("template <")
+            || line.starts_with("using ")
+            || line.contains("enum class ")
+            || line.contains("::")
+            || matches!(line, "public:" | "protected:" | "private:")
+            || [
+                "UCLASS(",
+                "UENUM(",
+                "UFUNCTION(",
+                "UINTERFACE(",
+                "UPROPERTY(",
+                "USTRUCT(",
+                "GENERATED_BODY(",
+            ]
+            .iter()
+            .any(|signal| line.contains(signal))
+    })
+}
 
 #[cfg(feature = "lang-python")]
 pub use python::{extract_python_file, extract_python_source};
@@ -225,11 +257,26 @@ pub fn extract_source(path: &str, source: &[u8]) -> Option<ExtractionResult> {
         #[cfg(feature = "lang-swift")]
         "swift" => Some(swift::extract_swift_source(path, source)),
         #[cfg(feature = "lang-c")]
-        "c" | "h" => Some(c::extract_c_source(path, source)),
+        "c" => Some(c::extract_c_source(path, source)),
+        #[cfg(all(feature = "lang-c", feature = "lang-cpp"))]
+        "h" => Some(if looks_like_cpp_header(source) {
+            cpp::extract_cpp_source(path, source)
+        } else {
+            c::extract_c_source(path, source)
+        }),
+        #[cfg(all(feature = "lang-c", not(feature = "lang-cpp")))]
+        "h" => Some(c::extract_c_source(path, source)),
+        #[cfg(all(feature = "lang-cpp", not(feature = "lang-c")))]
+        "h" => Some(cpp::extract_cpp_source(path, source)),
         #[cfg(feature = "lang-cpp")]
         "cpp" | "cc" | "cxx" | "hpp" | "hh" => Some(cpp::extract_cpp_source(path, source)),
         #[cfg(feature = "lang-json")]
-        "json" => Some(json::extract_json_source(path, source)),
+        "json" | "uproject" | "uplugin" => Some(json::extract_json_source(path, source)),
+        #[cfg(feature = "lang-json")]
+        // ponytail: Unreal packages stay opaque; add a real package parser when
+        // Blueprint symbol/bytecode coverage is required.
+        "uasset" | "umap" => crate::resource::emit_resources()
+            .then(|| crate::resource::extract_resource_source(path, b"")),
         // `.mcmeta` is JSON-syntax resource metadata, never config -> resource node
         // (gated by the resource toggle, like data JSON).
         #[cfg(feature = "lang-json")]
@@ -354,6 +401,39 @@ mod tests {
     fn dispatch_routes_ts_and_tsx_extensions() {
         assert!(extract_source("a/b.ts", b"function f(): number { return 1; }\n").is_some());
         assert!(extract_source("a/b.tsx", b"function C() { return null; }\n").is_some());
+    }
+
+    #[cfg(all(feature = "lang-c", feature = "lang-cpp"))]
+    #[test]
+    fn h_dispatch_sniffs_c_vs_cpp() {
+        let cpp = extract_source(
+            "Source/Game/Hero.h",
+            b"UCLASS()\nclass GAME_API AHero : public AActor { GENERATED_BODY() };\n",
+        )
+        .unwrap();
+        assert!(cpp.nodes.iter().any(|node| node.label == "AHero"));
+
+        let c = extract_source("include/math.h", b"int add(int a, int b);\n").unwrap();
+        assert!(c.nodes.iter().all(|node| node.label != "AHero"));
+    }
+
+    #[cfg(feature = "lang-json")]
+    #[test]
+    fn unreal_extensions_are_dispatched() {
+        let project = extract_source(
+            "Game.uproject",
+            br#"{"FileVersion":3,"Modules":[{"Name":"Game","Type":"Runtime"}]}"#,
+        )
+        .unwrap();
+        assert!(project.nodes.iter().any(|node| node.label == "Game"));
+
+        let _guard = resource::RESOURCE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        resource::set_emit_resources(true);
+        let asset = extract_source("Content/BP_Hero.uasset", b"binary").unwrap();
+        assert_eq!(asset.nodes.len(), 1);
+        assert_eq!(asset.nodes[0].label, "Content/BP_Hero.uasset");
     }
 
     #[cfg(feature = "lang-dotnet")]

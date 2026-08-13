@@ -47,7 +47,7 @@ pub const CODE_EXTENSIONS: &[&str] = &[
     "astro", "dart", "v", "sv", "svh", "vh", "sql", "f", "f90", "f95", "f03", "f08", "for", "sh",
     "bash", "json", "yaml", "yml", "tf", "tfvars", "hcl", "asp", "asa", "ql", "qll", "csproj",
     "fsproj", "vbproj", "sln", "slnx", "cls", "trigger", "pas", "pp", "dpr", "dpk", "lpr", "razor",
-    "cshtml", "xaml",
+    "cshtml", "xaml", "uproject", "uplugin", "uasset", "umap",
 ];
 // NB: `yaml`/`yml` are classified as Code (Synaptic has a YAML structural
 // extractor for CI/Compose/k8s; it returns empty for non-config YAML), so they

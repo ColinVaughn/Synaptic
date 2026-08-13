@@ -118,17 +118,20 @@ Classes, interfaces, and enums; methods; imports; `inherits`, `implements`;
 `calls`. Reuses the Java extraction configuration (Groovy's grammar is
 Java-shaped).
 
-### C (`.c`, `.h`)
+### C (`.c`, C-shaped `.h`)
 
 Functions; `#include` directives become `imports_from` to the header base name;
 non-primitive parameter and return type `references` (primitives like `int` are
 skipped); `calls`.
 
-### C++ (`.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`)
+### C++ (`.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, C++-shaped `.h`)
 
 Classes and structs; methods including out-of-line prototypes and data members;
 `#include` becomes `imports_from`; `inherits` from base classes; parameter,
-return, and field type `references`; `calls`.
+return, and field type `references`; `calls`. Ambiguous `.h` files are
+content-sniffed. Unreal reflection macros and `*_API` export markers are
+normalized before parsing, and qualified definitions such as
+`AHero::BeginPlay` attach to their header class.
 
 ### Ruby (`.rb`)
 
@@ -226,6 +229,10 @@ Produces package/dependency nodes, config-key concept nodes (top level plus one
 nested level, capped per file), and external reference nodes. Edges: `imports`
 (dependencies), `extends` (extended configs), `references` (`$ref`), `contains`
 (config keys). Returns empty for arbitrary data JSON.
+
+Unreal `.uproject` and `.uplugin` JSON manifests additionally expose module and
+plugin relationships. Binary `.uasset` and `.umap` packages are indexed as
+opaque resource nodes; Blueprint symbols and bytecode are not parsed.
 
 ### YAML (`.yaml`, `.yml`)
 

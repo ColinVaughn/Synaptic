@@ -13,7 +13,7 @@
 
 use crate::config::{HeritageStyle, ImportStyle, LanguageConfig, TypeRefStyle};
 use crate::result::ExtractionResult;
-use crate::walker::extract_with_config;
+use crate::walker::{extract_with_config, normalize_ecmascript_source};
 
 /// Global callables skipped as call targets. Only *bare* globals are listed —
 /// member-method names (`log`, `parse`, …) are intentionally excluded so a
@@ -44,14 +44,46 @@ pub const ECMASCRIPT_BUILTINS: &[&str] = &[
     "Object",
     "Symbol",
     "BigInt",
+    "Error",
+    "AggregateError",
+    "EvalError",
+    "RangeError",
+    "ReferenceError",
+    "SyntaxError",
+    "TypeError",
+    "URIError",
 ];
 
 /// Node types common to JS and TS: function declarations + class/object methods.
-const FUNCTION_TYPES: &[&str] = &["function_declaration", "method_definition"];
+const FUNCTION_TYPES: &[&str] = &[
+    "function_declaration",
+    "generator_function_declaration",
+    "function_signature",
+    "method_definition",
+];
+const TS_FUNCTION_TYPES: &[&str] = &[
+    "function_declaration",
+    "generator_function_declaration",
+    "function_signature",
+    "method_definition",
+    "method_signature",
+    "abstract_method_signature",
+];
 const FUNCTION_BOUNDARY_TYPES: &[&str] = &[
     "function_declaration",
+    "generator_function_declaration",
+    "function_signature",
     "arrow_function",
     "method_definition",
+];
+const TS_FUNCTION_BOUNDARY_TYPES: &[&str] = &[
+    "function_declaration",
+    "generator_function_declaration",
+    "function_signature",
+    "arrow_function",
+    "method_definition",
+    "method_signature",
+    "abstract_method_signature",
 ];
 
 /// The JavaScript `LanguageConfig`.
@@ -80,8 +112,7 @@ pub fn js_config() -> LanguageConfig {
     }
 }
 
-/// TS treats interfaces / enums / type-aliases / abstract classes as "classes"
-/// (named container nodes).
+/// Named TypeScript declarations handled by the generic class-family path.
 #[cfg(feature = "lang-typescript")]
 const TS_CLASS_TYPES: &[&str] = &[
     "class_declaration",
@@ -97,14 +128,14 @@ pub fn ts_config() -> LanguageConfig {
     LanguageConfig {
         language: || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         class_types: TS_CLASS_TYPES,
-        function_types: FUNCTION_TYPES,
+        function_types: TS_FUNCTION_TYPES,
         call_types: &["call_expression"],
         name_field: "name",
         body_field: "body",
         call_function_field: "function",
         call_accessor_node_types: &["member_expression"],
         call_accessor_field: "property",
-        function_boundary_types: FUNCTION_BOUNDARY_TYPES,
+        function_boundary_types: TS_FUNCTION_BOUNDARY_TYPES,
         superclasses_field: None,
         decorated_types: &[],
         builtins: ECMASCRIPT_BUILTINS,
@@ -130,19 +161,22 @@ pub fn tsx_config() -> LanguageConfig {
 /// Extract in-memory JavaScript (`.js`/`.jsx`/`.mjs`).
 #[cfg(feature = "lang-javascript")]
 pub fn extract_js_source(path: &str, source: &[u8]) -> ExtractionResult {
-    extract_with_config(path, source, &js_config())
+    let source = normalize_ecmascript_source(source);
+    extract_with_config(path, &source, &js_config())
 }
 
 /// Extract in-memory TypeScript (`.ts`).
 #[cfg(feature = "lang-typescript")]
 pub fn extract_ts_source(path: &str, source: &[u8]) -> ExtractionResult {
-    extract_with_config(path, source, &ts_config())
+    let source = normalize_ecmascript_source(source);
+    extract_with_config(path, &source, &ts_config())
 }
 
 /// Extract in-memory TSX (`.tsx`).
 #[cfg(feature = "lang-typescript")]
 pub fn extract_tsx_source(path: &str, source: &[u8]) -> ExtractionResult {
-    extract_with_config(path, source, &tsx_config())
+    let source = normalize_ecmascript_source(source);
+    extract_with_config(path, &source, &tsx_config())
 }
 
 #[cfg(test)]
@@ -229,13 +263,18 @@ mod tests {
         assert!(ls.contains(&"draw()".to_string()));
         assert!(ls.contains(&"main()".to_string()));
         let pairs = call_pairs(&r);
-        // render() calls module fn draw(); main() calls draw() and the method render().
+        // render() calls module fn draw(); main() calls draw(). The untyped
+        // `w.render()` call remains unresolved rather than guessing by name.
         assert!(
             pairs.contains(&(".render()".into(), "draw()".into())),
             "{pairs:?}"
         );
         assert!(pairs.contains(&("main()".into(), "draw()".into())));
-        assert!(pairs.contains(&("main()".into(), ".render()".into())));
+        assert!(
+            r.raw_calls
+                .iter()
+                .any(|call| call.callee == "w.render" && call.is_member_call)
+        );
     }
 
     fn rel_pairs(
@@ -396,6 +435,25 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "lang-typescript")]
+    #[test]
+    fn ts_namespace_import_records_module_alias_and_member_call() {
+        let r = super::extract_ts_source(
+            "api.ts",
+            b"import * as util from './util.js';\nfunction run() { util.normalizeParams(); }\n",
+        );
+        assert!(r.imports.iter().any(|import| {
+            import.local_name == "util"
+                && import.imported_name == "*"
+                && import.module_stem == "util"
+        }));
+        assert!(
+            r.raw_calls
+                .iter()
+                .any(|call| { call.callee == "util.normalizeParams" && call.is_member_call })
+        );
+    }
+
     #[cfg(feature = "lang-javascript")]
     #[test]
     fn js_bare_import_creates_module_stub_edge() {
@@ -471,6 +529,195 @@ mod tests {
         assert!(ls.contains(&".area()".to_string()));
         assert!(ls.contains(&"compute()".to_string()));
         assert!(call_pairs(&r).contains(&(".area()".into(), "compute()".into())));
+    }
+
+    #[cfg(feature = "lang-typescript")]
+    #[test]
+    fn ts_class_constructor_has_constructor_kind() {
+        let r = super::extract_ts_source(
+            "service.ts",
+            b"class Service { constructor(readonly value: string) {} }\n",
+        );
+        assert_eq!(
+            r.nodes
+                .iter()
+                .find(|node| node.label == ".constructor()")
+                .and_then(|node| node.kind()),
+            Some(synaptic_core::NodeKind::Constructor)
+        );
+    }
+
+    #[cfg(feature = "lang-typescript")]
+    #[test]
+    fn ts_extracts_generators_ambient_signatures_and_nul_following_declarations() {
+        let r = super::extract_ts_source(
+            "all.d.mts",
+            b"export async function* chunks() { yield 1; }\n\
+              export function declared(value: string): void;\n\
+              const marker = /[\0]/;\n\
+              function afterNul() {}\n",
+        );
+        let labels = labels(&r);
+        assert!(labels.contains(&"chunks()".to_string()), "{labels:?}");
+        assert!(labels.contains(&"declared()".to_string()), "{labels:?}");
+        assert!(labels.contains(&"afterNul()".to_string()), "{labels:?}");
+        let declared = r
+            .nodes
+            .iter()
+            .find(|node| node.label == "declared()")
+            .expect("ambient signature node");
+        assert_eq!(
+            declared
+                .extra
+                .get("_declaration_only")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[cfg(feature = "lang-typescript")]
+    #[test]
+    fn ts_extracts_named_interface_and_abstract_method_signatures() {
+        use synaptic_core::NodeKind;
+
+        let r = super::extract_ts_source(
+            "api.ts",
+            b"interface Writer { write(value: string): void; }\n\
+              abstract class Service { abstract run(): Promise<void>; }\n",
+        );
+        for label in [".write()", ".run()"] {
+            let method = r
+                .nodes
+                .iter()
+                .find(|node| node.label == label)
+                .unwrap_or_else(|| panic!("missing {label}: {:?}", labels(&r)));
+            assert_eq!(method.kind(), Some(NodeKind::Method));
+            assert_eq!(
+                method
+                    .extra
+                    .get("_declaration_only")
+                    .and_then(|value| value.as_bool()),
+                Some(true)
+            );
+        }
+    }
+
+    #[cfg(feature = "lang-typescript")]
+    #[test]
+    fn ts_named_type_alias_owns_method_signatures() {
+        let r = super::extract_ts_source(
+            "api.ts",
+            b"type Options = { run(): void; nested: { stop(): void } };\n",
+        );
+        let methods = rel_pairs(&r, "method");
+        assert!(
+            methods.contains(&("Options".into(), ".run()".into())),
+            "{methods:?}"
+        );
+        assert!(
+            r.nodes.iter().any(|node| {
+                node.label == "stop()" && node.kind() == Some(synaptic_core::NodeKind::Method)
+            }),
+            "{:?}",
+            labels(&r)
+        );
+    }
+
+    #[cfg(feature = "lang-typescript")]
+    #[test]
+    fn ts_object_methods_are_methods_and_duplicate_names_survive() {
+        use synaptic_core::NodeKind;
+
+        let r = super::extract_ts_source(
+            "mail.ts",
+            b"const a = { send() {} };\nconst b = { async send() {} };\n",
+        );
+        let sends: Vec<_> = r
+            .nodes
+            .iter()
+            .filter(|node| node.label == "send()")
+            .collect();
+        assert_eq!(sends.len(), 2, "{:?}", labels(&r));
+        assert!(
+            sends
+                .iter()
+                .all(|node| node.kind() == Some(NodeKind::Method))
+        );
+        assert_ne!(sends[0].id, sends[1].id);
+    }
+
+    #[cfg(feature = "lang-typescript")]
+    #[test]
+    fn ts_type_and_function_names_that_differ_only_by_case_do_not_collide() {
+        let r = super::extract_ts_source(
+            "types.ts",
+            b"export type ScopeId = string;\nexport function scopeId(): ScopeId { return ''; }\n",
+        );
+        let labels = labels(&r);
+        assert!(labels.contains(&"ScopeId".to_string()), "{labels:?}");
+        assert!(labels.contains(&"scopeId()".to_string()), "{labels:?}");
+        assert_eq!(
+            r.nodes
+                .iter()
+                .find(|node| node.label == "ScopeId")
+                .and_then(|node| node.kind()),
+            Some(synaptic_core::NodeKind::TypeAlias)
+        );
+        let ids: std::collections::HashSet<_> = r.nodes.iter().map(|node| &node.id).collect();
+        assert_eq!(ids.len(), r.nodes.len());
+    }
+
+    #[cfg(feature = "lang-typescript")]
+    #[test]
+    fn ts_leading_punctuation_does_not_collapse_distinct_types() {
+        let r = super::extract_ts_source(
+            "schemas.ts",
+            b"interface _ZodString {}\ninterface ZodString {}\n\
+              interface _$ZodTypeInternals {}\ninterface $ZodTypeInternals {}\n",
+        );
+        let labels = labels(&r);
+        for expected in [
+            "_ZodString",
+            "ZodString",
+            "_$ZodTypeInternals",
+            "$ZodTypeInternals",
+        ] {
+            assert!(labels.contains(&expected.to_string()), "{labels:?}");
+        }
+        let ids: std::collections::HashSet<_> = r.nodes.iter().map(|node| &node.id).collect();
+        assert_eq!(ids.len(), r.nodes.len());
+    }
+
+    #[cfg(feature = "lang-typescript")]
+    #[test]
+    fn ts_imported_bare_call_does_not_bind_to_same_named_method() {
+        let r = super::extract_ts_source(
+            "route.test.ts",
+            b"import { test } from 'node:test';\n\
+              function compilePath() { return { test() {} }; }\n\
+              test('case', () => {});\n",
+        );
+        assert!(r.raw_calls.iter().any(|call| call.callee == "test"));
+        assert!(
+            !call_pairs(&r)
+                .iter()
+                .any(|(_, target)| target.trim_start_matches('.') == "test()")
+        );
+    }
+
+    #[cfg(feature = "lang-typescript")]
+    #[test]
+    fn ts_builtin_error_constructor_is_not_a_project_call() {
+        let r = super::extract_ts_source(
+            "errors.ts",
+            b"class Service { error() {} }\nfunction fail() { throw new Error('no'); }\n",
+        );
+        assert!(
+            !call_pairs(&r)
+                .iter()
+                .any(|(source, target)| source == "fail()" && target == ".error()")
+        );
+        assert!(r.raw_calls.iter().all(|call| call.callee != "Error"));
     }
 
     #[cfg(feature = "lang-typescript")]

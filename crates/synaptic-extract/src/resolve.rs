@@ -17,7 +17,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value, json};
-use synaptic_core::{Edge, FileType, Node, NodeId};
+use synaptic_core::{Confidence, Edge, FileType, Node, NodeId, NodeKind};
 
 use crate::paths::file_node_id;
 use crate::tsconfig::AliasResolver;
@@ -40,6 +40,117 @@ pub struct ResolveStats {
     pub ql_bound: usize,
     /// XAML code-behind class references bound to their real C# declaration.
     pub xaml_bound: usize,
+}
+
+/// Attach out-of-line C++ definitions (`Type::method`) to their class after all
+/// headers and implementation files have been extracted.
+pub fn attach_cpp_methods(nodes: &mut [Node], edges: &mut Vec<Edge>) -> usize {
+    let mut owners: HashMap<String, Vec<(NodeId, String)>> = HashMap::new();
+    for node in nodes
+        .iter()
+        .filter(|node| matches!(node.kind(), Some(NodeKind::Class | NodeKind::Struct)))
+    {
+        owners
+            .entry(node.label.clone())
+            .or_default()
+            .push((node.id.clone(), node.source_file.clone()));
+    }
+    let mut seen: HashSet<(NodeId, NodeId)> = edges
+        .iter()
+        .filter(|edge| edge.relation == "method")
+        .map(|edge| (edge.source.clone(), edge.target.clone()))
+        .collect();
+    let mut attached = 0;
+    for node in nodes.iter_mut().filter(|node| {
+        node.kind() == Some(NodeKind::Function)
+            && std::path::Path::new(&node.source_file)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| matches!(ext, "cpp" | "cc" | "cxx" | "mm"))
+    }) {
+        let Some(qualified) = node.label.strip_suffix("()") else {
+            continue;
+        };
+        let Some((owner, method)) = qualified.rsplit_once("::") else {
+            continue;
+        };
+        let owner = owner.rsplit("::").next().unwrap_or(owner);
+        let Some(candidates) = owners.get(owner) else {
+            continue;
+        };
+        let same_stem: Vec<_> = candidates
+            .iter()
+            .filter(|(_, header)| file_stem(header) == file_stem(&node.source_file))
+            .collect();
+        let class = match same_stem.as_slice() {
+            [(id, _)] => (*id).clone(),
+            _ if candidates.len() == 1 => candidates[0].0.clone(),
+            _ => continue,
+        };
+        node.set_kind(if method == owner {
+            NodeKind::Constructor
+        } else {
+            NodeKind::Method
+        });
+        if seen.insert((class.clone(), node.id.clone())) {
+            edges.push(Edge {
+                source: class,
+                target: node.id.clone(),
+                relation: "method".into(),
+                confidence: Confidence::Extracted,
+                source_file: node.source_file.clone(),
+                source_location: node.source_location.clone(),
+                confidence_score: None,
+                weight: 1.0,
+                context: Some("out_of_line_definition".into()),
+                cross_repo: false,
+                extra: Map::new(),
+            });
+        }
+        attached += 1;
+    }
+    attached
+}
+
+fn file_stem(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+#[cfg(all(test, feature = "lang-cpp"))]
+mod cpp_method_tests {
+    use super::attach_cpp_methods;
+    use crate::cpp::extract_cpp_source;
+    use synaptic_core::NodeKind;
+
+    #[test]
+    fn qualified_definition_attaches_to_header_class() {
+        let header = extract_cpp_source(
+            "Source/Game/Hero.h",
+            b"class GAME_API AHero { public: void TakeDamage(float Amount); };",
+        );
+        let implementation = extract_cpp_source(
+            "Source/Game/Hero.cpp",
+            b"void AHero::TakeDamage(float Amount) {}",
+        );
+        let mut nodes = header.nodes;
+        nodes.extend(implementation.nodes);
+        let mut edges = header.edges;
+        edges.extend(implementation.edges);
+
+        assert_eq!(attach_cpp_methods(&mut nodes, &mut edges), 1);
+        let class = nodes.iter().find(|node| node.label == "AHero").unwrap();
+        let method = nodes
+            .iter()
+            .find(|node| node.label == "AHero::TakeDamage()")
+            .unwrap();
+        assert_eq!(method.kind(), Some(NodeKind::Method));
+        assert!(edges.iter().any(|edge| {
+            edge.relation == "method" && edge.source == class.id && edge.target == method.id
+        }));
+    }
 }
 
 /// Strip a known JS/TS extension, returning the extensionless path.

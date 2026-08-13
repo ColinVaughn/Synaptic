@@ -1,7 +1,10 @@
 //! `core` extraction methods on `Extractor` (split from walker.rs).
 
 use super::Extractor;
-use super::{COMMENT_TOKENS, MAX_DEPTH, RATIONALE_MARKERS, first_docstring};
+use super::{
+    COMMENT_TOKENS, MAX_DEPTH, RATIONALE_MARKERS, c_family_function_id_part, first_docstring,
+    is_macro_identifier,
+};
 use crate::config::{HeritageStyle, ImportStyle, TypeRefStyle};
 use crate::paths::file_node_id;
 use crate::result::RawCall;
@@ -101,7 +104,9 @@ impl<'tree> Extractor<'_, '_, 'tree> {
     pub(crate) fn class_kind(ts_kind: &str) -> synaptic_core::NodeKind {
         use synaptic_core::NodeKind::*;
         let k = ts_kind.to_ascii_lowercase();
-        if k.contains("interface") {
+        if k.contains("type_alias") {
+            TypeAlias
+        } else if k.contains("interface") {
             Interface
         } else if k.contains("trait") {
             Trait
@@ -288,32 +293,71 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         if let Some(n) = self.field(node, self.cfg.name_field) {
             return Some(n);
         }
-        let mut d = node.child_by_field_name("declarator")?;
-        for _ in 0..MAX_DEPTH {
-            match d.kind() {
-                "identifier"
-                | "field_identifier"
-                | "type_identifier"
-                | "qualified_identifier"
-                | "destructor_name"
-                | "operator_name" => return Some(d),
-                _ => d = d.child_by_field_name("declarator")?,
-            }
+        Self::declarator_name(node.child_by_field_name("declarator")?, 0)
+    }
+
+    pub(crate) fn function_name(&self, node: TsNode<'tree>) -> Option<String> {
+        let name = self.function_name_node(node)?;
+        if name.kind() == "operator_cast" {
+            let raw = self.text(name);
+            return Some(
+                raw.find("()")
+                    .map_or(raw.as_str(), |end| &raw[..end])
+                    .trim()
+                    .to_string(),
+            );
         }
-        None
+        Some(self.text(name))
     }
 
     /// The `function_declarator` inside a C/C++ `function_definition`'s declarator
     /// chain (holds the `parameters`), or `None`.
     pub(crate) fn c_function_declarator(&self, node: TsNode<'tree>) -> Option<TsNode<'tree>> {
-        let mut d = node.child_by_field_name("declarator")?;
-        for _ in 0..MAX_DEPTH {
-            if d.kind() == "function_declarator" {
-                return Some(d);
-            }
-            d = d.child_by_field_name("declarator")?;
+        Self::declarator_kind(
+            node.child_by_field_name("declarator")?,
+            "function_declarator",
+            0,
+        )
+    }
+
+    fn declarator_name(node: TsNode<'tree>, depth: usize) -> Option<TsNode<'tree>> {
+        if matches!(
+            node.kind(),
+            "identifier"
+                | "field_identifier"
+                | "type_identifier"
+                | "qualified_identifier"
+                | "destructor_name"
+                | "operator_name"
+                | "operator_cast"
+        ) {
+            return Some(node);
         }
-        None
+        if depth == MAX_DEPTH {
+            return None;
+        }
+        if let Some(declarator) = node.child_by_field_name("declarator")
+            && let Some(name) = Self::declarator_name(declarator, depth + 1)
+        {
+            return Some(name);
+        }
+        Self::children(node)
+            .into_iter()
+            .filter(|child| child.is_named())
+            .find_map(|child| Self::declarator_name(child, depth + 1))
+    }
+
+    fn declarator_kind(node: TsNode<'tree>, kind: &str, depth: usize) -> Option<TsNode<'tree>> {
+        if node.kind() == kind {
+            return Some(node);
+        }
+        if depth == MAX_DEPTH {
+            return None;
+        }
+        Self::children(node)
+            .into_iter()
+            .filter(|child| child.is_named())
+            .find_map(|child| Self::declarator_kind(child, kind, depth + 1))
     }
 
     /// The class/function body: the named `body_field` if present, else (for
@@ -343,6 +387,15 @@ impl<'tree> Extractor<'_, '_, 'tree> {
             return; // guard against stack overflow on pathologically nested input
         }
         let t = node.kind();
+
+        // Macro definitions describe generated code, not declarations present in
+        // the source file. Descending into their replacement text creates fake
+        // functions from test/diagnostic macros.
+        if matches!(self.cfg.type_ref_style, Some(TypeRefStyle::Cpp))
+            && matches!(t, "preproc_def" | "preproc_function_def")
+        {
+            return;
+        }
 
         // Transparent wrappers (e.g. `decorated_definition`): recurse preserving
         // the parent-class scope so decorated methods stay methods (not functions).
@@ -394,15 +447,30 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         }
 
         if self.cfg.class_types.contains(&t) {
+            // C++ forward declarations are references, not class definitions.
+            if matches!(self.cfg.heritage_style, Some(HeritageStyle::Cpp))
+                && self.body_of(node).is_none()
+            {
+                return;
+            }
             let class_name = if let Some(name_node) = self.field(node, self.cfg.name_field) {
                 self.text(name_node)
-            } else if t == "anonymous_class" {
+            } else if t == "anonymous_class"
+                || matches!(self.cfg.heritage_style, Some(HeritageStyle::Cpp))
+            {
                 format!("anonymous@{}", Self::line(node))
             } else {
                 return;
             };
-            let class_nid = NodeId(make_id(&[stem, &class_name]));
             let line = Self::line(node);
+            let base = NodeId(make_id(&[stem, &class_name]));
+            let class_nid = if matches!(self.cfg.heritage_style, Some(HeritageStyle::EcmaScript))
+                && self.seen.contains(&base)
+            {
+                NodeId(make_id(&[base.as_str(), "overload", &line.to_string()]))
+            } else {
+                base
+            };
             let kind = Self::class_kind(t);
             let vis = self.decl_visibility(node, &class_name);
             self.add_code_node(class_nid.clone(), class_name, node, kind, vis, None);
@@ -451,43 +519,124 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                 for child in Self::children(body) {
                     self.walk(child, file_nid, Some(&class_nid), stem, depth + 1);
                 }
+            } else if t == "type_alias_declaration" {
+                for child in Self::children(node) {
+                    self.walk(child, file_nid, Some(&class_nid), stem, depth + 1);
+                }
             }
             return;
         }
 
         if self.cfg.function_types.contains(&t) {
-            let Some(name_node) = self.function_name_node(node) else {
+            let Some(func_name) = self.function_name(node) else {
                 return;
             };
-            let func_name = self.text(name_node);
+            let mut ancestor = node.parent();
+            let mut nested_function = false;
+            while let Some(parent) = ancestor {
+                if self.cfg.function_boundary_types.contains(&parent.kind()) {
+                    nested_function = true;
+                    break;
+                }
+                ancestor = parent.parent();
+            }
+            if matches!(self.cfg.type_ref_style, Some(TypeRefStyle::Cpp))
+                && is_macro_identifier(func_name.as_bytes())
+                && (nested_function
+                    || (parent_class.is_none() && node.child_by_field_name("type").is_none())
+                    || self.text(node).contains("#define"))
+            {
+                return;
+            }
             let line = Self::line(node);
             let vis = self.decl_visibility(node, &func_name);
             let sig = crate::signature::extract_signature(node, self.source);
+            let id_name = if matches!(self.cfg.type_ref_style, Some(TypeRefStyle::Cpp)) {
+                c_family_function_id_part(&func_name)
+            } else {
+                std::borrow::Cow::Borrowed(func_name.as_str())
+            };
+            let standalone_method = matches!(
+                node.kind(),
+                "method_definition" | "method_signature" | "abstract_method_signature"
+            ) && parent_class.is_none();
+            let mut ancestor = node.parent();
+            let mut ecmascript_constructor = false;
+            while let Some(parent) = ancestor {
+                if matches!(
+                    parent.kind(),
+                    "class" | "class_declaration" | "abstract_class_declaration"
+                ) {
+                    ecmascript_constructor =
+                        matches!(self.cfg.heritage_style, Some(HeritageStyle::EcmaScript))
+                            && func_name == "constructor";
+                    break;
+                }
+                ancestor = parent.parent();
+            }
             let func_nid = if let Some(class_nid) = parent_class {
-                let nid = NodeId(make_id(&[class_nid.as_str(), &func_name]));
+                let base = NodeId(make_id(&[class_nid.as_str(), id_name.as_ref()]));
+                let nid = if matches!(
+                    self.cfg.heritage_style,
+                    Some(HeritageStyle::Cpp | HeritageStyle::EcmaScript)
+                ) && self.seen.contains(&base)
+                {
+                    NodeId(make_id(&[base.as_str(), "overload", &line.to_string()]))
+                } else {
+                    base
+                };
                 self.add_code_node(
                     nid.clone(),
                     format!(".{func_name}()"),
                     node,
-                    synaptic_core::NodeKind::Method,
+                    if ecmascript_constructor {
+                        synaptic_core::NodeKind::Constructor
+                    } else {
+                        synaptic_core::NodeKind::Method
+                    },
                     vis,
                     Some(sig),
                 );
                 self.add_edge(class_nid.clone(), nid.clone(), "method", line, None);
                 nid
             } else {
-                let nid = NodeId(make_id(&[stem, &func_name]));
+                let base = NodeId(make_id(&[stem, id_name.as_ref()]));
+                let nid = if (matches!(
+                    self.cfg.heritage_style,
+                    Some(HeritageStyle::Cpp | HeritageStyle::EcmaScript)
+                ) || standalone_method)
+                    && self.seen.contains(&base)
+                {
+                    NodeId(make_id(&[base.as_str(), "overload", &line.to_string()]))
+                } else {
+                    base
+                };
                 self.add_code_node(
                     nid.clone(),
                     format!("{func_name}()"),
                     node,
-                    synaptic_core::NodeKind::Function,
+                    if ecmascript_constructor {
+                        synaptic_core::NodeKind::Constructor
+                    } else if standalone_method {
+                        synaptic_core::NodeKind::Method
+                    } else {
+                        synaptic_core::NodeKind::Function
+                    },
                     vis,
                     Some(sig),
                 );
                 self.add_edge(file_nid.clone(), nid.clone(), "contains", line, None);
                 nid
             };
+            if matches!(
+                node.kind(),
+                "function_signature" | "method_signature" | "abstract_method_signature"
+            ) && let Some(function) = self.nodes.iter_mut().find(|n| n.id == func_nid)
+            {
+                function
+                    .extra
+                    .insert("_declaration_only".into(), serde_json::Value::Bool(true));
+            }
             // Type-reference edges from parameter/return annotations.
             match self.cfg.type_ref_style {
                 Some(TypeRefStyle::Python) => self.python_type_refs(node, &func_nid, stem, line),
@@ -537,11 +686,21 @@ impl<'tree> Extractor<'_, '_, 'tree> {
             return;
         }
 
-        // Default: recurse, resetting class scope.
+        // Default: recurse, retaining a named TS type alias through its direct
+        // type wrapper and otherwise resetting class scope.
         // Iterate the cursor directly: no per-node `Vec` allocation.
+        let nested_parent = if matches!(self.cfg.heritage_style, Some(HeritageStyle::EcmaScript))
+            && matches!(
+                t,
+                "object_type" | "union_type" | "intersection_type" | "parenthesized_type"
+            ) {
+            parent_class
+        } else {
+            None
+        };
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            self.walk(child, file_nid, None, stem, depth + 1);
+            self.walk(child, file_nid, nested_parent, stem, depth + 1);
         }
     }
 
@@ -706,9 +865,19 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         // Map normalized label -> node id: "run_analysis()" -> "run_analysis",
         // ".forward()" -> "forward" (reference: raw.strip("()").lstrip(".")).
         let mut label_to_nid: HashMap<String, NodeId> = HashMap::new();
+        let mut ambiguous = HashSet::new();
         for n in self.nodes.iter().filter(|n| !n.source_file.is_empty()) {
             let key = n.label.trim_matches(|c| c == '(' || c == ')').to_string();
-            label_to_nid.insert(key, n.id.clone());
+            if matches!(self.cfg.heritage_style, Some(HeritageStyle::Cpp))
+                && label_to_nid.contains_key(&key)
+            {
+                ambiguous.insert(key);
+            } else {
+                label_to_nid.insert(key, n.id.clone());
+            }
+        }
+        for key in ambiguous {
+            label_to_nid.remove(&key);
         }
 
         let file_nid = file_node_id(&self.path);
@@ -804,17 +973,30 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         if self.cfg.builtins.contains(&callee.as_str()) {
             return;
         }
+        let imported_bare = !is_member
+            && matches!(self.cfg.import_style, Some(ImportStyle::EcmaScript))
+            && self
+                .imports
+                .iter()
+                .any(|import| import.local_name == callee);
         let defer_member = is_member
             && (matches!(
                 self.cfg.import_style,
-                Some(ImportStyle::Java | ImportStyle::Swift | ImportStyle::CSharp)
+                Some(
+                    ImportStyle::EcmaScript
+                        | ImportStyle::Java
+                        | ImportStyle::Swift
+                        | ImportStyle::CSharp
+                )
             ) || (matches!(self.cfg.import_style, Some(ImportStyle::Python))
                 && callee.contains('.')));
         let member_lookup = format!(".{callee}");
-        let target = if defer_member {
+        let target = if defer_member || imported_bare {
             None
         } else if is_member {
             label_to_nid.get(&member_lookup)
+        } else if matches!(self.cfg.import_style, Some(ImportStyle::EcmaScript)) {
+            label_to_nid.get(&callee)
         } else {
             label_to_nid
                 .get(&callee)
@@ -888,7 +1070,8 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                     .and_then(|receiver| receiver.chars().next())
                     .is_some_and(char::is_uppercase);
             Some((
-                if (self.cfg.heritage_style == Some(crate::config::HeritageStyle::CSharp)
+                if (matches!(self.cfg.import_style, Some(ImportStyle::EcmaScript))
+                    || self.cfg.heritage_style == Some(crate::config::HeritageStyle::CSharp)
                     || explicit_type_receiver)
                     && full.contains('.')
                 {

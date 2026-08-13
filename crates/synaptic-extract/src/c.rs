@@ -11,7 +11,7 @@ use crate::config::{ImportStyle, LanguageConfig, TypeRefStyle};
 #[cfg(feature = "lang-c")]
 use crate::result::ExtractionResult;
 #[cfg(feature = "lang-c")]
-use crate::walker::extract_with_config;
+use crate::walker::{extract_with_config, normalize_c_family_source};
 
 /// The C `LanguageConfig`. `function_definition` has no `name` field — the
 /// walker's `function_name_node` fallback unwraps the declarator chain. Calls
@@ -44,7 +44,8 @@ pub fn c_config() -> LanguageConfig {
 /// Extract a C source file already in memory.
 #[cfg(feature = "lang-c")]
 pub fn extract_c_source(path: &str, source: &[u8]) -> ExtractionResult {
-    extract_with_config(path, source, &c_config())
+    let source = normalize_c_family_source(source, true);
+    extract_with_config(path, &source, &c_config())
 }
 
 /// Read and extract a C file from disk.
@@ -157,5 +158,71 @@ int run(struct Config *cfg) {
                 assert_eq!(e.confidence, Confidence::Extracted, "edge {e:?}");
             }
         }
+    }
+
+    #[test]
+    fn declaration_macros_do_not_hide_functions() {
+        let r = extract_c_source(
+            "zlib.c",
+            br#"
+int ZEXPORT inflate(void FAR *stream, int flush) { return flush; }
+const char * ZEXPORT zlibVersion(void) { return "1.0"; }
+void ZLIB_INTERNAL helper(void) {}
+"#,
+        );
+        let ls = labels(&r);
+        assert!(ls.contains(&"inflate()".to_string()), "{ls:?}");
+        assert!(ls.contains(&"zlibVersion()".to_string()), "{ls:?}");
+        assert!(ls.contains(&"helper()".to_string()), "{ls:?}");
+        assert_eq!(
+            r.nodes
+                .iter()
+                .find(|node| node.label == "inflate()")
+                .unwrap()
+                .signature()
+                .unwrap()
+                .params
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn trailing_underscore_functions_do_not_collide() {
+        let r = extract_c_source(
+            "api.c",
+            b"int get(void) { return 1; }\nint get_(void) { return get(); }\n",
+        );
+        let functions: Vec<_> = r
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.label.as_str(), "get()" | "get_()"))
+            .collect();
+        assert_eq!(functions.len(), 2);
+        assert_ne!(functions[0].id, functions[1].id);
+    }
+
+    #[test]
+    fn conditionals_inside_function_bodies_do_not_hide_definition() {
+        let r = extract_c_source(
+            "deflate.c",
+            br#"
+int ZEXPORT reset(void *stream) {
+  int state;
+  state =
+#ifdef FEATURE
+      stream ? 1 :
+#endif
+      0;
+  return state;
+}
+#if NEVER
+Call UPDATE_HASH()
+#endif
+"#,
+        );
+        let ls = labels(&r);
+        assert!(ls.contains(&"reset()".to_string()));
+        assert!(!ls.contains(&"UPDATE_HASH()".to_string()));
     }
 }

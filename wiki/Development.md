@@ -16,10 +16,10 @@ These are the exact commands CI runs:
 cargo fmt --all --check
 
 # Lint (warnings are errors)
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
 # Full test suite
-cargo test --workspace --all-features
+cargo test --workspace --all-features --locked
 ```
 
 A release build of just the binary:
@@ -34,23 +34,27 @@ Every language extractor can be built and tested in isolation so a grammar bump 
 silently drops nodes or edges fails on its own:
 
 ```sh
-cargo test -p synaptic-extract --no-default-features --features lang-rust
+cargo test -p synaptic-extract --no-default-features --features lang-rust --locked
 ```
 
 CI runs this across a matrix of grammar-backed languages. See [Languages](Languages).
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every push and pull request with three jobs:
+`.github/workflows/ci.yml` runs on every push and pull request with these gates:
 
 - **lint** - `cargo fmt --all --check` and `cargo clippy ... -D warnings`.
 - **test** - `cargo test --workspace --all-features` on Linux, macOS, and Windows.
+- **mcp-conformance** - exercises the real stdio MCP handshake and tool calls on all three OSes.
+- **store-backend** - verifies the sharded store and JSON/redb CLI parity on all three OSes.
+- **docs** - builds workspace documentation with rustdoc warnings denied.
 - **extract-langs** - a matrix that tests each grammar-backed language on its own
   (`--no-default-features --features lang-<name>`).
 
 `.github/workflows/release.yml` runs on `v*` tags (and manual dispatch): it cross-compiles
 the binary for Linux (`x86_64`), macOS (`x86_64` and `aarch64`), and Windows (`x86_64`),
-packages each with the README/LICENSE/CHANGELOG, and publishes a GitHub Release.
+packages each with the README/LICENSE/NOTICE/CHANGELOG and locked third-party notices,
+publishes checksums and artifact attestations to a GitHub Release, and syncs `wiki/`.
 
 ## Benchmarks
 

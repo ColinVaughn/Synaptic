@@ -10,6 +10,8 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.11] - 2026-08-13
+
 ### Changed
 
 - The project is now licensed under `AGPL-3.0-or-later`. Historical releases
@@ -21,6 +23,18 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ### Fixed
 
+- TypeScript extraction now retains generators, ambient function signatures,
+  interface/abstract/type-alias method signatures, precise declaration kinds,
+  declarations after embedded NUL bytes, duplicate object-literal methods, and
+  symbols distinguished by case or leading punctuation. ECMAScript call
+  resolution now honors import and receiver evidence instead of binding
+  external globals or built-in error constructors to unrelated project methods.
+- C++ extraction now content-sniffs ambiguous `.h` files, accepts Unreal
+  `*_API`/reflection macros, captures nested declarator parameters, attaches
+  out-of-line definitions to their owning classes, and ignores `UE_LOG` as a
+  callable symbol.
+- Unreal `.uproject`/`.uplugin` manifests now expose modules and plugin
+  dependencies; `.uasset`/`.umap` files are retained as opaque resources.
 - Incremental rebuilds no longer repeatedly merge parser-owned Markdown
   headings as semantic duplicates; unchanged updates now preserve heading
   identities and produce byte-stable graphs.
@@ -2340,7 +2354,8 @@ parameters), and `graph.json` gains only additive edge keys.
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.10...HEAD
+[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.11...HEAD
+[0.9.11]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.9...v0.9.10
 [0.9.9]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.8...v0.9.9
 [0.9.8]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.7...v0.9.8

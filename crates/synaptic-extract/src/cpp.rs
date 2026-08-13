@@ -12,7 +12,24 @@ use crate::config::{HeritageStyle, ImportStyle, LanguageConfig, TypeRefStyle};
 #[cfg(feature = "lang-cpp")]
 use crate::result::ExtractionResult;
 #[cfg(feature = "lang-cpp")]
-use crate::walker::extract_with_config;
+use crate::walker::{extract_with_config, normalize_c_family_source};
+
+#[cfg(feature = "lang-cpp")]
+const CPP_MACRO_BUILTINS: &[&str] = &[
+    "GENERATED_BODY",
+    "GENERATED_UCLASS_BODY",
+    "GENERATED_USTRUCT_BODY",
+    "UCLASS",
+    "UENUM",
+    "UFUNCTION",
+    "UINTERFACE",
+    "UMETA",
+    "UPROPERTY",
+    "USTRUCT",
+    "UE_LOG",
+    "SLATE_BEGIN_ARGS",
+    "SLATE_END_ARGS",
+];
 
 /// The C++ `LanguageConfig`. `class_specifier`/`struct_specifier` carry `name`
 /// and `body` fields; inline methods are `function_definition` (their name is
@@ -33,8 +50,15 @@ pub fn cpp_config() -> LanguageConfig {
         call_accessor_field: "field",
         function_boundary_types: &["function_definition"],
         superclasses_field: None,
-        decorated_types: &[],
-        builtins: &[],
+        decorated_types: &[
+            "template_declaration",
+            "preproc_if",
+            "preproc_ifdef",
+            "preproc_elif",
+            "preproc_elifdef",
+            "preproc_else",
+        ],
+        builtins: CPP_MACRO_BUILTINS,
         import_types: &["preproc_include"],
         import_style: Some(ImportStyle::CInclude),
         type_ref_style: Some(TypeRefStyle::Cpp),
@@ -47,7 +71,8 @@ pub fn cpp_config() -> LanguageConfig {
 /// Extract a C++ source file already in memory.
 #[cfg(feature = "lang-cpp")]
 pub fn extract_cpp_source(path: &str, source: &[u8]) -> ExtractionResult {
-    extract_with_config(path, source, &cpp_config())
+    let source = normalize_c_family_source(source, false);
+    extract_with_config(path, &source, &cpp_config())
 }
 
 /// Read and extract a C++ file from disk.
@@ -267,5 +292,301 @@ public:
                 assert_eq!(e.confidence, Confidence::Extracted, "edge {e:?}");
             }
         }
+    }
+
+    #[test]
+    fn unreal_export_macros_and_reflected_methods_parse() {
+        let r = extract_cpp_source(
+            "Source/Game/Hero.h",
+            br#"
+UCLASS(BlueprintType)
+class GAME_API AHero : public AActor {
+    GENERATED_BODY()
+public:
+    UFUNCTION(BlueprintCallable)
+    void TakeDamage(float Amount, const FVector& HitPoint);
+    UFUNCTION(BlueprintPure)
+    const FVector& GetPoint(int Index) const;
+};
+"#,
+        );
+        let ls = labels(&r);
+        assert!(ls.contains(&"AHero".to_string()), "{ls:?}");
+        assert!(ls.contains(&".TakeDamage()".to_string()), "{ls:?}");
+        assert!(ls.contains(&".GetPoint()".to_string()), "{ls:?}");
+        assert!(
+            rels(&r, "inherits").contains(&("AHero".into(), "AActor".into())),
+            "{:?}",
+            rels(&r, "inherits")
+        );
+        let method = r.nodes.iter().find(|n| n.label == ".TakeDamage()").unwrap();
+        let sig = method.signature().expect("prototype signature");
+        assert_eq!(
+            sig.params
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Amount", "HitPoint"]
+        );
+        let get_point = r.nodes.iter().find(|n| n.label == ".GetPoint()").unwrap();
+        assert_eq!(get_point.signature().unwrap().params[0].name, "Index");
+    }
+
+    #[test]
+    fn unreal_log_macro_does_not_become_a_function() {
+        let r = extract_cpp_source(
+            "Crash.cpp",
+            br#"
+void cleanup() {}
+void crash() {
+    UE_LOG(LogGame, Error, TEXT("failed (%s)"), *Message);
+    cleanup();
+}
+"#,
+        );
+        assert!(!labels(&r).contains(&"UE_LOG()".to_string()));
+        assert!(r.raw_calls.iter().all(|call| call.callee != "UE_LOG"));
+        assert!(rels(&r, "calls").contains(&("crash()".into(), "cleanup()".into())));
+    }
+
+    #[test]
+    fn unreal_legacy_generated_bodies_keep_interface_and_struct() {
+        let r = extract_cpp_source(
+            "Source/Game/Types.h",
+            br#"
+UINTERFACE()
+class GAME_API UDamageable : public UInterface {
+    GENERATED_UINTERFACE_BODY()
+};
+USTRUCT()
+struct FDamageData {
+    GENERATED_USTRUCT_BODY()
+    float Amount;
+};
+"#,
+        );
+        let ls = labels(&r);
+        assert!(ls.contains(&"UDamageable".to_string()), "{ls:?}");
+        assert!(ls.contains(&"FDamageData".to_string()), "{ls:?}");
+    }
+
+    #[test]
+    fn forward_declaration_is_not_a_class_definition() {
+        let r = extract_cpp_source("Types.h", b"class Forward; class Real { Forward* Value; };");
+        let classes: Vec<_> = r
+            .nodes
+            .iter()
+            .filter(|node| node.kind() == Some(synaptic_core::NodeKind::Class))
+            .map(|node| node.label.as_str())
+            .collect();
+        assert_eq!(classes, ["Real"]);
+    }
+
+    #[test]
+    fn unreal_metadata_and_slate_dsl_are_not_functions() {
+        let r = extract_cpp_source(
+            "Ui.h",
+            br#"
+enum Difficulty { Sane UMETA(DisplayName = "Sane") };
+class Widget {
+    SLATE_BEGIN_ARGS(Widget) : _Enabled(true) {}
+        SLATE_ARGUMENT(bool, Enabled)
+    SLATE_END_ARGS()
+};
+"#,
+        );
+        let ls = labels(&r);
+        assert!(!ls.iter().any(|label| label.contains("UMETA")), "{ls:?}");
+        assert!(!ls.iter().any(|label| label.contains("SLATE_")), "{ls:?}");
+    }
+
+    #[test]
+    fn library_control_macros_preserve_classes_and_methods() {
+        let r = extract_cpp_source(
+            "fmt/base.h",
+            br#"
+FMT_BEGIN_NAMESPACE
+FMT_BEGIN_EXPORT
+template <typename T> class basic_view : public base<T> {
+ public:
+  template <typename U>
+  FMT_CONSTEXPR explicit basic_view(const U& value) : value_(value) {}
+  FMT_NODISCARD FMT_CONSTEXPR int size() const { return 0; }
+ private:
+  T value_;
+};
+FMT_END_EXPORT
+class dynamic_arg_list {};
+FMT_END_NAMESPACE
+"#,
+        );
+        let ls = labels(&r);
+        assert!(ls.contains(&"basic_view".to_string()), "{ls:?}");
+        assert!(ls.contains(&"dynamic_arg_list".to_string()), "{ls:?}");
+        assert!(ls.contains(&".basic_view()".to_string()), "{ls:?}");
+        assert!(ls.contains(&".size()".to_string()), "{ls:?}");
+        assert!(
+            rels(&r, "inherits").contains(&("basic_view".into(), "base".into())),
+            "{:?}",
+            rels(&r, "inherits")
+        );
+    }
+
+    #[test]
+    fn macro_blocks_are_not_functions() {
+        let r = extract_cpp_source(
+            "test.cc",
+            b"TEST(format_test, works) { helper(); }\nvoid real() {}\n",
+        );
+        let ls = labels(&r);
+        assert!(!ls.contains(&"TEST()".to_string()), "{ls:?}");
+        assert!(ls.contains(&"real()".to_string()), "{ls:?}");
+    }
+
+    #[test]
+    fn punctuation_bearing_functions_have_distinct_ids() {
+        let r = extract_cpp_source(
+            "ops.hpp",
+            br#"
+class Value {
+ public:
+  Value() {}
+  ~Value() {}
+  bool operator==(const Value&) const { return true; }
+  bool operator!=(const Value&) const { return false; }
+};
+"#,
+        );
+        let methods: Vec<_> = r
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.label.as_str(),
+                    ".Value()" | ".~Value()" | ".operator==()" | ".operator!=()"
+                )
+            })
+            .collect();
+        assert_eq!(methods.len(), 4, "{:?}", labels(&r));
+        let ids: std::collections::HashSet<_> = methods.iter().map(|node| &node.id).collect();
+        assert_eq!(ids.len(), 4);
+    }
+
+    #[test]
+    fn conversion_operator_keeps_operator_name_and_member_pointer_is_a_field() {
+        let r = extract_cpp_source(
+            "conversion.hpp",
+            br#"
+template <typename T> class Wrapper {
+ public:
+  explicit operator T() const { return T{}; }
+  explicit operator const char*() const { return nullptr; }
+  void (Wrapper::*callback)();
+};
+"#,
+        );
+        let ls = labels(&r);
+        assert!(ls.contains(&".operator T()".to_string()), "{ls:?}");
+        assert!(
+            ls.contains(&".operator const char*()".to_string()),
+            "{ls:?}"
+        );
+        assert!(!ls.contains(&".Wrapper()".to_string()), "{ls:?}");
+    }
+
+    #[test]
+    fn macro_definitions_do_not_emit_functions() {
+        let r = extract_cpp_source(
+            "macros.hpp",
+            b"void DebugBreak();\n#define CATCH_BREAK_INTO_DEBUGGER() [] {}\n#define MAKE_TEST(name) void name() {}\nvoid real() {}\n",
+        );
+        let ls = labels(&r);
+        assert_eq!(
+            ls.iter().filter(|label| label.ends_with("()")).count(),
+            1,
+            "{ls:?}"
+        );
+        assert!(ls.contains(&"real()".to_string()));
+    }
+
+    #[test]
+    fn top_level_conditionals_do_not_merge_neighboring_declarations() {
+        let r = extract_cpp_source(
+            "conditional.hpp",
+            br#"
+#ifndef HEADER_ONLY
+extern template auto implementation<char>() -> char;
+#endif
+template <typename T> auto equal2(const T* lhs, const T* rhs) -> bool {
+  return *lhs == *rhs;
+}
+"#,
+        );
+        assert!(labels(&r).contains(&"equal2()".to_string()));
+    }
+
+    #[test]
+    fn conditionals_inside_classes_preserve_method_scope() {
+        let r = extract_cpp_source(
+            "conditional.hpp",
+            br#"
+class locale_ref {
+#if USE_LOCALE
+ public:
+  locale_ref() {}
+  explicit operator bool() const { return true; }
+#endif
+};
+"#,
+        );
+        let ls = labels(&r);
+        assert!(ls.contains(&".locale_ref()".to_string()), "{ls:?}");
+        assert!(ls.contains(&".operator bool()".to_string()), "{ls:?}");
+        assert!(!ls.contains(&"locale_ref()".to_string()), "{ls:?}");
+    }
+
+    #[test]
+    fn overloads_have_distinct_nodes_and_calls_are_not_arbitrarily_bound() {
+        let r = extract_cpp_source(
+            "overloads.hpp",
+            br#"
+class Visitor {
+ public:
+  void operator()(int) {}
+  void operator()(const char*) {}
+  void run() { (*this)(1); }
+};
+"#,
+        );
+        let overloads: Vec<_> = r
+            .nodes
+            .iter()
+            .filter(|node| node.label == ".operator()()")
+            .collect();
+        assert_eq!(overloads.len(), 2, "{:?}", labels(&r));
+        assert_ne!(overloads[0].id, overloads[1].id);
+        assert!(r.edges.iter().all(|edge| {
+            edge.relation != "calls" || !overloads.iter().any(|node| node.id == edge.target)
+        }));
+    }
+
+    #[test]
+    fn anonymous_struct_methods_are_retained() {
+        let r = extract_cpp_source(
+            "anonymous.cpp",
+            br#"
+void parse() {
+  struct {
+    void operator()(int value) { consume(value); }
+  } visitor;
+}
+"#,
+        );
+        let ls = labels(&r);
+        assert!(
+            ls.iter().any(|label| label.starts_with("anonymous@")),
+            "{ls:?}"
+        );
+        assert!(ls.contains(&".operator()()".to_string()), "{ls:?}");
     }
 }

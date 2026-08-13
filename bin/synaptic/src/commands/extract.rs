@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use synaptic_core::NodeId;
 use synaptic_detect::{FileType, Manifest, detect};
 use synaptic_extract::{
-    ExtractionResult, cached_extract_source, load_alias_resolver, prune_local_sdk_candidates,
-    resolve_imports,
+    ExtractionResult, attach_cpp_methods, cached_extract_source, load_alias_resolver,
+    prune_local_sdk_candidates, resolve_imports,
 };
 use synaptic_graph::{
     BuildOptions, ClusterOptions, KnowledgeGraph, ambiguous_concept_pairs, analyze,
@@ -224,6 +224,10 @@ pub(crate) fn run_extract(
             "Resources: {} reference(s) bound, {} dropped, {} generated-shadow edge(s)",
             res_stats.bound, res_stats.dropped, res_stats.shadows
         );
+    }
+    let attached_methods = attach_cpp_methods(&mut nodes, &mut edges);
+    if attached_methods > 0 {
+        println!("Attached {attached_methods} out-of-line C++ method definition(s)");
     }
 
     // Semantic pass: documents/papers -> concept nodes/edges via the LLM, merged

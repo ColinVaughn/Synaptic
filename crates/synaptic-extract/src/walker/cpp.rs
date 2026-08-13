@@ -1,6 +1,6 @@
 //! `cpp` extraction methods on `Extractor` (split from walker.rs).
 
-use super::Extractor;
+use super::{Extractor, c_family_function_id_part};
 use std::collections::HashSet;
 use synaptic_core::{NodeId, make_id};
 use tree_sitter::Node as TsNode;
@@ -20,13 +20,28 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                 continue;
             }
             let line = Self::line(child);
-            if self.c_function_declarator(child).is_some() {
-                let Some(name_node) = self.function_name_node(child) else {
+            if self
+                .c_function_declarator(child)
+                .is_some_and(|declarator| !self.text(declarator).contains("::*"))
+            {
+                let Some(name) = self.function_name(child) else {
                     continue;
                 };
-                let name = self.text(name_node);
-                let nid = NodeId(make_id(&[class_nid.as_str(), &name]));
-                self.add_node(nid.clone(), format!(".{name}()"), line);
+                let id_name = c_family_function_id_part(&name);
+                let base = NodeId(make_id(&[class_nid.as_str(), id_name.as_ref()]));
+                let nid = if self.seen.contains(&base) {
+                    NodeId(make_id(&[base.as_str(), "overload", &line.to_string()]))
+                } else {
+                    base
+                };
+                self.add_code_node(
+                    nid.clone(),
+                    format!(".{name}()"),
+                    child,
+                    synaptic_core::NodeKind::Method,
+                    None,
+                    Some(crate::signature::extract_signature(child, self.source)),
+                );
                 self.add_edge(class_nid.clone(), nid.clone(), "method", line, None);
                 self.cpp_type_refs(child, &nid, stem, line);
             } else if let Some(ty) = child.child_by_field_name("type") {

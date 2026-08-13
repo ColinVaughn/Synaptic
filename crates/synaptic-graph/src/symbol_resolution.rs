@@ -132,7 +132,19 @@ fn typed_member_target(
     }
     if !matches!(
         Path::new(&source).extension().and_then(|ext| ext.to_str()),
-        Some("cs" | "java" | "swift" | "py")
+        Some(
+            "cs" | "java"
+                | "swift"
+                | "py"
+                | "js"
+                | "jsx"
+                | "mjs"
+                | "cjs"
+                | "ts"
+                | "tsx"
+                | "mts"
+                | "cts"
+        )
     ) {
         return None;
     }
@@ -200,7 +212,8 @@ fn source_family(path: &str) -> Option<String> {
 
 fn call_candidates(kg: &KnowledgeGraph, call: &RawCall, ids: &[NodeId]) -> Vec<NodeId> {
     let family = source_family(&call.source_file);
-    ids.iter()
+    let candidates: Vec<_> = ids
+        .iter()
         .filter_map(|id| {
             let node = kg.node(id)?;
             if family.is_some() && source_family(&node.source_file) != family {
@@ -220,7 +233,24 @@ fn call_candidates(kg: &KnowledgeGraph, call: &RawCall, ids: &[NodeId]) -> Vec<N
             }
             Some(id.clone())
         })
-        .collect()
+        .collect();
+    let implementations: Vec<_> = candidates
+        .iter()
+        .filter(|id| {
+            kg.node(id).is_some_and(|node| {
+                node.extra
+                    .get("_declaration_only")
+                    .and_then(|value| value.as_bool())
+                    != Some(true)
+            })
+        })
+        .cloned()
+        .collect();
+    if implementations.is_empty() {
+        candidates
+    } else {
+        implementations
+    }
 }
 
 fn source_stem(source_file: &str) -> String {
@@ -666,14 +696,51 @@ pub fn resolve_symbols(
     // Pass 1: import-guided (EXTRACTED, 1.0)
     let symbol_index = build_symbol_index(kg);
     let mut aliases_by_file: HashMap<&str, HashMap<&str, &ImportRecord>> = HashMap::new();
+    let mut namespaces_by_file: HashMap<&str, HashMap<&str, &ImportRecord>> = HashMap::new();
     for imp in imports {
         if imp.imported_name == "*" {
+            namespaces_by_file
+                .entry(imp.source_file.as_str())
+                .or_default()
+                .insert(imp.local_name.as_str(), imp);
             continue;
         }
         aliases_by_file
             .entry(imp.source_file.as_str())
             .or_default()
             .insert(imp.local_name.as_str(), imp);
+    }
+    for rc in raw_calls.iter().filter(|call| call.is_member_call) {
+        let Some((receiver, member)) = rc.callee.rsplit_once('.') else {
+            continue;
+        };
+        let Some(imported) = namespaces_by_file
+            .get(rc.source_file.as_str())
+            .and_then(|aliases| aliases.get(receiver))
+        else {
+            continue;
+        };
+        let Some(cands) =
+            symbol_index.get(&(imported.module_stem.clone(), member.to_ascii_lowercase()))
+        else {
+            continue;
+        };
+        let cands = call_candidates(kg, rc, cands);
+        if cands.len() != 1 || rc.caller == cands[0] {
+            continue;
+        }
+        let target = cands[0].clone();
+        if known.insert((rc.caller.clone(), target.clone(), "calls".to_string())) {
+            out.push(calls_edge(
+                rc.caller.clone(),
+                target,
+                Confidence::Extracted,
+                1.0,
+                "namespace_import_call",
+                rc.source_file.clone(),
+                rc.source_location.clone(),
+            ));
+        }
     }
     for rc in raw_calls {
         if rc.is_member_call
@@ -749,6 +816,12 @@ pub fn resolve_symbols(
         }
         let callee = rc.callee.trim();
         if callee.is_empty() {
+            continue;
+        }
+        if aliases_by_file
+            .get(rc.source_file.as_str())
+            .is_some_and(|aliases| aliases.contains_key(callee))
+        {
             continue;
         }
         let Some(cands) = label_index.get(&callee.to_lowercase()) else {
@@ -995,6 +1068,100 @@ mod tests {
         assert_eq!(edges[0].confidence, Confidence::Inferred);
         assert_eq!(edges[0].confidence_score, Some(0.8));
         assert_eq!(edges[0].context.as_deref(), Some("call"));
+    }
+
+    #[test]
+    fn imported_external_name_does_not_fall_back_to_unrelated_global_symbol() {
+        let g = kg(
+            vec![
+                function_node("caller", "run()", "route.test.ts"),
+                function_node("unrelated", ".test()", "route.ts"),
+            ],
+            vec![],
+        );
+        let edges = resolve_symbols(
+            &g,
+            &[raw("caller", "test", false, "route.test.ts")],
+            &[imp("test", "test", "node:test", "route.test.ts")],
+        );
+        assert!(edges.is_empty(), "{edges:?}");
+    }
+
+    #[test]
+    fn namespace_import_member_resolves_to_imported_module_symbol() {
+        let g = kg(
+            vec![
+                function_node("caller", "run()", "api.ts"),
+                function_node("util_normalize", "normalizeParams()", "util.ts"),
+                function_node("other_normalize", "normalizeParams()", "other.ts"),
+            ],
+            vec![],
+        );
+        let edges = resolve_symbols(
+            &g,
+            &[raw("caller", "util.normalizeParams", true, "api.ts")],
+            &[imp("util", "*", "util", "api.ts")],
+        );
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        assert_eq!(edges[0].target, NodeId("util_normalize".into()));
+        assert_eq!(edges[0].context.as_deref(), Some("namespace_import_call"));
+        assert_eq!(edges[0].confidence, Confidence::Extracted);
+    }
+
+    #[test]
+    fn import_guided_call_prefers_overload_implementation() {
+        let signature = |id: &str| {
+            let mut node = function_node(id, "parse()", "parser.ts");
+            node.extra.insert("_declaration_only".into(), json!(true));
+            node
+        };
+        let g = kg(
+            vec![
+                function_node("caller", "run()", "api.ts"),
+                signature("parse_string"),
+                signature("parse_number"),
+                function_node("parse_impl", "parse()", "parser.ts"),
+            ],
+            vec![],
+        );
+        let edges = resolve_symbols(
+            &g,
+            &[raw("caller", "parse", false, "api.ts")],
+            &[imp("parse", "parse", "parser", "api.ts")],
+        );
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        assert_eq!(edges[0].target, NodeId("parse_impl".into()));
+    }
+
+    #[test]
+    fn typescript_this_member_resolves_with_owner_evidence() {
+        let mut service = node("service", "Service", "service.ts");
+        service.set_kind(synaptic_core::NodeKind::Class);
+        let mut run = function_node("run", ".run()", "service.ts");
+        run.set_kind(synaptic_core::NodeKind::Method);
+        let mut stop = function_node("stop", ".stop()", "service.ts");
+        stop.set_kind(synaptic_core::NodeKind::Method);
+        let method = |target: &str| Edge {
+            source: NodeId("service".into()),
+            target: NodeId(target.into()),
+            relation: "method".into(),
+            confidence: Confidence::Extracted,
+            confidence_score: Some(1.0),
+            source_file: "service.ts".into(),
+            source_location: Some("L1".into()),
+            weight: 1.0,
+            context: None,
+            cross_repo: false,
+            extra: Map::new(),
+        };
+        let g = kg(
+            vec![service, run, stop],
+            vec![method("run"), method("stop")],
+        );
+        let edges = resolve_symbols(&g, &[raw("run", "this.stop", true, "service.ts")], &[]);
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        assert_eq!(edges[0].target, NodeId("stop".into()));
+        assert_eq!(edges[0].context.as_deref(), Some("typed_member_call"));
     }
 
     #[test]

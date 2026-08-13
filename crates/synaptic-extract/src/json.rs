@@ -93,12 +93,19 @@ pub fn extract_json_source(path: &str, source: &[u8]) -> ExtractionResult {
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let is_unreal = matches!(
+        std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str()),
+        Some("uproject" | "uplugin")
+    );
     let top_keys: Vec<String> = children(top)
         .into_iter()
         .filter(|c| c.kind() == "pair")
         .filter_map(|p| ex.key_text(p))
         .collect();
-    let is_config = CONFIG_NAMES.contains(&filename.as_str())
+    let is_config = is_unreal
+        || CONFIG_NAMES.contains(&filename.as_str())
         || top_keys.iter().any(|k| CONFIG_KEYS.contains(&k.as_str()));
     if !is_config {
         return resource_fallback(path, source);
@@ -107,6 +114,10 @@ pub fn extract_json_source(path: &str, source: &[u8]) -> ExtractionResult {
     let mut b = Builder::new(path);
     let file_nid = file_node_id(path);
     b.add_node(file_nid.clone(), filename, 1);
+
+    if is_unreal {
+        extract_unreal_metadata(&mut b, &file_nid, path, source);
+    }
 
     // Bounded count of structural key nodes (config shape), kept small so a
     // large config can't explode the graph.
@@ -199,6 +210,53 @@ pub fn extract_json_source(path: &str, source: &[u8]) -> ExtractionResult {
     b.into_result()
 }
 
+#[cfg(feature = "lang-json")]
+fn extract_unreal_metadata(b: &mut Builder, file_nid: &NodeId, path: &str, source: &[u8]) {
+    let Ok(root) = serde_json::from_slice::<serde_json::Value>(source) else {
+        return;
+    };
+    for module in root
+        .get("Modules")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let Some(name) = module.get("Name").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let id = NodeId(make_id(&["unreal_module", path, name]));
+        b.add_tagged_node(id.clone(), name.to_string(), 1, "unreal_module");
+        if let Some(node) = b.nodes.iter_mut().find(|node| node.id == id) {
+            for (key, field) in [("module_type", "Type"), ("loading_phase", "LoadingPhase")] {
+                if let Some(value) = module.get(field).and_then(|value| value.as_str()) {
+                    node.extra.insert(key.into(), json!(value));
+                }
+            }
+        }
+        b.add_edge(file_nid.clone(), id, "contains", 1, Some("unreal_module"));
+    }
+    for plugin in root
+        .get("Plugins")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let Some(name) = plugin.get("Name").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let id = NodeId(make_id(&["unreal_plugin", name]));
+        b.add_external_node(id.clone(), name.to_string());
+        b.add_edge(file_nid.clone(), id, "imports", 1, Some("unreal_plugin"));
+        if let Some(enabled) = plugin.get("Enabled").and_then(|value| value.as_bool()) {
+            b.edges
+                .last_mut()
+                .unwrap()
+                .extra
+                .insert("enabled".into(), json!(enabled));
+        }
+    }
+}
+
 /// Read and extract a JSON file from disk.
 #[cfg(feature = "lang-json")]
 pub fn extract_json_file(path: &std::path::Path) -> std::io::Result<ExtractionResult> {
@@ -285,6 +343,7 @@ impl JsonExtractor<'_> {
 mod tests {
     use super::extract_json_source;
     use crate::result::ExtractionResult;
+    use serde_json::json;
 
     fn rels(r: &ExtractionResult, relation: &str) -> Vec<String> {
         let lbl = |id: &synaptic_core::NodeId| {
@@ -428,5 +487,27 @@ mod tests {
         let r = extract_json_source("package.json", br#"{"dependencies":{"lodash":"^4"}}"#);
         assert!(r.edges.iter().any(|e| e.relation == "imports"));
         crate::resource::set_emit_resources(true);
+    }
+
+    #[test]
+    fn unreal_project_extracts_modules_and_plugins() {
+        let result = extract_json_source(
+            "Game.uproject",
+            br#"{"FileVersion":3,"Modules":[{"Name":"Game","Type":"Runtime","LoadingPhase":"Default"}],"Plugins":[{"Name":"GameplayAbilities","Enabled":true}]}"#,
+        );
+        assert!(result.nodes.iter().any(|node| {
+            node.label == "Game"
+                && node
+                    .extra
+                    .get("_node_type")
+                    .and_then(|value| value.as_str())
+                    == Some("unreal_module")
+                && node.extra.get("module_type") == Some(&json!("Runtime"))
+        }));
+        assert!(result.edges.iter().any(|edge| {
+            edge.relation == "imports"
+                && edge.context.as_deref() == Some("unreal_plugin")
+                && edge.extra.get("enabled") == Some(&json!(true))
+        }));
     }
 }
