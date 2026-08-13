@@ -209,7 +209,7 @@ fn meta(n: &crate::forecast::NodeRef) -> String {
 mod tests {
     use super::*;
     use crate::forecast::{
-        DepEdge, DependencyDelta, ImpactHit, NodeRef, VerifyStep, FORECAST_VERSION,
+        DepEdge, DependencyDelta, FORECAST_VERSION, ImpactHit, NodeRef, VerifyStep,
     };
 
     fn populated() -> ChangeForecast {

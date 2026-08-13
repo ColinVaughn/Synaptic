@@ -19,7 +19,7 @@ use synaptic_core::{GraphData, NodeId};
 use synaptic_incremental::union_graphs;
 
 use crate::federate::{dedup_externals, prefix_graph};
-use crate::{load_graph, sanitize_tag, write_graph, Result, WorkspaceError};
+use crate::{Result, WorkspaceError, load_graph, sanitize_tag, write_graph};
 
 /// One repo's entry in the global manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,10 +124,10 @@ impl GlobalStore {
         let source_hash = blake3::hash(&bytes).to_hex()[..16].to_string();
 
         let mut manifest = self.load_manifest();
-        if let Some(existing) = manifest.repos.get(&tag) {
-            if existing.source_hash == source_hash {
-                return Ok(AddOutcome::Skipped { tag });
-            }
+        if let Some(existing) = manifest.repos.get(&tag)
+            && existing.source_hash == source_hash
+        {
+            return Ok(AddOutcome::Skipped { tag });
         }
 
         let source_graph = load_graph(source)?;

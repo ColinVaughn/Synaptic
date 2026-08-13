@@ -221,10 +221,10 @@ fn dotnet_name(root: &Path) -> Option<String> {
         return dotnet_proj_name(&proj);
     }
     let sln = first_sln(root)?;
-    if let Some(proj) = sln_project_files(root, &sln).into_iter().min() {
-        if let Some(name) = dotnet_proj_name(&proj) {
-            return Some(name);
-        }
+    if let Some(proj) = sln_project_files(root, &sln).into_iter().min()
+        && let Some(name) = dotnet_proj_name(&proj)
+    {
+        return Some(name);
     }
     sln.file_stem().map(|s| s.to_string_lossy().into_owned())
 }

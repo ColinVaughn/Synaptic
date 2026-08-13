@@ -3,11 +3,11 @@
 
 use std::path::Path;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use serde_json::Map;
 use synaptic_core::{Confidence, Edge, GraphData, Node, NodeId, NodeKind, Span};
 use synaptic_graph::KnowledgeGraph;
-use synaptic_refactor::{plan_rename, RenameOptions};
+use synaptic_refactor::{RenameOptions, plan_rename};
 
 const FILES: usize = 40;
 const CALLS_PER_FILE: usize = 3;

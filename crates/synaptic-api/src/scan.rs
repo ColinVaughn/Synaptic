@@ -5,9 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    diff_contracts, normalize_contract, ApiChangeEvent, ApiEventStore, ArtifactFetchRequest,
-    ArtifactFetcher, FetchArtifactError, FetchedArtifact, SourceArtifact, SourceLockState,
-    StoreError, SurfaceFormat, VendorRegistry, VendorSource, VersionRange,
+    ApiChangeEvent, ApiEventStore, ArtifactFetchRequest, ArtifactFetcher, FetchArtifactError,
+    FetchedArtifact, SourceArtifact, SourceLockState, StoreError, SurfaceFormat, VendorRegistry,
+    VendorSource, VersionRange, diff_contracts, normalize_contract,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,15 +140,14 @@ pub fn scan_repository(
                     artifact.uri, location
                 )));
             }
-            if let Some(prior) = &prior {
-                if prior.revision == artifact.revision
-                    && prior.content_digest != artifact.content_digest
-                {
-                    return Err(ScanError::Integrity(format!(
-                        "source {} changed payload under the same revision {}",
-                        location, artifact.revision
-                    )));
-                }
+            if let Some(prior) = &prior
+                && prior.revision == artifact.revision
+                && prior.content_digest != artifact.content_digest
+            {
+                return Err(ScanError::Integrity(format!(
+                    "source {} changed payload under the same revision {}",
+                    location, artifact.revision
+                )));
             }
             store.put_artifact(&artifact.content_digest, &artifact.bytes)?;
 

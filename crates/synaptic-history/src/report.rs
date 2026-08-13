@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use synaptic_core::{FileType, NodeId};
-use synaptic_graph::{find_import_cycles, graph_diff, KnowledgeGraph};
+use synaptic_graph::{KnowledgeGraph, find_import_cycles, graph_diff};
 
 use crate::DiffOptions;
 
@@ -144,10 +144,10 @@ pub fn removed_apis(old: &KnowledgeGraph, new: &KnowledgeGraph, top: usize) -> V
             continue;
         }
         let (sf, tf) = (src_file.get(&e.source), src_file.get(&e.target));
-        if let (Some(sf), Some(tf)) = (sf, tf) {
-            if sf != tf {
-                *refs.entry(e.target.clone()).or_default() += 1;
-            }
+        if let (Some(sf), Some(tf)) = (sf, tf)
+            && sf != tf
+        {
+            *refs.entry(e.target.clone()).or_default() += 1;
         }
     }
     let mut out: Vec<RemovedApi> = old

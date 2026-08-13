@@ -323,11 +323,7 @@ fn ods_cell_text(cell: roxmltree::Node) -> String {
                     .descendants()
                     .filter_map(|t| if t.is_text() { t.text() } else { None })
                     .collect();
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(s)
-                }
+                if s.is_empty() { None } else { Some(s) }
             })
             .collect::<Vec<_>>()
             .join(" "),

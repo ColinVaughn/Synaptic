@@ -3,7 +3,7 @@
 use crate::commands::update::run_update;
 use anyhow::{Context, Result};
 use std::path::Path;
-use synaptic_incremental::{is_rebuildable, should_ignore_path, ChangeBatch, DEBOUNCE_MS};
+use synaptic_incremental::{ChangeBatch, DEBOUNCE_MS, is_rebuildable, should_ignore_path};
 
 /// Watch the working tree and rebuild incrementally on change. Debounces a burst
 /// of saves (`DEBOUNCE_MS`) into one rebuild, ignores the output/VCS/build

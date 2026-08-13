@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use synaptic_core::{make_id, ImportRecord, NodeId, RawCall};
+use synaptic_core::{ImportRecord, NodeId, RawCall, make_id};
 use tree_sitter::{Node as TsNode, Parser};
 
 use crate::common::Builder;
@@ -542,58 +542,58 @@ impl<'tree> RustExtractor<'_, 'tree> {
         if node.kind() == "function_item" {
             return;
         }
-        if node.kind() == "call_expression" {
-            if let Some(func) = node.child_by_field_name("function") {
-                let (callee, is_member) = match func.kind() {
-                    "identifier" => (Some(self.text(func)), false),
-                    "field_expression" => {
-                        let receiver = func.child_by_field_name("value").map(|n| self.text(n));
-                        let member = func.child_by_field_name("field").map(|n| self.text(n));
-                        (
-                            receiver
-                                .zip(member)
-                                .map(|(receiver, member)| format!("{receiver}.{member}")),
-                            true,
-                        )
-                    }
-                    "scoped_identifier" => {
-                        let receiver = func.child_by_field_name("path").map(|n| self.text(n));
-                        let member = func.child_by_field_name("name").map(|n| self.text(n));
-                        (
-                            receiver
-                                .zip(member)
-                                .map(|(receiver, member)| format!("{receiver}.{member}")),
-                            true,
-                        )
-                    }
-                    _ => (None, false),
-                };
-                if let Some(callee) = callee {
-                    let member = callee.rsplit('.').next().unwrap_or(&callee);
-                    if !member.is_empty() && !RUST_BUILTINS.contains(&member) {
-                        let line = Self::line(node);
-                        if is_member {
-                            self.b.raw_calls.push(RawCall {
-                                caller: caller.clone(),
-                                callee,
-                                is_member_call: true,
-                                source_file: self.b.path.clone(),
-                                source_location: Some(format!("L{line}")),
-                                span: None,
-                            });
-                        } else {
-                            let enqueue_raw = !RUST_TRAIT_METHOD_BLOCKLIST
-                                .contains(&member.to_lowercase().as_str());
-                            self.b.resolve_call(
-                                caller,
-                                member,
-                                false,
-                                line,
-                                index,
-                                seen_pairs,
-                                enqueue_raw,
-                            );
-                        }
+        if node.kind() == "call_expression"
+            && let Some(func) = node.child_by_field_name("function")
+        {
+            let (callee, is_member) = match func.kind() {
+                "identifier" => (Some(self.text(func)), false),
+                "field_expression" => {
+                    let receiver = func.child_by_field_name("value").map(|n| self.text(n));
+                    let member = func.child_by_field_name("field").map(|n| self.text(n));
+                    (
+                        receiver
+                            .zip(member)
+                            .map(|(receiver, member)| format!("{receiver}.{member}")),
+                        true,
+                    )
+                }
+                "scoped_identifier" => {
+                    let receiver = func.child_by_field_name("path").map(|n| self.text(n));
+                    let member = func.child_by_field_name("name").map(|n| self.text(n));
+                    (
+                        receiver
+                            .zip(member)
+                            .map(|(receiver, member)| format!("{receiver}.{member}")),
+                        true,
+                    )
+                }
+                _ => (None, false),
+            };
+            if let Some(callee) = callee {
+                let member = callee.rsplit('.').next().unwrap_or(&callee);
+                if !member.is_empty() && !RUST_BUILTINS.contains(&member) {
+                    let line = Self::line(node);
+                    if is_member {
+                        self.b.raw_calls.push(RawCall {
+                            caller: caller.clone(),
+                            callee,
+                            is_member_call: true,
+                            source_file: self.b.path.clone(),
+                            source_location: Some(format!("L{line}")),
+                            span: None,
+                        });
+                    } else {
+                        let enqueue_raw =
+                            !RUST_TRAIT_METHOD_BLOCKLIST.contains(&member.to_lowercase().as_str());
+                        self.b.resolve_call(
+                            caller,
+                            member,
+                            false,
+                            line,
+                            index,
+                            seen_pairs,
+                            enqueue_raw,
+                        );
                     }
                 }
             }
@@ -675,10 +675,11 @@ mod tests {
             .find(|e| e.relation == "imports_from")
             .expect("imports_from edge");
         assert_ne!(edge.target.0, synaptic_core::make_id(&["HashMap"]));
-        assert!(r
-            .nodes
-            .iter()
-            .any(|n| n.id == edge.target && n.label == "HashMap"));
+        assert!(
+            r.nodes
+                .iter()
+                .any(|n| n.id == edge.target && n.label == "HashMap")
+        );
         assert!(r.imports.iter().any(|i| i.local_name == "HashMap"
             && i.imported_name == "HashMap"
             && i.module_stem == "collections"));

@@ -241,9 +241,11 @@ approved_by = "someone"
     fn an_expired_exception_stops_suppressing_its_finding() {
         let policy = VulnPolicy::parse(SAMPLE).unwrap();
 
-        assert!(policy
-            .active_exception("vuln_finding_abc", "2026-08-05")
-            .is_some());
+        assert!(
+            policy
+                .active_exception("vuln_finding_abc", "2026-08-05")
+                .is_some()
+        );
         assert!(
             policy
                 .active_exception("vuln_finding_abc", "2027-01-01")

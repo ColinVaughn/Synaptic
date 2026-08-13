@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use synaptic_core::{Node, NodeId};
 use synaptic_graph::KnowledgeGraph;
 use synaptic_query::{
-    affected_nodes_multi, module_importers, resolve_seed, DEFAULT_AFFECTED_RELATIONS,
+    DEFAULT_AFFECTED_RELATIONS, affected_nodes_multi, module_importers, resolve_seed,
 };
 
 fn strip_call(label: &str) -> &str {
@@ -207,13 +207,14 @@ pub fn assess_edit(
                 // An inferred runtime coupling (HTTP/queue/IPC/subprocess) does
                 // not break at compile time -- flag it for a contract review, not
                 // as certain breakage (2026-07 audit).
-                "calls_service" | "handled_by" | "invokes" | "binds_native"
-                | "dynamic_ref" => Some((
-                    false,
-                    format!(
-                        "{rel} the symbol across a runtime boundary (inferred); re-check the wire contract, not the compiler"
-                    ),
-                )),
+                "calls_service" | "handled_by" | "invokes" | "binds_native" | "dynamic_ref" => {
+                    Some((
+                        false,
+                        format!(
+                            "{rel} the symbol across a runtime boundary (inferred); re-check the wire contract, not the compiler"
+                        ),
+                    ))
+                }
                 _ => Some((
                     true,
                     format!("{rel} the symbol; a signature change may break it"),

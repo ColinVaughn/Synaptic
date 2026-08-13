@@ -3,7 +3,7 @@
 //! blobs and the incremental "skip unchanged shard" check.
 
 use crate::StoreError;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 /// Encode a value to msgpack with named fields, so `#[serde(flatten)] extra`
 /// maps on [`synaptic_core::node::Node`] / [`synaptic_core::edge::Edge`] survive

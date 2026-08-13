@@ -152,9 +152,11 @@ fn predict_surfaces_co_change_from_history() {
         )
         .unwrap();
         git(&["add", "-A"]);
-        assert!(git(&["commit", "-q", "-m", &format!("c{i}")])
-            .status
-            .success());
+        assert!(
+            git(&["commit", "-q", "-m", &format!("c{i}")])
+                .status
+                .success()
+        );
     }
     // An uncommitted edit to helper.py only.
     std::fs::write(root.join("helper.py"), b"def helper():\n    return 99\n").unwrap();

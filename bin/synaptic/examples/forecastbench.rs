@@ -14,8 +14,8 @@ use std::time::Instant;
 use synaptic_core::NodeId;
 use synaptic_graph::KnowledgeGraph;
 use synaptic_predict::{
-    forecast_nodes, forecast_nodes_with_index, ForecastOptions, ReverseImpactIndex,
-    DEFAULT_AFFECTED_RELATIONS,
+    DEFAULT_AFFECTED_RELATIONS, ForecastOptions, ReverseImpactIndex, forecast_nodes,
+    forecast_nodes_with_index,
 };
 
 static ALLOCATED: AtomicUsize = AtomicUsize::new(0);

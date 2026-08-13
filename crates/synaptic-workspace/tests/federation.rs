@@ -7,8 +7,8 @@
 use std::path::Path;
 
 use synaptic_workspace::coordinate::{Coordinate, Ecosystem};
-use synaptic_workspace::manifest::{write_manifest, RepoMember, WorkspaceManifest, WorkspaceMeta};
-use synaptic_workspace::workspace_build::{build_workspace, MemberSource, WorkspaceBuildOptions};
+use synaptic_workspace::manifest::{RepoMember, WorkspaceManifest, WorkspaceMeta, write_manifest};
+use synaptic_workspace::workspace_build::{MemberSource, WorkspaceBuildOptions, build_workspace};
 
 fn write(dir: &Path, rel: &str, body: &str) {
     let p = dir.join(rel);
@@ -129,10 +129,12 @@ fn path_member_is_built_and_federated() {
 
     let build = build_workspace(&ws, &WorkspaceBuildOptions::default()).unwrap();
     assert_eq!(build.members[0].source, MemberSource::Local);
-    assert!(build
-        .federated
-        .nodes()
-        .any(|n| n.repo.as_deref() == Some("ext")));
+    assert!(
+        build
+            .federated
+            .nodes()
+            .any(|n| n.repo.as_deref() == Some("ext"))
+    );
 }
 
 #[test]

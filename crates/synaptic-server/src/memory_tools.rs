@@ -3,14 +3,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use synaptic_memory::{
     AccessScope, MemoryKind, MemoryLifecycle, MemoryQuery, MemoryRecord, MemorySearchHit,
     MemoryStore, RecordOutcome, SourceArtifact, SymbolAnchor, VerificationOutcome,
     VerificationStatus,
 };
 
-use crate::{provider, tool_error_result, Server};
+use crate::{Server, provider, tool_error_result};
 
 const READ_TOOLS: &[&str] = &[
     "search_memory",

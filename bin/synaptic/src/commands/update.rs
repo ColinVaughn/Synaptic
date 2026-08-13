@@ -6,11 +6,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use synaptic_core::GraphData;
-use synaptic_detect::{detect_inputs, DetectResult};
+use synaptic_detect::{DetectResult, detect_inputs};
 use synaptic_graph::analyze;
 use synaptic_incremental::{
-    drain_pending, drain_queued_rounds, manifest_path, merge_changed_paths, queue_pending,
-    rebuild_with_detect, try_acquire_lock, ChangeSet, RebuildOptions,
+    ChangeSet, RebuildOptions, drain_pending, drain_queued_rounds, manifest_path,
+    merge_changed_paths, queue_pending, rebuild_with_detect, try_acquire_lock,
 };
 
 /// Backstop against a writer that re-queues on every round.
@@ -159,7 +159,9 @@ pub(crate) fn run_update(
         Ok(())
     })?;
     if !clean {
-        println!("Changes kept arriving during the rebuild; run `synaptic update` again to cover the remainder.");
+        println!(
+            "Changes kept arriving during the rebuild; run `synaptic update` again to cover the remainder."
+        );
     }
 
     if !any_changed {

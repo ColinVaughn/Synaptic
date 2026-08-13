@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use synaptic_graph::KnowledgeGraph;
 
-use crate::edit::{assess_edit, resolve_edit_target, EditDependent, EditKind};
+use crate::edit::{EditDependent, EditKind, assess_edit, resolve_edit_target};
 
 /// The predicted graph delta of a described edit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

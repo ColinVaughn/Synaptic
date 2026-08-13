@@ -11,11 +11,11 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::error::LlmError;
 use crate::provider::{Completion, LlmClient};
-use crate::sigv4::{authorization_header, sha256_hex, uri_encode_path, Credentials};
+use crate::sigv4::{Credentials, authorization_header, sha256_hex, uri_encode_path};
 
 /// Default Bedrock model; override with `BEDROCK_MODEL`.
 pub const BEDROCK_DEFAULT_MODEL: &str = "anthropic.claude-3-5-sonnet-20241022-v2:0";

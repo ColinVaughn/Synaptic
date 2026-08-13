@@ -16,7 +16,7 @@ use std::sync::LazyLock;
 #[cfg(feature = "lang-sql")]
 use regex::Regex;
 #[cfg(feature = "lang-sql")]
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 #[cfg(feature = "lang-sql")]
 use tree_sitter::{Node as TsNode, Parser};
 

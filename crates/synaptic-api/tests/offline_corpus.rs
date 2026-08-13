@@ -2,9 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use synaptic_api::{
-    analyze_api_coverage, diff_contracts, import_behavioral_evidence, normalize_openapi,
-    sanitize_release_text, ApiChangeEvent, GateOutcome, RelevanceAssessment, RepairBrief,
-    SourceArtifact, VerificationReport, VersionRange,
+    ApiChangeEvent, GateOutcome, RelevanceAssessment, RepairBrief, SourceArtifact,
+    VerificationReport, VersionRange, analyze_api_coverage, diff_contracts,
+    import_behavioral_evidence, normalize_openapi, sanitize_release_text,
 };
 use synaptic_core::GraphData;
 
@@ -49,10 +49,12 @@ fn contract_and_hostile_release_fixture_replay_without_network() {
     )
     .unwrap();
     assert!(!event.changes.is_empty());
-    assert!(event
-        .changes
-        .iter()
-        .all(|change| !change.evidence.is_empty()));
+    assert!(
+        event
+            .changes
+            .iter()
+            .all(|change| !change.evidence.is_empty())
+    );
 
     let hostile = fs::read_to_string(root().join("release-notes/hostile.html")).unwrap();
     let sanitized = sanitize_release_text(&hostile);
@@ -78,10 +80,12 @@ fn versioned_json_schemas_cover_the_engine_artifacts() {
     )
     .unwrap();
     assert!(verification.verified);
-    assert!(verification
-        .gates
-        .iter()
-        .all(|gate| gate.outcome == GateOutcome::Passed));
+    assert!(
+        verification
+            .gates
+            .iter()
+            .all(|gate| gate.outcome == GateOutcome::Passed)
+    );
     let binding = serde_json::to_value(&assessment.bindings[0]).unwrap();
     let coverage =
         serde_json::to_value(analyze_api_coverage(&GraphData::default(), &[], None)).unwrap();

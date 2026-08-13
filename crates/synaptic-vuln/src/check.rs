@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use synaptic_api::PackageCoordinate;
 
-use crate::matching::{match_version, parse_version_for_ordering, VersionMatch};
+use crate::matching::{VersionMatch, match_version, parse_version_for_ordering};
 use crate::plan::VersionAvailability;
 use crate::policy::VulnPolicy;
 use crate::source::AdvisorySource;
@@ -326,10 +326,12 @@ replacement = "cargo:successor"
 
         assert_eq!(safety.verdict, SafetyVerdict::Blocked);
         assert_eq!(safety.alternatives, vec!["cargo:successor".to_string()]);
-        assert!(safety
-            .reasons
-            .iter()
-            .any(|note| note.contains("unmaintained")));
+        assert!(
+            safety
+                .reasons
+                .iter()
+                .any(|note| note.contains("unmaintained"))
+        );
     }
 
     #[test]
@@ -466,10 +468,12 @@ reason = "organisation floor above the advisory fix"
 
         assert_eq!(safety.verdict, SafetyVerdict::Blocked);
         assert_eq!(safety.approved_constraint, None);
-        assert!(safety
-            .reasons
-            .iter()
-            .any(|note| note.contains("no fixed version")));
+        assert!(
+            safety
+                .reasons
+                .iter()
+                .any(|note| note.contains("no fixed version"))
+        );
     }
 
     #[test]
@@ -481,9 +485,11 @@ reason = "organisation floor above the advisory fix"
             None,
         );
 
-        assert!(safety
-            .reasons
-            .iter()
-            .any(|note| note.contains("RUSTSEC-2026-0001")));
+        assert!(
+            safety
+                .reasons
+                .iter()
+                .any(|note| note.contains("RUSTSEC-2026-0001"))
+        );
     }
 }

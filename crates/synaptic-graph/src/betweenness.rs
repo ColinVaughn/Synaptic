@@ -12,7 +12,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use synaptic_core::NodeId;
 
-use crate::graph::{is_structural_edge, is_structural_node, KnowledgeGraph};
+use crate::graph::{KnowledgeGraph, is_structural_edge, is_structural_node};
 
 /// Above this node count, node betweenness is sampled.
 const SAMPLE_THRESHOLD: usize = 1000;

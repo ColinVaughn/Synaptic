@@ -12,5 +12,5 @@ pub mod tiebreak;
 
 pub use convert::fragment_to_graph;
 pub use label::label_communities;
-pub use pass::{run_semantic_pass, SemanticOutcome, MAX_RETRY_DEPTH, TOKEN_BUDGET};
+pub use pass::{MAX_RETRY_DEPTH, SemanticOutcome, TOKEN_BUDGET, run_semantic_pass};
 pub use tiebreak::llm_tiebreak;

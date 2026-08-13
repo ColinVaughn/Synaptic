@@ -49,15 +49,21 @@ fn package_release_adapter_diffs_removed_exports_and_signature_changes() {
         .unwrap();
 
     assert_eq!(changes.len(), 3);
-    assert!(changes
-        .iter()
-        .any(|change| change.kind == BreakingChangeKind::SdkExportRemoved));
-    assert!(changes
-        .iter()
-        .any(|change| change.kind == BreakingChangeKind::SdkSignatureChanged));
-    assert!(changes
-        .iter()
-        .any(|change| change.kind == BreakingChangeKind::MinimumSupportedVersionRaised));
+    assert!(
+        changes
+            .iter()
+            .any(|change| change.kind == BreakingChangeKind::SdkExportRemoved)
+    );
+    assert!(
+        changes
+            .iter()
+            .any(|change| change.kind == BreakingChangeKind::SdkSignatureChanged)
+    );
+    assert!(
+        changes
+            .iter()
+            .any(|change| change.kind == BreakingChangeKind::MinimumSupportedVersionRaised)
+    );
     assert!(changes.iter().all(|change| change.confidence == 1.0));
 }
 

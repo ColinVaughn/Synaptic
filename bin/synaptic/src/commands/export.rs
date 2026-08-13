@@ -4,7 +4,7 @@ use crate::commands::common::{load_scoped_graph, write_file};
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use synaptic_graph::{analyze, apply_communities, cluster, ClusterOptions, KnowledgeGraph};
+use synaptic_graph::{ClusterOptions, KnowledgeGraph, analyze, apply_communities, cluster};
 use synaptic_output::{
     to_cypher, to_dot, to_force3d, to_graphml, to_html, to_json, to_mermaid, to_obsidian, to_svg,
     to_tree_html, to_wiki,

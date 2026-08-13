@@ -11,12 +11,12 @@
 
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use synaptic_api::{Dependency, DependencyScope, Ecosystem, PackageCoordinate};
 use synaptic_vuln::{
-    assess_severity, cvss_v3_base_score, cvss_v4_base_score, feature_gated_dependencies,
-    manifest_features, parse_lockfile, scan, Advisory, LocalDirSource, LockfileKind,
-    NoUsageEvidence, PackageGraph, ScanRequest, UsageOracle,
+    Advisory, LocalDirSource, LockfileKind, NoUsageEvidence, PackageGraph, ScanRequest,
+    UsageOracle, assess_severity, cvss_v3_base_score, cvss_v4_base_score,
+    feature_gated_dependencies, manifest_features, parse_lockfile, scan,
 };
 
 /// A `Cargo.lock` with `count` registry packages in a chain off one workspace

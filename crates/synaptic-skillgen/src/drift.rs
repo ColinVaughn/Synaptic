@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{always_on_section, render_skill, Platform};
+use crate::{Platform, always_on_section, render_skill};
 
 /// A rendered skill artifact: a flat snapshot filename + its content.
 #[derive(Debug, Clone, PartialEq)]

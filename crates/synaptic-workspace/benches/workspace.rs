@@ -11,12 +11,12 @@
 
 use std::path::PathBuf;
 
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
 use synaptic_workspace::alias::collect_aliases;
 use synaptic_workspace::coordinate::{Coordinate, Ecosystem};
-use synaptic_workspace::export_surface::{build_export_surface, resolve_cross_repo, ExportSurface};
+use synaptic_workspace::export_surface::{ExportSurface, build_export_surface, resolve_cross_repo};
 use synaptic_workspace::federate::{compose, prefix_graph};
 
 fn node(id: String, label: String, source_file: String, repo: Option<String>) -> Node {

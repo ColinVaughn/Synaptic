@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use synaptic_llm::{parse_llm_json, LlmClient};
+use synaptic_llm::{LlmClient, parse_llm_json};
 
 /// Communities per LLM batch (keeps the prompt within a ~16k context window).
 pub const LABEL_BATCH_SIZE: usize = 100;

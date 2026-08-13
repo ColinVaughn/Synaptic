@@ -20,8 +20,8 @@ pub mod drift;
 pub mod registry;
 pub mod settings_hooks;
 
-pub use drift::{bless, check_drift, render_all, RenderedArtifact};
-pub use registry::{record_install, record_uninstall, refresh_all, registry_path, RefreshSummary};
+pub use drift::{RenderedArtifact, bless, check_drift, render_all};
+pub use registry::{RefreshSummary, record_install, record_uninstall, refresh_all, registry_path};
 pub use settings_hooks::{install_settings_hook, uninstall_settings_hook};
 
 use std::path::{Path, PathBuf};
@@ -252,11 +252,11 @@ fn version_stamp() -> String {
 pub fn stamped_skill(platform: Platform) -> String {
     let body = render_skill(platform);
     let stamp = version_stamp();
-    if let Some(rest) = body.strip_prefix("---\n") {
-        if let Some(close) = rest.find("\n---\n") {
-            let split = "---\n".len() + close + "\n---\n".len();
-            return format!("{}{}\n{}", &body[..split], stamp, &body[split..]);
-        }
+    if let Some(rest) = body.strip_prefix("---\n")
+        && let Some(close) = rest.find("\n---\n")
+    {
+        let split = "---\n".len() + close + "\n---\n".len();
+        return format!("{}{}\n{}", &body[..split], stamp, &body[split..]);
     }
     format!("{stamp}\n\n{body}")
 }
@@ -664,9 +664,11 @@ mod tests {
         assert_eq!(written.len(), 1, "instructions file only");
         let ao = root.join(".github/copilot-instructions.md");
         assert!(ao.exists(), "{written:?}");
-        assert!(std::fs::read_to_string(&ao)
-            .unwrap()
-            .contains("## Synaptic"));
+        assert!(
+            std::fs::read_to_string(&ao)
+                .unwrap()
+                .contains("## Synaptic")
+        );
         uninstall(Platform::Copilot, root).unwrap();
         assert!(!ao.exists(), "empty instructions file removed on uninstall");
     }
@@ -678,8 +680,10 @@ mod tests {
         install(Platform::Kilo, root).unwrap();
         let rules = root.join(".kilocode/rules/synaptic.md");
         assert!(rules.exists());
-        assert!(std::fs::read_to_string(&rules)
-            .unwrap()
-            .contains("Synaptic"));
+        assert!(
+            std::fs::read_to_string(&rules)
+                .unwrap()
+                .contains("Synaptic")
+        );
     }
 }

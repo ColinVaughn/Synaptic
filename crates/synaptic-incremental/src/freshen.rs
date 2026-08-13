@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use synaptic_detect::{detect_inputs, DetectResult, FileType, Manifest, ManifestDiff};
+use synaptic_detect::{DetectResult, FileType, Manifest, ManifestDiff, detect_inputs};
 
 /// The build manifest's name under the output dir. Hidden + inside
 /// `synaptic-out/`, so the watcher's ignore rules already skip it (no

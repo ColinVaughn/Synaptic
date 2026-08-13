@@ -8,13 +8,13 @@ use std::path::Path;
 
 use serde::Serialize;
 use synaptic_core::{Node, NodeId};
-use synaptic_graph::{find_import_cycles, norm_source_file, KnowledgeGraph};
+use synaptic_graph::{KnowledgeGraph, find_import_cycles, norm_source_file};
 
+use crate::RefactorError;
 use crate::plan::RenamePlan;
 use crate::relocate::RelocatePlan;
 use crate::resolve::normalize;
 use crate::sites::REF_RELATIONS;
-use crate::RefactorError;
 
 /// One invariant outcome.
 #[derive(Debug, Serialize)]

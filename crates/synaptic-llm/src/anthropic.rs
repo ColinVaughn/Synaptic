@@ -5,7 +5,7 @@
 //! `stop_reason` rather than the OpenAI vocab.
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::error::LlmError;
 use crate::provider::{Completion, LlmClient};

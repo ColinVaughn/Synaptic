@@ -2,7 +2,7 @@
 
 use serde_json::Map;
 use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
-use synaptic_graph::{apply_communities, cluster, ClusterOptions, KnowledgeGraph};
+use synaptic_graph::{ClusterOptions, KnowledgeGraph, apply_communities, cluster};
 
 fn node(id: &str, label: &str, sf: &str) -> Node {
     Node {

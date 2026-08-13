@@ -1,7 +1,7 @@
 //! `csharp` extraction methods on `Extractor` (split from walker.rs).
 
-use super::is_csharp_interface_name;
 use super::Extractor;
+use super::is_csharp_interface_name;
 use synaptic_core::NodeId;
 use tree_sitter::Node as TsNode;
 
@@ -136,10 +136,10 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                 }
             }
             "qualified_name" => {
-                if let Some(tail) = self.text(node).rsplit('.').next() {
-                    if !tail.is_empty() {
-                        out.push((tail.to_string(), generic));
-                    }
+                if let Some(tail) = self.text(node).rsplit('.').next()
+                    && !tail.is_empty()
+                {
+                    out.push((tail.to_string(), generic));
                 }
             }
             "generic_name" => {

@@ -4,7 +4,7 @@
 use std::sync::LazyLock;
 
 use regex::Regex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Known prompt-injection / chat-template sentinels a hostile source file might
 /// embed to break out of the `<untrusted_source>` block or impersonate a role
@@ -77,10 +77,10 @@ pub fn parse_llm_json(raw: &str) -> Value {
     // fence-stripped `candidate` (not the original `stripped`): the fence body is
     // what we parse here, so a brace in a pre-fence preamble must not hijack the
     // scan.
-    if let Some(obj) = first_balanced_object(candidate) {
-        if let Ok(v) = serde_json::from_str::<Value>(obj) {
-            return v;
-        }
+    if let Some(obj) = first_balanced_object(candidate)
+        && let Ok(v) = serde_json::from_str::<Value>(obj)
+    {
+        return v;
     }
     empty_fragment()
 }

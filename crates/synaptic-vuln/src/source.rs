@@ -110,13 +110,12 @@ impl LocalDirSource {
                     slot.push(position);
                 }
             }
-            if let Some(modified) = &advisory.modified {
-                if newest_modified
+            if let Some(modified) = &advisory.modified
+                && newest_modified
                     .as_ref()
                     .is_none_or(|current| modified > current)
-                {
-                    newest_modified = Some(modified.clone());
-                }
+            {
+                newest_modified = Some(modified.clone());
             }
         }
         Self {
@@ -449,16 +448,18 @@ mod tests {
         );
         let npm = LocalDirSource::from_advisories(
             "npm-corpus",
-            vec![Advisory::parse(
-                r#"{
+            vec![
+                Advisory::parse(
+                    r#"{
                     "id": "GHSA-1",
                     "modified": "2026-06-01T00:00:00Z",
                     "affected": [
                         { "package": { "ecosystem": "npm", "name": "left-pad" } }
                     ]
                 }"#,
-            )
-            .unwrap()],
+                )
+                .unwrap(),
+            ],
         );
         let composite = CompositeSource::new(vec![cargo_corpus, npm]);
 
@@ -467,9 +468,11 @@ mod tests {
             composite.advisories_for(&PackageCoordinate::new(Ecosystem::Npm, "left-pad"))[0].id,
             "GHSA-1"
         );
-        assert!(composite
-            .advisories_for(&PackageCoordinate::new(Ecosystem::Npm, "alpha"))
-            .is_empty());
+        assert!(
+            composite
+                .advisories_for(&PackageCoordinate::new(Ecosystem::Npm, "alpha"))
+                .is_empty()
+        );
     }
 
     #[test]

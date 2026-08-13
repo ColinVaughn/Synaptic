@@ -510,11 +510,7 @@ fn canonical_path(path: &str) -> String {
     while out.len() > 1 && out.ends_with('/') {
         out.pop();
     }
-    if out.is_empty() {
-        "/".into()
-    } else {
-        out
-    }
+    if out.is_empty() { "/".into() } else { out }
 }
 
 fn sanitize_component(value: &str) -> String {

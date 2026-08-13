@@ -129,13 +129,12 @@ pub fn evaluate_relevance(
                 binding_matched = true;
                 matched_changes.extend(change_ids.iter().cloned());
             }
-            if let Some(member) = &binding.sdk_member {
-                if let Some(change_ids) =
+            if let Some(member) = &binding.sdk_member
+                && let Some(change_ids) =
                     symbol_changes.get(&(package.clone(), member.to_ascii_lowercase()))
-                {
-                    binding_matched = true;
-                    matched_changes.extend(change_ids.iter().cloned());
-                }
+            {
+                binding_matched = true;
+                matched_changes.extend(change_ids.iter().cloned());
             }
         }
         if binding_matched {

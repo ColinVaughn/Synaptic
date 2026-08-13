@@ -1,12 +1,12 @@
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
-use serde_json::{json, Map};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
+use serde_json::{Map, json};
 use synaptic_api::{
-    analyze_api_coverage, analyze_api_coverage_with_runtime, diff_contracts, evaluate_relevance,
-    normalize_openapi, ApiChangeEvent, ApiContract, ApiInventory, ApiMaintenanceConfig, Dependency,
-    DependencyScope, Ecosystem, PackageCoordinate, RuntimeEvidenceReport, RuntimeSurfaceEvidence,
-    RuntimeSurfaceKind, SourceArtifact, VendorRegistry, VersionRange,
+    ApiChangeEvent, ApiContract, ApiInventory, ApiMaintenanceConfig, Dependency, DependencyScope,
+    Ecosystem, PackageCoordinate, RuntimeEvidenceReport, RuntimeSurfaceEvidence,
+    RuntimeSurfaceKind, SourceArtifact, VendorRegistry, VersionRange, analyze_api_coverage,
+    analyze_api_coverage_with_runtime, diff_contracts, evaluate_relevance, normalize_openapi,
 };
 use synaptic_core::{FileType, GraphData, Node, NodeId};
 

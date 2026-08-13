@@ -17,21 +17,20 @@ use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use synaptic_core::{GraphData, NodeId};
 use synaptic_graph::{
-    apply_communities, cluster, link_dynamic_refs, mark_cross_repo_edges,
-    resolve_command_invocations, resolve_parameterized_routes, resolve_pyo3_imports,
-    resolve_pyo3_modules, resolve_route_handlers, resolve_sql_queries, ClusterOptions,
-    KnowledgeGraph,
+    ClusterOptions, KnowledgeGraph, apply_communities, cluster, link_dynamic_refs,
+    mark_cross_repo_edges, resolve_command_invocations, resolve_parameterized_routes,
+    resolve_pyo3_imports, resolve_pyo3_modules, resolve_route_handlers, resolve_sql_queries,
 };
-use synaptic_incremental::{rebuild, ChangeSet, RebuildOptions};
+use synaptic_incremental::{ChangeSet, RebuildOptions, rebuild};
 
 use crate::coordinate::{Coordinate, Ecosystem};
-use crate::discover::{discover_members, members_from_globs, Member};
+use crate::discover::{Member, discover_members, members_from_globs};
 use crate::export_surface::{
-    build_export_surface, load_surface, resolve_cross_repo, CrossRepoReport, ExportSurface,
+    CrossRepoReport, ExportSurface, build_export_surface, load_surface, resolve_cross_repo,
 };
 use crate::federate::compose;
-use crate::manifest::{load_manifest, RepoMember};
-use crate::{load_graph, sanitize_tag, Result, WorkspaceError};
+use crate::manifest::{RepoMember, load_manifest};
+use crate::{Result, WorkspaceError, load_graph, sanitize_tag};
 
 /// How a member's subgraph was obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -637,10 +636,11 @@ mod tests {
             co.cross_repo.extracted + co.cross_repo.inferred,
             "artifact federation resolves the same cross-repo links"
         );
-        assert!(fed
-            .members
-            .iter()
-            .all(|m| m.source == MemberSource::Artifact));
+        assert!(
+            fed.members
+                .iter()
+                .all(|m| m.source == MemberSource::Artifact)
+        );
     }
 
     #[test]
@@ -705,10 +705,12 @@ mod tests {
         let tags: std::collections::BTreeSet<&str> =
             build.members.iter().map(|m| m.tag.as_str()).collect();
         assert!(tags.contains("alpha") && tags.contains("beta"), "{tags:?}");
-        assert!(build
-            .federated
-            .nodes()
-            .any(|n| n.repo.as_deref() == Some("alpha")));
+        assert!(
+            build
+                .federated
+                .nodes()
+                .any(|n| n.repo.as_deref() == Some("alpha"))
+        );
     }
 
     #[test]

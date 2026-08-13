@@ -29,9 +29,9 @@ mod store;
 mod worker;
 
 pub use adapter::{
-    extract_sdk_surface_from_graph, AdapterError, ChangelogAdapter, ConfiguredVendorAdapter,
-    OpenApiAdapter, PackageReleaseAdapter, SdkSurface, SdkSurfaceLoss, StaticAdapter,
-    StripeAdapter, VendorAdapter,
+    AdapterError, ChangelogAdapter, ConfiguredVendorAdapter, OpenApiAdapter, PackageReleaseAdapter,
+    SdkSurface, SdkSurfaceLoss, StaticAdapter, StripeAdapter, VendorAdapter,
+    extract_sdk_surface_from_graph,
 };
 pub use artifact::{
     ArtifactFetchRequest, ArtifactFetcher, FetchArtifactError, FetchedArtifact,
@@ -39,41 +39,42 @@ pub use artifact::{
 };
 
 pub use behavior::{
-    import_behavioral_evidence, BehavioralEvidenceError, BehavioralEvidenceReport,
-    BehavioralObservation, BehavioralOutcome, BehavioralRegressionCandidate,
+    BehavioralEvidenceError, BehavioralEvidenceReport, BehavioralObservation, BehavioralOutcome,
+    BehavioralRegressionCandidate, import_behavioral_evidence,
 };
 pub use binding::{
-    bind_direct_http_usages, bind_repository_api_usages,
-    bind_repository_api_usages_with_dependencies, bind_sdk_dependencies, bind_sdk_usages,
-    ApiBindingReport, API_OPERATION_NODE_TYPE, API_VENDOR_NODE_TYPE,
+    API_OPERATION_NODE_TYPE, API_VENDOR_NODE_TYPE, ApiBindingReport, bind_direct_http_usages,
+    bind_repository_api_usages, bind_repository_api_usages_with_dependencies,
+    bind_sdk_dependencies, bind_sdk_usages,
 };
 pub use brief::{
-    build_repair_brief, impact_from_nodes, ApiImpactForecast, ApiImpactHit, BriefBudget,
-    BriefError, MemoryEvidence, RepairBrief, RepairBriefRequest, SourceSlice,
-    VerificationRequirement,
+    ApiImpactForecast, ApiImpactHit, BriefBudget, BriefError, MemoryEvidence, RepairBrief,
+    RepairBriefRequest, SourceSlice, VerificationRequirement, build_repair_brief,
+    impact_from_nodes,
 };
 pub use catalog::{
     CachedPackageMetadataResolver, PackageMetadata, PackageMetadataError, PackageMetadataResolver,
 };
 pub use config::{
-    load_optional_registry, maintenance_policy_digest, ApiMaintenanceConfig, CommandPolicy,
-    ConfigError, ConfigLoadError, CoveragePolicy, CoverageWaiver, MaintenanceMode, PublishPolicy,
-    SdkBindingRule, VendorConfig, VendorMatch, VendorRegistry, VendorSource, DEFAULT_CONFIG_PATH,
+    ApiMaintenanceConfig, CommandPolicy, ConfigError, ConfigLoadError, CoveragePolicy,
+    CoverageWaiver, DEFAULT_CONFIG_PATH, MaintenanceMode, PublishPolicy, SdkBindingRule,
+    VendorConfig, VendorMatch, VendorRegistry, VendorSource, load_optional_registry,
+    maintenance_policy_digest,
 };
 pub use contract::{
-    diff_contracts, normalize_contract, normalize_openapi, ApiContract, AutoSurfaceReader,
-    CompatibilityPolicy, ContractError, ContractOperation, DefaultCompatibilityPolicy, FieldShape,
-    ParseCompleteness, SurfaceFormat, SurfaceLoss, SurfaceReader,
+    ApiContract, AutoSurfaceReader, CompatibilityPolicy, ContractError, ContractOperation,
+    DefaultCompatibilityPolicy, FieldShape, ParseCompleteness, SurfaceFormat, SurfaceLoss,
+    SurfaceReader, diff_contracts, normalize_contract, normalize_openapi,
 };
 pub use coverage::{
+    ApiCoverageReport, CoverageGap, CoverageGapKind, CoverageState, EXTERNAL_SURFACE_NODE_TYPE,
+    EvidenceWindow, ExternalSurfaceKind, ExternalSurfaceObservation, OBSERVES_EXTERNAL_RELATION,
     analyze_api_coverage, analyze_api_coverage_with_evidence, analyze_api_coverage_with_runtime,
-    attach_api_coverage, attach_api_coverage_with_evidence, ApiCoverageReport, CoverageGap,
-    CoverageGapKind, CoverageState, EvidenceWindow, ExternalSurfaceKind,
-    ExternalSurfaceObservation, EXTERNAL_SURFACE_NODE_TYPE, OBSERVES_EXTERNAL_RELATION,
+    attach_api_coverage, attach_api_coverage_with_evidence,
 };
 pub use discovery::{
-    candidate_profile_toml, discover_contracts, ContractDiscoveryReport, DiscoveredContract,
-    DiscoveryError, RejectedContractCandidate,
+    ContractDiscoveryReport, DiscoveredContract, DiscoveryError, RejectedContractCandidate,
+    candidate_profile_toml, discover_contracts,
 };
 pub use evaluation::{HistoricalCaseObservation, HistoricalEvaluationReport};
 pub use event::{
@@ -81,45 +82,45 @@ pub use event::{
     SourceArtifact, VersionRange,
 };
 pub use handoff::{HandoffError, VerifiedRunHandoff};
-pub use invariants::{verify_api_invariants, ApiInvariantReport, InvariantCheck};
+pub use invariants::{ApiInvariantReport, InvariantCheck, verify_api_invariants};
 pub use inventory::{
-    inventory, is_sbom_manifest, scan_dependencies, scan_dependencies_and_sbom_evidence,
-    scan_graph_dependency_evidence, scan_sbom_evidence, AmbiguousVendorDependency, ApiInventory,
-    ExternalServiceEvidence, InventoryError, SbomCompleteness, SbomDocumentEvidence,
-    SbomEvidenceReport, VendorDependency,
+    AmbiguousVendorDependency, ApiInventory, ExternalServiceEvidence, InventoryError,
+    SbomCompleteness, SbomDocumentEvidence, SbomEvidenceReport, VendorDependency, inventory,
+    is_sbom_manifest, scan_dependencies, scan_dependencies_and_sbom_evidence,
+    scan_graph_dependency_evidence, scan_sbom_evidence,
 };
 pub use ledger::{ApiRunRecord, ApiRunStore, LedgerError, RunState};
 pub use model::{
     ApiOperationAnchor, Dependency, DependencyScope, Ecosystem, PackageCoordinate, PackageUrl,
 };
-pub use patch_policy::{validate_patch, PatchInspection, PatchPolicy, PatchPolicyError};
+pub use patch_policy::{PatchInspection, PatchPolicy, PatchPolicyError, validate_patch};
 pub use publisher::{
+    ChangeRequestKind, ChangeRequestProvider, CommandOutput, DraftPublishRequest, PublishAction,
+    PublishCommandRunner, PublishContext, PublishError, PublishResult, SystemPublishCommandRunner,
     deterministic_branch, deterministic_vulnerability_branch, publish_verified_change_request,
-    publish_verified_draft, publish_verified_vulnerability_change_request, ChangeRequestKind,
-    ChangeRequestProvider, CommandOutput, DraftPublishRequest, PublishAction, PublishCommandRunner,
-    PublishContext, PublishError, PublishResult, SystemPublishCommandRunner,
+    publish_verified_draft, publish_verified_vulnerability_change_request,
 };
 pub use relevance::{
-    evaluate_relevance, usage_bindings, ApiUsageBinding, ApplicabilityReason, ApplicabilityState,
-    BindingBasis, RelevanceAssessment,
+    ApiUsageBinding, ApplicabilityReason, ApplicabilityState, BindingBasis, RelevanceAssessment,
+    evaluate_relevance, usage_bindings,
 };
 pub use repair::{
-    failed_attempt_summary, run_repair_attempts, GateOutcome, GateResult, GeneratedPatch,
-    PatchGenerationError, PatchGenerator, PatchVerifier, RepairAttempt, RepairError, RepairFailure,
-    RepairOutcome, VerificationReport,
+    GateOutcome, GateResult, GeneratedPatch, PatchGenerationError, PatchGenerator, PatchVerifier,
+    RepairAttempt, RepairError, RepairFailure, RepairOutcome, VerificationReport,
+    failed_attempt_summary, run_repair_attempts,
 };
 pub use runtime::{
-    import_runtime_evidence, RuntimeEvidenceError, RuntimeEvidenceReport, RuntimeSurfaceEvidence,
-    RuntimeSurfaceKind,
+    RuntimeEvidenceError, RuntimeEvidenceReport, RuntimeSurfaceEvidence, RuntimeSurfaceKind,
+    import_runtime_evidence,
 };
 pub use scan::{
-    sanitize_release_text, scan_repository, ReviewCandidate, ScanDisposition, ScanError,
-    ScanReport, ScannedSource, WebhookArtifactEnvelope,
+    ReviewCandidate, ScanDisposition, ScanError, ScanReport, ScannedSource,
+    WebhookArtifactEnvelope, sanitize_release_text, scan_repository,
 };
 pub use store::{ApiEventStore, SourceLockState, StoreError};
 pub use worker::{
-    build_coordination_plan, credential_scope_for_stage, execute_worker_attempt, BoundedJobQueue,
-    CancellationToken, CoordinatedRepositoryRepair, CoordinationPlan, CredentialScope,
-    HostedApiJob, JobStage, QueueError, RepositoryImpact, RetryPolicy, WorkerAttemptOutcome,
-    WorkerEvent, WorkerEventSink, WorkerEventState, WorkerJobRunner,
+    BoundedJobQueue, CancellationToken, CoordinatedRepositoryRepair, CoordinationPlan,
+    CredentialScope, HostedApiJob, JobStage, QueueError, RepositoryImpact, RetryPolicy,
+    WorkerAttemptOutcome, WorkerEvent, WorkerEventSink, WorkerEventState, WorkerJobRunner,
+    build_coordination_plan, credential_scope_for_stage, execute_worker_attempt,
 };

@@ -4,7 +4,7 @@
 //! that duplicates an AST symbol onto the AST node.
 
 use serde_json::{Map, Value};
-use synaptic_core::{make_id, Confidence, Edge, FileType, Node, NodeId};
+use synaptic_core::{Confidence, Edge, FileType, Node, NodeId, make_id};
 use synaptic_llm::Fragment;
 
 const CORE_NODE_KEYS: &[&str] = &[

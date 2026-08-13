@@ -436,12 +436,14 @@ mod tests {
         )
         .unwrap();
 
-        assert!(session.path().starts_with(
-            repo.path()
-                .canonicalize()
-                .unwrap()
-                .join("synaptic-out/vuln-maintenance/worktrees")
-        ));
+        assert!(
+            session.path().starts_with(
+                repo.path()
+                    .canonicalize()
+                    .unwrap()
+                    .join("synaptic-out/vuln-maintenance/worktrees")
+            )
+        );
         assert_eq!(
             session.branch(),
             "synaptic/vuln/vuln_finding_abcdef0123456789"

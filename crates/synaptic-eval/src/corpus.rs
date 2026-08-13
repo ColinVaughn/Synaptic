@@ -10,10 +10,10 @@ use std::path::Path;
 
 use synaptic_core::{GraphData, NodeId};
 use synaptic_graph::KnowledgeGraph;
-use synaptic_incremental::{rebuild, ChangeSet, RebuildOptions};
-use synaptic_query::{affected_nodes, DEFAULT_AFFECTED_RELATIONS};
+use synaptic_incremental::{ChangeSet, RebuildOptions, rebuild};
+use synaptic_query::{DEFAULT_AFFECTED_RELATIONS, affected_nodes};
 
-use crate::groundtruth::{resolve_label, GroundTruth, Manifest};
+use crate::groundtruth::{GroundTruth, Manifest, resolve_label};
 
 /// Precision / recall / F1 from set-comparison counts.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
@@ -292,10 +292,10 @@ pub fn score_blast_radius(gd: &GraphData, gt: &GroundTruth) -> BlastScore {
         }
         for label in &b.not_affected {
             score.distractors_total += 1;
-            if let Some(NodeId(id)) = resolve_label(gd, label) {
-                if reached.contains(&id) {
-                    score.distractors_hit += 1;
-                }
+            if let Some(NodeId(id)) = resolve_label(gd, label)
+                && reached.contains(&id)
+            {
+                score.distractors_hit += 1;
             }
         }
     }
@@ -339,10 +339,10 @@ pub fn score_affected_tests(gd: &GraphData, gt: &GroundTruth) -> PrF1 {
         let test_id = resolve_label(gd, &tl.test);
         for covered in &tl.covers {
             let reached = reached_from(covered);
-            if let Some(t) = &test_id {
-                if reached.contains(&t.0) {
-                    pr.false_positive += 1;
-                }
+            if let Some(t) = &test_id
+                && reached.contains(&t.0)
+            {
+                pr.false_positive += 1;
             }
         }
     }

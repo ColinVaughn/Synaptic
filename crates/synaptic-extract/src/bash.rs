@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 
 #[cfg(feature = "lang-bash")]
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 #[cfg(feature = "lang-bash")]
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -132,12 +132,11 @@ impl<'tree> Bash<'_, 'tree> {
             }
             "command" => {
                 // `source x` / `. x` imports the sourced script's base name.
-                if let Some(name) = self.command_name(node) {
-                    if matches!(name.as_str(), "source" | ".") {
-                        if let Some(arg) = self.first_arg(node) {
-                            self.emit_source_import(&arg, Self::line(node));
-                        }
-                    }
+                if let Some(name) = self.command_name(node)
+                    && matches!(name.as_str(), "source" | ".")
+                    && let Some(arg) = self.first_arg(node)
+                {
+                    self.emit_source_import(&arg, Self::line(node));
                 }
                 for c in Self::children(node) {
                     self.walk(c, depth + 1);
@@ -226,13 +225,13 @@ impl<'tree> Bash<'_, 'tree> {
         if node.kind() == "function_definition" {
             return; // don't descend into a nested function's body
         }
-        if node.kind() == "command" {
-            if let Some(name) = self.command_name(node) {
-                if !name.is_empty() && !BASH_BUILTINS.contains(&name.as_str()) {
-                    self.b
-                        .resolve_call(caller, &name, false, Self::line(node), index, seen, true);
-                }
-            }
+        if node.kind() == "command"
+            && let Some(name) = self.command_name(node)
+            && !name.is_empty()
+            && !BASH_BUILTINS.contains(&name.as_str())
+        {
+            self.b
+                .resolve_call(caller, &name, false, Self::line(node), index, seen, true);
         }
         for c in Self::children(node) {
             self.walk_calls(c, caller, index, seen, depth + 1);

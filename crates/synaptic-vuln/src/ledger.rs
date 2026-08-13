@@ -287,7 +287,7 @@ fn record_path(root: &Path, id: &str) -> Result<PathBuf, LedgerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::applicability::{assess_applicability, ApplicabilityInput};
+    use crate::applicability::{ApplicabilityInput, assess_applicability};
     use crate::matching::VersionMatch;
     use crate::plan::{CompatibilityRisk, RemediationKind, RemediationPlan, VersionAvailability};
     use crate::severity::{Priority, SeverityAssessment, SeverityBand, SeverityScoreSource};

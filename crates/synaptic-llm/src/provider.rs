@@ -1,7 +1,7 @@
 //! The LLM client abstraction and an OpenAI-compatible backend.
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::error::LlmError;
 
@@ -145,10 +145,10 @@ impl OpenAiCompat {
             "max_tokens": self.max_tokens,
         });
         // Reasoning models (o1/o3/o4/gpt-5) reject an explicit temperature; omit it.
-        if let Some(t) = self.temperature {
-            if !model_requires_default_temperature(&self.model) {
-                body["temperature"] = json!(t);
-            }
+        if let Some(t) = self.temperature
+            && !model_requires_default_temperature(&self.model)
+        {
+            body["temperature"] = json!(t);
         }
 
         let req = self.client.post(self.endpoint_url()).json(&body);
@@ -220,10 +220,10 @@ impl OpenAiCompat {
             // Ask the final chunk to carry usage so cost accounting still works.
             "stream_options": {"include_usage": true},
         });
-        if let Some(t) = self.temperature {
-            if !model_requires_default_temperature(&self.model) {
-                body["temperature"] = json!(t);
-            }
+        if let Some(t) = self.temperature
+            && !model_requires_default_temperature(&self.model)
+        {
+            body["temperature"] = json!(t);
         }
 
         let req = self.client.post(self.endpoint_url()).json(&body);
@@ -539,8 +539,7 @@ mod tests {
         let server = MockServer::start().await;
         // A canonical OpenAI SSE stream: two content deltas, a finish chunk, then
         // a usage-only chunk (include_usage), then [DONE].
-        let sse =
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n\
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n\
             data: {\"choices\":[{\"delta\":{\"content\":\" world\"},\"finish_reason\":null}]}\n\n\
             data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
             data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n\

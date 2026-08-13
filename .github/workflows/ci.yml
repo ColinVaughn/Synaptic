@@ -21,9 +21,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      # ponytail: Rust 2024 exposes ~200 legacy nested-if style warnings; remove
-      # this exception after a dedicated let-chain formatting pass.
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings -A clippy::collapsible-if
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   test:
     strategy:

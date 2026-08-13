@@ -63,8 +63,7 @@ mod tests {
 
     #[test]
     fn parses_pg_seq_scan_and_cost() {
-        let explain =
-            "Seq Scan on orders  (cost=0.00..431.00 rows=25000 width=44)\n  Filter: (tenant_id = 1)";
+        let explain = "Seq Scan on orders  (cost=0.00..431.00 rows=25000 width=44)\n  Filter: (tenant_id = 1)";
         let p = parse_pg_explain(explain);
         assert!(p.seq_scan);
         assert_eq!(p.est_cost, Some(431.00));

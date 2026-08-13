@@ -343,6 +343,6 @@ Run the release gates with:
 
 ```text
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings -A clippy::collapsible-if
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
 ```

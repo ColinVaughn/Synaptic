@@ -15,7 +15,7 @@ use std::sync::LazyLock;
 #[cfg(feature = "lang-markdown")]
 use regex::Regex;
 #[cfg(feature = "lang-markdown")]
-use synaptic_core::{make_id, FileType, NodeId};
+use synaptic_core::{FileType, NodeId, make_id};
 
 #[cfg(feature = "lang-markdown")]
 use crate::common::Builder;

@@ -7,7 +7,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn send(stdin: &mut ChildStdin, v: &Value) {
     writeln!(stdin, "{v}").unwrap();

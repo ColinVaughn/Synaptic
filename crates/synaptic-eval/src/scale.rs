@@ -19,7 +19,7 @@ use std::time::Instant;
 use serde::Deserialize;
 
 use synaptic_core::GraphData;
-use synaptic_incremental::{rebuild, ChangeSet, RebuildOptions};
+use synaptic_incremental::{ChangeSet, RebuildOptions, rebuild};
 
 /// One pinned external repository.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -310,10 +310,10 @@ pub fn run_scale(
     let mut results = Vec::new();
     let mut skipped = Vec::new();
     for repo in &manifest.repos {
-        if let Some(t) = tier_filter {
-            if repo.tier != t {
-                continue;
-            }
+        if let Some(t) = tier_filter
+            && repo.tier != t
+        {
+            continue;
         }
         match ensure_checkout(cache_dir, repo).and_then(|dir| measure(&dir, repo, reps)) {
             Ok(r) => results.push(r),

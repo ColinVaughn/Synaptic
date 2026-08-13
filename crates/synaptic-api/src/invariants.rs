@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use synaptic_core::{NodeId, Visibility};
-use synaptic_graph::{find_import_cycles, KnowledgeGraph};
+use synaptic_graph::{KnowledgeGraph, find_import_cycles};
 
 use crate::{ApiChangeEvent, RelevanceAssessment};
 

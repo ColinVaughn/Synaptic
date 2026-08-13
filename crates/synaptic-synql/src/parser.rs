@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use crate::ast::*;
-use crate::lexer::{lex, Spanned, Tok};
+use crate::lexer::{Spanned, Tok, lex};
 
 /// Parse a SYNQL query string.
 pub fn parse(input: &str) -> Result<Query, String> {
@@ -209,28 +209,27 @@ impl Parser {
 
     fn ret_item(&mut self) -> Result<RetItem, String> {
         // `count(...)`: only an aggregate when the ident `count` is followed by '('.
-        if let Some(Tok::Ident(w)) = self.peek() {
-            if w.eq_ignore_ascii_case("count")
-                && self.toks.get(self.pos + 1).map(|s| &s.tok) == Some(&Tok::LParen)
-            {
-                self.pos += 1; // count
-                self.expect(&Tok::LParen, "'('")?;
-                let arg = match self.peek() {
-                    Some(Tok::Star) => {
-                        self.pos += 1;
-                        None
-                    }
-                    Some(Tok::Ident(_)) => Some(self.ident()?),
-                    _ => {
-                        return Err(format!(
-                            "expected a variable or '*' but found {}",
-                            self.at()
-                        ))
-                    }
-                };
-                self.expect(&Tok::RParen, "')'")?;
-                return Ok(RetItem::Count(arg));
-            }
+        if let Some(Tok::Ident(w)) = self.peek()
+            && w.eq_ignore_ascii_case("count")
+            && self.toks.get(self.pos + 1).map(|s| &s.tok) == Some(&Tok::LParen)
+        {
+            self.pos += 1; // count
+            self.expect(&Tok::LParen, "'('")?;
+            let arg = match self.peek() {
+                Some(Tok::Star) => {
+                    self.pos += 1;
+                    None
+                }
+                Some(Tok::Ident(_)) => Some(self.ident()?),
+                _ => {
+                    return Err(format!(
+                        "expected a variable or '*' but found {}",
+                        self.at()
+                    ));
+                }
+            };
+            self.expect(&Tok::RParen, "')'")?;
+            return Ok(RetItem::Count(arg));
         }
         let var = self.ident()?;
         if self.peek() == Some(&Tok::Dot) {
@@ -302,7 +301,7 @@ impl Parser {
                 return Err(format!(
                     "expected a modifier string but found {}",
                     self.at()
-                ))
+                ));
             }
         };
         self.expect(&Tok::RParen, "')'")?;
@@ -357,10 +356,10 @@ fn validate(q: &Query) -> Result<(), String> {
         .filter_map(|n| n.var.as_deref())
         .collect();
     for item in &q.ret {
-        if let Some(v) = item.var() {
-            if !bound.contains(v) {
-                return Err(format!("RETURN variable '{v}' is not bound by the pattern"));
-            }
+        if let Some(v) = item.var()
+            && !bound.contains(v)
+        {
+            return Err(format!("RETURN variable '{v}' is not bound by the pattern"));
         }
     }
     if let Some(e) = &q.where_ {

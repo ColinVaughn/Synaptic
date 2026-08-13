@@ -5,7 +5,7 @@
 //! alias). The bounded walk and member resolution live in [`crate::alias`]; this module
 //! only turns one file's `imports` object into `RawAlias` entries.
 
-use crate::alias::{named_object, object_pairs, AliasKind, RawAlias};
+use crate::alias::{AliasKind, RawAlias, named_object, object_pairs};
 
 /// Append an exact `RawAlias` per entry of the first `imports` object in `text`.
 /// Tolerant of JSON importmaps and the JS object-literal (template-literal) form.
@@ -46,9 +46,10 @@ mod tests {
               "single-spa": `${url}/root-config/dist/single-spa.js`
             }}</script>"#;
         let m = aliases(text);
-        assert!(m
-            .iter()
-            .any(|(a, t)| a == "@acme/Hub" && t[0].contains("hub/dist")));
+        assert!(
+            m.iter()
+                .any(|(a, t)| a == "@acme/Hub" && t[0].contains("hub/dist"))
+        );
         assert!(m.iter().any(|(a, _)| a == "single-spa"));
     }
 

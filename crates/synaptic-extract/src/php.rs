@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 #[cfg(feature = "lang-php")]
-use synaptic_core::{make_id, FileType, NodeId};
+use synaptic_core::{FileType, NodeId, make_id};
 #[cfg(feature = "lang-php")]
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -197,10 +197,9 @@ impl<'tree> PhpFw<'_> {
                 | "interface_declaration"
                 | "trait_declaration"
                 | "enum_declaration"
-        ) {
-            if let Some(name) = self.name_of(node) {
-                self.in_file_classes.insert(name);
-            }
+        ) && let Some(name) = self.name_of(node)
+        {
+            self.in_file_classes.insert(name);
         }
         for c in Self::children(node) {
             self.collect_classes(c, depth + 1);

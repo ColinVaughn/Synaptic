@@ -16,10 +16,10 @@ use serde::{Deserialize, Serialize};
 
 use synaptic_history::git;
 
-use crate::detect::{detect_command_plan, DetectedCommandPlan, DetectedCommands};
-use crate::run::{expand_template, run_command, tail_lines, CommandResult, CommandStatus};
-use crate::worktree::Worktree;
 use crate::SandboxError;
+use crate::detect::{DetectedCommandPlan, DetectedCommands, detect_command_plan};
+use crate::run::{CommandResult, CommandStatus, expand_template, run_command, tail_lines};
+use crate::worktree::Worktree;
 
 /// On-disk schema version for a speculate report.
 pub const SPECULATE_VERSION: u32 = 1;
@@ -620,14 +620,18 @@ mod tests {
                 .and_then(|plan| plan.language.as_deref()),
             Some("rust")
         );
-        assert!(report
-            .check
-            .as_ref()
-            .is_some_and(|check| check.command.contains("cargo build")));
-        assert!(report
-            .tests
-            .iter()
-            .any(|test| test.command.contains("cargo test")));
+        assert!(
+            report
+                .check
+                .as_ref()
+                .is_some_and(|check| check.command.contains("cargo build"))
+        );
+        assert!(
+            report
+                .tests
+                .iter()
+                .any(|test| test.command.contains("cargo test"))
+        );
     }
 
     #[test]

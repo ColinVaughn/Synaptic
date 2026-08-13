@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use synaptic_core::{Confidence, FileType, GraphData, NodeId};
 
 use crate::coordinate::{Coordinate, Ecosystem};
-use crate::{check_size, Result, WorkspaceError, SURFACE_SCHEMA_VERSION};
+use crate::{Result, SURFACE_SCHEMA_VERSION, WorkspaceError, check_size};
 
 /// One exported symbol: an importable name and the member-local node it resolves
 /// to.
@@ -222,13 +222,12 @@ fn resolve_label(
     // Coordinate match: longest coordinate wins.
     let mut best: Option<(&MemberIndex, String)> = None;
     for m in members {
-        if let Some(rem) = strip_coordinate(imported, &m.match_name) {
-            if best
+        if let Some(rem) = strip_coordinate(imported, &m.match_name)
+            && best
                 .as_ref()
                 .is_none_or(|(b, _)| b.match_name.len() < m.match_name.len())
-            {
-                best = Some((m, rem));
-            }
+        {
+            best = Some((m, rem));
         }
     }
     if let Some((member, remaining)) = best {
@@ -631,7 +630,7 @@ mod tests {
         assert!(e.cross_repo);
         assert_eq!(e.confidence, Confidence::Inferred);
         assert_eq!(e.target.0, "repob::Ledger"); // anchor (only symbol)
-                                                 // The matched stub is gone (orphaned).
+        // The matched stub is gone (orphaned).
         assert!(!g.nodes.iter().any(|n| n.id.0 == "repoa::billing"));
     }
 

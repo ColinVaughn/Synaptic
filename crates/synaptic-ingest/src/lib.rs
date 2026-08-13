@@ -25,12 +25,12 @@ pub mod url;
 
 pub use cargo_manifest::introspect_cargo;
 pub use mcp::ingest_mcp_config;
-pub use pg::{build_postgres_graph, introspect_postgres, PgError, PgSchema, SchemaSource};
+pub use pg::{PgError, PgSchema, SchemaSource, build_postgres_graph, introspect_postgres};
 pub use scip::ingest_scip_json;
 pub use security::{
-    safe_fetch, safe_fetch_response, safe_fetch_text, validate_url, FetchError, SafeFetchResponse,
+    FetchError, SafeFetchResponse, safe_fetch, safe_fetch_response, safe_fetch_text, validate_url,
 };
-pub use url::{detect_url_type, ingest_url, yaml_str, UrlKind};
+pub use url::{UrlKind, detect_url_type, ingest_url, yaml_str};
 
 #[cfg(feature = "gws")]
 pub use gws::{gws_export_args, ingest_gdoc, is_gws_pointer, parse_gws_pointer};
@@ -45,8 +45,8 @@ pub use pg::SystemPostgres;
 
 use std::path::Path;
 
-use serde_json::{json, Map};
-use synaptic_core::{sanitize_label, Confidence, Edge, FileType, Node, NodeId};
+use serde_json::{Map, json};
+use synaptic_core::{Confidence, Edge, FileType, Node, NodeId, sanitize_label};
 
 /// Nodes + edges produced by a "shape B" source (mcp-config, cargo).
 #[derive(Debug, Default, Clone, PartialEq)]

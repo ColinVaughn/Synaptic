@@ -7,9 +7,9 @@
 
 use std::path::Path;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
-use synaptic_workspace::scan::{discover_sibling_repos, ScanOptions};
+use synaptic_workspace::scan::{ScanOptions, discover_sibling_repos};
 
 fn write(dir: &Path, rel: &str, body: &str) {
     let p = dir.join(rel);

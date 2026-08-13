@@ -104,20 +104,20 @@ fn referenced_tables(sql: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     if let Ok(stmts) = Parser::parse_sql(&GenericDialect {}, sql) {
         for stmt in stmts {
-            if let Statement::Query(q) = stmt {
-                if let SetExpr::Select(select) = *q.body {
-                    for twj in select.from {
-                        if let TableFactor::Table { name, .. } = twj.relation {
-                            if let Some(p) = name.0.last() {
-                                out.push(last_ident(&p.to_string()));
-                            }
-                        }
-                        for j in twj.joins {
-                            if let TableFactor::Table { name, .. } = j.relation {
-                                if let Some(p) = name.0.last() {
-                                    out.push(last_ident(&p.to_string()));
-                                }
-                            }
+            if let Statement::Query(q) = stmt
+                && let SetExpr::Select(select) = *q.body
+            {
+                for twj in select.from {
+                    if let TableFactor::Table { name, .. } = twj.relation
+                        && let Some(p) = name.0.last()
+                    {
+                        out.push(last_ident(&p.to_string()));
+                    }
+                    for j in twj.joins {
+                        if let TableFactor::Table { name, .. } = j.relation
+                            && let Some(p) = name.0.last()
+                        {
+                            out.push(last_ident(&p.to_string()));
                         }
                     }
                 }

@@ -8,7 +8,7 @@ use std::io;
 use std::path::Path;
 
 use synaptic_core::{Confidence, NodeId};
-use synaptic_graph::{cohesion_score, KnowledgeGraph};
+use synaptic_graph::{KnowledgeGraph, cohesion_score};
 
 use crate::common::degrees;
 
@@ -36,11 +36,7 @@ fn safe_name(label: &str) -> String {
         })
         .collect();
     let s = s.trim().trim_end_matches('.').trim().to_string();
-    if s.is_empty() {
-        "node".to_string()
-    } else {
-        s
-    }
+    if s.is_empty() { "node".to_string() } else { s }
 }
 
 /// Write a wiki under `dir`: `index.md`, `community-<id>.md`, and a page per god

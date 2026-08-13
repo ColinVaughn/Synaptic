@@ -1,6 +1,6 @@
 use synaptic_api::{
-    candidate_profile_toml, discover_contracts, normalize_contract, ApiMaintenanceConfig,
-    ParseCompleteness, SurfaceFormat,
+    ApiMaintenanceConfig, ParseCompleteness, SurfaceFormat, candidate_profile_toml,
+    discover_contracts, normalize_contract,
 };
 
 fn operation_protocol(source: &str) -> (String, SurfaceFormat, String) {
@@ -22,10 +22,12 @@ fn auto_detects_asyncapi_and_openrpc() {
     let contract = normalize_contract("acme", asyncapi.as_bytes()).unwrap();
     assert_eq!(contract.format, SurfaceFormat::AsyncApi);
     assert_eq!(contract.completeness, ParseCompleteness::Partial);
-    assert!(contract
-        .losses
-        .iter()
-        .any(|loss| loss.reason.contains("format-specific policy")));
+    assert!(
+        contract
+            .losses
+            .iter()
+            .any(|loss| loss.reason.contains("format-specific policy"))
+    );
     let operation = &contract.operations["publishOrder"];
     assert_eq!(operation.anchor.protocol, "asyncapi");
     assert!(operation.request_fields["id"].required);

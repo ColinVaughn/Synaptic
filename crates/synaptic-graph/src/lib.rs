@@ -15,19 +15,19 @@ mod minhash;
 pub mod symbol_resolution;
 
 pub use analyze::{
-    analyze, find_import_cycles, god_nodes, god_nodes_with_extra, graph_diff, graph_stats,
-    strongly_connected_components, suggest_questions, surprising_connections, AnalysisResult,
-    GodNode, GraphDelta, GraphStats, ImportCycle, Question, Surprise,
+    AnalysisResult, GodNode, GraphDelta, GraphStats, ImportCycle, Question, Surprise, analyze,
+    find_import_cycles, god_nodes, god_nodes_with_extra, graph_diff, graph_stats,
+    strongly_connected_components, suggest_questions, surprising_connections,
 };
-pub use build::{build_from_parts, guard_shrink, BuildOptions};
+pub use build::{BuildOptions, build_from_parts, guard_shrink};
 pub use cluster::{
-    apply_communities, cluster, cohesion_score, partition_cohesion_scores,
-    remap_communities_to_previous, Algorithm, ClusterOptions,
+    Algorithm, ClusterOptions, apply_communities, cluster, cohesion_score,
+    partition_cohesion_scores, remap_communities_to_previous,
 };
 pub use cross_language::{
-    mark_cross_repo_edges, resolve_command_invocations, resolve_parameterized_routes,
-    resolve_pyo3_imports, resolve_pyo3_modules, resolve_route_handlers, resolve_sql_queries,
-    CROSS_LANGUAGE_RELATIONS,
+    CROSS_LANGUAGE_RELATIONS, mark_cross_repo_edges, resolve_command_invocations,
+    resolve_parameterized_routes, resolve_pyo3_imports, resolve_pyo3_modules,
+    resolve_route_handlers, resolve_sql_queries,
 };
 pub use dedup::{
     ambiguous_concept_pairs, deduplicate_entities, deterministic_tiebreak,
@@ -35,6 +35,6 @@ pub use dedup::{
 };
 pub use dynamic_link::link_dynamic_refs;
 pub use error::GraphError;
-pub use graph::{is_structural_edge, is_structural_node, KnowledgeGraph};
+pub use graph::{KnowledgeGraph, is_structural_edge, is_structural_node};
 pub use ids::{norm_source_file, normalize_id};
 pub use symbol_resolution::resolve_symbols;

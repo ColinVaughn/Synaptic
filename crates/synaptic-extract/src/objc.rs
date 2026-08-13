@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 #[cfg(feature = "lang-objc")]
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 #[cfg(feature = "lang-objc")]
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -179,13 +179,12 @@ impl<'tree> ObjC<'_, 'tree> {
         self.b.add_node(m.clone(), format!(".{name}()"), line);
         self.b
             .add_edge(class_nid.clone(), m.clone(), "method", line, None);
-        if with_body {
-            if let Some(body) = Self::children(node)
+        if with_body
+            && let Some(body) = Self::children(node)
                 .into_iter()
                 .find(|c| c.kind() == "compound_statement")
-            {
-                self.function_bodies.push((m, body));
-            }
+        {
+            self.function_bodies.push((m, body));
         }
     }
 
@@ -227,13 +226,13 @@ impl<'tree> ObjC<'_, 'tree> {
         if matches!(node.kind(), "method_definition" | "method_declaration") {
             return;
         }
-        if node.kind() == "message_expression" {
-            if let Some(method) = node.child_by_field_name("method") {
-                let callee = self.text(method);
-                if !callee.is_empty() {
-                    self.b
-                        .resolve_call(caller, &callee, true, Self::line(node), index, seen, true);
-                }
+        if node.kind() == "message_expression"
+            && let Some(method) = node.child_by_field_name("method")
+        {
+            let callee = self.text(method);
+            if !callee.is_empty() {
+                self.b
+                    .resolve_call(caller, &callee, true, Self::line(node), index, seen, true);
             }
         }
         for c in Self::children(node) {

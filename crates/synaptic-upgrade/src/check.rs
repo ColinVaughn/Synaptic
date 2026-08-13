@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use crate::config::{config_path, UpdateConfig};
-use crate::github::{latest_release, Release};
+use crate::config::{UpdateConfig, config_path};
+use crate::github::{Release, latest_release};
 use crate::version::version_is_newer;
 
 /// Current epoch seconds (lives here so deterministic code stays clock-free).

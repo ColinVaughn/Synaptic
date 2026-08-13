@@ -1,12 +1,12 @@
 use std::fs;
 
-use serde_json::{json, Map};
+use serde_json::{Map, json};
 use synaptic_api::{
-    bind_direct_http_usages, bind_repository_api_usages, bind_sdk_dependencies, bind_sdk_usages,
-    ApiMaintenanceConfig, Dependency, DependencyScope, Ecosystem, PackageCoordinate,
-    VendorRegistry, API_OPERATION_NODE_TYPE, API_VENDOR_NODE_TYPE,
+    API_OPERATION_NODE_TYPE, API_VENDOR_NODE_TYPE, ApiMaintenanceConfig, Dependency,
+    DependencyScope, Ecosystem, PackageCoordinate, VendorRegistry, bind_direct_http_usages,
+    bind_repository_api_usages, bind_sdk_dependencies, bind_sdk_usages,
 };
-use synaptic_core::{make_id, Confidence, Edge, FileType, Node, NodeId};
+use synaptic_core::{Confidence, Edge, FileType, Node, NodeId, make_id};
 
 fn registry(source: &str) -> VendorRegistry {
     VendorRegistry::new(ApiMaintenanceConfig::parse(source).unwrap()).unwrap()
@@ -123,9 +123,11 @@ hosts = ["api.other.test"]
         .collect();
     assert_eq!(operation_nodes.len(), 2);
     assert_ne!(operation_nodes[0].id, operation_nodes[1].id);
-    assert!(operation_nodes
-        .iter()
-        .all(|node| node.extra["canonical_path"] == "/v1/charges"));
+    assert!(
+        operation_nodes
+            .iter()
+            .all(|node| node.extra["canonical_path"] == "/v1/charges")
+    );
     assert_eq!(
         edges
             .iter()

@@ -14,13 +14,13 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rayon::prelude::*;
-use synaptic_detect::{detect, FileType};
+use synaptic_detect::{FileType, detect};
 use synaptic_extract::{cached_extract_source, load_alias_resolver, resolve_imports};
 use synaptic_graph::{
-    analyze, apply_communities, build_from_parts, cluster, deduplicate_entities,
-    deterministic_tiebreak_candidates, link_dynamic_refs, merge_pairs, resolve_command_invocations,
-    resolve_parameterized_routes, resolve_pyo3_imports, resolve_pyo3_modules,
-    resolve_route_handlers, resolve_sql_queries, resolve_symbols, BuildOptions, ClusterOptions,
+    BuildOptions, ClusterOptions, analyze, apply_communities, build_from_parts, cluster,
+    deduplicate_entities, deterministic_tiebreak_candidates, link_dynamic_refs, merge_pairs,
+    resolve_command_invocations, resolve_parameterized_routes, resolve_pyo3_imports,
+    resolve_pyo3_modules, resolve_route_handlers, resolve_sql_queries, resolve_symbols,
 };
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);

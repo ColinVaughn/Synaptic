@@ -139,10 +139,12 @@ fn index_blobs_keyed_by_name_and_hash() {
         .unwrap();
 
     // get before any put -> miss (blob table absent)
-    assert!(store
-        .get_index_blob("billing", "query_index", "h1")
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .get_index_blob("billing", "query_index", "h1")
+            .unwrap()
+            .is_none()
+    );
 
     store
         .put_index_blob("billing", "query_index", "h1", b"INDEXBYTES")
@@ -156,15 +158,19 @@ fn index_blobs_keyed_by_name_and_hash() {
     );
 
     // different hash (shard changed) -> stale -> miss
-    assert!(store
-        .get_index_blob("billing", "query_index", "h2")
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .get_index_blob("billing", "query_index", "h2")
+            .unwrap()
+            .is_none()
+    );
     // different index name -> miss
-    assert!(store
-        .get_index_blob("billing", "reverse_impact", "h1")
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .get_index_blob("billing", "reverse_impact", "h1")
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]

@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use synaptic_core::NodeId;
 
 use crate::community::{build_wgraph, leiden, louvain};
-use crate::graph::{is_structural_edge, is_structural_node, KnowledgeGraph};
+use crate::graph::{KnowledgeGraph, is_structural_edge, is_structural_node};
 
 const MAX_COMMUNITY_FRACTION: f64 = 0.25;
 const MIN_SPLIT_SIZE: usize = 10;

@@ -14,8 +14,8 @@ pub mod sensitive;
 pub mod submodule;
 
 pub use classify::classify_file;
-pub use file_type::{FileType, ALL_FILE_TYPES};
-pub use manifest::{hash_file, relative_key, FileEntry, Manifest, ManifestDiff};
+pub use file_type::{ALL_FILE_TYPES, FileType};
+pub use manifest::{FileEntry, Manifest, ManifestDiff, hash_file, relative_key};
 pub use sensitive::is_sensitive;
 pub use submodule::submodule_paths;
 
@@ -94,12 +94,11 @@ fn detect_impl(root: &Path, count: bool) -> DetectResult {
         .filter_entry(move |entry| {
             // Prune symlinks whose real path escapes the scan root (escape/cycle
             // guard): in-tree links are followed, out-of-tree ones are not.
-            if entry.path_is_symlink() {
-                if let Ok(real) = entry.path().canonicalize() {
-                    if !real.starts_with(&root_guard) {
-                        return false;
-                    }
-                }
+            if entry.path_is_symlink()
+                && let Ok(real) = entry.path().canonicalize()
+                && !real.starts_with(&root_guard)
+            {
+                return false;
             }
             // Prune noise directories so we never descend into them.
             if entry.file_type().is_some_and(|t| t.is_dir()) {
@@ -193,12 +192,11 @@ pub fn walk_dirs(root: &Path, max_depth: Option<usize>) -> Vec<PathBuf> {
         .follow_links(true)
         .add_custom_ignore_filename(".synapticignore")
         .filter_entry(move |entry| {
-            if entry.path_is_symlink() {
-                if let Ok(real) = entry.path().canonicalize() {
-                    if !real.starts_with(&root_guard) {
-                        return false;
-                    }
-                }
+            if entry.path_is_symlink()
+                && let Ok(real) = entry.path().canonicalize()
+                && !real.starts_with(&root_guard)
+            {
+                return false;
             }
             if entry.file_type().is_some_and(|t| t.is_dir()) {
                 let name = entry.file_name().to_string_lossy();

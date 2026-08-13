@@ -10,8 +10,8 @@
 //! ([`SystemPostgres`], behind the `pg` cargo feature) touches a database, and
 //! that path is untestable offline (as accepted for this source).
 
-use serde_json::{json, Map, Value};
-use synaptic_core::{sanitize_label, sanitize_metadata, Confidence, Edge, FileType, Node, NodeId};
+use serde_json::{Map, Value, json};
+use synaptic_core::{Confidence, Edge, FileType, Node, NodeId, sanitize_label, sanitize_metadata};
 
 use crate::Ingested;
 
@@ -466,10 +466,11 @@ mod tests {
     #[test]
     fn source_file_is_a_credential_free_virtual_dsn() {
         let out = build_postgres_graph(&sample());
-        assert!(out
-            .nodes
-            .iter()
-            .all(|n| n.source_file == "postgresql://localhost/shop"));
+        assert!(
+            out.nodes
+                .iter()
+                .all(|n| n.source_file == "postgresql://localhost/shop")
+        );
     }
 
     #[test]

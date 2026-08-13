@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 use synaptic_core::{GraphData, Visibility};
 
 use crate::{
-    diff_contracts, normalize_openapi, sanitize_release_text, ApiBreakingChange, ApiChangeEvent,
-    ApiContract, BreakingChangeKind, Ecosystem, EvidenceSpan, FetchedArtifact, SdkBindingRule,
-    SdkSymbolAnchor, SourceArtifact, VendorConfig, VersionRange,
+    ApiBreakingChange, ApiChangeEvent, ApiContract, BreakingChangeKind, Ecosystem, EvidenceSpan,
+    FetchedArtifact, SdkBindingRule, SdkSymbolAnchor, SourceArtifact, VendorConfig, VersionRange,
+    diff_contracts, normalize_openapi, sanitize_release_text,
 };
 
 /// Vendor-specific behavior is deliberately narrow. Most implementations are

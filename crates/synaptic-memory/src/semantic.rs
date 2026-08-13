@@ -5,9 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use synaptic_graph::KnowledgeGraph;
 
 use crate::{
-    ingest_repository_documents, AccessScope, DocumentIngestError, DocumentIngestReport,
-    MemoryKind, MemoryLifecycle, MemoryLink, MemoryRecord, MemoryRelation, MemoryStore,
-    RecordOutcome, SourceArtifact, SymbolAnchor,
+    AccessScope, DocumentIngestError, DocumentIngestReport, MemoryKind, MemoryLifecycle,
+    MemoryLink, MemoryRecord, MemoryRelation, MemoryStore, RecordOutcome, SourceArtifact,
+    SymbolAnchor, ingest_repository_documents,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

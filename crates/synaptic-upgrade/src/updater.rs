@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 
 use crate::github::{Asset, Release};
@@ -206,8 +206,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn extracts_named_binary_from_tar_gz() {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("a.tar.gz");
         {

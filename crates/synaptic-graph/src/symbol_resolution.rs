@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use serde_json::{json, Map};
+use serde_json::{Map, json};
 use synaptic_core::{Confidence, Edge, ImportRecord, Node, NodeId, RawCall};
 
 use crate::graph::KnowledgeGraph;

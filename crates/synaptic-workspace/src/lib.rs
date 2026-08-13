@@ -55,10 +55,14 @@ pub enum WorkspaceError {
         source: serde_json::Error,
     },
     /// A loaded file exceeded the byte safety cap (memory-bomb guard).
-    #[error("{path} is {size} bytes, over the {limit}-byte graph cap (set SYNAPTIC_MAX_GRAPH_MB to raise it; 0 = no cap)")]
+    #[error(
+        "{path} is {size} bytes, over the {limit}-byte graph cap (set SYNAPTIC_MAX_GRAPH_MB to raise it; 0 = no cap)"
+    )]
     TooBig { path: String, size: u64, limit: u64 },
     /// A loaded/merged graph exceeded the node cap.
-    #[error("{path} has {count} nodes, over the {limit}-node cap (set SYNAPTIC_MAX_NODES to raise it; 0 = no cap)")]
+    #[error(
+        "{path} has {count} nodes, over the {limit}-node cap (set SYNAPTIC_MAX_NODES to raise it; 0 = no cap)"
+    )]
     TooManyNodes {
         path: String,
         count: usize,

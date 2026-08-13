@@ -21,18 +21,18 @@ mod scale;
 mod scoring;
 
 pub use calibrate::{
-    brier, calibrate_history, reliability, samples_from_history, Bin, CalibrationReport, Sample,
+    Bin, CalibrationReport, Sample, brier, calibrate_history, reliability, samples_from_history,
 };
 pub use corpus::{
-    build_fixture, resolution_coverage, run_corpus, score_fixture, BlastScore, CorpusReport,
-    FixtureReport, PrF1, ResolutionReport,
+    BlastScore, CorpusReport, FixtureReport, PrF1, ResolutionReport, build_fixture,
+    resolution_coverage, run_corpus, score_fixture,
 };
-pub use cross_language::{calibrate_cross_language, CrossLanguageReport};
+pub use cross_language::{CrossLanguageReport, calibrate_cross_language};
 pub use groundtruth::{GroundTruth, Manifest};
 pub use ledger::{Ledger, PredictionRecord};
-pub use replay::{replay, score_commit, CommitEval, ReplayOptions, ReplayReport};
-pub use scale::{run_scale, ScaleEnv, ScaleManifest, ScaleRepo, ScaleReport, ScaleResult, Skip};
-pub use scoring::{aggregate, score_sets, Scores};
+pub use replay::{CommitEval, ReplayOptions, ReplayReport, replay, score_commit};
+pub use scale::{ScaleEnv, ScaleManifest, ScaleRepo, ScaleReport, ScaleResult, Skip, run_scale};
+pub use scoring::{Scores, aggregate, score_sets};
 
 /// Errors the evaluation pipeline can surface.
 #[derive(Debug, thiserror::Error)]

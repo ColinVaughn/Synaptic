@@ -1,4 +1,4 @@
-use synaptic_api::{import_behavioral_evidence, BehavioralOutcome, RuntimeSurfaceKind};
+use synaptic_api::{BehavioralOutcome, RuntimeSurfaceKind, import_behavioral_evidence};
 
 #[test]
 fn canary_and_error_evidence_is_sanitized_and_becomes_review_only() {

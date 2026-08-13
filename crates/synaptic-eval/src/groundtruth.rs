@@ -221,7 +221,7 @@ family = "systems-rust"
 mod resolver_tests {
     use super::*;
     use std::path::PathBuf;
-    use synaptic_incremental::{rebuild, ChangeSet, RebuildOptions};
+    use synaptic_incremental::{ChangeSet, RebuildOptions, rebuild};
 
     fn build() -> GraphData {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("corpus/systems-rust");

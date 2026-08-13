@@ -6,7 +6,7 @@ use synaptic_core::NodeKind;
 
 use crate::findings::{Category, Finding, Severity};
 use crate::graphview::{columns_of, indexed_columns, nodes_of_kind, policies_of};
-use crate::rules::{query_snippets, AuditCtx, Rule};
+use crate::rules::{AuditCtx, Rule, query_snippets};
 
 pub fn register(rules: &mut Vec<Box<dyn Rule>>) {
     rules.push(Box::new(MissingIndexOnFilterColumn));
@@ -481,14 +481,18 @@ mod tests {
             ],
             "links": [{"source":"app.f","target":"sql:t","relation":"queries","confidence":"INFERRED","source_file":"a.py","source_location":"L2","sql":"SELECT * FROM t ORDER BY RANDOM()"}]
         }));
-        assert!(SelectStar
-            .check(&ctx(&kg))
-            .iter()
-            .any(|x| x.rule_id == "PERF-SEL-001"));
-        assert!(OrderByRand
-            .check(&ctx(&kg))
-            .iter()
-            .any(|x| x.rule_id == "PERF-RAND-001"));
+        assert!(
+            SelectStar
+                .check(&ctx(&kg))
+                .iter()
+                .any(|x| x.rule_id == "PERF-SEL-001")
+        );
+        assert!(
+            OrderByRand
+                .check(&ctx(&kg))
+                .iter()
+                .any(|x| x.rule_id == "PERF-RAND-001")
+        );
     }
 
     #[test]
@@ -500,10 +504,12 @@ mod tests {
             ],
             "links": [{"source":"app.f","target":"sql:t","relation":"writes_to","confidence":"INFERRED","source_file":"a.py","source_location":"L2","sql":"UPDATE t SET active = 1"}]
         }));
-        assert!(DmlWithoutWhere
-            .check(&ctx(&kg))
-            .iter()
-            .any(|x| x.rule_id == "PERF-DML-001"));
+        assert!(
+            DmlWithoutWhere
+                .check(&ctx(&kg))
+                .iter()
+                .any(|x| x.rule_id == "PERF-DML-001")
+        );
     }
 
     #[test]
@@ -515,10 +521,12 @@ mod tests {
             ],
             "links": [{"source":"app.f","target":"sql:t","relation":"queries","confidence":"INFERRED","source_file":"a.py","source_location":"L2","sql":"SELECT id FROM t WHERE LOWER(email) = 'x'"}]
         }));
-        assert!(NonSargablePredicate
-            .check(&ctx(&kg))
-            .iter()
-            .any(|x| x.rule_id == "PERF-SARG-001"));
+        assert!(
+            NonSargablePredicate
+                .check(&ctx(&kg))
+                .iter()
+                .any(|x| x.rule_id == "PERF-SARG-001")
+        );
     }
 
     #[test]
@@ -553,29 +561,37 @@ mod tests {
 
     #[test]
     fn flags_excessive_joins() {
-        let kg = query_graph("SELECT * FROM a JOIN b ON a.id=b.a JOIN c ON b.id=c.b JOIN d ON c.id=d.c JOIN e ON d.id=e.d");
-        assert!(JoinComplexity
-            .check(&ctx(&kg))
-            .iter()
-            .any(|x| x.rule_id == "PERF-JOIN-001"));
+        let kg = query_graph(
+            "SELECT * FROM a JOIN b ON a.id=b.a JOIN c ON b.id=c.b JOIN d ON c.id=d.c JOIN e ON d.id=e.d",
+        );
+        assert!(
+            JoinComplexity
+                .check(&ctx(&kg))
+                .iter()
+                .any(|x| x.rule_id == "PERF-JOIN-001")
+        );
     }
 
     #[test]
     fn flags_or_chain_that_should_be_in() {
         let kg = query_graph("SELECT id FROM t WHERE status = 'a' OR status = 'b' OR status = 'c'");
-        assert!(JoinComplexity
-            .check(&ctx(&kg))
-            .iter()
-            .any(|x| x.rule_id == "PERF-JOIN-001"));
+        assert!(
+            JoinComplexity
+                .check(&ctx(&kg))
+                .iter()
+                .any(|x| x.rule_id == "PERF-JOIN-001")
+        );
     }
 
     #[test]
     fn simple_join_and_distinct_column_or_are_not_flagged() {
         let kg = query_graph("SELECT * FROM a JOIN b ON a.id = b.a WHERE a.x = 1 OR a.y = 2");
-        assert!(JoinComplexity
-            .check(&ctx(&kg))
-            .iter()
-            .all(|x| x.rule_id != "PERF-JOIN-001"));
+        assert!(
+            JoinComplexity
+                .check(&ctx(&kg))
+                .iter()
+                .all(|x| x.rule_id != "PERF-JOIN-001")
+        );
     }
 
     #[test]
@@ -594,10 +610,12 @@ mod tests {
             kg: &kg,
             root: Some(dir.path()),
         };
-        assert!(QueryInLoop
-            .check(&cx)
-            .iter()
-            .any(|x| x.rule_id == "PERF-N1-001"));
+        assert!(
+            QueryInLoop
+                .check(&cx)
+                .iter()
+                .any(|x| x.rule_id == "PERF-N1-001")
+        );
     }
 
     fn inj_finding(sql: &str) -> Finding {

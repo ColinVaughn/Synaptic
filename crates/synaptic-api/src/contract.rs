@@ -806,38 +806,34 @@ fn normalize_wsdl(vendor: &str, source: &str) -> Result<ApiContract, ContractErr
             if let Some(input) = operation_node
                 .children()
                 .find(|node| node.tag_name().name() == "input")
-            {
-                if let Some(message) = input
+                && let Some(message) = input
                     .attribute("message")
                     .or_else(|| input.attribute("element"))
-                {
-                    operation.request_fields.insert(
-                        "message".into(),
-                        FieldShape {
-                            field_type: message.into(),
-                            required: true,
-                            enum_values: BTreeSet::new(),
-                        },
-                    );
-                }
+            {
+                operation.request_fields.insert(
+                    "message".into(),
+                    FieldShape {
+                        field_type: message.into(),
+                        required: true,
+                        enum_values: BTreeSet::new(),
+                    },
+                );
             }
             if let Some(output) = operation_node
                 .children()
                 .find(|node| node.tag_name().name() == "output")
-            {
-                if let Some(message) = output
+                && let Some(message) = output
                     .attribute("message")
                     .or_else(|| output.attribute("element"))
-                {
-                    operation.response_fields.insert(
-                        "message".into(),
-                        FieldShape {
-                            field_type: message.into(),
-                            required: true,
-                            enum_values: BTreeSet::new(),
-                        },
-                    );
-                }
+            {
+                operation.response_fields.insert(
+                    "message".into(),
+                    FieldShape {
+                        field_type: message.into(),
+                        required: true,
+                        enum_values: BTreeSet::new(),
+                    },
+                );
             }
             operations.insert(key, operation);
         }
@@ -1429,10 +1425,9 @@ fn field_renames(
             old_shape.field_type.as_str(),
             old_shape.required,
             &old_shape.enum_values,
-        )) {
-            if let Some(new_name) = candidate.take() {
-                renames.insert(old_name.clone(), new_name.clone());
-            }
+        )) && let Some(new_name) = candidate.take()
+        {
+            renames.insert(old_name.clone(), new_name.clone());
         }
     }
     renames

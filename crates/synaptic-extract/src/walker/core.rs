@@ -1,13 +1,13 @@
 //! `core` extraction methods on `Extractor` (split from walker.rs).
 
 use super::Extractor;
-use super::{first_docstring, COMMENT_TOKENS, MAX_DEPTH, RATIONALE_MARKERS};
+use super::{COMMENT_TOKENS, MAX_DEPTH, RATIONALE_MARKERS, first_docstring};
 use crate::config::{HeritageStyle, ImportStyle, TypeRefStyle};
 use crate::paths::file_node_id;
 use crate::result::RawCall;
 use serde_json::Map;
 use std::collections::{HashMap, HashSet};
-use synaptic_core::{make_id, Confidence, Edge, FileType, Node, NodeId};
+use synaptic_core::{Confidence, Edge, FileType, Node, NodeId, make_id};
 use tree_sitter::Node as TsNode;
 
 impl<'tree> Extractor<'_, '_, 'tree> {
@@ -408,21 +408,21 @@ impl<'tree> Extractor<'_, '_, 'tree> {
             self.add_code_node(class_nid.clone(), class_name, node, kind, vis, None);
             self.add_edge(file_nid.clone(), class_nid.clone(), "contains", line, None);
 
-            if let Some(field) = self.cfg.superclasses_field {
-                if let Some(args) = self.field(node, field) {
-                    for arg in Self::children(args) {
-                        if arg.kind() == "identifier" {
-                            let base = self.text(arg);
-                            let local = NodeId(make_id(&[stem, &base]));
-                            let base_nid = if self.seen.contains(&local) {
-                                local
-                            } else {
-                                let global = NodeId(make_id(&[base.as_str()]));
-                                self.add_external_node(global.clone(), base.clone());
-                                global
-                            };
-                            self.add_edge(class_nid.clone(), base_nid, "inherits", line, None);
-                        }
+            if let Some(field) = self.cfg.superclasses_field
+                && let Some(args) = self.field(node, field)
+            {
+                for arg in Self::children(args) {
+                    if arg.kind() == "identifier" {
+                        let base = self.text(arg);
+                        let local = NodeId(make_id(&[stem, &base]));
+                        let base_nid = if self.seen.contains(&local) {
+                            local
+                        } else {
+                            let global = NodeId(make_id(&[base.as_str()]));
+                            self.add_external_node(global.clone(), base.clone());
+                            global
+                        };
+                        self.add_edge(class_nid.clone(), base_nid, "inherits", line, None);
                     }
                 }
             }
@@ -451,10 +451,10 @@ impl<'tree> Extractor<'_, '_, 'tree> {
             self.class_members(node, &class_nid, stem);
             if let Some(body) = self.body_of(node) {
                 // Python class docstring becomes rationale (reuses this parse/walk).
-                if matches!(self.cfg.type_ref_style, Some(TypeRefStyle::Python)) {
-                    if let Some((doc, dline)) = first_docstring(body, self.source) {
-                        self.add_rationale(doc, dline, class_nid.clone(), stem);
-                    }
+                if matches!(self.cfg.type_ref_style, Some(TypeRefStyle::Python))
+                    && let Some((doc, dline)) = first_docstring(body, self.source)
+                {
+                    self.add_rationale(doc, dline, class_nid.clone(), stem);
                 }
                 for child in Self::children(body) {
                     self.walk(child, file_nid, Some(&class_nid), stem, depth + 1);
@@ -526,10 +526,10 @@ impl<'tree> Extractor<'_, '_, 'tree> {
             }
             if let Some(body) = self.body_of(node) {
                 // Python function docstring becomes rationale (reuses this parse/walk).
-                if matches!(self.cfg.type_ref_style, Some(TypeRefStyle::Python)) {
-                    if let Some((doc, dline)) = first_docstring(body, self.source) {
-                        self.add_rationale(doc, dline, func_nid.clone(), stem);
-                    }
+                if matches!(self.cfg.type_ref_style, Some(TypeRefStyle::Python))
+                    && let Some((doc, dline)) = first_docstring(body, self.source)
+                {
+                    self.add_rationale(doc, dline, func_nid.clone(), stem);
                 }
                 self.function_bodies.push((func_nid.clone(), body));
                 // Mark this function node as own-bodied so the call pass skips it
@@ -691,17 +691,17 @@ impl<'tree> Extractor<'_, '_, 'tree> {
     pub(crate) fn pre_scan(&mut self, root: TsNode<'tree>) {
         let mut stack = vec![root];
         while let Some(n) = stack.pop() {
-            if self.cfg.class_types.contains(&n.kind()) {
-                if let Some(name) = self.field(n, self.cfg.name_field) {
-                    let name = self.text(name);
-                    self.declared_types.insert(name.clone());
-                    if matches!(
-                        (self.cfg.heritage_style, n.kind()),
-                        (Some(HeritageStyle::CSharp), "interface_declaration")
-                            | (Some(HeritageStyle::Swift), "protocol_declaration")
-                    ) {
-                        self.interface_names.insert(name);
-                    }
+            if self.cfg.class_types.contains(&n.kind())
+                && let Some(name) = self.field(n, self.cfg.name_field)
+            {
+                let name = self.text(name);
+                self.declared_types.insert(name.clone());
+                if matches!(
+                    (self.cfg.heritage_style, n.kind()),
+                    (Some(HeritageStyle::CSharp), "interface_declaration")
+                        | (Some(HeritageStyle::Swift), "protocol_declaration")
+                ) {
+                    self.interface_names.insert(name);
                 }
             }
             for c in Self::children(n) {
@@ -750,37 +750,36 @@ impl<'tree> Extractor<'_, '_, 'tree> {
             }
         }
 
-        if self.cfg.call_types.contains(&node.kind()) {
-            if let Some((callee, is_member)) = self.callee_name(node) {
-                let line = Self::line(node);
-                self.record_call(
-                    caller,
-                    callee,
-                    is_member,
-                    line,
-                    Some(Self::span(node)),
-                    label_to_nid,
-                    seen_pairs,
-                );
-            }
+        if self.cfg.call_types.contains(&node.kind())
+            && let Some((callee, is_member)) = self.callee_name(node)
+        {
+            let line = Self::line(node);
+            self.record_call(
+                caller,
+                callee,
+                is_member,
+                line,
+                Some(Self::span(node)),
+                label_to_nid,
+                seen_pairs,
+            );
         }
         // `new X(...)` constructor call: the callee is the constructed type.
-        if Some(node.kind()) == self.cfg.constructor_call_type {
-            if let Some(ctor) = self.field(node, "constructor") {
-                if matches!(ctor.kind(), "identifier" | "type_identifier") {
-                    let callee = self.text(ctor);
-                    let line = Self::line(node);
-                    self.record_call(
-                        caller,
-                        callee,
-                        false,
-                        line,
-                        Some(Self::span(node)),
-                        label_to_nid,
-                        seen_pairs,
-                    );
-                }
-            }
+        if Some(node.kind()) == self.cfg.constructor_call_type
+            && let Some(ctor) = self.field(node, "constructor")
+            && matches!(ctor.kind(), "identifier" | "type_identifier")
+        {
+            let callee = self.text(ctor);
+            let line = Self::line(node);
+            self.record_call(
+                caller,
+                callee,
+                false,
+                line,
+                Some(Self::span(node)),
+                label_to_nid,
+                seen_pairs,
+            );
         }
 
         // EcmaScript dynamic imports inside function/method bodies (`walk()` covers

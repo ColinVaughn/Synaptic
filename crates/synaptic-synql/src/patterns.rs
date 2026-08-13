@@ -205,10 +205,10 @@ fn detect_observer(kg: &KnowledgeGraph) -> Vec<NodeId> {
 fn detect_service_locator(kg: &KnowledgeGraph) -> Vec<NodeId> {
     let mut access: HashMap<NodeId, HashSet<u32>> = HashMap::new();
     for e in kg.edges() {
-        if e.relation == "calls" || e.relation == "references" {
-            if let Some(c) = kg.node(&e.source).and_then(|n| n.community) {
-                access.entry(e.target.clone()).or_default().insert(c);
-            }
+        if (e.relation == "calls" || e.relation == "references")
+            && let Some(c) = kg.node(&e.source).and_then(|n| n.community)
+        {
+            access.entry(e.target.clone()).or_default().insert(c);
         }
     }
     let mut out = Vec::new();

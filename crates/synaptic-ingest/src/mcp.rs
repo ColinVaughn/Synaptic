@@ -19,7 +19,7 @@ use regex::Regex;
 use serde_json::Value;
 use synaptic_core::make_id;
 
-use crate::{file_stem, make_edge, make_node, Ingested};
+use crate::{Ingested, file_stem, make_edge, make_node};
 
 const MAX_BYTES: usize = 1_048_576; // 1 MiB
 const MAX_SERVERS: usize = 200;
@@ -184,12 +184,12 @@ pub fn ingest_mcp_config(path: &Path) -> Ingested {
                 b.edge(&server_nid, &cmd_nid, "references", Some("command"));
             }
         }
-        if let Some(args) = spec.get("args").and_then(Value::as_array) {
-            if let Some(pkg) = detect_package_from_args(args) {
-                let pkg_nid = make_id(&["mcp_package", &pkg]);
-                b.node(&pkg_nid, &pkg, "mcp_package");
-                b.edge(&server_nid, &pkg_nid, "references", Some("package"));
-            }
+        if let Some(args) = spec.get("args").and_then(Value::as_array)
+            && let Some(pkg) = detect_package_from_args(args)
+        {
+            let pkg_nid = make_id(&["mcp_package", &pkg]);
+            b.node(&pkg_nid, &pkg, "mcp_package");
+            b.edge(&server_nid, &pkg_nid, "references", Some("package"));
         }
         if let Some(env) = spec.get("env").and_then(Value::as_object) {
             for env_name in env.keys() {

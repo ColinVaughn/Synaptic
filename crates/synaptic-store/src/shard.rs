@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use synaptic_core::{GraphData, Hyperedge};
 use synaptic_graph::KnowledgeGraph;
 
-use crate::{codec, StoreError};
+use crate::{StoreError, codec};
 
 /// On-disk schema version. v1 = redb, one msgpack record per row (no longer
 /// readable; detected and rejected with a rebuild hint). v2 = flat container

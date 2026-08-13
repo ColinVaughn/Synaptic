@@ -8,7 +8,7 @@ use synaptic_core::node_kind::NodeKind;
 use synaptic_core::{Confidence, Edge, FileType, GraphData, Hyperedge, Node, NodeId};
 use synaptic_graph::KnowledgeGraph;
 use synaptic_output::to_json_value;
-use synaptic_store::{migrate, Scope, ShardStore};
+use synaptic_store::{Scope, ShardStore, migrate};
 
 fn code_node(id: &str, label: &str, sf: &str, repo: Option<&str>) -> Node {
     Node {
@@ -152,16 +152,19 @@ fn cross_repo_bridge_is_opt_in() {
     // Isolation default: the cross-repo edge is not present.
     let iso = store.export_graph(&Scope::All).unwrap();
     assert_eq!(iso.edge_count(), 1, "only the intra-repo edge survives");
-    assert!(iso
-        .edges()
-        .all(|e| !(e.source.0 == "b" && e.target.0 == "c")));
+    assert!(
+        iso.edges()
+            .all(|e| !(e.source.0 == "b" && e.target.0 == "c"))
+    );
 
     // Cross-repo opt-in: the bridge edge is grafted back.
     let cross = store.export_cross_repo().unwrap();
     assert_eq!(cross.edge_count(), 2, "bridge edge included");
-    assert!(cross
-        .edges()
-        .any(|e| e.source.0 == "b" && e.target.0 == "c"));
+    assert!(
+        cross
+            .edges()
+            .any(|e| e.source.0 == "b" && e.target.0 == "c")
+    );
 }
 
 proptest! {

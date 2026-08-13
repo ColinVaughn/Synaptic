@@ -3,18 +3,18 @@
 //! graph diff (base vs working tree) into a single forecast.json + forecast.md.
 //! Synaptic never edits source; the forecast is data an AI agent reads first.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use synaptic_graph::KnowledgeGraph;
-use synaptic_history::{diff, DiffOptions, DiffReport};
+use synaptic_history::{DiffOptions, DiffReport, diff};
 use synaptic_predict::{
-    co_change, fold_diff_report, forecast_changes, forecast_edit, refine_risk, refresh_summary,
-    render_edit_markdown, render_markdown, ChangeForecast, CoChangeOptions, EditKind,
-    ForecastOptions,
+    ChangeForecast, CoChangeOptions, EditKind, ForecastOptions, co_change, fold_diff_report,
+    forecast_changes, forecast_edit, refine_risk, refresh_summary, render_edit_markdown,
+    render_markdown,
 };
-use synaptic_prs::{detect_default_branch, SystemCommands};
+use synaptic_prs::{SystemCommands, detect_default_branch};
 
 use crate::commands::common::{default_graph_path, load_scoped_graph};
 
@@ -199,7 +199,9 @@ fn parse_edit_spec(spec: &str) -> Result<(EditKind, &str)> {
 /// change, so it fails rather than passing blind.
 fn gate_verdict(forecast: &ChangeForecast, diff_ok: bool) -> Result<()> {
     if !diff_ok {
-        bail!("gate failed: could not run the time-travel diff to verify the change (no base / git unavailable / build error)");
+        bail!(
+            "gate failed: could not run the time-travel diff to verify the change (no base / git unavailable / build error)"
+        );
     }
     let cycles = forecast.new_cycles.len();
     let apis = forecast.removed_apis.len();

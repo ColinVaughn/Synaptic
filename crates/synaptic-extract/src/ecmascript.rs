@@ -279,11 +279,12 @@ mod tests {
         let rels: Vec<&str> = r.edges.iter().map(|e| e.relation.as_str()).collect();
         assert!(rels.contains(&"contains"));
         assert!(rels.contains(&"method"));
-        assert!(r
-            .edges
-            .iter()
-            .filter(|e| matches!(e.relation.as_str(), "contains" | "method"))
-            .all(|e| e.confidence == Confidence::Extracted));
+        assert!(
+            r.edges
+                .iter()
+                .filter(|e| matches!(e.relation.as_str(), "contains" | "method"))
+                .all(|e| e.confidence == Confidence::Extracted)
+        );
     }
 
     #[cfg(feature = "lang-typescript")]
@@ -371,10 +372,11 @@ mod tests {
             "records: {:?}",
             r.imports
         );
-        assert!(r
-            .imports
-            .iter()
-            .any(|i| i.imported_name == "bar" && i.local_name == "baz" && i.module_stem == "util"));
+        assert!(
+            r.imports.iter().any(|i| i.imported_name == "bar"
+                && i.local_name == "baz"
+                && i.module_stem == "util")
+        );
         // The imports_from edge is tagged with the imported symbol names (original
         // names, not aliases) so forecast-time impact can resolve module importers.
         let edge = r
@@ -398,10 +400,12 @@ mod tests {
     #[test]
     fn js_bare_import_creates_module_stub_edge() {
         let r = super::extract_js_source("a.js", b"import React from 'react';\n");
-        assert!(r.edges.iter().any(|e| e.relation == "imports_from"
-            && r.nodes
-                .iter()
-                .any(|n| n.id == e.target && n.label == "react")));
+        assert!(r.edges.iter().any(|e| {
+            e.relation == "imports_from"
+                && r.nodes
+                    .iter()
+                    .any(|n| n.id == e.target && n.label == "react")
+        }));
         assert!(r.imports.iter().any(|i| i.local_name == "React"
             && i.imported_name == "React"
             && i.module_stem == "react"));

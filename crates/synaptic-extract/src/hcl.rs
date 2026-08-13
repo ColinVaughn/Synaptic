@@ -7,7 +7,7 @@
 //! cross-file references inside a module resolve.
 
 #[cfg(feature = "lang-hcl")]
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 #[cfg(feature = "lang-hcl")]
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -299,9 +299,10 @@ mod tests {
             refs.contains(&("aws_instance.web".to_string(), "var.ami".to_string())),
             "refs: {refs:?}"
         );
-        assert!(refs
-            .iter()
-            .any(|(s, t)| s == "output.ip" && t == "aws_instance.web"));
+        assert!(
+            refs.iter()
+                .any(|(s, t)| s == "output.ip" && t == "aws_instance.web")
+        );
     }
 
     #[test]
@@ -329,9 +330,10 @@ mod tests {
             .find(|n| n.label == "aws_vpc.main")
             .map(|n| n.id.clone())
             .unwrap();
-        assert!(b
-            .edges
-            .iter()
-            .any(|e| e.target == vpc_id && e.relation == "references"));
+        assert!(
+            b.edges
+                .iter()
+                .any(|e| e.target == vpc_id && e.relation == "references")
+        );
     }
 }

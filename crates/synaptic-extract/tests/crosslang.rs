@@ -1879,14 +1879,16 @@ fn custom_event_links_but_standard_dom_event_is_ignored() {
         .iter()
         .find(|n| n.label == "event #app:refresh")
         .expect("custom event channel");
-    assert!(r
-        .edges
-        .iter()
-        .any(|e| e.target == chan.id && e.relation == "calls_service"));
-    assert!(r
-        .edges
-        .iter()
-        .any(|e| e.source == chan.id && e.relation == "handled_by"));
+    assert!(
+        r.edges
+            .iter()
+            .any(|e| e.target == chan.id && e.relation == "calls_service")
+    );
+    assert!(
+        r.edges
+            .iter()
+            .any(|e| e.source == chan.id && e.relation == "handled_by")
+    );
     assert!(
         !r.nodes.iter().any(|n| n.label == "event #click"),
         "standard DOM event must not mint a channel"
@@ -1920,14 +1922,16 @@ fn csharp_event_invoke_and_subscribe_link_through_channel() {
         .iter()
         .find(|n| n.label == "event #StatusChanged")
         .expect("event channel");
-    assert!(r
-        .edges
-        .iter()
-        .any(|e| e.target == chan.id && e.relation == "calls_service"));
-    assert!(r
-        .edges
-        .iter()
-        .any(|e| e.source == chan.id && e.relation == "handled_by"));
+    assert!(
+        r.edges
+            .iter()
+            .any(|e| e.target == chan.id && e.relation == "calls_service")
+    );
+    assert!(
+        r.edges
+            .iter()
+            .any(|e| e.source == chan.id && e.relation == "handled_by")
+    );
     assert!(
         !r.nodes.iter().any(|n| n.label == "event #total"),
         "arithmetic += must not mint a channel"
@@ -1961,10 +1965,11 @@ public class FeedServer {
         .find(|n| n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("ws_endpoint"))
         .expect("a ws_endpoint node");
     assert_eq!(ep.label, "ws /feed");
-    assert!(r
-        .edges
-        .iter()
-        .any(|e| e.relation == "handled_by" && e.source == ep.id));
+    assert!(
+        r.edges
+            .iter()
+            .any(|e| e.relation == "handled_by" && e.source == ep.id)
+    );
     // Per-command handler nodes for subscribe + fetch.
     let msgs: Vec<&str> = r
         .nodes
@@ -2016,10 +2021,11 @@ fn js_ws_endpoint_from_url_and_id_matches_csharp() {
         .find(|n| n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("ws_endpoint"))
         .expect("a ws_endpoint node");
     assert_eq!(ep.label, "ws /feed");
-    assert!(r
-        .edges
-        .iter()
-        .any(|e| e.relation == "calls_service" && e.target == ep.id));
+    assert!(
+        r.edges
+            .iter()
+            .any(|e| e.relation == "calls_service" && e.target == ep.id)
+    );
     // Same boundary id as the C# server (case-insensitive path via make_id).
     let cs = br#"class S { void Start() { Server.AddWebSocketService<Feed>("/feed"); } }"#;
     let rc = extract_source("S.cs", cs).unwrap();

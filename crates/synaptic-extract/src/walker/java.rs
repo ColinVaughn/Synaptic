@@ -151,10 +151,10 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                 }
             }
             "scoped_type_identifier" => {
-                if let Some(tail) = self.text(node).rsplit('.').next() {
-                    if !tail.is_empty() {
-                        out.push((tail.to_string(), generic));
-                    }
+                if let Some(tail) = self.text(node).rsplit('.').next()
+                    && !tail.is_empty()
+                {
+                    out.push((tail.to_string(), generic));
                 }
             }
             "generic_type" => {

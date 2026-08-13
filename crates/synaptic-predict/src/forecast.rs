@@ -11,11 +11,11 @@ use synaptic_core::{Node, NodeId};
 use synaptic_graph::KnowledgeGraph;
 use synaptic_history::DiffReport;
 use synaptic_query::{
-    affected_nodes_multi, AffectedHit, ReverseImpactIndex, DEFAULT_AFFECTED_RELATIONS,
+    AffectedHit, DEFAULT_AFFECTED_RELATIONS, ReverseImpactIndex, affected_nodes_multi,
 };
 
 use crate::cochange::CoChange;
-use crate::risk::{assess_risk, RiskFactors, RiskScore};
+use crate::risk::{RiskFactors, RiskScore, assess_risk};
 
 /// On-disk schema version for a forecast (bump on a breaking shape change).
 pub const FORECAST_VERSION: u32 = 1;

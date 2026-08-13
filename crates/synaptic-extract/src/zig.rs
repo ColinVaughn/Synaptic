@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 #[cfg(feature = "lang-zig")]
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 #[cfg(feature = "lang-zig")]
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -113,21 +113,21 @@ impl<'tree> Zig<'_, 'tree> {
                     .find(|c| c.kind() == "builtin_identifier")
                     .map(|c| self.text(c))
                     .unwrap_or_default();
-                if bid == "@import" {
-                    if let Some(s) = self.first_string(value) {
-                        let last = s.rsplit(['/', '\\']).next().unwrap_or(&s);
-                        let base = last.strip_suffix(".zig").unwrap_or(last);
-                        if !base.is_empty() {
-                            let tgt = NodeId(make_id(&["zig", "mod", base]));
-                            self.b.add_external_node(tgt.clone(), base.to_string());
-                            self.b.add_edge(
-                                self.file_nid.clone(),
-                                tgt,
-                                "imports_from",
-                                Self::line(node),
-                                Some("import"),
-                            );
-                        }
+                if bid == "@import"
+                    && let Some(s) = self.first_string(value)
+                {
+                    let last = s.rsplit(['/', '\\']).next().unwrap_or(&s);
+                    let base = last.strip_suffix(".zig").unwrap_or(last);
+                    if !base.is_empty() {
+                        let tgt = NodeId(make_id(&["zig", "mod", base]));
+                        self.b.add_external_node(tgt.clone(), base.to_string());
+                        self.b.add_edge(
+                            self.file_nid.clone(),
+                            tgt,
+                            "imports_from",
+                            Self::line(node),
+                            Some("import"),
+                        );
                     }
                 }
             }
@@ -267,22 +267,14 @@ impl<'tree> Zig<'_, 'tree> {
         if node.kind() == "function_declaration" {
             return;
         }
-        if node.kind() == "call_expression" {
-            if let Some(func) = node.child_by_field_name("function") {
-                if func.kind() == "identifier" {
-                    let callee = self.text(func);
-                    if !callee.is_empty() {
-                        self.b.resolve_call(
-                            caller,
-                            &callee,
-                            false,
-                            Self::line(node),
-                            index,
-                            seen,
-                            true,
-                        );
-                    }
-                }
+        if node.kind() == "call_expression"
+            && let Some(func) = node.child_by_field_name("function")
+            && func.kind() == "identifier"
+        {
+            let callee = self.text(func);
+            if !callee.is_empty() {
+                self.b
+                    .resolve_call(caller, &callee, false, Self::line(node), index, seen, true);
             }
         }
         for c in Self::children(node) {
@@ -332,9 +324,11 @@ mod tests {
 
     #[test]
     fn import_becomes_import() {
-        assert!(rels(&extract(), "imports_from")
-            .iter()
-            .any(|(_, t)| t == "std"));
+        assert!(
+            rels(&extract(), "imports_from")
+                .iter()
+                .any(|(_, t)| t == "std")
+        );
     }
 
     #[test]

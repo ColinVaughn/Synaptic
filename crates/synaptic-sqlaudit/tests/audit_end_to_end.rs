@@ -1,6 +1,6 @@
 //! End-to-end: a tiny SQL-aware graph yields the expected findings.
 use synaptic_graph::KnowledgeGraph;
-use synaptic_sqlaudit::{audit, AuditOptions};
+use synaptic_sqlaudit::{AuditOptions, audit};
 
 #[test]
 fn audits_a_small_graph() {

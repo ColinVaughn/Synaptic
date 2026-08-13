@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 #[cfg(feature = "lang-powershell")]
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 #[cfg(feature = "lang-powershell")]
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -142,14 +142,12 @@ impl<'tree> Ps<'_, 'tree> {
                 }
             }
             "command" => {
-                if let Some(name) = self.command_name(node) {
-                    if name.eq_ignore_ascii_case("import-module")
-                        || name.eq_ignore_ascii_case("using")
-                    {
-                        if let Some(arg) = self.first_arg(node) {
-                            self.emit_import(&arg, Self::line(node));
-                        }
-                    }
+                if let Some(name) = self.command_name(node)
+                    && (name.eq_ignore_ascii_case("import-module")
+                        || name.eq_ignore_ascii_case("using"))
+                    && let Some(arg) = self.first_arg(node)
+                {
+                    self.emit_import(&arg, Self::line(node));
                 }
                 for c in Self::children(node) {
                     self.walk(c, depth + 1);
@@ -202,13 +200,13 @@ impl<'tree> Ps<'_, 'tree> {
         if node.kind() == "function_statement" {
             return;
         }
-        if node.kind() == "command" {
-            if let Some(name) = self.command_name(node) {
-                if !name.is_empty() && !name.eq_ignore_ascii_case("import-module") {
-                    self.b
-                        .resolve_call(caller, &name, false, Self::line(node), index, seen, true);
-                }
-            }
+        if node.kind() == "command"
+            && let Some(name) = self.command_name(node)
+            && !name.is_empty()
+            && !name.eq_ignore_ascii_case("import-module")
+        {
+            self.b
+                .resolve_call(caller, &name, false, Self::line(node), index, seen, true);
         }
         for c in Self::children(node) {
             self.walk_calls(c, caller, index, seen, depth + 1);

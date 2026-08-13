@@ -178,12 +178,11 @@ fn newest_with_ext(dir: &Path, ext: &str) -> Option<PathBuf> {
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let p = entry.path();
-        if p.extension().and_then(|e| e.to_str()) == Some(ext) {
-            if let Ok(m) = entry.metadata().and_then(|m| m.modified()) {
-                if best.as_ref().is_none_or(|(t, _)| m >= *t) {
-                    best = Some((m, p));
-                }
-            }
+        if p.extension().and_then(|e| e.to_str()) == Some(ext)
+            && let Ok(m) = entry.metadata().and_then(|m| m.modified())
+            && best.as_ref().is_none_or(|(t, _)| m >= *t)
+        {
+            best = Some((m, p));
         }
     }
     best.map(|(_, p)| p)

@@ -4,15 +4,16 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use synaptic_api::{Ecosystem, PackageCoordinate};
 use synaptic_vuln::{
-    check_dependency, decision, discover_repository_files, feature_gated_in, is_sbom_source,
-    repair_inputs, scan, sync_ecosystem, AdvisorySource, CompositeSource, CorpusCache,
-    DecisionKind, EcosystemCoverage, Finding, FindingState, FindingStore, GraphUsageOracle,
-    ImpactIndex, LocalDirSource, LockfileKind, NoUsageEvidence, PackageGraph, Priority, ReachIndex,
-    ScanReport, ScanRequest, SystemCorpusFetcher, SystemOsvTransport, UsageOracle, VulnPolicy,
-    DEFAULT_MAX_DOWNLOAD_BYTES, DEFAULT_POLICY_PATH, DEFAULT_STALE_AFTER_SECONDS,
+    AdvisorySource, CompositeSource, CorpusCache, DEFAULT_MAX_DOWNLOAD_BYTES, DEFAULT_POLICY_PATH,
+    DEFAULT_STALE_AFTER_SECONDS, DecisionKind, EcosystemCoverage, Finding, FindingState,
+    FindingStore, GraphUsageOracle, ImpactIndex, LocalDirSource, LockfileKind, NoUsageEvidence,
+    PackageGraph, Priority, ReachIndex, ScanReport, ScanRequest, SystemCorpusFetcher,
+    SystemOsvTransport, UsageOracle, VulnPolicy, check_dependency, decision,
+    discover_repository_files, feature_gated_in, is_sbom_source, repair_inputs, scan,
+    sync_ecosystem,
 };
 
 use crate::cli::VulnAction;
@@ -250,7 +251,7 @@ fn resolve_source(
                 return Err(anyhow::anyhow!(error)).context(
                     "no advisory corpus is available; run `synaptic vuln sync`, pass \
                      --advisories <dir>, or fix connectivity",
-                )
+                );
             }
         }
     }
@@ -887,10 +888,8 @@ fn add_dependency_files(
             .and_then(|name| name.to_str())
             .and_then(LockfileKind::for_file_name)
             .is_some_and(|kind| kind.ecosystem() == finding.package.ecosystem);
-        if matches_ecosystem {
-            if let Some(relative) = repository_relative(root, &path) {
-                files.push(relative);
-            }
+        if matches_ecosystem && let Some(relative) = repository_relative(root, &path) {
+            files.push(relative);
         }
     }
     if finding.package.ecosystem == Ecosystem::Cargo {

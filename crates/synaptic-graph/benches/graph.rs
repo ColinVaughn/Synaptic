@@ -18,15 +18,15 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 use synaptic_core::{
     Confidence, Edge, EdgeSiteAccumulator, FileType, ImportRecord, Node, NodeId, RawCall,
 };
 use synaptic_graph::{
-    analyze, build_from_parts, cluster, deduplicate_entities, find_import_cycles, god_nodes,
-    remap_communities_to_previous, resolve_symbols, suggest_questions, surprising_connections,
-    BuildOptions, ClusterOptions, KnowledgeGraph,
+    BuildOptions, ClusterOptions, KnowledgeGraph, analyze, build_from_parts, cluster,
+    deduplicate_entities, find_import_cycles, god_nodes, remap_communities_to_previous,
+    resolve_symbols, suggest_questions, surprising_connections,
 };
 
 const SCALES: [usize; 3] = [100, 1_000, 10_000];

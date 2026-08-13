@@ -31,53 +31,53 @@ pub use advisory::{
     Advisory, AdvisoryError, Affected, RangeEvent, RangeKind, Severity, SeverityKind, VersionRange,
 };
 pub use applicability::{
-    assess_applicability, ApplicabilityEvidence, ApplicabilityInput, ApplicabilityVerdict,
-    EvidenceDirection, EvidenceKind,
+    ApplicabilityEvidence, ApplicabilityInput, ApplicabilityVerdict, EvidenceDirection,
+    EvidenceKind, assess_applicability,
 };
-pub use check::{check_dependency, DependencySafety, SafetyVerdict};
+pub use check::{DependencySafety, SafetyVerdict, check_dependency};
 pub use cvss4::cvss_v4_base_score;
 pub use features::{
-    feature_gated_dependencies, feature_gated_in, manifest_features, ManifestFeatures,
+    ManifestFeatures, feature_gated_dependencies, feature_gated_in, manifest_features,
 };
-pub use finding::{finding_id, Finding};
+pub use finding::{Finding, finding_id};
 pub use handoff::{VerifiedVulnerabilityRunHandoff, VulnerabilityHandoffError};
 pub use ledger::{
-    decision, Decision, DecisionKind, FindingRecord, FindingState, FindingStore, LedgerError,
+    Decision, DecisionKind, FindingRecord, FindingState, FindingStore, LedgerError, decision,
 };
-pub use lockfiles::{parse as parse_lockfile, LockfileKind};
+pub use lockfiles::{LockfileKind, parse as parse_lockfile};
 pub use lockgraph::{
-    discover_repository_files, LockGraphError, LockfileRead, PackageGraph, PackageKey,
-    PackageScope, RepositoryFiles, ResolvedPackage,
+    LockGraphError, LockfileRead, PackageGraph, PackageKey, PackageScope, RepositoryFiles,
+    ResolvedPackage, discover_repository_files,
 };
-pub use matching::{match_range, match_version, VersionMatch};
+pub use matching::{VersionMatch, match_range, match_version};
 // Re-exported because this crate's public signatures are written in terms of
 // it, so a caller cannot use them without naming the type.
 pub use osv_api::{
+    OSV_API_BASE, OSV_BATCH_LIMIT, OSV_TIMEOUT_SECONDS, OsvTransport, SystemOsvTransport,
     fetch_advisories, fetch_advisories_for_package, offline_forced, osv_ecosystem_name,
-    OsvTransport, SystemOsvTransport, OSV_API_BASE, OSV_BATCH_LIMIT, OSV_TIMEOUT_SECONDS,
 };
 pub use plan::{
-    compatibility_risk, plan_remediation, CompatibilityRisk, RemediationKind, RemediationPlan,
-    VersionAvailability,
+    CompatibilityRisk, RemediationKind, RemediationPlan, VersionAvailability, compatibility_risk,
+    plan_remediation,
 };
-pub use policy::{DenyRule, ExceptionRule, PinRule, PolicyError, VulnPolicy, DEFAULT_POLICY_PATH};
+pub use policy::{DEFAULT_POLICY_PATH, DenyRule, ExceptionRule, PinRule, PolicyError, VulnPolicy};
 pub use reach::{
-    remediation_scope, CallSite, EntryPoint, EntryPointKind, ImpactForecast, ImpactIndex,
-    ReachIndex, RemediationScope,
+    CallSite, EntryPoint, EntryPointKind, ImpactForecast, ImpactIndex, ReachIndex,
+    RemediationScope, remediation_scope,
 };
-pub use repair::{repair_inputs, RepairInputs};
+pub use repair::{RepairInputs, repair_inputs};
 pub use scan::{
-    advisories_for, is_sbom_source, scan, EcosystemCoverage, GraphUsageOracle, NoUsageEvidence,
-    ScanError, ScanReport, ScanRequest, SuppressedFinding, UsageOracle,
+    EcosystemCoverage, GraphUsageOracle, NoUsageEvidence, ScanError, ScanReport, ScanRequest,
+    SuppressedFinding, UsageOracle, advisories_for, is_sbom_source, scan,
 };
 pub use severity::{
-    assess_severity, band_for_score, cvss_v3_base_score, prioritize, Priority, PriorityInputs,
-    SeverityAssessment, SeverityBand, SeverityScoreSource,
+    Priority, PriorityInputs, SeverityAssessment, SeverityBand, SeverityScoreSource,
+    assess_severity, band_for_score, cvss_v3_base_score, prioritize,
 };
 pub use source::{AdvisorySource, CompositeSource, LocalDirSource, SourceDescription, SourceError};
 pub use synaptic_api::{Ecosystem, PackageCoordinate};
 pub use sync::{
-    osv_bulk_url, sync_ecosystem, unpack_corpus, CorpusCache, CorpusFetcher, CorpusHead,
-    CorpusMetadata, SyncError, SystemCorpusFetcher, DEFAULT_MAX_DOWNLOAD_BYTES,
-    DEFAULT_STALE_AFTER_SECONDS, OSV_BULK_BASE,
+    CorpusCache, CorpusFetcher, CorpusHead, CorpusMetadata, DEFAULT_MAX_DOWNLOAD_BYTES,
+    DEFAULT_STALE_AFTER_SECONDS, OSV_BULK_BASE, SyncError, SystemCorpusFetcher, osv_bulk_url,
+    sync_ecosystem, unpack_corpus,
 };

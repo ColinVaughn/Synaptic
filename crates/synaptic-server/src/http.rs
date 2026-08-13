@@ -34,26 +34,26 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 use axum::{
+    Json, Router,
     body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{
-        sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
-    Json, Router,
 };
 use base64::Engine as _;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
-use crate::session::{SessionStore, DEFAULT_SESSION_IDLE};
+use crate::session::{DEFAULT_SESSION_IDLE, SessionStore};
 use crate::{
-    is_modern_request, jsonrpc_error_response, jsonrpc_parse_error, request_needs_reload,
-    resource_updated_notification, subscription_acknowledged, validate_initialize_params,
-    validate_jsonrpc_request, validate_modern_request, validate_subscription_filter,
-    NegotiatedClient, Server, MODERN_PROTOCOL,
+    MODERN_PROTOCOL, NegotiatedClient, Server, is_modern_request, jsonrpc_error_response,
+    jsonrpc_parse_error, request_needs_reload, resource_updated_notification,
+    subscription_acknowledged, validate_initialize_params, validate_jsonrpc_request,
+    validate_modern_request, validate_subscription_filter,
 };
 
 /// Acquire the engine read lock, recovering from poisoning. A poisoned lock left
@@ -327,22 +327,22 @@ fn guard(headers: &HeaderMap, st: &HttpState) -> Option<Response> {
         // Origin. Absent Origin (non-browser clients) is allowed. Gated on the
         // same specific/loopback bind as the Host check; a wildcard bind
         // disables both.
-        if let Some(origin) = headers.get("origin").and_then(|h| h.to_str().ok()) {
-            if !allowed.contains(origin_authority(origin)) {
-                return Some((StatusCode::FORBIDDEN, "forbidden origin").into_response());
-            }
+        if let Some(origin) = headers.get("origin").and_then(|h| h.to_str().ok())
+            && !allowed.contains(origin_authority(origin))
+        {
+            return Some((StatusCode::FORBIDDEN, "forbidden origin").into_response());
         }
     }
-    if let Some(key) = &st.api_key {
-        if !authorized(headers, key) {
-            return Some(
-                (
-                    StatusCode::UNAUTHORIZED,
-                    Json(json!({ "error": "unauthorized" })),
-                )
-                    .into_response(),
-            );
-        }
+    if let Some(key) = &st.api_key
+        && !authorized(headers, key)
+    {
+        return Some(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "unauthorized" })),
+            )
+                .into_response(),
+        );
     }
     None
 }
@@ -435,12 +435,12 @@ fn validate_modern_http_request(
     // unsupported-version error until after header/body agreement is checked,
     // so a version mismatch remains HeaderMismatch.
     let modern_validation = validate_modern_request(req);
-    if let Err(error) = &modern_validation {
-        if error["error"]["code"] != -32022 {
-            return Err(Box::new(
-                (StatusCode::BAD_REQUEST, Json(error.clone())).into_response(),
-            ));
-        }
+    if let Err(error) = &modern_validation
+        && error["error"]["code"] != -32022
+    {
+        return Err(Box::new(
+            (StatusCode::BAD_REQUEST, Json(error.clone())).into_response(),
+        ));
     }
 
     let header_version = headers
@@ -601,14 +601,13 @@ async fn handle_post(State(st): State<HttpState>, headers: HeaderMap, body: Byte
             if let Some(sent) = headers
                 .get("mcp-protocol-version")
                 .and_then(|value| value.to_str().ok())
+                && st.sessions.negotiated_protocol(session_id).as_deref() != Some(sent)
             {
-                if st.sessions.negotiated_protocol(session_id).as_deref() != Some(sent) {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        "MCP-Protocol-Version does not match the negotiated session version",
-                    )
-                        .into_response();
-                }
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "MCP-Protocol-Version does not match the negotiated session version",
+                )
+                    .into_response();
             }
             if method == "notifications/initialized" && req.id.is_none() {
                 st.sessions.mark_ready(session_id);
@@ -774,20 +773,20 @@ async fn handle_sse(State(st): State<HttpState>, headers: HeaderMap) -> Response
         return resp;
     }
     let mut session_id = None;
-    if !st.stateless {
-        if let Some(id) = session_header(&headers) {
-            if !st.sessions.touch(&id) {
-                return (StatusCode::NOT_FOUND, "unknown or expired session").into_response();
-            }
-            if !st.sessions.is_ready(&id) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    "session is waiting for notifications/initialized",
-                )
-                    .into_response();
-            }
-            session_id = Some(id);
+    if !st.stateless
+        && let Some(id) = session_header(&headers)
+    {
+        if !st.sessions.touch(&id) {
+            return (StatusCode::NOT_FOUND, "unknown or expired session").into_response();
         }
+        if !st.sessions.is_ready(&id) {
+            return (
+                StatusCode::BAD_REQUEST,
+                "session is waiting for notifications/initialized",
+            )
+                .into_response();
+        }
+        session_id = Some(id);
     }
     // Bounded so an abandoned (or sessionless) GET can't hold a connection for
     // the process lifetime: ends once a tracked session is reaped, or after a
@@ -805,10 +804,10 @@ async fn handle_sse(State(st): State<HttpState>, headers: HeaderMap) -> Response
                 return None;
             }
             // End promptly once a tracked session has been reaped.
-            if let Some(id) = &session_id {
-                if !sessions.contains(id) {
-                    return None;
-                }
+            if let Some(id) = &session_id
+                && !sessions.contains(id)
+            {
+                return None;
             }
             let event = match rx.as_mut() {
                 Some(r) => {
@@ -1045,7 +1044,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::{to_bytes, Body};
+    use axum::body::{Body, to_bytes};
     use axum::http::Request;
     use serde_json::Map;
     use synaptic_core::GraphData;
@@ -1817,10 +1816,12 @@ mod tests {
             .oneshot(Request::get("/api/stats").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert!(json_body(stats).await["text"]
-            .as_str()
-            .unwrap()
-            .contains("2 nodes"));
+        assert!(
+            json_body(stats).await["text"]
+                .as_str()
+                .unwrap()
+                .contains("2 nodes")
+        );
 
         write_graph(
             &path,
@@ -1843,10 +1844,12 @@ mod tests {
             .oneshot(Request::get("/api/god-nodes").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert!(json_body(gods).await["text"]
-            .as_str()
-            .unwrap()
-            .contains("GodFresh"));
+        assert!(
+            json_body(gods).await["text"]
+                .as_str()
+                .unwrap()
+                .contains("GodFresh")
+        );
 
         write_graph(&path, &[("node", "NodeFreshExtraLong", None)], &[]);
         let node = app
@@ -1858,10 +1861,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(json_body(node).await["text"]
-            .as_str()
-            .unwrap()
-            .contains("NodeFreshExtraLong"));
+        assert!(
+            json_body(node).await["text"]
+                .as_str()
+                .unwrap()
+                .contains("NodeFreshExtraLong")
+        );
 
         write_graph(
             &path,
@@ -1880,10 +1885,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(json_body(query).await["text"]
-            .as_str()
-            .unwrap()
-            .contains("QueryFreshEvenLonger"));
+        assert!(
+            json_body(query).await["text"]
+                .as_str()
+                .unwrap()
+                .contains("QueryFreshEvenLonger")
+        );
 
         write_graph(
             &path,
@@ -1899,10 +1906,12 @@ mod tests {
             .oneshot(Request::get("/api/repos").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert!(json_body(repos).await["text"]
-            .as_str()
-            .unwrap()
-            .contains("repo_fresh"));
+        assert!(
+            json_body(repos).await["text"]
+                .as_str()
+                .unwrap()
+                .contains("repo_fresh")
+        );
 
         write_graph(
             &path,
@@ -1926,11 +1935,13 @@ mod tests {
             .await
             .unwrap();
         let completion = json_body(completion).await;
-        assert!(completion["result"]["completion"]["values"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|value| value == "CompletionFreshLongestOfAll"));
+        assert!(
+            completion["result"]["completion"]["values"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "CompletionFreshLongestOfAll")
+        );
 
         // Protocol-only requests do not pay the reload cost.
         write_graph(

@@ -2,8 +2,8 @@
 use std::path::Path;
 
 use synaptic_workspace::manifest::RepoMember;
-use synaptic_workspace::scan::{discover_sibling_repos, ScanOptions};
-use synaptic_workspace::workspace_build::{federate_repos, WorkspaceBuildOptions};
+use synaptic_workspace::scan::{ScanOptions, discover_sibling_repos};
+use synaptic_workspace::workspace_build::{WorkspaceBuildOptions, federate_repos};
 
 fn touch(dir: &Path, rel: &str, body: &str) {
     let p = dir.join(rel);

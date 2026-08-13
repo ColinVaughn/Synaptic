@@ -4,8 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::span::Span;
 use crate::NodeId;
+use crate::span::Span;
 
 /// An unresolved call captured during extraction, resolved across files by the
 /// symbol-resolution pass.

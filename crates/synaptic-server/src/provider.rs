@@ -10,12 +10,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Condvar, Mutex};
 
 use synaptic_core::{Edge, GraphData, Node, NodeId};
-use synaptic_graph::{god_nodes, graph_stats, GodNode, GraphStats, KnowledgeGraph};
+use synaptic_graph::{GodNode, GraphStats, KnowledgeGraph, god_nodes, graph_stats};
 use synaptic_query::{
-    rank_result_edges, resolve_detailed, DynamicHazardIndex, EdgeRef, QueryIndex, QueryResult,
-    Recency, Resolution, ReverseImpactIndex, TraversalMode, DEFAULT_AFFECTED_RELATIONS,
+    DEFAULT_AFFECTED_RELATIONS, DynamicHazardIndex, EdgeRef, QueryIndex, QueryResult, Recency,
+    Resolution, ReverseImpactIndex, TraversalMode, rank_result_edges, resolve_detailed,
 };
-use synaptic_store::{ShardStore, AFFECTED_INDEX_BLOB, QUERY_INDEX_BLOB};
+use synaptic_store::{AFFECTED_INDEX_BLOB, QUERY_INDEX_BLOB, ShardStore};
 
 use crate::aggregate::AggregateCache;
 
@@ -1021,7 +1021,9 @@ impl GraphProvider {
 /// not been migrated to per-shard fan-out yet. Never reached in shipped builds
 /// (construction only makes a `Shard` once every tool is migrated).
 fn unmigrated(method: &str) -> ! {
-    panic!("BUG: GraphProvider::{method}() called on a ShardProvider; this tool must be migrated to fan-out before serving a federated store");
+    panic!(
+        "BUG: GraphProvider::{method}() called on a ShardProvider; this tool must be migrated to fan-out before serving a federated store"
+    );
 }
 
 /// Build the community-membership map: community id -> the real code symbols that
@@ -1215,7 +1217,7 @@ mod tests {
     }
 
     fn shard_provider_over(gd: &GraphData) -> GraphProvider {
-        use synaptic_store::{migrate, ShardStore};
+        use synaptic_store::{ShardStore, migrate};
         let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
         let store_dir = dir.path().join("store");
         let mut store = ShardStore::open(&store_dir).unwrap();
@@ -1496,9 +1498,11 @@ mod tests {
         let results = concurrent_shard_requests(provider.clone(), "missing", 8);
         assert!(results.iter().all(Result::is_err));
         let first_error = results[0].as_ref().err().unwrap();
-        assert!(results
-            .iter()
-            .all(|result| result.as_ref().err() == Some(first_error)));
+        assert!(
+            results
+                .iter()
+                .all(|result| result.as_ref().err() == Some(first_error))
+        );
         let GraphProvider::Shard(sp) = provider.as_ref() else {
             unreachable!();
         };
@@ -1510,7 +1514,7 @@ mod tests {
 
     #[test]
     fn resolve_fans_out_across_shards() {
-        use synaptic_store::{migrate, ShardStore};
+        use synaptic_store::{ShardStore, migrate};
         // "Widget" exists in both repos (ambiguous); "Solo" only in billing.
         let gd = GraphData {
             directed: true,
@@ -1551,7 +1555,7 @@ mod tests {
 
     #[test]
     fn shard_provider_lists_and_materializes_shards() {
-        use synaptic_store::{migrate, ShardStore};
+        use synaptic_store::{ShardStore, migrate};
         let gd = GraphData {
             directed: true,
             multigraph: false,

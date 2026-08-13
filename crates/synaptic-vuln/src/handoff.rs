@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 use synaptic_api::{
-    deterministic_vulnerability_branch, ApiChangeEvent, ApiRunRecord, RepairBrief, RepairOutcome,
-    RunState, VerificationReport,
+    ApiChangeEvent, ApiRunRecord, RepairBrief, RepairOutcome, RunState, VerificationReport,
+    deterministic_vulnerability_branch,
 };
 
 use crate::FindingRecord;
-use crate::{repair_inputs, FindingState};
+use crate::{FindingState, repair_inputs};
 
 /// Credential-separated handoff for one conclusively verified vulnerability repair.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

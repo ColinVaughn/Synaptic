@@ -2,7 +2,7 @@
 //! Connects with sqlx and runs `EXPLAIN <query>`, parsing the text output.
 //! Read-only: it runs EXPLAIN (never EXPLAIN ANALYZE), so it does not execute
 //! the audited query.
-use crate::explain::{parse_pg_explain, PlanProvider, PlanSignal};
+use crate::explain::{PlanProvider, PlanSignal, parse_pg_explain};
 
 /// Connects to `db_url` (postgres://, mysql://, sqlite://) and EXPLAINs queries.
 /// One pool is opened at construction and reused for every query.

@@ -48,10 +48,10 @@ fn read_graph(root: &Path) -> Option<serde_json::Value> {
 fn wait_for(root: &Path, secs: u64, pred: impl Fn(&serde_json::Value) -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_secs(secs);
     while Instant::now() < deadline {
-        if let Some(g) = read_graph(root) {
-            if pred(&g) {
-                return true;
-            }
+        if let Some(g) = read_graph(root)
+            && pred(&g)
+        {
+            return true;
         }
         std::thread::sleep(Duration::from_millis(200));
     }

@@ -1,8 +1,8 @@
 //! `sql audit`: run the SQL auditor over the graph and write findings.json + audit.md.
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::path::PathBuf;
 
-use synaptic_sqlaudit::{advise, audit, render::render_markdown, AuditOptions, Severity};
+use synaptic_sqlaudit::{AuditOptions, Severity, advise, audit, render::render_markdown};
 
 use crate::cli::SqlAction;
 use crate::commands::common::{default_graph_path, load_scoped_graph};
@@ -105,7 +105,9 @@ fn build_audit_report(
     #[cfg(not(feature = "live-explain"))]
     {
         if explain {
-            eprintln!("[synaptic] --explain requires building with --features live-explain; reporting static findings only");
+            eprintln!(
+                "[synaptic] --explain requires building with --features live-explain; reporting static findings only"
+            );
         }
     }
     let _ = (explain, db_url);

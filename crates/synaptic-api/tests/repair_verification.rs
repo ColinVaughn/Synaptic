@@ -1,6 +1,6 @@
 use synaptic_api::{
-    validate_patch, verify_api_invariants, ApiChangeEvent, ApiUsageBinding, ApplicabilityState,
-    BindingBasis, PatchPolicy, RelevanceAssessment,
+    ApiChangeEvent, ApiUsageBinding, ApplicabilityState, BindingBasis, PatchPolicy,
+    RelevanceAssessment, validate_patch, verify_api_invariants,
 };
 use synaptic_core::GraphData;
 use synaptic_graph::KnowledgeGraph;

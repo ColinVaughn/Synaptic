@@ -171,9 +171,11 @@ fn decorated_methods_stay_methods() {
         .filter(|e| e.relation == "contains")
         .map(|e| e.target.as_str())
         .collect();
-    assert!(contains_targets
-        .iter()
-        .all(|t| !t.ends_with("_value") && !t.ends_with("_make")));
+    assert!(
+        contains_targets
+            .iter()
+            .all(|t| !t.ends_with("_value") && !t.ends_with("_make"))
+    );
 }
 
 #[test]
@@ -230,9 +232,11 @@ fn relative_import_resolves_to_sibling_file_id() {
     // `from .helper import transform` in pkg/mod.py targets pkg/helper.py's id.
     let r = extract_python_source("pkg/mod.py", b"from .helper import transform\n");
     let helper_file = make_id(&["pkg/helper.py"]);
-    assert!(import_edges(&r)
-        .iter()
-        .any(|(_, rel, t)| rel == "imports_from" && t == &helper_file));
+    assert!(
+        import_edges(&r)
+            .iter()
+            .any(|(_, rel, t)| rel == "imports_from" && t == &helper_file)
+    );
     // Relative targets are NOT stubbed (they bind to the real file node).
     assert!(!r.nodes.iter().any(|n| n.id.0 == helper_file));
 }
@@ -242,9 +246,11 @@ fn relative_import_climbs_parents() {
     // `from ..util import x` in a/b/mod.py resolves to a/util.py
     let r = extract_python_source("a/b/mod.py", b"from ..util import x\n");
     let util = make_id(&["a/util.py"]);
-    assert!(import_edges(&r)
-        .iter()
-        .any(|(_, rel, t)| rel == "imports_from" && t == &util));
+    assert!(
+        import_edges(&r)
+            .iter()
+            .any(|(_, rel, t)| rel == "imports_from" && t == &util)
+    );
 }
 
 #[test]
@@ -252,9 +258,11 @@ fn absolute_from_import_records_alias_and_stem() {
     let r = extract_python_source("m.py", b"from lib.lower import Foo as F\n");
     let modid = make_id(&["lib.lower"]);
     // Edge to the module + stub node.
-    assert!(import_edges(&r)
-        .iter()
-        .any(|(_, rel, t)| rel == "imports_from" && t == &modid));
+    assert!(
+        import_edges(&r)
+            .iter()
+            .any(|(_, rel, t)| rel == "imports_from" && t == &modid)
+    );
     assert!(r.nodes.iter().any(|n| n.id.0 == modid));
     // Import record captures alias + module stem (final component).
     assert_eq!(r.imports.len(), 1);
@@ -330,16 +338,18 @@ fn param_and_return_types_link_to_in_file_classes() {
     assert!(rs.contains(&("Result".to_string(), "return_type".to_string())));
     // The reference edge binds to the actual in-file class node id.
     let widget_id = make_id(&["t", "Widget"]);
-    assert!(r
-        .edges
-        .iter()
-        .any(|e| e.relation == "references" && e.target.0 == widget_id));
+    assert!(
+        r.edges
+            .iter()
+            .any(|e| e.relation == "references" && e.target.0 == widget_id)
+    );
     // references edges are EXTRACTED.
-    assert!(r
-        .edges
-        .iter()
-        .filter(|e| e.relation == "references")
-        .all(|e| e.confidence == Confidence::Extracted));
+    assert!(
+        r.edges
+            .iter()
+            .filter(|e| e.relation == "references")
+            .all(|e| e.confidence == Confidence::Extracted)
+    );
 }
 
 #[test]
@@ -359,14 +369,16 @@ fn unknown_param_type_creates_global_stub() {
     let r = extract_python_source("t.py", src);
     let settings = make_id(&["Settings"]);
     // Global stub node created + a references edge pointing at it.
-    assert!(r
-        .nodes
-        .iter()
-        .any(|n| n.id.0 == settings && n.label == "Settings"));
-    assert!(r
-        .edges
-        .iter()
-        .any(|e| e.relation == "references" && e.target.0 == settings));
+    assert!(
+        r.nodes
+            .iter()
+            .any(|n| n.id.0 == settings && n.label == "Settings")
+    );
+    assert!(
+        r.edges
+            .iter()
+            .any(|e| e.relation == "references" && e.target.0 == settings)
+    );
 }
 
 #[test]

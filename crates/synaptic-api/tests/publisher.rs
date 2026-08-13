@@ -3,10 +3,10 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use synaptic_api::{
-    publish_verified_change_request, publish_verified_draft,
-    publish_verified_vulnerability_change_request, ChangeRequestKind, ChangeRequestProvider,
-    CommandOutput, DraftPublishRequest, GateOutcome, GateResult, PublishAction,
-    PublishCommandRunner, PublishContext, PublishError, RepairBrief, VerificationReport,
+    ChangeRequestKind, ChangeRequestProvider, CommandOutput, DraftPublishRequest, GateOutcome,
+    GateResult, PublishAction, PublishCommandRunner, PublishContext, PublishError, RepairBrief,
+    VerificationReport, publish_verified_change_request, publish_verified_draft,
+    publish_verified_vulnerability_change_request,
 };
 
 struct MockRunner {
@@ -157,9 +157,11 @@ fn verified_publish_commits_pushes_and_creates_one_draft_with_marker() {
     assert_eq!(result.action, PublishAction::Created);
     assert_eq!(result.number, Some(7));
     let calls = runner.calls.lock().unwrap();
-    assert!(calls
-        .iter()
-        .any(|(program, args, _)| program == "git" && args.iter().any(|arg| arg == "commit")));
+    assert!(
+        calls
+            .iter()
+            .any(|(program, args, _)| program == "git" && args.iter().any(|arg| arg == "commit"))
+    );
     let create = calls
         .iter()
         .find(|(program, args, _)| program == "gh" && args.iter().any(|arg| arg == "create"))
@@ -171,9 +173,11 @@ fn verified_publish_commits_pushes_and_creates_one_draft_with_marker() {
     assert!(create.2.contains("src/client.ts:12"));
     assert!(create.2.contains("customers.create"));
     assert!(create.2.contains("Community `7`"));
-    assert!(create
-        .2
-        .contains("old binding removed and replacement present"));
+    assert!(
+        create
+            .2
+            .contains("old binding removed and replacement present")
+    );
     assert!(create.2.contains("computed SDK member at src/dynamic.ts:4"));
     assert!(create.2.contains("human review is required"));
     assert!(!create.2.contains("publish-secret"));
@@ -244,12 +248,14 @@ fn replay_updates_matching_pr_and_unverified_runs_cannot_publish() {
     let result = publish_verified_draft(&request, &runner).unwrap();
     assert_eq!(result.action, PublishAction::Updated);
     assert_eq!(result.number, Some(12));
-    assert!(runner
-        .calls
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|(program, args, _)| program == "gh" && args.iter().any(|arg| arg == "edit")));
+    assert!(
+        runner
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(program, args, _)| program == "gh" && args.iter().any(|arg| arg == "edit"))
+    );
 
     let mut invalid = request;
     invalid.verification = VerificationReport::from_gates(vec![GateResult {
@@ -281,14 +287,16 @@ fn publish_rejects_a_target_branch_that_moved_after_verification() {
         publish_verified_draft(&request, &runner),
         Err(PublishError::StaleBase { .. })
     ));
-    assert!(!runner
-        .calls
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|(program, args, _)| {
-            program == "git" && args.iter().any(|argument| argument == "push")
-        }));
+    assert!(
+        !runner
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(program, args, _)| {
+                program == "git" && args.iter().any(|argument| argument == "push")
+            })
+    );
 }
 
 #[test]
@@ -358,7 +366,9 @@ fn verified_publish_uses_real_git_against_a_local_remote_only() {
     );
     assert_eq!(remote_head, local_head);
     assert_eq!(git(&worktree, &["status", "--porcelain"]), "");
-    assert!(git(&worktree, &["log", "-1", "--format=%B"]).contains("Synaptic-API-Event: event_123"));
+    assert!(
+        git(&worktree, &["log", "-1", "--format=%B"]).contains("Synaptic-API-Event: event_123")
+    );
 
     let gh_calls = runner.gh_calls.lock().unwrap();
     let create = gh_calls
@@ -452,12 +462,14 @@ fn replay_with_the_same_verified_tree_does_not_overwrite_the_remote_branch() {
     .unwrap();
 
     assert_eq!(result.action, PublishAction::Updated);
-    assert!(!runner
-        .git_calls
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|args| args.first().is_some_and(|argument| argument == "push")));
+    assert!(
+        !runner
+            .git_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|args| args.first().is_some_and(|argument| argument == "push"))
+    );
 }
 
 #[test]
@@ -499,10 +511,12 @@ fn gitlab_publish_creates_one_draft_merge_request_with_explicit_target() {
         })
         .expect("draft merge request create command");
     assert!(create.1.iter().any(|arg| arg == "--draft"));
-    assert!(create
-        .1
-        .windows(2)
-        .any(|args| args == ["--target-branch", "main"]));
+    assert!(
+        create
+            .1
+            .windows(2)
+            .any(|args| args == ["--target-branch", "main"])
+    );
     assert!(create.2.contains(
         "<!-- synaptic-api-event:event_123 base:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->"
     ));
@@ -534,14 +548,16 @@ fn gitlab_replay_updates_the_single_matching_merge_request_and_rejects_duplicate
     let result = publish_verified_change_request(&request, &context, &runner).unwrap();
     assert_eq!(result.action, PublishAction::Updated);
     assert_eq!(result.number, Some(8));
-    assert!(runner
-        .calls
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|(program, args, _)| {
-            program == "glab" && args.starts_with(&["mr".into(), "update".into(), "8".into()])
-        }));
+    assert!(
+        runner
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(program, args, _)| {
+                program == "glab" && args.starts_with(&["mr".into(), "update".into(), "8".into()])
+            })
+    );
 
     let duplicate_runner = MockRunner {
         list_output: format!("[{item},{item}]", item = &matching[1..matching.len() - 1]),

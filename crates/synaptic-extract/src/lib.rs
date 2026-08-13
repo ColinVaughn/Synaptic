@@ -170,20 +170,20 @@ pub mod yaml;
 #[cfg(feature = "lang-zig")]
 pub mod zig;
 
-pub use cache::{cached_extract_source, AST_CACHE_VERSION};
+pub use cache::{AST_CACHE_VERSION, cached_extract_source};
 pub use config::{ImportStyle, LanguageConfig, TypeRefStyle};
 #[cfg(feature = "cross-language")]
 pub use crosslang::prune_local_sdk_candidates;
-pub use resolve::{resolve_imports, resolve_relative_imports, ResolveStats};
+pub use resolve::{ResolveStats, resolve_imports, resolve_relative_imports};
 #[cfg(feature = "lang-json")]
 pub use resource::{
-    emit_resources, extract_resource_source, resolve_resource_refs, set_emit_resources,
-    ResourceResolveStats,
+    ResourceResolveStats, emit_resources, extract_resource_source, resolve_resource_refs,
+    set_emit_resources,
 };
 pub use result::{ExtractionResult, ImportRecord, RawCall};
 #[cfg(feature = "lang-sql")]
 pub use sql_semantic::{emit_sql_columns, set_emit_sql_columns};
-pub use tsconfig::{load_alias_resolver, AliasResolver};
+pub use tsconfig::{AliasResolver, load_alias_resolver};
 pub use walker::extract_with_config;
 
 #[cfg(feature = "lang-python")]
@@ -431,10 +431,11 @@ mod tests {
         crate::resource::set_emit_resources(true);
         let r = extract_source("pack.mcmeta", br#"{"pack":{"pack_format":15}}"#)
             .expect("mcmeta dispatched when resources on");
-        assert!(r
-            .nodes
-            .iter()
-            .any(|n| n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("resource")));
+        assert!(
+            r.nodes
+                .iter()
+                .any(|n| n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("resource"))
+        );
         crate::resource::set_emit_resources(false);
         assert!(
             extract_source("pack.mcmeta", b"{}").is_none(),

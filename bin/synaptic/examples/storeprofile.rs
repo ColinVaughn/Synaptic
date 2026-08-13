@@ -9,7 +9,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use synaptic_query::{QueryIndex, ReverseImpactIndex, DEFAULT_AFFECTED_RELATIONS};
+use synaptic_query::{DEFAULT_AFFECTED_RELATIONS, QueryIndex, ReverseImpactIndex};
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);

@@ -15,10 +15,10 @@ use std::path::{Path, PathBuf};
 
 use synaptic_incremental::{is_rebuildable, should_ignore_path};
 
-use crate::discover::Member;
-use crate::manifest::{RepoMember, MANIFEST_NAME};
-use crate::workspace_build::resolve_members;
 use crate::Result;
+use crate::discover::Member;
+use crate::manifest::{MANIFEST_NAME, RepoMember};
+use crate::workspace_build::resolve_members;
 
 /// A filesystem event the workspace watcher acts on.
 #[derive(Debug, Clone, PartialEq, Eq)]

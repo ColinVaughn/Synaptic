@@ -22,7 +22,7 @@ use std::sync::LazyLock;
 #[cfg(feature = "lang-dotnet")]
 use regex::Regex;
 #[cfg(feature = "lang-dotnet")]
-use synaptic_core::{make_id, FileType, NodeId, RawCall};
+use synaptic_core::{FileType, NodeId, RawCall, make_id};
 
 #[cfg(feature = "lang-dotnet")]
 use crate::common::Builder;
@@ -209,16 +209,15 @@ fn extract_xaml(path: &str, source: &[u8]) -> ExtractionResult {
                 ("ResourceDictionary", "Source") => Some("xaml_resource"),
                 _ => None,
             };
-            if let Some(context) = resource_context {
-                if value.to_ascii_lowercase().ends_with(".xaml")
-                    && !value.contains("://")
-                    && !value.starts_with("pack:")
-                {
-                    let resolved = resolve_relative_path(path, xaml_resource_path(value));
-                    let target = file_node_id(&resolved);
-                    b.add_external_node(target.clone(), filename(&resolved));
-                    b.add_edge(file_nid.clone(), target, "imports", line, Some(context));
-                }
+            if let Some(context) = resource_context
+                && value.to_ascii_lowercase().ends_with(".xaml")
+                && !value.contains("://")
+                && !value.starts_with("pack:")
+            {
+                let resolved = resolve_relative_path(path, xaml_resource_path(value));
+                let target = file_node_id(&resolved);
+                b.add_external_node(target.clone(), filename(&resolved));
+                b.add_edge(file_nid.clone(), target, "imports", line, Some(context));
             }
             if class_simple.is_some() && XAML_EVENTS.contains(&name) && is_identifier(value) {
                 b.raw_calls.push(RawCall {
@@ -366,20 +365,18 @@ fn extract_sln(path: &str, source: &[u8]) -> ExtractionResult {
             in_deps = false;
             continue;
         }
-        if in_deps {
-            if let (Some(cap), Some(from)) = (dep_re.captures(trimmed), &current) {
-                if let Some(to) = guid_to_nid.get(&cap[1].to_ascii_lowercase()) {
-                    if from != to {
-                        b.add_edge(
-                            from.clone(),
-                            to.clone(),
-                            "imports",
-                            1,
-                            Some("project_dependency"),
-                        );
-                    }
-                }
-            }
+        if in_deps
+            && let (Some(cap), Some(from)) = (dep_re.captures(trimmed), &current)
+            && let Some(to) = guid_to_nid.get(&cap[1].to_ascii_lowercase())
+            && from != to
+        {
+            b.add_edge(
+                from.clone(),
+                to.clone(),
+                "imports",
+                1,
+                Some("project_dependency"),
+            );
         }
     }
     b.into_result()
@@ -509,8 +506,10 @@ mod tests {
     #[test]
     fn csproj_sdk_is_a_concept_referenced() {
         let r = extract_dotnet_source("src/App/App.csproj", CSPROJ);
-        assert!(rels(&r, "references")
-            .contains(&("App.csproj".to_string(), "Microsoft.NET.Sdk".to_string())));
+        assert!(
+            rels(&r, "references")
+                .contains(&("App.csproj".to_string(), "Microsoft.NET.Sdk".to_string()))
+        );
         assert_eq!(node_type(&r, "Microsoft.NET.Sdk"), Some(FileType::Concept));
     }
 

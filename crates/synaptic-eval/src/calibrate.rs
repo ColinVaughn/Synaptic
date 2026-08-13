@@ -130,7 +130,7 @@ pub fn reliability(samples: &[Sample], n_bins: usize) -> CalibrationReport {
 
 use std::path::Path;
 use std::process::Command;
-use synaptic_predict::{co_change, CoChangeOptions};
+use synaptic_predict::{CoChangeOptions, co_change};
 
 /// Turn commit history into calibration samples by leave-one-out co-change.
 ///
@@ -204,10 +204,10 @@ fn read_transactions(repo_root: &Path) -> Result<Vec<Vec<String>>, String> {
     for line in text.lines() {
         if let Some(_hash) = line.strip_prefix('\x01') {
             txns.push(Vec::new());
-        } else if !line.is_empty() {
-            if let Some(cur) = txns.last_mut() {
-                cur.push(line.replace('\\', "/"));
-            }
+        } else if !line.is_empty()
+            && let Some(cur) = txns.last_mut()
+        {
+            cur.push(line.replace('\\', "/"));
         }
     }
     Ok(txns)

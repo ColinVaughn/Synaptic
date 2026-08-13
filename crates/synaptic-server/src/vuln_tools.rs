@@ -13,15 +13,15 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use synaptic_core::{EdgeSiteAccumulator, GraphData};
 use synaptic_graph::KnowledgeGraph;
 use synaptic_vuln::{
+    AdvisorySource, CompositeSource, CorpusCache, DecisionKind, Ecosystem, FindingStore,
+    GraphUsageOracle, ImpactIndex, LocalDirSource, NoUsageEvidence, PackageCoordinate,
+    PackageGraph, ReachIndex, ScanRequest, SystemOsvTransport, UsageOracle, VulnPolicy,
     check_dependency, decision, discover_repository_files, feature_gated_in, is_sbom_source,
-    repair_inputs, scan, AdvisorySource, CompositeSource, CorpusCache, DecisionKind, Ecosystem,
-    FindingStore, GraphUsageOracle, ImpactIndex, LocalDirSource, NoUsageEvidence,
-    PackageCoordinate, PackageGraph, ReachIndex, ScanRequest, SystemOsvTransport, UsageOracle,
-    VulnPolicy,
+    repair_inputs, scan,
 };
 
 /// Environment variable naming the OSV advisory directory.
@@ -306,13 +306,13 @@ pub(crate) fn explain_tool(root: &Path, finding: &str) -> (String, Value) {
             return (
                 format!("Finding {finding} is not in the ledger."),
                 json!({ "error": "unknown_finding" }),
-            )
+            );
         }
         Err(error) => {
             return (
                 format!("Finding {finding} could not be read: {error}"),
                 json!({ "error": "unreadable_finding" }),
-            )
+            );
         }
     };
 

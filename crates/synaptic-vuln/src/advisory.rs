@@ -302,10 +302,10 @@ fn coordinate_from_osv(
     name: &str,
     purl: Option<&str>,
 ) -> Option<PackageCoordinate> {
-    if let Some(purl) = purl {
-        if let Ok(parsed) = PackageUrl::parse(purl) {
-            return Some(parsed.to_coordinate());
-        }
+    if let Some(purl) = purl
+        && let Ok(parsed) = PackageUrl::parse(purl)
+    {
+        return Some(parsed.to_coordinate());
     }
     // OSV ecosystem strings can carry a `:suffix` qualifier, e.g.
     // "Alpine:v3.16". Only the leading token identifies the package type.

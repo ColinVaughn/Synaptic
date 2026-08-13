@@ -117,10 +117,10 @@ fn ghost_remap(kg: &KnowledgeGraph) -> HashMap<NodeId, NodeId> {
             continue;
         }
         let key = (base, label.to_string());
-        if let Some(canonical) = loc.get(&key) {
-            if canonical != &n.id {
-                remap.insert(n.id.clone(), canonical.clone());
-            }
+        if let Some(canonical) = loc.get(&key)
+            && canonical != &n.id
+        {
+            remap.insert(n.id.clone(), canonical.clone());
         }
     }
     remap

@@ -14,7 +14,7 @@
 //! which is why the key is included in `targets`. The `remotes` object is found by
 //! [`crate::alias::named_object`], tolerant of both quoted and unquoted keys.
 
-use crate::alias::{named_object, object_pairs, AliasKind, RawAlias};
+use crate::alias::{AliasKind, RawAlias, named_object, object_pairs};
 
 /// Append a prefix `RawAlias` per `remotes` entry in a config file's `text`.
 pub(crate) fn parse(text: &str, out: &mut Vec<RawAlias>) {

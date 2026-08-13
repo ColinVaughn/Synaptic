@@ -8,10 +8,10 @@ use std::fs;
 use std::path::Path;
 use synaptic_core::GraphData;
 use synaptic_graph::{
-    analyze, apply_communities, build_from_parts, cluster, BuildOptions, ClusterOptions,
+    BuildOptions, ClusterOptions, analyze, apply_communities, build_from_parts, cluster,
 };
 use synaptic_ingest::{
-    ingest_mcp_config, ingest_scip_json, ingest_url, introspect_cargo, Ingested,
+    Ingested, ingest_mcp_config, ingest_scip_json, ingest_url, introspect_cargo,
 };
 // `PathBuf` is used only by `ingested_dir`, which is gated on these features.
 #[cfg(any(feature = "office", feature = "gws", feature = "media"))]
@@ -125,7 +125,9 @@ pub(crate) fn run_ingest_pg(out_dir: &Path, dsn: String) -> Result<()> {
 
 #[cfg(not(feature = "pg"))]
 pub(crate) fn run_ingest_pg(_out_dir: &Path, _dsn: String) -> Result<()> {
-    anyhow::bail!("postgres support is not built in; rebuild with `cargo install --features pg` (or `cargo build --features pg`)")
+    anyhow::bail!(
+        "postgres support is not built in; rebuild with `cargo install --features pg` (or `cargo build --features pg`)"
+    )
 }
 
 /// Merge ingested nodes/edges into the existing graph.json and rebuild outputs.

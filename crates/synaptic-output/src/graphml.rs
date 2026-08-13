@@ -64,10 +64,8 @@ pub fn to_graphml_string(kg: &KnowledgeGraph) -> String {
             "community",
             &n.community.map(|c| c as i64).unwrap_or(-1).to_string(),
         ));
-        if federated {
-            if let Some(r) = &n.repo {
-                s.push_str(&data("repo", &xml_escape(r)));
-            }
+        if federated && let Some(r) = &n.repo {
+            s.push_str(&data("repo", &xml_escape(r)));
         }
         if enriched {
             if let Some(k) = n.kind() {

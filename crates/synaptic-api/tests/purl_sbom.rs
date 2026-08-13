@@ -1,8 +1,8 @@
 use std::fs;
 
 use synaptic_api::{
-    scan_dependencies, scan_dependencies_and_sbom_evidence, scan_sbom_evidence, Ecosystem,
-    PackageUrl, SbomCompleteness,
+    Ecosystem, PackageUrl, SbomCompleteness, scan_dependencies,
+    scan_dependencies_and_sbom_evidence, scan_sbom_evidence,
 };
 
 #[test]

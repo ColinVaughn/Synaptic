@@ -11,7 +11,7 @@
 #[cfg(feature = "lang-json")]
 use serde_json::json;
 #[cfg(feature = "lang-json")]
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 #[cfg(feature = "lang-json")]
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -360,10 +360,11 @@ mod tests {
         );
         // scripts.build is contained under the scripts key node
         let scripts_id = synaptic_core::make_id(&["jsonkey", "package.json", "scripts"]);
-        assert!(r
-            .edges
-            .iter()
-            .any(|e| e.source.0 == scripts_id && e.relation == "contains"));
+        assert!(
+            r.edges
+                .iter()
+                .any(|e| e.source.0 == scripts_id && e.relation == "contains")
+        );
         // Config-key nodes are tagged non-code so change-impact excludes them.
         for n in r
             .nodes

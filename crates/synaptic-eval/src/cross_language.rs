@@ -170,7 +170,7 @@ pub fn calibrate_cross_language(graph: &GraphData) -> CrossLanguageReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Map};
+    use serde_json::{Map, json};
     use synaptic_core::{Confidence, Edge, FileType, Node};
 
     fn file_node(id: &str, label: &str) -> Node {

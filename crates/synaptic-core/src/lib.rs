@@ -33,7 +33,7 @@ pub use file_type::FileType;
 pub use fsio::{write_atomic, write_atomic_with};
 pub use graph_data::GraphData;
 pub use hyperedge::Hyperedge;
-pub use id::{make_id, NodeId};
+pub use id::{NodeId, make_id};
 pub use limits::{max_graph_bytes, max_nodes, max_shard_bytes, max_shard_nodes};
 pub use node::Node;
 pub use node_kind::{KindValue, NodeKind, Origin, OriginKind, Visibility};

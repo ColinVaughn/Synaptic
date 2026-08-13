@@ -209,7 +209,7 @@ fn run_workspace_watch(
     use std::sync::mpsc::channel;
     use std::time::{Duration, Instant};
     use synaptic_incremental::ChangeBatch;
-    use synaptic_workspace::watch::{classify, member_for_path, resolve_watch_targets, WatchEvent};
+    use synaptic_workspace::watch::{WatchEvent, classify, member_for_path, resolve_watch_targets};
 
     let debounce = debounce_ms
         .or_else(|| {
@@ -405,7 +405,7 @@ fn run_workspace_watch(
 
 pub(crate) fn run_workspace(action: WorkspaceAction) -> Result<()> {
     use synaptic_workspace::workspace_build::{
-        build_workspace, federate_artifacts, resolve_members, WorkspaceBuildOptions,
+        WorkspaceBuildOptions, build_workspace, federate_artifacts, resolve_members,
     };
     let root = std::env::current_dir().context("resolving current directory")?;
     let root = root.canonicalize().unwrap_or(root);
@@ -417,8 +417,8 @@ pub(crate) fn run_workspace(action: WorkspaceAction) -> Result<()> {
         } => {
             use synaptic_workspace::discover::discover_members;
             use synaptic_workspace::manifest::{
-                load_manifest, write_manifest, RepoMember, WorkspaceManifest, WorkspaceMeta,
-                MANIFEST_NAME,
+                MANIFEST_NAME, RepoMember, WorkspaceManifest, WorkspaceMeta, load_manifest,
+                write_manifest,
             };
             let members = discover_members(&root);
             let member_globs: Vec<String> = members
@@ -453,7 +453,7 @@ pub(crate) fn run_workspace(action: WorkspaceAction) -> Result<()> {
             // Optional: scan for sibling git repos and append [[repos]] entries.
             if let Some(scan_arg) = scan_repos {
                 use synaptic_workspace::scan::{
-                    discover_sibling_repos, relative_path, ScanOptions, SkipReason,
+                    ScanOptions, SkipReason, discover_sibling_repos, relative_path,
                 };
                 let scan_root = scan_arg.map(|p| root.join(p)).unwrap_or_else(|| {
                     root.parent()
@@ -503,7 +503,7 @@ pub(crate) fn run_workspace(action: WorkspaceAction) -> Result<()> {
             Ok(())
         }
         WorkspaceAction::Add { target } => {
-            use synaptic_workspace::manifest::{load_manifest, write_manifest, RepoMember};
+            use synaptic_workspace::manifest::{RepoMember, load_manifest, write_manifest};
             let mut manifest = load_manifest(&root)
                 .map_err(|e| anyhow::anyhow!("{e}"))?
                 .unwrap_or_default();
@@ -678,7 +678,7 @@ pub(crate) fn run_workspace(action: WorkspaceAction) -> Result<()> {
             Ok(())
         }
         WorkspaceAction::Discover { path, depth, max } => {
-            use synaptic_workspace::scan::{discover_sibling_repos, ScanOptions, SkipReason};
+            use synaptic_workspace::scan::{ScanOptions, SkipReason, discover_sibling_repos};
             use synaptic_workspace::workspace_build::federate_repos;
             let scan_root = path.map(|p| root.join(p)).unwrap_or_else(|| {
                 root.parent()

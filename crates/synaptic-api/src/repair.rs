@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{validate_patch, PatchInspection, PatchPolicy, RepairBrief};
+use crate::{PatchInspection, PatchPolicy, RepairBrief, validate_patch};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneratedPatch {

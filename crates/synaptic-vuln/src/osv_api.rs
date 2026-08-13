@@ -121,26 +121,28 @@ pub fn fetch_advisories(
 
         std::thread::scope(|scope| {
             for _ in 0..workers {
-                scope.spawn(|| loop {
-                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let Some(entry) = outstanding.get(index) else {
-                        return;
-                    };
-                    // Another worker already failed; stop rather than pile more
-                    // requests onto a service that is not answering.
-                    if failure.lock().is_ok_and(|slot| slot.is_some()) {
-                        return;
-                    }
-                    match transport.get_json(&format!("{OSV_API_BASE}/vulns/{}", entry.id)) {
-                        Ok(body) => {
-                            store(cache, entry, &body);
-                            if let Ok(mut slot) = fetched.lock() {
-                                slot.push((entry.id.as_str(), body));
-                            }
+                scope.spawn(|| {
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(entry) = outstanding.get(index) else {
+                            return;
+                        };
+                        // Another worker already failed; stop rather than pile more
+                        // requests onto a service that is not answering.
+                        if failure.lock().is_ok_and(|slot| slot.is_some()) {
+                            return;
                         }
-                        Err(error) => {
-                            if let Ok(mut slot) = failure.lock() {
-                                slot.get_or_insert(error);
+                        match transport.get_json(&format!("{OSV_API_BASE}/vulns/{}", entry.id)) {
+                            Ok(body) => {
+                                store(cache, entry, &body);
+                                if let Ok(mut slot) = fetched.lock() {
+                                    slot.push((entry.id.as_str(), body));
+                                }
+                            }
+                            Err(error) => {
+                                if let Ok(mut slot) = failure.lock() {
+                                    slot.get_or_insert(error);
+                                }
                             }
                         }
                     }
@@ -511,9 +513,11 @@ mod tests {
 
         let source = fetch_advisories(&transport, &[cargo("leaf")], None).unwrap();
 
-        assert!(crate::AdvisorySource::describe(&source)
-            .origin
-            .contains("OSV API"));
+        assert!(
+            crate::AdvisorySource::describe(&source)
+                .origin
+                .contains("OSV API")
+        );
     }
 
     #[test]

@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 /// Matchers a Synaptic PreToolUse hook may use (current + legacy), used to
 /// recognise our own entries for idempotent replace / clean removal.
@@ -167,12 +167,14 @@ mod tests {
         // foreign Write hook kept + our two appended.
         assert_eq!(pre.len(), 3, "{pre:#?}");
         assert!(pre.iter().any(|h| h["matcher"] == "Write"));
-        assert!(pre
-            .iter()
-            .any(|h| h["matcher"] == "Bash" && is_synaptic_hook(h)));
-        assert!(pre
-            .iter()
-            .any(|h| h["matcher"] == "Read|Glob" && is_synaptic_hook(h)));
+        assert!(
+            pre.iter()
+                .any(|h| h["matcher"] == "Bash" && is_synaptic_hook(h))
+        );
+        assert!(
+            pre.iter()
+                .any(|h| h["matcher"] == "Read|Glob" && is_synaptic_hook(h))
+        );
         // Unrelated top-level key survives.
         let settings = load_settings(&settings_path(root));
         assert_eq!(settings["model"], json!("sonnet"));

@@ -1427,9 +1427,11 @@ fn workspace_build_federates_a_cargo_monorepo() {
     let repos: std::collections::BTreeSet<&str> =
         nodes.iter().filter_map(|n| n["repo"].as_str()).collect();
     assert!(repos.contains("app") && repos.contains("lib"), "{repos:?}");
-    assert!(nodes
-        .iter()
-        .any(|n| n["id"].as_str().unwrap_or("").starts_with("lib::")));
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n["id"].as_str().unwrap_or("").starts_with("lib::"))
+    );
     // A cross-repo edge from app into lib exists.
     let cross = graph["links"].as_array().unwrap().iter().any(|e| {
         e["cross_repo"].as_bool().unwrap_or(false)

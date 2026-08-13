@@ -6,8 +6,8 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::shard::SCHEMA_VERSION;
 use crate::StoreError;
+use crate::shard::SCHEMA_VERSION;
 
 const MANIFEST_FILE: &str = "manifest.json";
 const MANIFEST_TMP: &str = "manifest.json.tmp";

@@ -352,10 +352,12 @@ mod tests {
             serde_json::json!("int")
         );
         // An untyped param omits type_ref entirely.
-        assert!(!v["signature"]["params"][1]
-            .as_object()
-            .unwrap()
-            .contains_key("type_ref"));
+        assert!(
+            !v["signature"]["params"][1]
+                .as_object()
+                .unwrap()
+                .contains_key("type_ref")
+        );
         assert_eq!(v["signature"]["return_type"], serde_json::json!("Result"));
 
         // Round-trips back through serde to the typed value.

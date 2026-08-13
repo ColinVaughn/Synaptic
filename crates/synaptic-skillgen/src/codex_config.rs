@@ -24,8 +24,8 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Map, Value};
-use toml_edit::{value, Array, DocumentMut, Item, Table};
+use serde_json::{Map, Value, json};
+use toml_edit::{Array, DocumentMut, Item, Table, value};
 
 use crate::settings_hooks::{load_settings, write_settings};
 

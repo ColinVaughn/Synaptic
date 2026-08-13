@@ -2,12 +2,12 @@
 //! with a dense dependency web, to catch any pathological blow-up in the
 //! files->nodes + reverse-impact composition.
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use serde_json::Map;
 use std::hint::black_box;
 use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
 use synaptic_graph::KnowledgeGraph;
-use synaptic_predict::{forecast_changes, forecast_changes_with_index, ForecastOptions};
+use synaptic_predict::{ForecastOptions, forecast_changes, forecast_changes_with_index};
 use synaptic_query::ReverseImpactIndex;
 
 fn edge(s: &str, t: &str, rel: &str) -> Edge {

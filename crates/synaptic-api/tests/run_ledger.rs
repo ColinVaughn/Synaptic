@@ -16,9 +16,11 @@ fn run_keys_and_state_transitions_are_idempotent_and_fail_closed() {
     );
 
     let mut invalid = first.clone();
-    assert!(store
-        .transition(&mut invalid, RunState::PrOpen, None, None)
-        .is_err());
+    assert!(
+        store
+            .transition(&mut invalid, RunState::PrOpen, None, None)
+            .is_err()
+    );
 
     let mut run = first;
     store

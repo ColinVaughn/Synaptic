@@ -12,8 +12,8 @@ pub mod target;
 pub mod updater;
 pub mod version;
 
-pub use config::{config_path, UpdateConfig};
-pub use github::{latest_release, Asset, Release};
+pub use config::{UpdateConfig, config_path};
+pub use github::{Asset, Release, latest_release};
 pub use version::version_is_newer;
 
 /// The repository self-update queries for releases.

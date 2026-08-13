@@ -171,7 +171,7 @@ pub fn repair_inputs(finding: &Finding, occurred_at: i64) -> Option<RepairInputs
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::applicability::{assess_applicability, ApplicabilityInput};
+    use crate::applicability::{ApplicabilityInput, assess_applicability};
     use crate::matching::VersionMatch;
     use crate::plan::{CompatibilityRisk, RemediationPlan, VersionAvailability};
     use crate::reach::{CallSite, EntryPoint, EntryPointKind};

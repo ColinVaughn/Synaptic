@@ -1,13 +1,13 @@
 //! `refactor` command: plan a safe rename, and verify the graph after edits.
 //! Synaptic never edits source; `rename` emits a plan for an AI agent to apply.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use std::path::{Path, PathBuf};
 
 use synaptic_graph::KnowledgeGraph;
 use synaptic_refactor::{
-    plan_relocate, plan_rename, verify_plan, verify_relocate, RefactorError, RelocatePlan,
-    RenameOptions, RenamePlan,
+    RefactorError, RelocatePlan, RenameOptions, RenamePlan, plan_relocate, plan_rename,
+    verify_plan, verify_relocate,
 };
 
 use crate::cli::RefactorAction;
@@ -111,7 +111,9 @@ fn run_relocate(a: RelocateArgs) -> Result<()> {
     let plan = match plan_relocate(&kg, &a.name, &a.to, a.operation, &a.root, &opts) {
         Ok(p) => p,
         Err(RefactorError::Ambiguous { name, count }) => {
-            eprintln!("`{name}` is ambiguous: {count} definitions match. Disambiguate with --id or --file:");
+            eprintln!(
+                "`{name}` is ambiguous: {count} definitions match. Disambiguate with --id or --file:"
+            );
             for c in synaptic_refactor::resolve::find_candidates(&kg, &a.name) {
                 let kind = c.kind.as_deref().unwrap_or("symbol");
                 let line = c.span.map(|s| s.start_line).unwrap_or(0);
@@ -208,7 +210,9 @@ fn run_rename(a: RenameArgs) -> Result<()> {
     let plan = match plan_rename(&kg, &old, &to, &root, &opts) {
         Ok(p) => p,
         Err(RefactorError::Ambiguous { name, count }) => {
-            eprintln!("`{name}` is ambiguous: {count} definitions match. Disambiguate with --id or --file:");
+            eprintln!(
+                "`{name}` is ambiguous: {count} definitions match. Disambiguate with --id or --file:"
+            );
             for c in synaptic_refactor::resolve::find_candidates(&kg, &old) {
                 let kind = c.kind.as_deref().unwrap_or("symbol");
                 let line = c.span.map(|s| s.start_line).unwrap_or(0);

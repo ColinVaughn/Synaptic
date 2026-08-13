@@ -1,10 +1,10 @@
 //! `python` extraction methods on `Extractor` (split from walker.rs).
 
-use super::resolve_relative_import;
 use super::Extractor;
+use super::resolve_relative_import;
 use crate::python::is_suppressed_type;
 use crate::result::ImportRecord;
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 use tree_sitter::Node as TsNode;
 
 impl<'tree> Extractor<'_, '_, 'tree> {

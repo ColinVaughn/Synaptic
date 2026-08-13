@@ -12,8 +12,8 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use regex::Regex;
-use serde_json::{json, Map};
-use synaptic_core::{make_id, Confidence, DynamicSite, Edge, FileType, Node, NodeId, NodeKind};
+use serde_json::{Map, json};
+use synaptic_core::{Confidence, DynamicSite, Edge, FileType, Node, NodeId, NodeKind, make_id};
 
 use crate::paths::file_node_id;
 use crate::result::ExtractionResult;
@@ -1946,12 +1946,11 @@ fn resolve_go_sdk_alias(
     if let Some(alias) = resolve_go_local_alias(scope, segments[0], imports) {
         return Some((0, alias));
     }
-    if segments.len() > 2 {
-        if let Some(alias) =
+    if segments.len() > 2
+        && let Some(alias) =
             resolve_go_receiver_field_alias(text, scope, segments[0], segments[1], imports)
-        {
-            return Some((1, alias));
-        }
+    {
+        return Some((1, alias));
     }
     None
 }
@@ -2171,13 +2170,13 @@ pub fn prune_local_sdk_candidates(
                     ) {
                         directories.push(entry.path());
                     }
-                } else if file_type.is_file() && entry.file_name() == "Cargo.toml" {
-                    if let Some(name) = std::fs::read_to_string(entry.path())
+                } else if file_type.is_file()
+                    && entry.file_name() == "Cargo.toml"
+                    && let Some(name) = std::fs::read_to_string(entry.path())
                         .ok()
                         .and_then(|text| toml_section_name(&text, "package"))
-                    {
-                        local.insert(("cargo".into(), normalize_local_package("cargo", &name)));
-                    }
+                {
+                    local.insert(("cargo".into(), normalize_local_package("cargo", &name)));
                 }
             }
         }
@@ -2257,13 +2256,12 @@ fn toml_section_name(text: &str, section: &str) -> Option<String> {
     for line in text.lines().map(str::trim) {
         if line.starts_with('[') {
             matches_section = line == format!("[{section}]");
-        } else if matches_section {
-            if let Some(value) = line
+        } else if matches_section
+            && let Some(value) = line
                 .strip_prefix("name")
                 .and_then(|value| value.trim_start().strip_prefix('='))
-            {
-                return Some(value.trim().trim_matches(['\'', '"']).to_string());
-            }
+        {
+            return Some(value.trim().trim_matches(['\'', '"']).to_string());
         }
     }
     None
@@ -3481,11 +3479,7 @@ fn template_to_path(raw: &str, hole_open: &str, hole_close: char) -> Option<Stri
     let has_literal = path_part
         .split('/')
         .any(|seg| !seg.is_empty() && !seg.contains("{param}"));
-    if has_literal {
-        Some(out)
-    } else {
-        None
-    }
+    if has_literal { Some(out) } else { None }
 }
 
 fn go_route_re() -> &'static Regex {
@@ -3942,11 +3936,7 @@ fn symfony_route_methods(tail: &str) -> Vec<String> {
         })
         .filter(|entry| !entry.is_empty())
         .collect();
-    if listed.is_empty() {
-        any()
-    } else {
-        listed
-    }
+    if listed.is_empty() { any() } else { listed }
 }
 
 /// Reduce Symfony placeholders to their names: `{slug:post}` maps the slug onto
@@ -4792,10 +4782,10 @@ fn scan_go_routes(path: &str, text: &str, result: &mut ExtractionResult) {
 /// `("GET", "/healthz")`; a pattern with no leading method -> `("ANY", pattern)`.
 fn split_go_route_pattern(pattern: &str) -> (&str, &str) {
     let trimmed = pattern.trim_start();
-    if let Some((head, rest)) = trimmed.split_once(' ') {
-        if is_http_method(head) {
-            return (head, rest.trim_start());
-        }
+    if let Some((head, rest)) = trimmed.split_once(' ')
+        && is_http_method(head)
+    {
+        return (head, rest.trim_start());
     }
     ("ANY", pattern)
 }
@@ -4823,11 +4813,7 @@ fn client_verb_method(verb: &str) -> String {
 /// captured prefix alone would key a wrong (truncated) route (2026-07 audit).
 fn concat_param(text: &str, end: usize) -> &'static str {
     let rest = text[end.min(text.len())..].trim_start();
-    if rest.starts_with('+') {
-        "{param}"
-    } else {
-        ""
-    }
+    if rest.starts_with('+') { "{param}" } else { "" }
 }
 
 /// `client.VERB("url"` style client calls (requests/httpx/axios/http.Get).
@@ -4903,11 +4889,7 @@ fn route_canon(np: &str) -> String {
             out.push_str(&seg.to_ascii_lowercase());
         }
     }
-    if out.is_empty() {
-        "/".to_string()
-    } else {
-        out
-    }
+    if out.is_empty() { "/".to_string() } else { out }
 }
 
 /// FNV-1a 32-bit hex of `s`. Appended to route ids because `make_id`'s
@@ -6934,20 +6916,20 @@ fn referenced_tables(sql: &str) -> Vec<String> {
 
     if let Ok(stmts) = Parser::parse_sql(&GenericDialect {}, sql) {
         for stmt in stmts {
-            if let Statement::Query(q) = stmt {
-                if let SetExpr::Select(select) = *q.body {
-                    for twj in select.from {
-                        if let TableFactor::Table { name, .. } = twj.relation {
-                            if let Some(p) = name.0.last() {
-                                out.push(last_ident(&p.to_string()));
-                            }
-                        }
-                        for j in twj.joins {
-                            if let TableFactor::Table { name, .. } = j.relation {
-                                if let Some(p) = name.0.last() {
-                                    out.push(last_ident(&p.to_string()));
-                                }
-                            }
+            if let Statement::Query(q) = stmt
+                && let SetExpr::Select(select) = *q.body
+            {
+                for twj in select.from {
+                    if let TableFactor::Table { name, .. } = twj.relation
+                        && let Some(p) = name.0.last()
+                    {
+                        out.push(last_ident(&p.to_string()));
+                    }
+                    for j in twj.joins {
+                        if let TableFactor::Table { name, .. } = j.relation
+                            && let Some(p) = name.0.last()
+                        {
+                            out.push(last_ident(&p.to_string()));
                         }
                     }
                 }

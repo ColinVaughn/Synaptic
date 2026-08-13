@@ -1936,16 +1936,16 @@ fn pub_lock_versions(dir: &Path) -> Result<BTreeMap<String, String>, InventoryEr
     for raw in source.lines() {
         if raw.starts_with("  ") && !raw.starts_with("    ") && raw.trim_end().ends_with(':') {
             current = Some(raw.trim().trim_end_matches(':').to_ascii_lowercase());
-        } else if raw.starts_with("    version:") {
-            if let Some(name) = current.take() {
-                versions.insert(
-                    name,
-                    raw.trim()["version:".len()..]
-                        .trim()
-                        .trim_matches(['\'', '"'])
-                        .to_string(),
-                );
-            }
+        } else if raw.starts_with("    version:")
+            && let Some(name) = current.take()
+        {
+            versions.insert(
+                name,
+                raw.trim()["version:".len()..]
+                    .trim()
+                    .trim_matches(['\'', '"'])
+                    .to_string(),
+            );
         }
     }
     Ok(versions)

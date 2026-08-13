@@ -13,10 +13,10 @@
 
 use std::path::{Path, PathBuf};
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 use synaptic_extract::python::python_config;
-use synaptic_extract::{cached_extract_source, extract_source, ExtractionResult};
+use synaptic_extract::{ExtractionResult, cached_extract_source, extract_source};
 use tree_sitter::Parser;
 
 // Per-language samples
@@ -258,10 +258,10 @@ fn collect_rs(dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
                 continue;
             }
             collect_rs(&path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            if let Ok(bytes) = std::fs::read(&path) {
-                out.push((path.to_string_lossy().into_owned(), bytes));
-            }
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs")
+            && let Ok(bytes) = std::fs::read(&path)
+        {
+            out.push((path.to_string_lossy().into_owned(), bytes));
         }
     }
 }

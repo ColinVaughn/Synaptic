@@ -2,7 +2,7 @@ use serde_json::Map;
 use synaptic_core::{FileType, GraphData, Node, NodeId};
 use synaptic_graph::KnowledgeGraph;
 use synaptic_memory::{
-    ingest_repository_documents, MemoryKind, MemoryQuery, MemoryRelation, MemoryStore,
+    MemoryKind, MemoryQuery, MemoryRelation, MemoryStore, ingest_repository_documents,
 };
 
 fn graph() -> KnowledgeGraph {
@@ -57,9 +57,11 @@ fn ingests_adrs_and_procedures_with_sources_digests_and_symbol_anchors() {
     assert!(decision.sources[0].digest.is_some());
     assert_eq!(decision.affected_symbols[0].node_id, "refresh_token");
     assert!(decision.summary.contains("Production loads"));
-    assert!(records
-        .iter()
-        .any(|record| record.kind == MemoryKind::Procedure));
+    assert!(
+        records
+            .iter()
+            .any(|record| record.kind == MemoryKind::Procedure)
+    );
 
     let retry = ingest_repository_documents(&store, repo.path(), Some(&graph())).unwrap();
     assert_eq!(retry.created, 0);
@@ -97,11 +99,13 @@ fn a_changed_document_supersedes_the_previous_source_revision() {
         .unwrap();
     assert_eq!(active.len(), 1);
     assert!(active[0].record.summary.contains("Updated"));
-    assert!(active[0]
-        .record
-        .links
-        .iter()
-        .any(|link| link.relation == MemoryRelation::Supersedes));
+    assert!(
+        active[0]
+            .record
+            .links
+            .iter()
+            .any(|link| link.relation == MemoryRelation::Supersedes)
+    );
 
     let all = store
         .search(&MemoryQuery {

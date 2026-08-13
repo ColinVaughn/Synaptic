@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use synaptic_core::{Confidence, Edge, FileType, GraphData, KindValue, Node, NodeId};
 
 use crate::{
@@ -1023,17 +1023,18 @@ fn sdk_observation(
                 VendorMatch::Unmatched => {}
             }
         }
-        if provider.is_none() && !ambiguous {
-            if let (Some(import), Some(ecosystem)) = (
+        if provider.is_none()
+            && !ambiguous
+            && let (Some(import), Some(ecosystem)) = (
                 import,
                 get("sdk_ecosystem").and_then(|value| value.parse().ok()),
-            ) {
-                let matches = registry.sdk_bindings_for_import(ecosystem, import, &member);
-                match matches.as_slice() {
-                    [(vendor, _)] => provider = Some((*vendor).to_string()),
-                    [] => {}
-                    _ => ambiguous = true,
-                }
+            )
+        {
+            let matches = registry.sdk_bindings_for_import(ecosystem, import, &member);
+            match matches.as_slice() {
+                [(vendor, _)] => provider = Some((*vendor).to_string()),
+                [] => {}
+                _ => ambiguous = true,
             }
         }
     }

@@ -5,11 +5,11 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 
 use synaptic_eval::{
-    calibrate_cross_language, calibrate_history, replay, run_corpus, run_scale, CalibrationReport,
-    CorpusReport, ReplayOptions, ReplayReport, ScaleReport,
+    CalibrationReport, CorpusReport, ReplayOptions, ReplayReport, ScaleReport,
+    calibrate_cross_language, calibrate_history, replay, run_corpus, run_scale,
 };
 
 use crate::cli::EvalAction;

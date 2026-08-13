@@ -560,7 +560,10 @@ fn node_shape_svg(
         "dot" => circle(r * 0.6),
         "square" => format!(
             "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"{color}\" opacity=\"{opacity}\"{extra}/>\n",
-            cx - r, cy - r, 2.0 * r, 2.0 * r
+            cx - r,
+            cy - r,
+            2.0 * r,
+            2.0 * r
         ),
         "diamond" => poly(4, PI / 4.0),
         "triangle" => poly(3, -PI / 2.0),

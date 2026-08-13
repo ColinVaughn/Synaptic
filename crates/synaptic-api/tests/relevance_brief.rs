@@ -1,6 +1,6 @@
 use synaptic_api::{
-    build_repair_brief, evaluate_relevance, ApiChangeEvent, ApiInventory, ApiMaintenanceConfig,
-    ApplicabilityState, BriefBudget, EvidenceSpan, SourceArtifact, VendorRegistry,
+    ApiChangeEvent, ApiInventory, ApiMaintenanceConfig, ApplicabilityState, BriefBudget,
+    EvidenceSpan, SourceArtifact, VendorRegistry, build_repair_brief, evaluate_relevance,
 };
 use synaptic_core::GraphData;
 use synaptic_graph::KnowledgeGraph;
@@ -172,10 +172,12 @@ fn repair_brief_is_bounded_to_usage_wrappers_and_tests() {
     assert!(brief.allowed_files.contains(&"tests/client.test.ts".into()));
     assert!(!brief.allowed_files.contains(&"src/unrelated.ts".into()));
     assert_eq!(brief.required_tests, vec!["tests/client.test.ts"]);
-    assert!(brief
-        .source_slices
-        .iter()
-        .any(|slice| slice.file == "src/client.ts"));
+    assert!(
+        brief
+            .source_slices
+            .iter()
+            .any(|slice| slice.file == "src/client.ts")
+    );
     let serialized = serde_json::to_string(&brief).unwrap();
     assert!(!serialized.contains("source-secret"));
     assert!(!serialized.contains("sk_live_fixture_secret"));

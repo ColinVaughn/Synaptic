@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use serde_json::Map;
 use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId, NodeKind, Span};
 use synaptic_graph::KnowledgeGraph;

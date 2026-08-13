@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use synaptic_history::{diff, DiffOptions};
+use synaptic_history::{DiffOptions, diff};
 
 fn git(dir: &Path, args: &[&str]) {
     let ok = Command::new("git")

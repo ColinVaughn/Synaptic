@@ -167,13 +167,12 @@ impl KnowledgeGraph {
             {
                 continue;
             }
-            if let Some(m) = self.node(&e.target) {
-                if m.source_file == node.source_file {
-                    if let Some(ms) = m.span() {
-                        start = start.min(ms.start_line);
-                        end = end.max(ms.end_line);
-                    }
-                }
+            if let Some(m) = self.node(&e.target)
+                && m.source_file == node.source_file
+                && let Some(ms) = m.span()
+            {
+                start = start.min(ms.start_line);
+                end = end.max(ms.end_line);
             }
         }
         Some(end.saturating_sub(start) + 1)

@@ -1,7 +1,7 @@
-use serde_json::{json, Map};
+use serde_json::{Map, json};
 use synaptic_core::{FileType, GraphData, Node, NodeId};
 use synaptic_graph::KnowledgeGraph;
-use synaptic_memory::{ingest_artifact_file, MemoryKind, MemoryQuery, MemoryRelation, MemoryStore};
+use synaptic_memory::{MemoryKind, MemoryQuery, MemoryRelation, MemoryStore, ingest_artifact_file};
 
 fn graph() -> KnowledgeGraph {
     KnowledgeGraph::from_graph_data(GraphData {
@@ -135,11 +135,13 @@ fn changed_external_artifact_supersedes_the_prior_source_revision() {
         })
         .unwrap();
     assert_eq!(current.len(), 1);
-    assert!(current[0]
-        .record
-        .links
-        .iter()
-        .any(|link| link.relation == MemoryRelation::Supersedes));
+    assert!(
+        current[0]
+            .record
+            .links
+            .iter()
+            .any(|link| link.relation == MemoryRelation::Supersedes)
+    );
     let active_by_symbol = store
         .search(&MemoryQuery {
             symbol: Some("refresh_session".into()),

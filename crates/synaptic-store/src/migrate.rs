@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use synaptic_core::{Edge, GraphData, NodeId};
 
-use crate::{codec, ShardStore, StoreError};
+use crate::{ShardStore, StoreError, codec};
 
 /// The default shard tag for nodes with no federation `repo`.
 pub const LOCAL: &str = "local";

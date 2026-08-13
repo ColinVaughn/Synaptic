@@ -14,7 +14,7 @@ use std::sync::LazyLock;
 #[cfg(feature = "lang-asp")]
 use regex::Regex;
 #[cfg(feature = "lang-asp")]
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 
 #[cfg(feature = "lang-asp")]
 use crate::common::Builder;
@@ -168,9 +168,11 @@ mod tests {
 
     #[test]
     fn include_becomes_import() {
-        assert!(rels(&extract(), "imports_from")
-            .iter()
-            .any(|(_, t)| t == "util"));
+        assert!(
+            rels(&extract(), "imports_from")
+                .iter()
+                .any(|(_, t)| t == "util")
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use synaptic_api::PatchVerifier;
 
@@ -1765,7 +1765,7 @@ fn vulnerability_resolution_gate(
                 "vulnerability_resolution",
                 synaptic_api::GateOutcome::Failed,
                 format!("repair event has an invalid package coordinate: {error}"),
-            )
+            );
         }
     };
     let affected = match event.changes.first() {
@@ -1775,7 +1775,7 @@ fn vulnerability_resolution_gate(
                 "vulnerability_resolution",
                 synaptic_api::GateOutcome::Failed,
                 "repair event has no affected version range".into(),
-            )
+            );
         }
     };
     let (locked, reads) = synaptic_vuln::PackageGraph::from_repository(root);

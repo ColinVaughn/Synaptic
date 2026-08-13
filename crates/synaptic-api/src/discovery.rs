@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    normalize_contract, ApiMaintenanceConfig, CommandPolicy, CoveragePolicy, MaintenanceMode,
-    ParseCompleteness, PublishPolicy, SurfaceFormat, SurfaceLoss, VendorConfig, VendorSource,
+    ApiMaintenanceConfig, CommandPolicy, CoveragePolicy, MaintenanceMode, ParseCompleteness,
+    PublishPolicy, SurfaceFormat, SurfaceLoss, VendorConfig, VendorSource, normalize_contract,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

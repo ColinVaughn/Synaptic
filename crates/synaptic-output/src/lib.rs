@@ -121,14 +121,14 @@ impl serde::Serialize for ExportLinks<'_> {
         let mut seq = s.serialize_seq(Some(self.0.edge_count()))?;
         for edge in self.0.edges() {
             let mut value = serde_json::to_value(edge).map_err(serde::ser::Error::custom)?;
-            if edge.confidence_score.is_none() {
-                if let Some(obj) = value.as_object_mut() {
-                    let score = edge.confidence.default_score();
-                    obj.insert(
-                        "confidence_score".to_string(),
-                        serde_json::to_value(score).map_err(serde::ser::Error::custom)?,
-                    );
-                }
+            if edge.confidence_score.is_none()
+                && let Some(obj) = value.as_object_mut()
+            {
+                let score = edge.confidence.default_score();
+                obj.insert(
+                    "confidence_score".to_string(),
+                    serde_json::to_value(score).map_err(serde::ser::Error::custom)?,
+                );
             }
             seq.serialize_element(&value)?;
         }
@@ -557,7 +557,7 @@ mod tests {
     use super::*;
     use serde_json::Map;
     use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
-    use synaptic_graph::{apply_communities, cluster, ClusterOptions};
+    use synaptic_graph::{ClusterOptions, apply_communities, cluster};
 
     fn sample_kg() -> KnowledgeGraph {
         let node = |id: &str, sf: &str| Node {
@@ -656,13 +656,17 @@ mod tests {
     fn json_carries_repo_and_cross_repo_when_federated() {
         let v = to_json_value(&crate::tests_support::kg_federated());
         let nodes = v.get("nodes").unwrap().as_array().unwrap();
-        assert!(nodes
-            .iter()
-            .any(|n| n.get("repo").and_then(|r| r.as_str()) == Some("app")));
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.get("repo").and_then(|r| r.as_str()) == Some("app"))
+        );
         let links = v.get("links").unwrap().as_array().unwrap();
-        assert!(links
-            .iter()
-            .any(|l| l.get("cross_repo").and_then(|c| c.as_bool()) == Some(true)));
+        assert!(
+            links
+                .iter()
+                .any(|l| l.get("cross_repo").and_then(|c| c.as_bool()) == Some(true))
+        );
     }
 
     #[test]

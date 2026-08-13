@@ -1,6 +1,6 @@
 use synaptic_memory::{
-    record_api_maintenance_memory, ApiMaintenanceMemory, MemoryKind, MemoryStore, RecordOutcome,
-    VerificationStatus,
+    ApiMaintenanceMemory, MemoryKind, MemoryStore, RecordOutcome, VerificationStatus,
+    record_api_maintenance_memory,
 };
 
 #[test]

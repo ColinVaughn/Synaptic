@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use ignore::WalkBuilder;
 use std::hint::black_box;
 use synaptic_detect::{detect, noise::is_noise_dir};
@@ -38,12 +38,11 @@ fn walk_count(root: &Path, follow: bool) -> usize {
         .follow_links(follow)
         .add_custom_ignore_filename(".synapticignore")
         .filter_entry(move |entry| {
-            if entry.path_is_symlink() {
-                if let Ok(real) = entry.path().canonicalize() {
-                    if !real.starts_with(&guard) {
-                        return false;
-                    }
-                }
+            if entry.path_is_symlink()
+                && let Ok(real) = entry.path().canonicalize()
+                && !real.starts_with(&guard)
+            {
+                return false;
             }
             if entry.file_type().is_some_and(|t| t.is_dir()) {
                 let name = entry.file_name().to_string_lossy();

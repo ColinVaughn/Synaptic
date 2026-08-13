@@ -17,7 +17,7 @@ require_tests = true
 [commands]
 check = "cargo check --workspace --locked"
 test = "cargo test --workspace --locked"
-policy = ["cargo fmt --all -- --check", "cargo clippy --workspace --all-targets --locked -- -D warnings -A clippy::collapsible-if"]
+policy = ["cargo fmt --all -- --check", "cargo clippy --workspace --all-targets --locked -- -D warnings"]
 
 [publish]
 labels = ["dependencies", "api-migration", "synaptic"]

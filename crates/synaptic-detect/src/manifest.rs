@@ -85,13 +85,12 @@ impl Manifest {
             let mtime = mtime_secs(p);
             // Fastpath: a readable, unchanged mtime that matches a prior entry
             // means trust the prior hash and skip the read + hash entirely.
-            if mtime != 0.0 {
-                if let Some(prev) = prior.0.get(&key) {
-                    if prev.mtime == mtime {
-                        map.insert(key, prev.clone());
-                        continue;
-                    }
-                }
+            if mtime != 0.0
+                && let Some(prev) = prior.0.get(&key)
+                && prev.mtime == mtime
+            {
+                map.insert(key, prev.clone());
+                continue;
             }
             if let Some(hash) = hash_file(p) {
                 map.insert(key, FileEntry { mtime, hash });

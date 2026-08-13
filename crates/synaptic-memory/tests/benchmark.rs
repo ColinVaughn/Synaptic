@@ -1,7 +1,7 @@
 use serde_json::json;
 use synaptic_memory::{
-    enforce_benchmark_gate, run_benchmark_file, AccessScope, BenchmarkGate, MemoryKind,
-    MemoryPrincipal, MemoryRecord, MemoryStore, SourceArtifact,
+    AccessScope, BenchmarkGate, MemoryKind, MemoryPrincipal, MemoryRecord, MemoryStore,
+    SourceArtifact, enforce_benchmark_gate, run_benchmark_file,
 };
 
 fn record(key: &str, title: &str, summary: &str, source: &str) -> MemoryRecord {
@@ -92,13 +92,15 @@ fn benchmark_reports_localization_quality_selectivity_and_gate_failures() {
         },
     )
     .unwrap();
-    assert!(enforce_benchmark_gate(
-        &report,
-        BenchmarkGate {
-            min_recall_at_5: 1.01,
-            min_mean_reciprocal_rank: 1.0,
-            max_mean_candidate_fraction: 0.1,
-        },
-    )
-    .is_err());
+    assert!(
+        enforce_benchmark_gate(
+            &report,
+            BenchmarkGate {
+                min_recall_at_5: 1.01,
+                min_mean_reciprocal_rank: 1.0,
+                max_mean_candidate_fraction: 0.1,
+            },
+        )
+        .is_err()
+    );
 }

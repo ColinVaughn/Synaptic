@@ -5,10 +5,10 @@
 
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use synaptic_sandbox::{
-    detect_command_plan, detect_commands, render_markdown, CommandResult, CommandStatus, Outcome,
-    SpeculateReport,
+    CommandResult, CommandStatus, Outcome, SpeculateReport, detect_command_plan, detect_commands,
+    render_markdown,
 };
 use tempfile::TempDir;
 

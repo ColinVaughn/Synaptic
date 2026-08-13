@@ -80,8 +80,10 @@ fn reports_a_stable_reason_when_no_dependency_version_is_auditable() {
         .unwrap();
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("[synaptic:vuln:no-auditable-dependencies]"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("[synaptic:vuln:no-auditable-dependencies]")
+    );
 }
 
 #[test]

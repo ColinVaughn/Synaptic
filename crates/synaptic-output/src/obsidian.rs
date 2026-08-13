@@ -8,7 +8,7 @@ use std::io;
 use std::path::Path;
 
 use synaptic_core::NodeId;
-use synaptic_graph::{cohesion_score, KnowledgeGraph};
+use synaptic_graph::{KnowledgeGraph, cohesion_score};
 
 use crate::common::file_type_str;
 
@@ -148,11 +148,11 @@ pub fn to_obsidian(
     // Inter-community shared-edge counts.
     let mut shared: BTreeMap<(u32, u32), usize> = BTreeMap::new();
     for e in kg.edges() {
-        if let (Some(&a), Some(&b)) = (node_comm.get(&e.source), node_comm.get(&e.target)) {
-            if a != b {
-                let key = if a <= b { (a, b) } else { (b, a) };
-                *shared.entry(key).or_default() += 1;
-            }
+        if let (Some(&a), Some(&b)) = (node_comm.get(&e.source), node_comm.get(&e.target))
+            && a != b
+        {
+            let key = if a <= b { (a, b) } else { (b, a) };
+            *shared.entry(key).or_default() += 1;
         }
     }
 

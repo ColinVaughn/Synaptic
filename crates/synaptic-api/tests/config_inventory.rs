@@ -1,8 +1,8 @@
 use std::fs;
 
 use synaptic_api::{
-    inventory, scan_dependencies, ApiMaintenanceConfig, ApiOperationAnchor, Dependency,
-    DependencyScope, Ecosystem, PackageCoordinate, VendorMatch, VendorRegistry,
+    ApiMaintenanceConfig, ApiOperationAnchor, Dependency, DependencyScope, Ecosystem,
+    PackageCoordinate, VendorMatch, VendorRegistry, inventory, scan_dependencies,
 };
 
 fn config() -> ApiMaintenanceConfig {

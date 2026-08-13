@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use toml::Value as Toml;
 
-use crate::coordinate::{package_coordinate, Coordinate};
+use crate::coordinate::{Coordinate, package_coordinate};
 use crate::sanitize_tag;
 
 /// A discovered (or declared) workspace member.

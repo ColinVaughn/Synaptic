@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 use serde_json::json;
-use synaptic_core::{make_id, NodeId, NodeKind, Param, RawCall, Signature, Visibility};
+use synaptic_core::{NodeId, NodeKind, Param, RawCall, Signature, Visibility, make_id};
 use tree_sitter::{Node as TsNode, Parser};
 
 use crate::common::Builder;
@@ -122,13 +122,13 @@ pub fn extract_ql_source(path: &str, source: &[u8]) -> ExtractionResult {
     };
     ex.walk_declarations(tree.root_node(), &root_scope, 0);
     let signature_recoveries = ex.recover_signature_declarations();
-    if signature_recoveries > 0 {
-        if let Some(file) = ex.b.nodes.iter_mut().find(|n| n.id == ex.file_nid) {
-            file.extra.insert(
-                "ql_signature_recoveries".into(),
-                json!(signature_recoveries),
-            );
-        }
+    if signature_recoveries > 0
+        && let Some(file) = ex.b.nodes.iter_mut().find(|n| n.id == ex.file_nid)
+    {
+        file.extra.insert(
+            "ql_signature_recoveries".into(),
+            json!(signature_recoveries),
+        );
     }
     ex.resolve_type_refs();
     ex.resolve_calls();
@@ -332,32 +332,32 @@ impl<'tree> QlExtractor<'_, 'tree> {
 
         let mut cursor = node.walk();
         for base in node.children_by_field_name("extends", &mut cursor) {
-            if base.kind() == "typeExpr" {
-                if let Some(name) = self.type_name(base) {
-                    self.type_refs.push(TypeRefFact {
-                        source: id.clone(),
-                        name,
-                        scope_key: scope.key.clone(),
-                        relation: "inherits",
-                        context: "extends",
-                        line,
-                    });
-                }
+            if base.kind() == "typeExpr"
+                && let Some(name) = self.type_name(base)
+            {
+                self.type_refs.push(TypeRefFact {
+                    source: id.clone(),
+                    name,
+                    scope_key: scope.key.clone(),
+                    relation: "inherits",
+                    context: "extends",
+                    line,
+                });
             }
         }
         let mut cursor = node.walk();
         for constraint in node.children_by_field_name("instanceof", &mut cursor) {
-            if constraint.kind() == "typeExpr" {
-                if let Some(name) = self.type_name(constraint) {
-                    self.type_refs.push(TypeRefFact {
-                        source: id.clone(),
-                        name,
-                        scope_key: scope.key.clone(),
-                        relation: "references",
-                        context: "instanceof",
-                        line,
-                    });
-                }
+            if constraint.kind() == "typeExpr"
+                && let Some(name) = self.type_name(constraint)
+            {
+                self.type_refs.push(TypeRefFact {
+                    source: id.clone(),
+                    name,
+                    scope_key: scope.key.clone(),
+                    relation: "references",
+                    context: "instanceof",
+                    line,
+                });
             }
         }
 
@@ -971,36 +971,34 @@ impl<'tree> QlExtractor<'_, 'tree> {
             }
             return;
         }
-        if node.kind() == "qualifiedRhs" {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                let name = self.text(name_node).trim().to_string();
-                let arity = Self::named_children(node)
-                    .iter()
-                    .filter(|child| {
-                        !matches!(child.kind(), "predicateName" | "closure" | "typeExpr")
-                    })
-                    .count();
-                let receiver = node
-                    .parent()
-                    .and_then(|parent| {
-                        Self::named_children(parent)
-                            .into_iter()
-                            .take_while(|child| child.id() != node.id())
-                            .last()
-                    })
-                    .map(|recv| compact_ql_name(&self.text(recv)))
-                    .unwrap_or_default();
-                let receiver = receiver.split('.').next().unwrap_or(&receiver).to_string();
-                let typed_receiver = variable_types.get(&receiver).cloned().unwrap_or(receiver);
-                out.push(CallFact {
-                    caller: caller.clone(),
-                    name,
-                    arity,
-                    qualifier: CallQualifier::Receiver(typed_receiver),
-                    scope: scope.clone(),
-                    line: Self::line(node),
-                });
-            }
+        if node.kind() == "qualifiedRhs"
+            && let Some(name_node) = node.child_by_field_name("name")
+        {
+            let name = self.text(name_node).trim().to_string();
+            let arity = Self::named_children(node)
+                .iter()
+                .filter(|child| !matches!(child.kind(), "predicateName" | "closure" | "typeExpr"))
+                .count();
+            let receiver = node
+                .parent()
+                .and_then(|parent| {
+                    Self::named_children(parent)
+                        .into_iter()
+                        .take_while(|child| child.id() != node.id())
+                        .last()
+                })
+                .map(|recv| compact_ql_name(&self.text(recv)))
+                .unwrap_or_default();
+            let receiver = receiver.split('.').next().unwrap_or(&receiver).to_string();
+            let typed_receiver = variable_types.get(&receiver).cloned().unwrap_or(receiver);
+            out.push(CallFact {
+                caller: caller.clone(),
+                name,
+                arity,
+                qualifier: CallQualifier::Receiver(typed_receiver),
+                scope: scope.clone(),
+                line: Self::line(node),
+            });
         }
         for child in Self::named_children(node) {
             if child.id() != node.id()

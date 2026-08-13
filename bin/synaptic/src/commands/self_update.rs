@@ -3,7 +3,7 @@
 use std::io::Write;
 
 use anyhow::{Context, Result};
-use synaptic_upgrade::config::{config_path, UpdateConfig};
+use synaptic_upgrade::config::{UpdateConfig, config_path};
 use synaptic_upgrade::{github, releases_url, target, updater, version_is_newer};
 
 const CURRENT: &str = env!("CARGO_PKG_VERSION");

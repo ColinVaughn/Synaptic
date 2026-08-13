@@ -128,10 +128,10 @@ fn run_claude_cli(system: &str, user: &str) -> Result<String, LlmError> {
         .args(["--output-format", "json"])
         .arg("--no-session-persistence")
         .args(["--system-prompt", system]);
-    if let Ok(model) = std::env::var("CLAUDE_CLI_MODEL") {
-        if !model.trim().is_empty() {
-            cmd.args(["--model", model.trim()]);
-        }
+    if let Ok(model) = std::env::var("CLAUDE_CLI_MODEL")
+        && !model.trim().is_empty()
+    {
+        cmd.args(["--model", model.trim()]);
     }
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

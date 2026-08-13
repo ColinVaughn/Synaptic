@@ -34,12 +34,12 @@ impl PackageMetadata {
                 "metadata provenance is missing or invalid".into(),
             ));
         }
-        if let Some(digest) = &self.artifact_digest {
-            if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                return Err(PackageMetadataError::InvalidMetadata(
-                    "artifact digest must be 64 hexadecimal characters".into(),
-                ));
-            }
+        if let Some(digest) = &self.artifact_digest
+            && (digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            return Err(PackageMetadataError::InvalidMetadata(
+                "artifact digest must be 64 hexadecimal characters".into(),
+            ));
         }
         for location in [
             self.repository.as_deref(),

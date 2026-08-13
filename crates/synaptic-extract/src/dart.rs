@@ -14,7 +14,7 @@ use std::sync::LazyLock;
 #[cfg(feature = "lang-dart")]
 use regex::Regex;
 #[cfg(feature = "lang-dart")]
-use synaptic_core::{make_id, FileType, NodeId};
+use synaptic_core::{FileType, NodeId, make_id};
 #[cfg(feature = "lang-dart")]
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -457,29 +457,29 @@ impl<'tree> Dart<'_, 'tree> {
         if node.kind() == "method_declaration" {
             return;
         }
-        if node.kind() == "call_expression" {
-            if let Some(func) = node.child_by_field_name("function") {
-                let callee = match func.kind() {
-                    "identifier" => Some((self.text(func), false)),
-                    "selector" | "unconditional_assignable_selector" => Self::children(func)
-                        .into_iter()
-                        .find(|c| c.kind() == "identifier")
-                        .map(|c| (self.text(c), true)),
-                    _ => None,
-                };
-                if let Some((callee, is_member)) = callee {
-                    if !callee.is_empty() {
-                        self.b.resolve_call(
-                            caller,
-                            &callee,
-                            is_member,
-                            Self::line(node),
-                            index,
-                            seen,
-                            true,
-                        );
-                    }
-                }
+        if node.kind() == "call_expression"
+            && let Some(func) = node.child_by_field_name("function")
+        {
+            let callee = match func.kind() {
+                "identifier" => Some((self.text(func), false)),
+                "selector" | "unconditional_assignable_selector" => Self::children(func)
+                    .into_iter()
+                    .find(|c| c.kind() == "identifier")
+                    .map(|c| (self.text(c), true)),
+                _ => None,
+            };
+            if let Some((callee, is_member)) = callee
+                && !callee.is_empty()
+            {
+                self.b.resolve_call(
+                    caller,
+                    &callee,
+                    is_member,
+                    Self::line(node),
+                    index,
+                    seen,
+                    true,
+                );
             }
         }
         for c in Self::children(node) {

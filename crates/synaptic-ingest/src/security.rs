@@ -217,10 +217,10 @@ pub fn safe_fetch_response(
         if !status.is_success() {
             return Err(FetchError::Http(format!("status {status}")));
         }
-        if let Some(len) = resp.content_length() {
-            if len > cap {
-                return Err(FetchError::TooLarge(cap));
-            }
+        if let Some(len) = resp.content_length()
+            && len > cap
+        {
+            return Err(FetchError::TooLarge(cap));
         }
         // Stream into a bounded buffer: read at most cap+1 bytes so a chunked or
         // dishonest-`Content-Length` response can't exhaust memory before the

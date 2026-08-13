@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::registry::BACKENDS;
 

@@ -119,12 +119,11 @@ impl Ledger {
         let mut out = Vec::new();
         if let Ok(rd) = std::fs::read_dir(&self.dir) {
             for entry in rd.flatten() {
-                if entry.path().extension().is_some_and(|e| e == "json") {
-                    if let Ok(text) = std::fs::read_to_string(entry.path()) {
-                        if let Ok(rec) = serde_json::from_str::<PredictionRecord>(&text) {
-                            out.push(rec);
-                        }
-                    }
+                if entry.path().extension().is_some_and(|e| e == "json")
+                    && let Ok(text) = std::fs::read_to_string(entry.path())
+                    && let Ok(rec) = serde_json::from_str::<PredictionRecord>(&text)
+                {
+                    out.push(rec);
                 }
             }
         }
@@ -142,7 +141,7 @@ fn safe_name(commit: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synaptic_predict::{forecast_changes, ForecastOptions};
+    use synaptic_predict::{ForecastOptions, forecast_changes};
 
     use serde_json::Map;
     use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId, Visibility};

@@ -1,11 +1,11 @@
 //! `search` command: structural SYNQL queries + named architectural patterns.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use std::path::PathBuf;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use synaptic_graph::KnowledgeGraph;
-use synaptic_synql::{explain, file_outline, patterns, run, QueryResult};
+use synaptic_synql::{QueryResult, explain, file_outline, patterns, run};
 
 use crate::commands::common::{default_graph_path, load_scoped_graph};
 
@@ -88,7 +88,9 @@ pub(crate) fn run_search(a: SearchArgs) -> Result<()> {
     } else if let Some(f) = &a.file {
         file_outline(&kg, f).map_err(|e| anyhow!("{e}"))?
     } else {
-        bail!("provide a SYNQL query, --saved <name>, --pattern <name>, or --file <path> (see --list-patterns)");
+        bail!(
+            "provide a SYNQL query, --saved <name>, --pattern <name>, or --file <path> (see --list-patterns)"
+        );
     };
     // A CLI-level safety cap on top of any LIMIT in the query.
     result.rows.truncate(a.limit);

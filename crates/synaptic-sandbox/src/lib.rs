@@ -19,15 +19,15 @@ mod speculate;
 mod worktree;
 
 pub use detect::{
-    detect_command_plan, detect_commands, CommandDetectionGap, DetectedCommandPlan,
-    DetectedCommands, DetectedProject, MissingCapability,
+    CommandDetectionGap, DetectedCommandPlan, DetectedCommands, DetectedProject, MissingCapability,
+    detect_command_plan, detect_commands,
 };
 pub use render::render_markdown;
 pub use repair_session::RepairSession;
 pub use run::{
-    run_command_with_policy, CommandResult, CommandStatus, ExecutionPolicy, NetworkPolicy,
+    CommandResult, CommandStatus, ExecutionPolicy, NetworkPolicy, run_command_with_policy,
 };
-pub use speculate::{speculate, Change, Outcome, SpeculateOptions, SpeculateReport};
+pub use speculate::{Change, Outcome, SpeculateOptions, SpeculateReport, speculate};
 
 /// Errors speculative execution can surface.
 #[derive(Debug, thiserror::Error)]

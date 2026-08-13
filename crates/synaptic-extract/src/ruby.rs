@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 #[cfg(feature = "lang-ruby")]
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 #[cfg(feature = "lang-ruby")]
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -172,14 +172,14 @@ impl<'tree> Ruby<'_, 'tree> {
                 let parent = scope.clone().unwrap_or_else(|| self.file_nid.clone());
                 self.b.add_edge(parent, nid.clone(), "contains", line, None);
 
-                if node.kind() == "class" {
-                    if let Some(sc) = node.child_by_field_name("superclass") {
-                        for base in Self::children(sc)
-                            .into_iter()
-                            .filter(|c| c.kind() == "constant")
-                        {
-                            self.link(&nid, &self.text(base), line, "inherits");
-                        }
+                if node.kind() == "class"
+                    && let Some(sc) = node.child_by_field_name("superclass")
+                {
+                    for base in Self::children(sc)
+                        .into_iter()
+                        .filter(|c| c.kind() == "constant")
+                    {
+                        self.link(&nid, &self.text(base), line, "inherits");
                     }
                 }
                 if let Some(body) = node.child_by_field_name("body") {
@@ -246,37 +246,35 @@ impl<'tree> Ruby<'_, 'tree> {
         let line = Self::line(call);
         let args = call.child_by_field_name("arguments");
         if REQUIRE_CALLS.contains(&name.as_str()) {
-            if let Some(args) = args {
-                if let Some(s) = Self::children(args)
+            if let Some(args) = args
+                && let Some(s) = Self::children(args)
                     .into_iter()
                     .find(|c| c.kind() == "string")
-                {
-                    let raw = self.text(s);
-                    let module = raw.trim_matches(|c| c == '"' || c == '\'');
-                    let base = module.rsplit(['/', '\\']).next().unwrap_or(module);
-                    if !base.is_empty() {
-                        let tgt = NodeId(make_id(&["ruby", "lib", base]));
-                        self.b.add_external_node(tgt.clone(), base.to_string());
-                        self.b.add_edge(
-                            self.file_nid.clone(),
-                            tgt,
-                            "imports_from",
-                            line,
-                            Some("import"),
-                        );
-                    }
+            {
+                let raw = self.text(s);
+                let module = raw.trim_matches(|c| c == '"' || c == '\'');
+                let base = module.rsplit(['/', '\\']).next().unwrap_or(module);
+                if !base.is_empty() {
+                    let tgt = NodeId(make_id(&["ruby", "lib", base]));
+                    self.b.add_external_node(tgt.clone(), base.to_string());
+                    self.b.add_edge(
+                        self.file_nid.clone(),
+                        tgt,
+                        "imports_from",
+                        line,
+                        Some("import"),
+                    );
                 }
             }
-        } else if MIXIN_CALLS.contains(&name.as_str()) {
-            if let Some(cls) = scope {
-                if let Some(args) = args {
-                    for c in Self::children(args)
-                        .into_iter()
-                        .filter(|c| c.kind() == "constant")
-                    {
-                        self.link(&cls.clone(), &self.text(c), line, "mixes_in");
-                    }
-                }
+        } else if MIXIN_CALLS.contains(&name.as_str())
+            && let Some(cls) = scope
+            && let Some(args) = args
+        {
+            for c in Self::children(args)
+                .into_iter()
+                .filter(|c| c.kind() == "constant")
+            {
+                self.link(&cls.clone(), &self.text(c), line, "mixes_in");
             }
         }
     }
@@ -320,23 +318,22 @@ impl<'tree> Ruby<'_, 'tree> {
         if matches!(node.kind(), "method" | "singleton_method") {
             return;
         }
-        if node.kind() == "call" {
-            if let Some(method) = node.child_by_field_name("method") {
-                if matches!(method.kind(), "identifier" | "constant") {
-                    let callee = self.text(method);
-                    if !callee.is_empty() && !RUBY_BUILTINS.contains(&callee.as_str()) {
-                        let is_member = node.child_by_field_name("receiver").is_some();
-                        self.b.resolve_call(
-                            caller,
-                            &callee,
-                            is_member,
-                            Self::line(node),
-                            index,
-                            seen,
-                            true,
-                        );
-                    }
-                }
+        if node.kind() == "call"
+            && let Some(method) = node.child_by_field_name("method")
+            && matches!(method.kind(), "identifier" | "constant")
+        {
+            let callee = self.text(method);
+            if !callee.is_empty() && !RUBY_BUILTINS.contains(&callee.as_str()) {
+                let is_member = node.child_by_field_name("receiver").is_some();
+                self.b.resolve_call(
+                    caller,
+                    &callee,
+                    is_member,
+                    Self::line(node),
+                    index,
+                    seen,
+                    true,
+                );
             }
         }
         for c in Self::children(node) {

@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::sinks::UTF8;
 use grep_searcher::{BinaryDetection, SearcherBuilder};
-use ignore::overrides::OverrideBuilder;
 use ignore::WalkBuilder;
+use ignore::overrides::OverrideBuilder;
 use regex::{Regex, RegexBuilder};
 
 /// One content match, before graph attribution.

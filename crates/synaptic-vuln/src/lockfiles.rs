@@ -415,30 +415,30 @@ fn parse_yarn_lock(source: &str) -> Vec<ResolvedPackage> {
             let header = line.trim_end().trim_end_matches(':');
             let first = header.split(',').next().unwrap_or(header).trim();
             let first = first.trim_matches('"');
-            if let Some(at) = first.rfind('@') {
-                if at > 0 {
-                    current = Some((first[..at].to_string(), None, Vec::new()));
-                }
+            if let Some(at) = first.rfind('@')
+                && at > 0
+            {
+                current = Some((first[..at].to_string(), None, Vec::new()));
             }
             continue;
         }
         let trimmed = line.trim();
         if indent == 2 {
             in_dependencies = trimmed.starts_with("dependencies:");
-            if let Some(rest) = trimmed.strip_prefix("version ") {
-                if let Some(entry) = current.as_mut() {
-                    entry.1 = Some(rest.trim().trim_matches('"').to_string());
-                }
+            if let Some(rest) = trimmed.strip_prefix("version ")
+                && let Some(entry) = current.as_mut()
+            {
+                entry.1 = Some(rest.trim().trim_matches('"').to_string());
             }
             continue;
         }
         if in_dependencies && indent >= 4 {
             let name = trimmed.split_whitespace().next().unwrap_or_default();
             let name = name.trim_matches('"').trim_end_matches(':');
-            if !name.is_empty() {
-                if let Some(entry) = current.as_mut() {
-                    entry.2.push(name.to_string());
-                }
+            if !name.is_empty()
+                && let Some(entry) = current.as_mut()
+            {
+                entry.2.push(name.to_string());
             }
         }
     }
@@ -654,10 +654,10 @@ fn parse_gemfile_lock(source: &str) -> Vec<ResolvedPackage> {
             }
         } else if indent >= 6 {
             let name = content.split(" (").next().unwrap_or_default().trim();
-            if !name.is_empty() {
-                if let Some(last) = named.last_mut() {
-                    last.1.push(name.to_string());
-                }
+            if !name.is_empty()
+                && let Some(last) = named.last_mut()
+            {
+                last.1.push(name.to_string());
             }
         }
     }

@@ -1,7 +1,7 @@
 //! Security rules: RLS coverage, grants, plaintext secrets, injection.
 use crate::findings::{Category, Finding, Severity};
 use crate::graphview::{columns_of, nodes_of_kind, out_targets, policies_of, table_flag};
-use crate::rules::{query_snippets, AuditCtx, Rule};
+use crate::rules::{AuditCtx, Rule, query_snippets};
 use synaptic_core::NodeKind;
 
 /// Column-name hints that a table is tenant/owner scoped (so RLS is expected).

@@ -8,7 +8,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::coordinate::Coordinate;
-use crate::{sanitize_tag, Result, WorkspaceError};
+use crate::{Result, WorkspaceError, sanitize_tag};
 
 /// The parsed `synaptic-workspace.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
@@ -107,7 +107,7 @@ pub fn load_manifest(root: &Path) -> Result<Option<WorkspaceManifest>> {
             return Err(WorkspaceError::Io {
                 context: format!("reading {}", path.display()),
                 source,
-            })
+            });
         }
     };
     let manifest = toml::from_str(&text).map_err(|source| WorkspaceError::Toml {

@@ -16,7 +16,7 @@ These are the exact commands CI runs:
 cargo fmt --all --check
 
 # Lint (warnings are errors)
-cargo clippy --workspace --all-targets --all-features -- -D warnings -A clippy::collapsible-if
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 # Full test suite
 cargo test --workspace --all-features

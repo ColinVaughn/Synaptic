@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use synaptic_detect::noise::is_noise_dir;
 
-use crate::coordinate::{package_coordinate, Coordinate};
+use crate::coordinate::{Coordinate, package_coordinate};
 use crate::discover::has_recognized_manifest;
 use crate::sanitize_tag;
 

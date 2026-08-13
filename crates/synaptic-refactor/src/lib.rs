@@ -14,11 +14,11 @@ pub mod resolve;
 pub mod sites;
 pub mod verify;
 
-pub use plan::{plan_rename, BlastRadius, Collision, RenameOptions, RenamePlan};
-pub use relocate::{plan_relocate, RelocatePlan};
+pub use plan::{BlastRadius, Collision, RenameOptions, RenamePlan, plan_rename};
+pub use relocate::{RelocatePlan, plan_relocate};
 pub use resolve::Candidate;
 pub use sites::EditSite;
-pub use verify::{verify_plan, verify_relocate, VerifyCheck, VerifyReport};
+pub use verify::{VerifyCheck, VerifyReport, verify_plan, verify_relocate};
 
 use synaptic_core::Confidence;
 

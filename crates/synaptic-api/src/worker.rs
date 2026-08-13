@@ -1,8 +1,8 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Component, Path};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::Instant;
 

@@ -98,18 +98,17 @@ pub fn cached_extract_source(
         return extract_source(path, source);
     };
     let file = cache_file(dir, &cache_key(path, source));
-    if let Ok(bytes) = std::fs::read(&file) {
-        if let Some(res) = decode_result(&bytes) {
-            return Some(res);
-        }
+    if let Ok(bytes) = std::fs::read(&file)
+        && let Some(res) = decode_result(&bytes)
+    {
+        return Some(res);
     }
     let res = extract_source(path, source)?;
-    if let Some(parent) = file.parent() {
-        if std::fs::create_dir_all(parent).is_ok() {
-            if let Some(bytes) = encode_result(&res) {
-                let _ = std::fs::write(&file, bytes);
-            }
-        }
+    if let Some(parent) = file.parent()
+        && std::fs::create_dir_all(parent).is_ok()
+        && let Some(bytes) = encode_result(&res)
+    {
+        let _ = std::fs::write(&file, bytes);
     }
     Some(res)
 }

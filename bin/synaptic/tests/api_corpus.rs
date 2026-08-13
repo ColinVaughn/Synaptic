@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use assert_cmd::cargo::cargo_bin_cmd;
 use serde::Deserialize;
 use synaptic_api::{
-    evaluate_relevance, impact_from_nodes, inventory, load_optional_registry, ApiChangeEvent,
-    ApiInventory, ApiOperationAnchor, ApplicabilityState, SourceArtifact,
+    ApiChangeEvent, ApiInventory, ApiOperationAnchor, ApplicabilityState, SourceArtifact,
+    evaluate_relevance, impact_from_nodes, inventory, load_optional_registry,
 };
 use synaptic_core::{GraphData, NodeId};
 use synaptic_graph::KnowledgeGraph;

@@ -1,9 +1,9 @@
-use serde_json::{json, Map};
+use serde_json::{Map, json};
 use synaptic_api::{
-    analyze_api_coverage, analyze_api_coverage_with_evidence, attach_api_coverage,
     ApiMaintenanceConfig, CoverageGapKind, CoverageState, Dependency, DependencyScope, Ecosystem,
     ExternalServiceEvidence, ExternalSurfaceKind, PackageCoordinate, SbomCompleteness,
-    SbomDocumentEvidence, SbomEvidenceReport, VendorRegistry,
+    SbomDocumentEvidence, SbomEvidenceReport, VendorRegistry, analyze_api_coverage,
+    analyze_api_coverage_with_evidence, attach_api_coverage,
 };
 use synaptic_core::{
     Confidence, DynamicKind, DynamicSite, Edge, FileType, GraphData, Node, NodeId,
@@ -143,10 +143,12 @@ fn unconfigured_http_and_sdk_calls_are_explicit_observed_gaps() {
     assert_eq!(report.raw_evidence, 2);
     assert_eq!(report.observations.len(), 2);
     assert!(!report.complete);
-    assert!(report
-        .observations
-        .iter()
-        .all(|observation| observation.state == CoverageState::Observed));
+    assert!(
+        report
+            .observations
+            .iter()
+            .all(|observation| observation.state == CoverageState::Observed)
+    );
     assert!(report.observations.iter().any(|observation| {
         observation.kind == ExternalSurfaceKind::Http
             && observation.authority.as_deref() == Some("api.unknown.test")
@@ -186,14 +188,18 @@ fn configured_but_unbound_call_is_identified_not_silently_supported() {
     assert_eq!(observation.state, CoverageState::Identified);
     assert_eq!(observation.provider.as_deref(), Some("acme"));
     assert_eq!(observation.resolved_version.as_deref(), Some("4.2.1"));
-    assert!(!observation
-        .gaps
-        .contains(&CoverageGapKind::ProviderIdentity));
+    assert!(
+        !observation
+            .gaps
+            .contains(&CoverageGapKind::ProviderIdentity)
+    );
     assert!(!observation.gaps.contains(&CoverageGapKind::ContractModel));
     assert!(!observation.gaps.contains(&CoverageGapKind::ChangeSource));
-    assert!(observation
-        .gaps
-        .contains(&CoverageGapKind::OperationBinding));
+    assert!(
+        observation
+            .gaps
+            .contains(&CoverageGapKind::OperationBinding)
+    );
     assert!(!report.complete);
 }
 

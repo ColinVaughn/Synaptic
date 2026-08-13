@@ -10,8 +10,8 @@ use std::path::Path;
 
 use synaptic_core::{Confidence, NodeId};
 use synaptic_graph::{
-    is_structural_edge, is_structural_node, partition_cohesion_scores, AnalysisResult,
-    KnowledgeGraph,
+    AnalysisResult, KnowledgeGraph, is_structural_edge, is_structural_node,
+    partition_cohesion_scores,
 };
 
 /// Communities smaller than this are omitted from the per-community listing and
@@ -360,7 +360,7 @@ mod tests {
     use super::*;
     use serde_json::Map;
     use synaptic_core::{Confidence, Edge, FileType, GraphData, Node};
-    use synaptic_graph::{analyze, apply_communities, cluster, ClusterOptions};
+    use synaptic_graph::{ClusterOptions, analyze, apply_communities, cluster};
 
     fn kg() -> (KnowledgeGraph, BTreeMap<u32, Vec<NodeId>>) {
         let node = |id: &str, sf: &str| Node {
@@ -522,8 +522,10 @@ mod tests {
         let p = dir.path().join("synaptic-out/GRAPH_REPORT.md");
         write_report(&g, &analysis, &comms, &BTreeMap::new(), &p).unwrap();
         assert!(p.exists());
-        assert!(std::fs::read_to_string(&p)
-            .unwrap()
-            .contains("# Graph Report"));
+        assert!(
+            std::fs::read_to_string(&p)
+                .unwrap()
+                .contains("# Graph Report")
+        );
     }
 }

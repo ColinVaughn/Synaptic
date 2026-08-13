@@ -2,7 +2,7 @@
 
 use synaptic_core::{Edge, Node};
 use synaptic_llm::{
-    extract_corpus, Document, Fragment, LlmClient, LlmError, SemanticCache, EXTRACTION_SYSTEM,
+    Document, EXTRACTION_SYSTEM, Fragment, LlmClient, LlmError, SemanticCache, extract_corpus,
 };
 
 use crate::convert::fragment_to_graph;
@@ -37,17 +37,17 @@ pub async fn run_semantic_pass(
         return Ok(SemanticOutcome::default());
     }
     let key = corpus_key(&docs);
-    if let Some(cache) = cache {
-        if let Some(v) = cache.get("__corpus__", &key) {
-            // Cache hit: no API call, so report no token cost.
-            let (nodes, edges) = fragment_to_graph(&Fragment::from_value(&v));
-            return Ok(SemanticOutcome {
-                nodes,
-                edges,
-                input_tokens: 0,
-                output_tokens: 0,
-            });
-        }
+    if let Some(cache) = cache
+        && let Some(v) = cache.get("__corpus__", &key)
+    {
+        // Cache hit: no API call, so report no token cost.
+        let (nodes, edges) = fragment_to_graph(&Fragment::from_value(&v));
+        return Ok(SemanticOutcome {
+            nodes,
+            edges,
+            input_tokens: 0,
+            output_tokens: 0,
+        });
     }
     let documents: Vec<Document> = docs
         .iter()
@@ -134,9 +134,11 @@ mod tests {
         assert_eq!(nodes.len(), 2);
         let labels: Vec<&str> = nodes.iter().map(|n| n.label.as_str()).collect();
         assert!(labels.contains(&"Concept of a.md"));
-        assert!(nodes
-            .iter()
-            .all(|n| n.file_type == synaptic_core::FileType::Concept));
+        assert!(
+            nodes
+                .iter()
+                .all(|n| n.file_type == synaptic_core::FileType::Concept)
+        );
     }
 
     #[tokio::test]

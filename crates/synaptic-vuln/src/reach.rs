@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use synaptic_core::{GraphData, NodeId};
 use synaptic_graph::KnowledgeGraph;
 use synaptic_predict::{
-    forecast_nodes_with_index, ForecastOptions, ReverseImpactIndex, DEFAULT_AFFECTED_RELATIONS,
+    DEFAULT_AFFECTED_RELATIONS, ForecastOptions, ReverseImpactIndex, forecast_nodes_with_index,
 };
 
 /// How far back the reverse walk looks for an entry point.

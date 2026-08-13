@@ -1,5 +1,5 @@
 use synaptic_api::{
-    diff_contracts, normalize_openapi, BreakingChangeKind, SourceArtifact, VersionRange,
+    BreakingChangeKind, SourceArtifact, VersionRange, diff_contracts, normalize_openapi,
 };
 
 fn source() -> SourceArtifact {
@@ -69,8 +69,10 @@ fn referenced_response_schemas_are_diffed() {
         VersionRange::any(),
     )
     .unwrap();
-    assert!(event
-        .changes
-        .iter()
-        .any(|change| change.kind == BreakingChangeKind::ResponseFieldRemoved));
+    assert!(
+        event
+            .changes
+            .iter()
+            .any(|change| change.kind == BreakingChangeKind::ResponseFieldRemoved)
+    );
 }

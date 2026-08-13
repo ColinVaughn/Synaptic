@@ -76,27 +76,27 @@ pub struct PriorityInputs {
 /// have a vector we cannot read" is more useful than recording nothing.
 pub fn assess_severity(advisory: &Advisory) -> SeverityAssessment {
     for entry in &advisory.severity {
-        if entry.kind == SeverityKind::CvssV4 {
-            if let Some(score) = crate::cvss4::cvss_v4_base_score(&entry.score) {
-                return SeverityAssessment {
-                    band: band_for_score(score),
-                    base_score: Some(score),
-                    vector: Some(entry.score.clone()),
-                    source: SeverityScoreSource::CvssV4Vector,
-                };
-            }
+        if entry.kind == SeverityKind::CvssV4
+            && let Some(score) = crate::cvss4::cvss_v4_base_score(&entry.score)
+        {
+            return SeverityAssessment {
+                band: band_for_score(score),
+                base_score: Some(score),
+                vector: Some(entry.score.clone()),
+                source: SeverityScoreSource::CvssV4Vector,
+            };
         }
     }
     for entry in &advisory.severity {
-        if entry.kind == SeverityKind::CvssV3 {
-            if let Some(score) = cvss_v3_base_score(&entry.score) {
-                return SeverityAssessment {
-                    band: band_for_score(score),
-                    base_score: Some(score),
-                    vector: Some(entry.score.clone()),
-                    source: SeverityScoreSource::CvssV3Vector,
-                };
-            }
+        if entry.kind == SeverityKind::CvssV3
+            && let Some(score) = cvss_v3_base_score(&entry.score)
+        {
+            return SeverityAssessment {
+                band: band_for_score(score),
+                base_score: Some(score),
+                vector: Some(entry.score.clone()),
+                source: SeverityScoreSource::CvssV3Vector,
+            };
         }
     }
     for entry in &advisory.severity {

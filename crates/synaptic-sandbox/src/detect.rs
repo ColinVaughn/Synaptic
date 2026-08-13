@@ -1085,11 +1085,21 @@ fn add_uncovered_language_gaps(
                 continue;
             }
             let reason = match language {
-                "sql" => "SQL validation is database-specific; configure schema, migration, and integration commands",
-                "salesforce-apex" => "Apex compilation/tests require an authenticated org; configure validation commands",
-                "verilog" => "no HDL build/test manifest was detected; configure simulator, lint, and test commands",
-                "classic-asp" => "Classic ASP has no portable local compiler/test convention; configure host-specific commands",
-                _ => "source is outside a recognized build/test project; configure authoritative commands",
+                "sql" => {
+                    "SQL validation is database-specific; configure schema, migration, and integration commands"
+                }
+                "salesforce-apex" => {
+                    "Apex compilation/tests require an authenticated org; configure validation commands"
+                }
+                "verilog" => {
+                    "no HDL build/test manifest was detected; configure simulator, lint, and test commands"
+                }
+                "classic-asp" => {
+                    "Classic ASP has no portable local compiler/test convention; configure host-specific commands"
+                }
+                _ => {
+                    "source is outside a recognized build/test project; configure authoritative commands"
+                }
             };
             gap(gaps, language, &snapshot.root, reason);
         }
@@ -1550,10 +1560,11 @@ mod tests {
                 "zig"
             ])
         );
-        assert!(plan
-            .projects
-            .iter()
-            .all(|project| { !project.checks.is_empty() && !project.tests.is_empty() }));
+        assert!(
+            plan.projects
+                .iter()
+                .all(|project| { !project.checks.is_empty() && !project.tests.is_empty() })
+        );
         assert!(plan.gaps.is_empty(), "unexpected gaps: {:?}", plan.gaps);
     }
 
@@ -1636,12 +1647,14 @@ mod tests {
                 .count(),
             1
         );
-        assert!(!plan
-            .projects
-            .iter()
-            .any(|project| project.root.starts_with("node_modules")
-                || project.root.starts_with(".render-cache")
-                || project.root.starts_with("vendor")));
+        assert!(
+            !plan
+                .projects
+                .iter()
+                .any(|project| project.root.starts_with("node_modules")
+                    || project.root.starts_with(".render-cache")
+                    || project.root.starts_with("vendor"))
+        );
     }
 
     #[test]
@@ -1652,14 +1665,17 @@ mod tests {
 
         let plan = detect_command_plan(repo.path()).unwrap();
 
-        assert!(plan
-            .gaps
-            .iter()
-            .any(|gap| gap.ecosystem == "salesforce-apex" && gap.reason.contains("authenticated")));
-        assert!(plan
-            .gaps
-            .iter()
-            .any(|gap| gap.ecosystem == "sql" && gap.reason.contains("database-specific")));
+        assert!(
+            plan.gaps
+                .iter()
+                .any(|gap| gap.ecosystem == "salesforce-apex"
+                    && gap.reason.contains("authenticated"))
+        );
+        assert!(
+            plan.gaps
+                .iter()
+                .any(|gap| gap.ecosystem == "sql" && gap.reason.contains("database-specific"))
+        );
     }
 
     #[test]
@@ -1820,9 +1836,10 @@ mod tests {
 
         assert_eq!(plan.projects.len(), MAX_PROJECTS);
         assert!(plan.truncated);
-        assert!(plan
-            .gaps
-            .iter()
-            .any(|gap| { gap.ecosystem == "repository" && gap.reason.contains("project cap") }));
+        assert!(
+            plan.gaps
+                .iter()
+                .any(|gap| { gap.ecosystem == "repository" && gap.reason.contains("project cap") })
+        );
     }
 }

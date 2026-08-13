@@ -4,12 +4,12 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use synaptic_memory::{
-    enforce_benchmark_gate, export_bundle, import_bundle, ingest_artifact_file, ingest_commit,
-    ingest_repository_documents, refresh_repository_memory, run_benchmark_file, AccessScope,
-    BenchmarkGate, MemoryKind, MemoryLifecycle, MemoryPrincipal, MemoryQuery, MemoryRecord,
-    MemoryStore, SourceArtifact, SymbolAnchor, VerificationOutcome, VerificationStatus,
+    AccessScope, BenchmarkGate, MemoryKind, MemoryLifecycle, MemoryPrincipal, MemoryQuery,
+    MemoryRecord, MemoryStore, SourceArtifact, SymbolAnchor, VerificationOutcome,
+    VerificationStatus, enforce_benchmark_gate, export_bundle, import_bundle, ingest_artifact_file,
+    ingest_commit, ingest_repository_documents, refresh_repository_memory, run_benchmark_file,
 };
 
 use crate::cli::MemoryAction;

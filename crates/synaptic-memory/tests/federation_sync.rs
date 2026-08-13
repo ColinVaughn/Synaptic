@@ -1,6 +1,6 @@
 use synaptic_memory::{
-    export_bundle, import_bundle, AccessScope, MemoryKind, MemoryPrincipal, MemoryQuery,
-    MemoryRecord, MemoryStore, SourceArtifact,
+    AccessScope, MemoryKind, MemoryPrincipal, MemoryQuery, MemoryRecord, MemoryStore,
+    SourceArtifact, export_bundle, import_bundle,
 };
 
 fn record(key: &str, repository: &str, title: &str) -> MemoryRecord {

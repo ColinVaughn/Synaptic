@@ -4,8 +4,8 @@ use serde_json::Map;
 use synaptic_core::{FileType, GraphData, Node, NodeId};
 use synaptic_graph::KnowledgeGraph;
 use synaptic_memory::{
-    ingest_commit, MemoryKind, MemoryQuery, MemoryStore, PathChangeKind, RecordOutcome,
-    SymbolChangeKind,
+    MemoryKind, MemoryQuery, MemoryStore, PathChangeKind, RecordOutcome, SymbolChangeKind,
+    ingest_commit,
 };
 
 fn git(root: &std::path::Path, args: &[&str]) -> String {

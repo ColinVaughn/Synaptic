@@ -1,7 +1,7 @@
 //! `php` extraction methods on `Extractor` (split from walker.rs).
 
 use super::Extractor;
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 use tree_sitter::Node as TsNode;
 
 impl<'tree> Extractor<'_, '_, 'tree> {

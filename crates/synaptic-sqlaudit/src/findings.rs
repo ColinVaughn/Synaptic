@@ -97,10 +97,10 @@ impl AuditReport {
         // via differently-normalized paths. The source_location suffix (e.g. `L12`)
         // never contains a backslash, so normalizing the whole string is safe.
         for f in &mut findings {
-            if let Some(loc) = &f.location {
-                if loc.contains('\\') {
-                    f.location = Some(loc.replace('\\', "/"));
-                }
+            if let Some(loc) = &f.location
+                && loc.contains('\\')
+            {
+                f.location = Some(loc.replace('\\', "/"));
             }
         }
         // scan_sql emits one code->SQL edge per referenced table, each carrying

@@ -132,10 +132,10 @@ pub fn resolve_parameterized_routes(nodes: Vec<Node>, edges: Vec<Edge>) -> (Vec<
         let mut hits = templates
             .iter()
             .filter(|(tid, tpath)| tid != cid && path_matches(cpath, tpath));
-        if let Some((tid, _)) = hits.next() {
-            if hits.next().is_none() {
-                resolved.insert(cid.clone(), tid.clone());
-            }
+        if let Some((tid, _)) = hits.next()
+            && hits.next().is_none()
+        {
+            resolved.insert(cid.clone(), tid.clone());
         }
     }
     if resolved.is_empty() {
@@ -247,12 +247,11 @@ pub fn resolve_pyo3_imports(nodes: Vec<Node>, edges: Vec<Edge>) -> (Vec<Node>, V
     // module name -> boundary id, from `pyo3_module` nodes labeled `pyo3:<module>`.
     let mut boundaries: HashMap<&str, &NodeId> = HashMap::new();
     for n in &nodes {
-        if n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("pyo3_module") {
-            if let Some(m) = n.label.strip_prefix("pyo3:") {
-                if !m.is_empty() {
-                    boundaries.insert(m, &n.id);
-                }
-            }
+        if n.extra.get("_node_type").and_then(|v| v.as_str()) == Some("pyo3_module")
+            && let Some(m) = n.label.strip_prefix("pyo3:")
+            && !m.is_empty()
+        {
+            boundaries.insert(m, &n.id);
         }
     }
     if boundaries.is_empty() {
@@ -532,10 +531,11 @@ pub fn resolve_sql_queries(nodes: Vec<Node>, edges: Vec<Edge>) -> (Vec<Node>, Ve
     }
     let mut remap: HashMap<NodeId, NodeId> = HashMap::new();
     for n in &nodes {
-        if is_table(n) && n.source_file.is_empty() {
-            if let Some(Some(real)) = real_by_label.get(&n.label.to_ascii_lowercase()) {
-                remap.insert(n.id.clone(), real.clone());
-            }
+        if is_table(n)
+            && n.source_file.is_empty()
+            && let Some(Some(real)) = real_by_label.get(&n.label.to_ascii_lowercase())
+        {
+            remap.insert(n.id.clone(), real.clone());
         }
     }
     if remap.is_empty() {
@@ -611,10 +611,11 @@ pub fn mark_cross_repo_edges(nodes: &[Node], mut edges: Vec<Edge>) -> Vec<Edge> 
             if let Some(r) = repo_of.get(&e.target) {
                 provider_repos.entry(&e.source).or_default().insert(r);
             }
-        } else if e.relation != "handled_by" && !in_repo.contains(&e.target) {
-            if let Some(r) = repo_of.get(&e.source) {
-                consumer_repos.entry(&e.target).or_default().insert(r);
-            }
+        } else if e.relation != "handled_by"
+            && !in_repo.contains(&e.target)
+            && let Some(r) = repo_of.get(&e.source)
+        {
+            consumer_repos.entry(&e.target).or_default().insert(r);
         }
     }
     let mut flags: Vec<bool> = Vec::with_capacity(edges.len());
@@ -659,7 +660,7 @@ pub fn mark_cross_repo_edges(nodes: &[Node], mut edges: Vec<Edge>) -> Vec<Edge> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Map};
+    use serde_json::{Map, json};
     use synaptic_core::{Confidence, FileType};
 
     fn command_stub(name: &str) -> Node {
@@ -1287,7 +1288,7 @@ mod tests {
 
     #[test]
     fn resolve_sql_queries_dedups_stub_into_real_table() {
-        use synaptic_core::{make_id, NodeId};
+        use synaptic_core::{NodeId, make_id};
         let tid = NodeId(make_id(&["sql", "orders"]));
         let mut real = Node {
             id: tid.clone(),

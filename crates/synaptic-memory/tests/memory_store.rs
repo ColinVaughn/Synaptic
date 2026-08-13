@@ -146,14 +146,16 @@ fn lifecycle_superseded_is_hidden() {
     let mut old = episode("old-state", "Old invariant", "No longer applies.");
     old.lifecycle = MemoryLifecycle::Superseded;
     store.record(&old).unwrap();
-    assert!(store
-        .search(&MemoryQuery {
-            text: "invariant".into(),
-            limit: 10,
-            ..Default::default()
-        })
-        .unwrap()
-        .is_empty());
+    assert!(
+        store
+            .search(&MemoryQuery {
+                text: "invariant".into(),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

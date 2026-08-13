@@ -1,9 +1,9 @@
 //! `diff` command: time-travel graph diff between two git revisions.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
 
-use synaptic_history::{diff, git, to_html, DiffOptions, DiffReport};
+use synaptic_history::{DiffOptions, DiffReport, diff, git, to_html};
 
 pub(crate) struct DiffArgs {
     pub rev1: Option<String>,

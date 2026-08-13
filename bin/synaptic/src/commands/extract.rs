@@ -5,24 +5,24 @@ use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use synaptic_core::NodeId;
-use synaptic_detect::{detect, FileType, Manifest};
+use synaptic_detect::{FileType, Manifest, detect};
 use synaptic_extract::{
-    cached_extract_source, load_alias_resolver, prune_local_sdk_candidates, resolve_imports,
-    ExtractionResult,
+    ExtractionResult, cached_extract_source, load_alias_resolver, prune_local_sdk_candidates,
+    resolve_imports,
 };
 use synaptic_graph::{
-    ambiguous_concept_pairs, analyze, apply_communities, build_from_parts, cluster,
-    deduplicate_entities, deterministic_tiebreak_candidates, link_dynamic_refs, merge_pairs,
-    resolve_command_invocations, resolve_parameterized_routes, resolve_pyo3_imports,
-    resolve_pyo3_modules, resolve_route_handlers, resolve_sql_queries, resolve_symbols,
-    BuildOptions, ClusterOptions, KnowledgeGraph,
+    BuildOptions, ClusterOptions, KnowledgeGraph, ambiguous_concept_pairs, analyze,
+    apply_communities, build_from_parts, cluster, deduplicate_entities,
+    deterministic_tiebreak_candidates, link_dynamic_refs, merge_pairs, resolve_command_invocations,
+    resolve_parameterized_routes, resolve_pyo3_imports, resolve_pyo3_modules,
+    resolve_route_handlers, resolve_sql_queries, resolve_symbols,
 };
 use synaptic_llm::{
-    build_client, default_concurrency, estimate_cost, resolve_backend, LlmClient, SemanticCache,
+    LlmClient, SemanticCache, build_client, default_concurrency, estimate_cost, resolve_backend,
 };
 use synaptic_output::{
-    bulk_export_is_viable, to_cypher, to_dot, to_force3d, to_graphml, to_html, to_json, to_mermaid,
-    to_obsidian, to_svg, to_tree_html, to_wiki, BULK_EXPORT_MAX_NODES,
+    BULK_EXPORT_MAX_NODES, bulk_export_is_viable, to_cypher, to_dot, to_force3d, to_graphml,
+    to_html, to_json, to_mermaid, to_obsidian, to_svg, to_tree_html, to_wiki,
 };
 use synaptic_report::write_report;
 use synaptic_semantic::{label_communities, llm_tiebreak, run_semantic_pass};
@@ -528,14 +528,14 @@ pub(crate) fn run_extract(
     }
     // Estimated LLM spend for the semantic extraction pass (zero on a cache hit
     // or for local/subscription backends). Reported only when a paid call was made.
-    if let Some(name) = backend_name {
-        if llm_input_tokens > 0 || llm_output_tokens > 0 {
-            let cost = estimate_cost(name, llm_input_tokens, llm_output_tokens);
-            println!(
-                "LLM usage (extraction pass): {llm_input_tokens} input + {llm_output_tokens} \
+    if let Some(name) = backend_name
+        && (llm_input_tokens > 0 || llm_output_tokens > 0)
+    {
+        let cost = estimate_cost(name, llm_input_tokens, llm_output_tokens);
+        println!(
+            "LLM usage (extraction pass): {llm_input_tokens} input + {llm_output_tokens} \
                  output tokens (~${cost:.4} estimated on {name})"
-            );
-        }
+        );
     }
     // Git-free change-detection ledger: rebuild the per-file manifest with the
     // stat-index fastpath (unchanged mtime -> skip re-hash), report what changed

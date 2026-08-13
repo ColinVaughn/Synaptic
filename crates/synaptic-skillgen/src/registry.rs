@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    extract_block, replace_or_append_section, skill_version, stamped_always_on, stamped_skill,
-    Platform,
+    Platform, extract_block, replace_or_append_section, skill_version, stamped_always_on,
+    stamped_skill,
 };
 
 /// The registry file: `~/.synaptic/skills.toml` (`%USERPROFILE%\.synaptic\…` on
@@ -219,20 +219,20 @@ fn refresh_entry(entry: &mut Entry) -> EntryStatus {
 
     // Always-on marker block (every host).
     let ao_path = repo_root.join(platform.always_on_file());
-    if let Ok(file) = std::fs::read_to_string(&ao_path) {
-        if let Some(current_block) = extract_block(&file) {
-            present = true;
-            let rendered_block = stamped_always_on();
-            if current_block != rendered_block {
-                if entry.block_hash.as_deref() == Some(content_hash(&current_block).as_str()) {
-                    let updated = replace_or_append_section(&file, &rendered_block);
-                    if std::fs::write(&ao_path, updated).is_ok() {
-                        entry.block_hash = Some(content_hash(&rendered_block));
-                        refreshed = true;
-                    }
-                } else {
-                    edited.push(platform.always_on_file().to_string());
+    if let Ok(file) = std::fs::read_to_string(&ao_path)
+        && let Some(current_block) = extract_block(&file)
+    {
+        present = true;
+        let rendered_block = stamped_always_on();
+        if current_block != rendered_block {
+            if entry.block_hash.as_deref() == Some(content_hash(&current_block).as_str()) {
+                let updated = replace_or_append_section(&file, &rendered_block);
+                if std::fs::write(&ao_path, updated).is_ok() {
+                    entry.block_hash = Some(content_hash(&rendered_block));
+                    refreshed = true;
                 }
+            } else {
+                edited.push(platform.always_on_file().to_string());
             }
         }
     }

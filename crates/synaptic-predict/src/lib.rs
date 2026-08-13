@@ -16,22 +16,22 @@ mod forecast;
 mod render;
 mod risk;
 
-pub use cochange::{co_change, CoChange, CoChangeOptions};
-pub use edit::{assess_edit, EditDependent, EditImpact, EditKind};
-pub use editforecast::{forecast_edit, EditForecast};
+pub use cochange::{CoChange, CoChangeOptions, co_change};
+pub use edit::{EditDependent, EditImpact, EditKind, assess_edit};
+pub use editforecast::{EditForecast, forecast_edit};
 pub use forecast::{
-    fold_diff_report, forecast_changes, forecast_changes_with_index, forecast_nodes,
-    forecast_nodes_with_index, refine_risk, refresh_summary, ChangeForecast, DepEdge,
-    DependencyDelta, ForecastFold, ForecastOptions, ImpactHit, NodeRef, VerifyStep,
-    FORECAST_VERSION,
+    ChangeForecast, DepEdge, DependencyDelta, FORECAST_VERSION, ForecastFold, ForecastOptions,
+    ImpactHit, NodeRef, VerifyStep, fold_diff_report, forecast_changes,
+    forecast_changes_with_index, forecast_nodes, forecast_nodes_with_index, refine_risk,
+    refresh_summary,
 };
 // `forecast_nodes_with_index` takes a `&ReverseImpactIndex` and the walk it does
 // is fixed to the relations the index was built with, so a caller outside this
 // crate needs both the type and that relation set. Re-exported here rather than
 // forcing every caller to also depend on `synaptic-query`.
 pub use render::{render_edit_markdown, render_markdown};
-pub use risk::{assess_risk, RiskFactors, RiskScore};
-pub use synaptic_query::{ReverseImpactIndex, DEFAULT_AFFECTED_RELATIONS};
+pub use risk::{RiskFactors, RiskScore, assess_risk};
+pub use synaptic_query::{DEFAULT_AFFECTED_RELATIONS, ReverseImpactIndex};
 
 /// Errors the prediction pipeline can surface.
 #[derive(Debug, thiserror::Error)]

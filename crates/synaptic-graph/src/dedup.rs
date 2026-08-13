@@ -4,11 +4,9 @@
 //! Jaro-Winkler verification → same-community boost → union-find merge, then
 //! rewire edges onto survivors.
 //!
-//! **Code symbols are never label-merged** (`file_type == Code`): a code node's
-//! identity is its fully-qualified id, already collapsed by id; two same-named
-//! symbols in different files are distinct (reference #1205). So this only acts
-//! on non-code (document/paper/concept) nodes — i.e. it's a no-op until the
-//! semantic layer (B5) adds such nodes.
+//! **AST nodes are never label-merged**: their identity is the extractor-assigned
+//! id, already collapsed by id. So this only acts on semantic entities rather
+//! than code symbols or structural document headings.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
@@ -120,9 +118,9 @@ fn short_label_blocked(a: &str, b: &str, jw_score: f64) -> bool {
     true
 }
 
-/// AST-extracted code symbol — excluded from all label-based merging.
-fn is_code(n: &Node) -> bool {
-    n.file_type == FileType::Code
+/// Code or parser-owned node — excluded from all label-based merging.
+fn is_structural(n: &Node) -> bool {
+    n.file_type == FileType::Code || n.is_ast_origin()
 }
 
 /// Resource file nodes are concrete files keyed by a unique path, not concepts.
@@ -218,7 +216,7 @@ pub fn deduplicate_entities(
     // pass 1: exact normalization (within the same source_file only)
     let mut norm_to: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, n) in unique.iter().enumerate() {
-        if is_code(n) || is_resource(n) {
+        if is_structural(n) || is_resource(n) {
             continue;
         }
         let key = norm(&n.label);
@@ -253,7 +251,7 @@ pub fn deduplicate_entities(
     let mut candidates: Vec<usize> = Vec::new();
     let mut seen_norms: HashSet<String> = HashSet::new();
     for (i, n) in unique.iter().enumerate() {
-        if is_code(n) || is_resource(n) {
+        if is_structural(n) || is_resource(n) {
             continue;
         }
         let key = norm(&n.label);
@@ -308,10 +306,11 @@ pub fn deduplicate_entities(
                 if hi.starts_with(lo.as_str()) && hi != lo {
                     continue;
                 }
-                if let (Some(&c1), Some(&c2)) = (communities.get(&id), communities.get(&nbr)) {
-                    if c1 == c2 && clen(&norm_label).min(clen(&nbr_norm)) >= 12 {
-                        score += COMMUNITY_BOOST;
-                    }
+                if let (Some(&c1), Some(&c2)) = (communities.get(&id), communities.get(&nbr))
+                    && c1 == c2
+                    && clen(&norm_label).min(clen(&nbr_norm)) >= 12
+                {
+                    score += COMMUNITY_BOOST;
                 }
                 if score >= MERGE_THRESHOLD {
                     // Identical labels in different files means same-named distinct
@@ -426,7 +425,7 @@ pub fn ambiguous_concept_pairs<'a>(
     let mut norms: Vec<String> = Vec::new();
     let mut seen_norms: HashSet<String> = HashSet::new();
     for n in nodes {
-        if is_code(n) || is_resource(n) {
+        if is_structural(n) || is_resource(n) {
             continue;
         }
         let key = norm(&n.label);
@@ -459,10 +458,11 @@ pub fn ambiguous_concept_pairs<'a>(
                 continue;
             }
             let (id_a, id_b) = (&cand[i].id, &cand[j].id);
-            if let (Some(&c1), Some(&c2)) = (communities.get(id_a), communities.get(id_b)) {
-                if c1 == c2 && clen(na).min(clen(nb)) >= 12 {
-                    score += COMMUNITY_BOOST;
-                }
+            if let (Some(&c1), Some(&c2)) = (communities.get(id_a), communities.get(id_b))
+                && c1 == c2
+                && clen(na).min(clen(nb)) >= 12
+            {
+                score += COMMUNITY_BOOST;
             }
             if (TIEBREAK_LOW..MERGE_THRESHOLD).contains(&score) {
                 let pair = if id_a <= id_b {
@@ -530,7 +530,7 @@ pub fn deterministic_tiebreak_candidates<'a>(
         std::collections::BTreeMap::new();
     let mut seen_norms = HashSet::new();
     for node in nodes {
-        if is_code(node) || is_resource(node) || entropy(&node.label) < ENTROPY_THRESHOLD {
+        if is_structural(node) || is_resource(node) || entropy(&node.label) < ENTROPY_THRESHOLD {
             continue;
         }
         let normalized = norm(&node.label);
@@ -569,12 +569,10 @@ pub fn deterministic_tiebreak_candidates<'a>(
                 }
                 if let (Some(&left_community), Some(&right_community)) =
                     (communities.get(&left.id), communities.get(&right.id))
+                    && left_community == right_community
+                    && clen(left_norm).min(clen(right_norm)) >= 12
                 {
-                    if left_community == right_community
-                        && clen(left_norm).min(clen(right_norm)) >= 12
-                    {
-                        score += COMMUNITY_BOOST;
-                    }
+                    score += COMMUNITY_BOOST;
                 }
                 if (TIEBREAK_LOW..MERGE_THRESHOLD).contains(&score) {
                     confirmed.push(if left.id <= right.id {
@@ -651,6 +649,23 @@ mod tests {
         ];
         let (out, _) = deduplicate_entities(nodes, vec![], &HashMap::new());
         assert_eq!(out.len(), 2, "code symbols stay distinct");
+    }
+
+    #[test]
+    fn duplicate_markdown_headings_survive_repeated_dedup() {
+        let mut first = n("guide_setup", "Setup", FileType::Document, "guide.md");
+        let mut second = n("guide_setup_12", "Setup", FileType::Document, "guide.md");
+        first.set_origin("ast");
+        second.set_origin("ast");
+
+        let (once, edges) = deduplicate_entities(vec![first, second], vec![], &HashMap::new());
+        let (twice, _) = deduplicate_entities(once, edges, &HashMap::new());
+
+        assert_eq!(
+            twice.len(),
+            2,
+            "structural headings keep extractor identity"
+        );
     }
 
     fn res(id: &str, sf: &str) -> Node {

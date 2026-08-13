@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 use synaptic_core::{Confidence, NodeId};
 use synaptic_graph::KnowledgeGraph;
 
+use crate::RefactorError;
 use crate::resolve::{self, Candidate, Selection};
 use crate::sites::{self, EditSite};
-use crate::RefactorError;
 
 /// Options for planning a rename.
 #[derive(Debug, Clone)]
@@ -132,7 +132,7 @@ pub fn plan_rename(
             return Err(RefactorError::Ambiguous {
                 name: old.to_string(),
                 count: v.len(),
-            })
+            });
         }
     };
 

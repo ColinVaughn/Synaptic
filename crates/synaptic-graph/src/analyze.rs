@@ -419,11 +419,12 @@ fn surprise_score(
     }
     let cid_u = node_comm.get(u);
     let cid_v = node_comm.get(v);
-    if let (Some(a), Some(b)) = (cid_u, cid_v) {
-        if a != b && !suppress {
-            score += 1;
-            reasons.push("bridges separate communities".to_string());
-        }
+    if let (Some(a), Some(b)) = (cid_u, cid_v)
+        && a != b
+        && !suppress
+    {
+        score += 1;
+        reasons.push("bridges separate communities".to_string());
     }
     if relation == "semantically_similar_to" {
         score = (score as f64 * 1.5) as i64;
@@ -1584,9 +1585,11 @@ mod tests {
             .flat_map(|s| [s.source.clone(), s.target.clone()])
             .collect();
         assert!(!labels.contains(&"Abstract Concept".to_string()));
-        assert!(surprises
-            .iter()
-            .all(|s| s.source_files[0] != s.source_files[1]));
+        assert!(
+            surprises
+                .iter()
+                .all(|s| s.source_files[0] != s.source_files[1])
+        );
     }
 
     #[test]
@@ -1648,20 +1651,24 @@ mod tests {
             .iter()
             .map(|c| c.cycle.iter().cloned().collect())
             .collect();
-        assert!(sets.iter().any(|s| s.is_superset(
-            &["src/a.ts".to_string(), "src/b.ts".to_string()]
+        assert!(sets.iter().any(|s| {
+            s.is_superset(
+                &["src/a.ts".to_string(), "src/b.ts".to_string()]
+                    .into_iter()
+                    .collect(),
+            )
+        }));
+        assert!(sets.iter().any(|s| {
+            s.is_superset(
+                &[
+                    "src/b.ts".to_string(),
+                    "src/c.ts".to_string(),
+                    "src/d.ts".to_string(),
+                ]
                 .into_iter()
-                .collect()
-        )));
-        assert!(sets.iter().any(|s| s.is_superset(
-            &[
-                "src/b.ts".to_string(),
-                "src/c.ts".to_string(),
-                "src/d.ts".to_string()
-            ]
-            .into_iter()
-            .collect()
-        )));
+                .collect(),
+            )
+        }));
         // max length respected
         let short = find_import_cycles(&kg, 2, 20);
         assert!(short.iter().all(|c| c.length <= 2));

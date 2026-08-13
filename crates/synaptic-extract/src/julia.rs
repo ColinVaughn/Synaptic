@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 #[cfg(feature = "lang-julia")]
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 #[cfg(feature = "lang-julia")]
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -218,24 +218,16 @@ impl<'tree> Julia<'_, 'tree> {
         ) {
             return;
         }
-        if node.kind() == "call_expression" {
-            if let Some(callee) = Self::children(node)
+        if node.kind() == "call_expression"
+            && let Some(callee) = Self::children(node)
                 .into_iter()
                 .find(|c| c.kind() == "identifier")
                 .map(|c| self.text(c))
-            {
-                if !callee.is_empty() && !JULIA_BUILTINS.contains(&callee.as_str()) {
-                    self.b.resolve_call(
-                        caller,
-                        &callee,
-                        false,
-                        Self::line(node),
-                        index,
-                        seen,
-                        true,
-                    );
-                }
-            }
+            && !callee.is_empty()
+            && !JULIA_BUILTINS.contains(&callee.as_str())
+        {
+            self.b
+                .resolve_call(caller, &callee, false, Self::line(node), index, seen, true);
         }
         for c in Self::children(node) {
             self.walk_calls(c, caller, index, seen, depth + 1);
@@ -285,9 +277,11 @@ mod tests {
 
     #[test]
     fn using_becomes_import() {
-        assert!(rels(&extract(), "imports_from")
-            .iter()
-            .any(|(_, t)| t == "Pkg"));
+        assert!(
+            rels(&extract(), "imports_from")
+                .iter()
+                .any(|(_, t)| t == "Pkg")
+        );
     }
 
     #[test]

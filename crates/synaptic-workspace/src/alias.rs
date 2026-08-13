@@ -93,10 +93,10 @@ pub fn collect_aliases(members: &[(String, PathBuf)]) -> AliasMap {
         let mut raws = Vec::new();
         scan_dir(root, MAX_DEPTH, &mut raws);
         for raw in raws {
-            if let Some(tag) = match_member(&raw.targets, &tags) {
-                if tag != owner.as_str() {
-                    map.insert(raw.kind, raw.alias, tag.to_string());
-                }
+            if let Some(tag) = match_member(&raw.targets, &tags)
+                && tag != owner.as_str()
+            {
+                map.insert(raw.kind, raw.alias, tag.to_string());
             }
         }
     }
@@ -230,12 +230,13 @@ pub(crate) fn object_pairs(obj: &str, allow_unquoted_keys: bool) -> Vec<(String,
             }
             if j < bytes.len() {
                 let q = bytes[j] as char;
-                if (q == '"' || q == '\'' || q == '`') && !key.is_empty() {
-                    if let Some((val, vnext)) = read_quoted(obj, j, q) {
-                        out.push((key, val));
-                        i = vnext;
-                        continue;
-                    }
+                if (q == '"' || q == '\'' || q == '`')
+                    && !key.is_empty()
+                    && let Some((val, vnext)) = read_quoted(obj, j, q)
+                {
+                    out.push((key, val));
+                    i = vnext;
+                    continue;
                 }
             }
         }

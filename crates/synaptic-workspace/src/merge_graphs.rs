@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::federate::compose_no_dedup;
-use crate::{load_graph, sanitize_tag, write_graph, Result};
+use crate::{Result, load_graph, sanitize_tag, write_graph};
 
 /// What `merge_graph_files` produced.
 #[derive(Debug, Clone, PartialEq, Eq)]

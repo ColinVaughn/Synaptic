@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "lang-json")]
 use serde_json::{Map, Value};
 #[cfg(feature = "lang-json")]
-use synaptic_core::{make_id, Confidence, Edge, FileType, Node, NodeId, NodeKind};
+use synaptic_core::{Confidence, Edge, FileType, Node, NodeId, NodeKind, make_id};
 #[cfg(feature = "lang-json")]
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -274,10 +274,10 @@ fn collect_localization_keys(
         if seen.insert(qualified.clone()) {
             out.push(qualified.clone());
         }
-        if let Some(value) = pair.child_by_field_name("value") {
-            if value.kind() == "object" {
-                collect_localization_keys(value, source, &qualified, depth + 1, out, seen);
-            }
+        if let Some(value) = pair.child_by_field_name("value")
+            && value.kind() == "object"
+        {
+            collect_localization_keys(value, source, &qualified, depth + 1, out, seen);
         }
     }
 }
@@ -606,10 +606,10 @@ fn resolve_path(s: &str, dir: &str, file_by_path: &HashMap<String, NodeId>) -> O
     }
     let s = s.trim_start_matches("./").replace('\\', "/");
     let mut cands = vec![s.clone()];
-    if !dir.is_empty() {
-        if let Some(joined) = join_norm(dir, &s) {
-            cands.push(joined);
-        }
+    if !dir.is_empty()
+        && let Some(joined) = join_norm(dir, &s)
+    {
+        cands.push(joined);
     }
     for c in cands {
         if let Some(id) = file_by_path.get(&c) {
@@ -632,10 +632,10 @@ fn resolve_symbol(s: &str, symbol: &HashMap<String, Option<NodeId>>) -> Option<N
         return Some(id.clone());
     }
     let seg = s.rsplit(['.', ':', '/']).next().unwrap_or(s);
-    if seg != s {
-        if let Some(Some(id)) = symbol.get(seg) {
-            return Some(id.clone());
-        }
+    if seg != s
+        && let Some(Some(id)) = symbol.get(seg)
+    {
+        return Some(id.clone());
     }
     None
 }
@@ -1001,10 +1001,11 @@ mod tests {
         // A top-level array is valid resource data (the config extractor drops it);
         // still one node per file.
         let r = extract_resource_source("data/mymod/tags/blocks/x.json", b"[1,2,3]");
-        assert!(r
-            .nodes
-            .iter()
-            .any(|n| n.id == file_node_id("data/mymod/tags/blocks/x.json")));
+        assert!(
+            r.nodes
+                .iter()
+                .any(|n| n.id == file_node_id("data/mymod/tags/blocks/x.json"))
+        );
     }
 
     fn ref_targets(r: &ExtractionResult) -> Vec<String> {
@@ -1031,11 +1032,12 @@ mod tests {
         assert!(t.contains(&"minecraft:block/cube_all".to_string()), "{t:?}");
         assert!(t.contains(&"mymod:block/x".to_string()), "{t:?}");
         // every ref edge originates at the resource file node
-        assert!(r
-            .edges
-            .iter()
-            .filter(|e| e.context.as_deref() == Some("resource_ref"))
-            .all(|e| e.source == file_node_id("assets/mymod/models/block/x.json")));
+        assert!(
+            r.edges
+                .iter()
+                .filter(|e| e.context.as_deref() == Some("resource_ref"))
+                .all(|e| e.source == file_node_id("assets/mymod/models/block/x.json"))
+        );
     }
 
     #[test]

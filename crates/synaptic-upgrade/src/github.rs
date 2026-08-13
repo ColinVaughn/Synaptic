@@ -68,10 +68,10 @@ pub fn latest_release() -> Result<Release> {
     let mut req = client
         .get(&url)
         .header("Accept", "application/vnd.github+json");
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-        if !token.is_empty() {
-            req = req.header("Authorization", format!("Bearer {token}"));
-        }
+    if let Ok(token) = std::env::var("GITHUB_TOKEN")
+        && !token.is_empty()
+    {
+        req = req.header("Authorization", format!("Bearer {token}"));
     }
     let resp = req.send().context("requesting latest release")?;
     let resp = resp

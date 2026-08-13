@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use synaptic_core::NodeId;
 use synaptic_graph::KnowledgeGraph;
 use synaptic_query::{
-    affected_including_members, dependents_caveat, explain, query_modal, references_to,
-    shortest_path, DynamicHazardIndex, QueryIndex, Recency, RecencyMode, TraversalMode,
-    DEFAULT_AFFECTED_RELATIONS,
+    DEFAULT_AFFECTED_RELATIONS, DynamicHazardIndex, QueryIndex, Recency, RecencyMode,
+    TraversalMode, affected_including_members, dependents_caveat, explain, query_modal,
+    references_to, shortest_path,
 };
 
 /// `query` recency-boost strength (mirrors the MCP server's RECENCY_BOOST).
@@ -381,10 +381,10 @@ pub(crate) fn run_hazards(
         }
         for s in n.dynamic_sites() {
             let ks = s.kind.as_str();
-            if let Some(k) = &kind {
-                if ks != k {
-                    continue;
-                }
+            if let Some(k) = &kind
+                && ks != k
+            {
+                continue;
             }
             rows.push((
                 n.source_file.clone(),

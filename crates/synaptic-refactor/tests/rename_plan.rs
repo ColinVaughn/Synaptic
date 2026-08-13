@@ -7,9 +7,9 @@
 use std::path::Path;
 
 use synaptic_graph::KnowledgeGraph;
-use synaptic_incremental::{rebuild, ChangeSet, RebuildOptions};
+use synaptic_incremental::{ChangeSet, RebuildOptions, rebuild};
 use synaptic_refactor::{
-    plan_relocate, plan_rename, verify_plan, verify_relocate, RenameOptions, RenamePlan,
+    RenameOptions, RenamePlan, plan_relocate, plan_rename, verify_plan, verify_relocate,
 };
 
 fn build(root: &Path) -> KnowledgeGraph {
@@ -216,10 +216,12 @@ fn move_plan_lists_def_and_import_update_then_verifies() {
     std::fs::write(root.join("core.py"), b"# core module\n").unwrap();
     let report2 = verify_relocate(&plan, &before, root).expect("verify");
     assert!(!report2.passed);
-    assert!(report2
-        .checks
-        .iter()
-        .any(|c| c.name == "definition-relocated" && !c.passed));
+    assert!(
+        report2
+            .checks
+            .iter()
+            .any(|c| c.name == "definition-relocated" && !c.passed)
+    );
 }
 
 #[test]
@@ -350,11 +352,12 @@ fn cross_repo_reference_sites_carry_repo_tag() {
     };
     let plan = plan_rename(&kg, "User", "Account", dir.path(), &opts).expect("plan");
     // The definition site is tagged with the lib repo.
-    assert!(plan
-        .edits
-        .iter()
-        .chain(plan.review.iter())
-        .any(|s| s.reason == "definition" && s.repo.as_deref() == Some("lib")));
+    assert!(
+        plan.edits
+            .iter()
+            .chain(plan.review.iter())
+            .any(|s| s.reason == "definition" && s.repo.as_deref() == Some("lib"))
+    );
     // The cross-repo reference site is tagged with the app repo.
     assert!(
         plan.edits

@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    deterministic_branch, ApiChangeEvent, ApiRunRecord, RepairBrief, RepairOutcome, RunState,
-    VerificationReport,
+    ApiChangeEvent, ApiRunRecord, RepairBrief, RepairOutcome, RunState, VerificationReport,
+    deterministic_branch,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

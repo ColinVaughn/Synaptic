@@ -5,9 +5,9 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use crate::RefactorError;
 use crate::plan::RenamePlan;
 use crate::sites::EditSite;
-use crate::RefactorError;
 
 /// Write `plan.json` + `plan.md` into `out_dir`, returning their paths.
 pub fn write_plan(plan: &RenamePlan, out_dir: &Path) -> Result<(PathBuf, PathBuf), RefactorError> {

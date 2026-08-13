@@ -60,9 +60,11 @@ fn repo(root: &Path) -> bool {
     std::fs::write(root.join("tests/test_helper.py"), b"# exercises helper\n").unwrap();
     write_graph(root);
     git(root, &["add", "src", "tests"]);
-    assert!(git(root, &["commit", "-q", "-m", "init", "--no-gpg-sign"])
-        .status
-        .success());
+    assert!(
+        git(root, &["commit", "-q", "-m", "init", "--no-gpg-sign"])
+            .status
+            .success()
+    );
     true
 }
 

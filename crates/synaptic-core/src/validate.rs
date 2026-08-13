@@ -41,13 +41,13 @@ pub fn validate_extraction(data: &Value) -> Vec<String> {
                         ));
                     }
                 }
-                if let Some(ft) = n.get("file_type").and_then(Value::as_str) {
-                    if !VALID_FILE_TYPES.contains(&ft) {
-                        errors.push(format!(
-                            "Node {i} (id={id_repr}) has invalid file_type '{ft}' \
+                if let Some(ft) = n.get("file_type").and_then(Value::as_str)
+                    && !VALID_FILE_TYPES.contains(&ft)
+                {
+                    errors.push(format!(
+                        "Node {i} (id={id_repr}) has invalid file_type '{ft}' \
                              - must be one of {VALID_FILE_TYPES:?}"
-                        ));
-                    }
+                    ));
                 }
             }
         }
@@ -83,23 +83,25 @@ pub fn validate_extraction(data: &Value) -> Vec<String> {
                         errors.push(format!("Edge {i} missing required field '{field}'"));
                     }
                 }
-                if let Some(c) = e.get("confidence").and_then(Value::as_str) {
-                    if !VALID_CONFIDENCES.contains(&c) {
-                        errors.push(format!(
-                            "Edge {i} has invalid confidence '{c}' \
+                if let Some(c) = e.get("confidence").and_then(Value::as_str)
+                    && !VALID_CONFIDENCES.contains(&c)
+                {
+                    errors.push(format!(
+                        "Edge {i} has invalid confidence '{c}' \
                              - must be one of {VALID_CONFIDENCES:?}"
-                        ));
-                    }
+                    ));
                 }
-                if let Some(s) = e.get("source").and_then(Value::as_str) {
-                    if !node_ids.is_empty() && !node_ids.contains(s) {
-                        errors.push(format!("Edge {i} source '{s}' does not match any node id"));
-                    }
+                if let Some(s) = e.get("source").and_then(Value::as_str)
+                    && !node_ids.is_empty()
+                    && !node_ids.contains(s)
+                {
+                    errors.push(format!("Edge {i} source '{s}' does not match any node id"));
                 }
-                if let Some(t) = e.get("target").and_then(Value::as_str) {
-                    if !node_ids.is_empty() && !node_ids.contains(t) {
-                        errors.push(format!("Edge {i} target '{t}' does not match any node id"));
-                    }
+                if let Some(t) = e.get("target").and_then(Value::as_str)
+                    && !node_ids.is_empty()
+                    && !node_ids.contains(t)
+                {
+                    errors.push(format!("Edge {i} target '{t}' does not match any node id"));
                 }
             }
         }
@@ -147,17 +149,19 @@ mod tests {
     #[test]
     fn missing_nodes_key_reported() {
         let errs = validate_extraction(&json!({"edges": []}));
-        assert!(errs
-            .iter()
-            .any(|e| e.contains("Missing required key 'nodes'")));
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("Missing required key 'nodes'"))
+        );
     }
 
     #[test]
     fn missing_edges_and_links_reported() {
         let errs = validate_extraction(&json!({"nodes": []}));
-        assert!(errs
-            .iter()
-            .any(|e| e.contains("Missing required key 'edges'")));
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("Missing required key 'edges'"))
+        );
     }
 
     #[test]
@@ -174,9 +178,10 @@ mod tests {
         let doc = json!({"nodes": [{"id": "a", "file_type": "code", "source_file": "a.py"}],
                          "edges": []});
         let errs = validate_extraction(&doc);
-        assert!(errs
-            .iter()
-            .any(|e| e.contains("missing required field 'label'")));
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("missing required field 'label'"))
+        );
     }
 
     #[test]
@@ -206,9 +211,10 @@ mod tests {
                        "confidence": "EXTRACTED", "source_file": "a.py"}]
         });
         let errs = validate_extraction(&doc);
-        assert!(errs
-            .iter()
-            .any(|e| e.contains("target 'ghost' does not match any node id")));
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("target 'ghost' does not match any node id"))
+        );
     }
 
     #[test]

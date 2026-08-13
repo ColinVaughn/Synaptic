@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use synaptic_core::{Edge, GraphData};
 use synaptic_graph::KnowledgeGraph;
 
-use crate::manifest::{validated_shard_path, ShardEntry, ShardManifest};
-use crate::{codec, sanitize_tag, shard, Scope, StoreError};
+use crate::manifest::{ShardEntry, ShardManifest, validated_shard_path};
+use crate::{Scope, StoreError, codec, sanitize_tag, shard};
 
 /// Manifest tag recorded for the cross-repo bridge entry (stored apart from the
 /// per-repo shards, so it never appears in `list_shards`).

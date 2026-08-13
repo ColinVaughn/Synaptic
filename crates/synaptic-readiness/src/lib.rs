@@ -8,7 +8,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use synaptic_core::{FileType, Node, NodeId};
 use synaptic_graph::KnowledgeGraph;
-use synaptic_query::{affected_nodes, DEFAULT_AFFECTED_RELATIONS};
+use synaptic_query::{DEFAULT_AFFECTED_RELATIONS, affected_nodes};
 
 pub const READINESS_VERSION: u32 = 1;
 
@@ -576,7 +576,9 @@ fn sentinel_return_finding(
                 "`{method}` returns a sentinel value in a method name that is commonly nullable; review intent but treat as lower risk."
             )
         } else {
-            format!("`{method}` returns a sentinel value; verify this is intentional for the API contract.")
+            format!(
+                "`{method}` returns a sentinel value; verify this is intentional for the API contract."
+            )
         },
         location: node
             .source_location
@@ -742,10 +744,10 @@ fn source_impact(
     generated: bool,
     severity: Severity,
 ) -> Impact {
-    if let Some(id) = enclosing_node_id(kg, graph_path, line) {
-        if let Some(n) = kg.node(&id) {
-            return node_impact(kg, n, generated, severity);
-        }
+    if let Some(id) = enclosing_node_id(kg, graph_path, line)
+        && let Some(n) = kg.node(&id)
+    {
+        return node_impact(kg, n, generated, severity);
     }
     Impact {
         score: if generated {
@@ -1124,14 +1126,18 @@ mod tests {
                 report.findings
             );
         }
-        assert!(report
-            .findings
-            .iter()
-            .any(|f| f.rule_id == "READY-SENTINEL-RETURN"));
-        assert!(report
-            .findings
-            .iter()
-            .any(|f| f.rule_id == "READY-PLACEHOLDER-001"));
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.rule_id == "READY-SENTINEL-RETURN")
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.rule_id == "READY-PLACEHOLDER-001")
+        );
     }
 
     #[test]
@@ -1163,10 +1169,12 @@ mod tests {
             },
         );
         assert!(report.groups.iter().any(|g| g.subsystem == "rocket"));
-        assert!(report
-            .findings
-            .iter()
-            .any(|f| f.subsystem == "generated" && f.impact.generated));
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.subsystem == "generated" && f.impact.generated)
+        );
         let generated = report
             .findings
             .iter()
@@ -1203,14 +1211,18 @@ mod tests {
                 ..AuditOptions::default()
             },
         );
-        assert!(report
-            .findings
-            .iter()
-            .any(|f| f.rule_id == "READY-PROFILE-CONFIG-001"));
-        assert!(report
-            .findings
-            .iter()
-            .any(|f| f.rule_id == "READY-PROFILE-ACCESS-001"));
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.rule_id == "READY-PROFILE-CONFIG-001")
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.rule_id == "READY-PROFILE-ACCESS-001")
+        );
     }
 
     #[test]

@@ -4,9 +4,9 @@ use std::path::Path;
 
 use synaptic_core::GraphData;
 use synaptic_graph::KnowledgeGraph;
-use synaptic_incremental::{rebuild, ChangeSet, RebuildOptions};
+use synaptic_incremental::{ChangeSet, RebuildOptions, rebuild};
 
-use crate::{git, snapshot, HistoryError};
+use crate::{HistoryError, git, snapshot};
 
 /// Build (or load from the snapshot store) the graph at commit `sha`.
 pub fn build_at_rev(
@@ -15,10 +15,8 @@ pub fn build_at_rev(
     directed: bool,
     use_cache: bool,
 ) -> Result<KnowledgeGraph, HistoryError> {
-    if use_cache {
-        if let Some(gd) = snapshot::load(repo_root, sha, directed) {
-            return Ok(KnowledgeGraph::from_graph_data(gd));
-        }
+    if use_cache && let Some(gd) = snapshot::load(repo_root, sha, directed) {
+        return Ok(KnowledgeGraph::from_graph_data(gd));
     }
     git::worktree_prune(repo_root);
     // Per-process worktree path: two concurrent diffs touching the same commit

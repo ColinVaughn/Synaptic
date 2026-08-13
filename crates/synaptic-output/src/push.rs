@@ -49,10 +49,10 @@ pub fn push_neo4j(kg: &KnowledgeGraph, uri: &str, user: &str, password: &str) ->
     }
     // Surface a genuine write failure (a `BrokenPipe` just means the shell
     // finished reading early, not an error).
-    if let Ok(Err(e)) = writer.join() {
-        if e.kind() != io::ErrorKind::BrokenPipe {
-            return Err(e);
-        }
+    if let Ok(Err(e)) = writer.join()
+        && e.kind() != io::ErrorKind::BrokenPipe
+    {
+        return Err(e);
     }
     Ok(count)
 }

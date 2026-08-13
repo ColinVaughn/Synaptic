@@ -1,7 +1,7 @@
-use serde_json::{json, Map};
+use serde_json::{Map, json};
 use synaptic_api::{
-    analyze_api_coverage_with_runtime, import_runtime_evidence, CoverageState, Dependency,
-    RuntimeSurfaceKind,
+    CoverageState, Dependency, RuntimeSurfaceKind, analyze_api_coverage_with_runtime,
+    import_runtime_evidence,
 };
 use synaptic_core::{DynamicKind, DynamicSite, FileType, GraphData, Node, NodeId};
 
@@ -107,13 +107,15 @@ fn runtime_targets_promote_dynamic_unknowns_without_becoming_impact_bindings() {
     .unwrap();
     let report =
         analyze_api_coverage_with_runtime(&graph, &Vec::<Dependency>::new(), None, &[runtime]);
-    assert!(report
-        .observations
-        .iter()
-        .any(|observation| observation.state == CoverageState::Identified
-            && observation.authority.as_deref() == Some("api.acme.test")
-            && observation.source_node_id.as_deref() == Some("dynamic:1")
-            && observation.source_location.as_deref() == Some("4")));
+    assert!(
+        report
+            .observations
+            .iter()
+            .any(|observation| observation.state == CoverageState::Identified
+                && observation.authority.as_deref() == Some("api.acme.test")
+                && observation.source_node_id.as_deref() == Some("dynamic:1")
+                && observation.source_location.as_deref() == Some("4"))
+    );
     assert_eq!(report.evidence_windows.len(), 2);
     assert!(graph.links.iter().all(|edge| edge.relation != "uses_api"));
 }

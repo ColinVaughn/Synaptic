@@ -9,8 +9,8 @@ use regex::Regex;
 use synaptic_core::NodeId;
 use synaptic_graph::KnowledgeGraph;
 
-use crate::ast::*;
 use crate::QueryResult;
+use crate::ast::*;
 
 /// A resolved property value.
 enum Val {
@@ -202,10 +202,10 @@ fn step(kg: &KnowledgeGraph, cur: &NodeId, rel: &RelPat) -> Vec<NodeId> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for e in kg.incident_edges(cur) {
-        if let Some(want) = &rel.rel {
-            if &e.relation != want {
-                continue;
-            }
+        if let Some(want) = &rel.rel
+            && &e.relation != want
+        {
+            continue;
         }
         let other = match rel.dir {
             Dir::LtoR if &e.source == cur => Some(&e.target),
@@ -214,10 +214,10 @@ fn step(kg: &KnowledgeGraph, cur: &NodeId, rel: &RelPat) -> Vec<NodeId> {
             Dir::Either if &e.target == cur => Some(&e.source),
             _ => None,
         };
-        if let Some(o) = other {
-            if seen.insert(o.clone()) {
-                out.push(o.clone());
-            }
+        if let Some(o) = other
+            && seen.insert(o.clone())
+        {
+            out.push(o.clone());
         }
     }
     out
@@ -661,11 +661,13 @@ mod tests {
             vec!["announce"]
         );
         // The decorated label no longer matches `.name` (parens are stripped).
-        assert!(run(
-            &kg,
-            "MATCH (f:function) WHERE f.name = \"announce()\" RETURN f"
-        )
-        .is_empty());
+        assert!(
+            run(
+                &kg,
+                "MATCH (f:function) WHERE f.name = \"announce()\" RETURN f"
+            )
+            .is_empty()
+        );
         // A class label is already bare and keeps matching.
         assert_eq!(
             run(&kg, "MATCH (c:class) WHERE c.name = \"User\" RETURN c"),

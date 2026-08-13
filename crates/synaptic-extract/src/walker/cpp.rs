@@ -2,7 +2,7 @@
 
 use super::Extractor;
 use std::collections::HashSet;
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 use tree_sitter::Node as TsNode;
 
 impl<'tree> Extractor<'_, '_, 'tree> {
@@ -163,18 +163,18 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         line: usize,
     ) {
         let mut refs: Vec<(String, &'static str)> = Vec::new();
-        if let Some(fd) = self.c_function_declarator(func_node) {
-            if let Some(params) = fd.child_by_field_name("parameters") {
-                for p in Self::children(params) {
-                    if p.kind() != "parameter_declaration" {
-                        continue;
-                    }
-                    if let Some(ty) = p.child_by_field_name("type") {
-                        let mut out = Vec::new();
-                        self.collect_cpp_type_refs(ty, false, &mut out);
-                        for (n, g) in out {
-                            refs.push((n, if g { "generic_arg" } else { "parameter_type" }));
-                        }
+        if let Some(fd) = self.c_function_declarator(func_node)
+            && let Some(params) = fd.child_by_field_name("parameters")
+        {
+            for p in Self::children(params) {
+                if p.kind() != "parameter_declaration" {
+                    continue;
+                }
+                if let Some(ty) = p.child_by_field_name("type") {
+                    let mut out = Vec::new();
+                    self.collect_cpp_type_refs(ty, false, &mut out);
+                    for (n, g) in out {
+                        refs.push((n, if g { "generic_arg" } else { "parameter_type" }));
                     }
                 }
             }
@@ -216,10 +216,10 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                 }
             }
             "qualified_identifier" => {
-                if let Some(tail) = self.text(node).rsplit("::").next() {
-                    if !tail.is_empty() {
-                        out.push((tail.to_string(), generic));
-                    }
+                if let Some(tail) = self.text(node).rsplit("::").next()
+                    && !tail.is_empty()
+                {
+                    out.push((tail.to_string(), generic));
                 }
             }
             "struct_specifier" | "union_specifier" | "enum_specifier" | "class_specifier" => {

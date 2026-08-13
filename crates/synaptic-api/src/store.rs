@@ -123,13 +123,14 @@ impl ApiEventStore {
         let _lock = StoreLock::acquire(&self.root)?;
         let mut lock = self.load_lock()?;
         let key = source_key(&state.vendor, &state.source_uri);
-        if let Some(prior) = lock.sources.get(&key) {
-            if prior.revision == state.revision && prior.content_digest != state.content_digest {
-                return Err(StoreError::Integrity(format!(
-                    "source {} changed payload under the same revision {}",
-                    state.source_uri, state.revision
-                )));
-            }
+        if let Some(prior) = lock.sources.get(&key)
+            && prior.revision == state.revision
+            && prior.content_digest != state.content_digest
+        {
+            return Err(StoreError::Integrity(format!(
+                "source {} changed payload under the same revision {}",
+                state.source_uri, state.revision
+            )));
         }
         lock.sources.insert(key, state);
         self.write_lock(&lock)

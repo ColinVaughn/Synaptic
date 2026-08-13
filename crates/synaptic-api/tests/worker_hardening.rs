@@ -1,7 +1,7 @@
 use synaptic_api::{
-    build_coordination_plan, credential_scope_for_stage, execute_worker_attempt, BoundedJobQueue,
-    CancellationToken, CredentialScope, HostedApiJob, JobStage, QueueError, RepositoryImpact,
-    RetryPolicy, WorkerAttemptOutcome, WorkerEvent, WorkerEventSink, WorkerJobRunner,
+    BoundedJobQueue, CancellationToken, CredentialScope, HostedApiJob, JobStage, QueueError,
+    RepositoryImpact, RetryPolicy, WorkerAttemptOutcome, WorkerEvent, WorkerEventSink,
+    WorkerJobRunner, build_coordination_plan, credential_scope_for_stage, execute_worker_attempt,
 };
 
 fn job(tenant: &str, repository: &str) -> HostedApiJob {
@@ -128,12 +128,14 @@ fn credentials_and_workspaces_are_scoped_to_one_stage_and_repository() {
     let assigned_run = assigned_root.join("run-1");
     let other_repository = worker_root.join("tenant-b").join("org-billing");
 
-    assert!(job
-        .validate_workspace(&assigned_root, &assigned_run)
-        .is_ok());
-    assert!(job
-        .validate_workspace(&assigned_root, &other_repository)
-        .is_err());
+    assert!(
+        job.validate_workspace(&assigned_root, &assigned_run)
+            .is_ok()
+    );
+    assert!(
+        job.validate_workspace(&assigned_root, &other_repository)
+            .is_err()
+    );
 }
 
 #[test]
@@ -149,10 +151,11 @@ fn federated_impacts_become_separate_repository_jobs_and_tenant_groups() {
     .unwrap();
 
     assert_eq!(plan.repositories.len(), 3);
-    assert!(plan
-        .repositories
-        .iter()
-        .all(|repo| !repo.seed_node_ids.is_empty()));
+    assert!(
+        plan.repositories
+            .iter()
+            .all(|repo| !repo.seed_node_ids.is_empty())
+    );
     assert_ne!(
         plan.repositories[0].coordination_group, plan.repositories[2].coordination_group,
         "coordination groups must not cross tenants"

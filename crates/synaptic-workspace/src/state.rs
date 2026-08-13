@@ -16,11 +16,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use synaptic_detect::{detect, Manifest, ALL_FILE_TYPES};
+use synaptic_detect::{ALL_FILE_TYPES, Manifest, detect};
 
 use crate::export_surface::ExportSurface;
 use crate::workspace_build::{
-    build_workspace, resolve_members, WorkspaceBuild, WorkspaceBuildOptions,
+    WorkspaceBuild, WorkspaceBuildOptions, build_workspace, resolve_members,
 };
 use crate::{Result, WorkspaceError};
 

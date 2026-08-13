@@ -21,33 +21,33 @@ pub mod hooks;
 pub mod merge_driver;
 pub mod watch;
 pub use callnames::{
-    bare_name, call_names, callnames_path, from_raw_calls, load_callnames, save_callnames,
-    CallNames,
+    CallNames, bare_name, call_names, callnames_path, from_raw_calls, load_callnames,
+    save_callnames,
 };
 pub use concurrency::{
-    drain_pending, drain_queued_rounds, merge_changed_paths, queue_pending, try_acquire_lock,
-    RebuildLock,
+    RebuildLock, drain_pending, drain_queued_rounds, merge_changed_paths, queue_pending,
+    try_acquire_lock,
 };
 pub use freshen::{
-    detect_changes, graph_input_files, is_extractable_markdown, manifest_path, persist_manifest,
-    persist_manifest_with, snapshot_manifest, ChangeReport,
+    ChangeReport, detect_changes, graph_input_files, is_extractable_markdown, manifest_path,
+    persist_manifest, persist_manifest_with, snapshot_manifest,
 };
-pub use merge_driver::{run_merge_driver, union_graphs, union_graphs_many, MergeDriverError};
-pub use watch::{is_rebuildable, should_ignore_path, ChangeBatch, DEBOUNCE_MS};
+pub use merge_driver::{MergeDriverError, run_merge_driver, union_graphs, union_graphs_many};
+pub use watch::{ChangeBatch, DEBOUNCE_MS, is_rebuildable, should_ignore_path};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 use synaptic_core::{Edge, GraphData, Hyperedge, Node, NodeId};
-use synaptic_detect::{classify_file, detect_inputs, DetectResult, FileType, Manifest};
+use synaptic_detect::{DetectResult, FileType, Manifest, classify_file, detect_inputs};
 use synaptic_extract::cached_extract_source;
 use synaptic_graph::{
-    apply_communities, build_from_parts, cluster, deduplicate_entities, guard_shrink,
-    link_dynamic_refs, norm_source_file, remap_communities_to_previous,
-    resolve_command_invocations, resolve_parameterized_routes, resolve_pyo3_imports,
-    resolve_pyo3_modules, resolve_route_handlers, resolve_sql_queries, resolve_symbols,
-    BuildOptions, ClusterOptions, KnowledgeGraph,
+    BuildOptions, ClusterOptions, KnowledgeGraph, apply_communities, build_from_parts, cluster,
+    deduplicate_entities, guard_shrink, link_dynamic_refs, norm_source_file,
+    remap_communities_to_previous, resolve_command_invocations, resolve_parameterized_routes,
+    resolve_pyo3_imports, resolve_pyo3_modules, resolve_route_handlers, resolve_sql_queries,
+    resolve_symbols,
 };
 
 /// Current repository commit for graph provenance. Repositories without a
@@ -589,49 +589,49 @@ pub fn rebuild_with_detect(
     // content = AST-cache hits) and feed their calls to resolution, which only
     // ADDS edges. New-ness is judged by node ID, which encodes the file, so a
     // move also triggers.
-    if matches!(changes, ChangeSet::Incremental(_)) {
-        if let Some(ex) = existing {
-            let existing_ids: HashSet<&NodeId> = ex.nodes.iter().map(|n| &n.id).collect();
-            let introduced: HashSet<&str> = fresh_nodes
+    if matches!(changes, ChangeSet::Incremental(_))
+        && let Some(ex) = existing
+    {
+        let existing_ids: HashSet<&NodeId> = ex.nodes.iter().map(|n| &n.id).collect();
+        let introduced: HashSet<&str> = fresh_nodes
+            .iter()
+            .filter(|n| is_ast(n) && !existing_ids.contains(&n.id))
+            .map(|n| bare_name(&n.label))
+            .collect();
+        if !introduced.is_empty() {
+            let extracted_keys: HashSet<String> = targets.iter().map(|f| rel_key(f)).collect();
+            let mut candidates: Vec<&String> = callnames
                 .iter()
-                .filter(|n| is_ast(n) && !existing_ids.contains(&n.id))
-                .map(|n| bare_name(&n.label))
+                .filter(|(k, names)| {
+                    !extracted_keys.contains(k.as_str())
+                        && names.iter().any(|n| introduced.contains(n.as_str()))
+                })
+                .map(|(k, _)| k)
                 .collect();
-            if !introduced.is_empty() {
-                let extracted_keys: HashSet<String> = targets.iter().map(|f| rel_key(f)).collect();
-                let mut candidates: Vec<&String> = callnames
-                    .iter()
-                    .filter(|(k, names)| {
-                        !extracted_keys.contains(k.as_str())
-                            && names.iter().any(|n| introduced.contains(n.as_str()))
+            if candidates.len() > RIPPLE_MAX {
+                eprintln!(
+                    "note: {} files reference newly introduced symbols; re-resolving only the first {RIPPLE_MAX}",
+                    candidates.len()
+                );
+                candidates.truncate(RIPPLE_MAX);
+            }
+            // Rebuild the OS-separator rel path the original extraction
+            // used: the path string feeds both the AST-cache key and the
+            // extractor's node ids, so it must match exactly.
+            let rippled: Vec<_> = synaptic_extract::with_extraction_pool(|| {
+                candidates
+                    .par_iter()
+                    .filter_map(|key| {
+                        let rel_os = key.replace('/', std::path::MAIN_SEPARATOR_STR);
+                        let abs = root.join(&rel_os);
+                        let bytes = std::fs::read(&abs).ok()?;
+                        cached_extract_source(Some(&cache_dir), &rel_os, &bytes)
                     })
-                    .map(|(k, _)| k)
-                    .collect();
-                if candidates.len() > RIPPLE_MAX {
-                    eprintln!(
-                        "note: {} files reference newly introduced symbols; re-resolving only the first {RIPPLE_MAX}",
-                        candidates.len()
-                    );
-                    candidates.truncate(RIPPLE_MAX);
-                }
-                // Rebuild the OS-separator rel path the original extraction
-                // used: the path string feeds both the AST-cache key and the
-                // extractor's node ids, so it must match exactly.
-                let rippled: Vec<_> = synaptic_extract::with_extraction_pool(|| {
-                    candidates
-                        .par_iter()
-                        .filter_map(|key| {
-                            let rel_os = key.replace('/', std::path::MAIN_SEPARATOR_STR);
-                            let abs = root.join(&rel_os);
-                            let bytes = std::fs::read(&abs).ok()?;
-                            cached_extract_source(Some(&cache_dir), &rel_os, &bytes)
-                        })
-                        .collect()
-                });
-                for r in rippled {
-                    raw_calls.extend(r.raw_calls);
-                    imports.extend(r.imports);
-                }
+                    .collect()
+            });
+            for r in rippled {
+                raw_calls.extend(r.raw_calls);
+                imports.extend(r.imports);
             }
         }
     }
@@ -727,35 +727,34 @@ pub fn rebuild_with_detect(
 
     // The sidecar reflects extraction facts, so it advances with the manifest
     // semantics: only after the rebuild is known good (best-effort write).
-    if callnames_dirty {
-        if let Err(e) = save_callnames(&out_dir, &callnames) {
-            eprintln!("note: could not write call-name sidecar: {e}");
-        }
+    if callnames_dirty && let Err(e) = save_callnames(&out_dir, &callnames) {
+        eprintln!("note: could not write call-name sidecar: {e}");
     }
 
     // No-change short-circuit: identical topology means reuse the previous
     // community assignment, skip re-clustering, and tell the caller nothing needs
     // rewriting.
-    if let Some(prev) = existing {
-        if same_topology(&kg, prev) && kg.built_at_commit == prev.built_at_commit {
-            let mut communities: BTreeMap<u32, Vec<NodeId>> = BTreeMap::new();
-            for (id, c) in previous_communities(prev) {
-                communities.entry(c).or_default().push(id);
-            }
-            for v in communities.values_mut() {
-                v.sort();
-            }
-            apply_communities(&mut kg, &communities);
-            return Ok(RebuildOutcome {
-                kg,
-                communities,
-                changed: false,
-                reextracted,
-                evicted_sources: evict_sources.len(),
-                unreadable,
-                manifest,
-            });
+    if let Some(prev) = existing
+        && same_topology(&kg, prev)
+        && kg.built_at_commit == prev.built_at_commit
+    {
+        let mut communities: BTreeMap<u32, Vec<NodeId>> = BTreeMap::new();
+        for (id, c) in previous_communities(prev) {
+            communities.entry(c).or_default().push(id);
         }
+        for v in communities.values_mut() {
+            v.sort();
+        }
+        apply_communities(&mut kg, &communities);
+        return Ok(RebuildOutcome {
+            kg,
+            communities,
+            changed: false,
+            reextracted,
+            evicted_sources: evict_sources.len(),
+            unreadable,
+            manifest,
+        });
     }
 
     // Cluster. A small incremental delta keeps the previous assignment and
@@ -871,9 +870,11 @@ mod tests {
         assert!(ids.contains("concept_x"), "semantic node preserved");
         // The b_fn->a_fn edge from unchanged b.py survives (its source node was
         // not re-extracted, and both endpoints are live).
-        assert!(edges
-            .iter()
-            .any(|e| e.source.0 == "b_fn" && e.target.0 == "a_fn"));
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.source.0 == "b_fn" && e.target.0 == "a_fn")
+        );
     }
 
     #[test]

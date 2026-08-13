@@ -30,8 +30,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use serde_json::{json, Map, Value};
-use synaptic_core::{sanitize_label, sanitize_metadata, Confidence, Edge, FileType, Node, NodeId};
+use serde_json::{Map, Value, json};
+use synaptic_core::{Confidence, Edge, FileType, Node, NodeId, sanitize_label, sanitize_metadata};
 
 use crate::Ingested;
 
@@ -426,10 +426,11 @@ mod tests {
         assert_eq!(e.context.as_deref(), Some("scip"));
         let b_id = make_scip_node_id("a.py:B#", "a.py");
         assert_eq!(e.target.0, b_id, "edge resolves to the in-file B node");
-        assert!(out
-            .nodes
-            .iter()
-            .all(|n| n.extra["metadata"]["scip_kind"] != json!("external")));
+        assert!(
+            out.nodes
+                .iter()
+                .all(|n| n.extra["metadata"]["scip_kind"] != json!("external"))
+        );
     }
 
     #[test]

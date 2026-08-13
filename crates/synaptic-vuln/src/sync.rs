@@ -269,14 +269,14 @@ pub fn sync_ecosystem(
 ) -> Result<CorpusMetadata, SyncError> {
     let url = osv_bulk_url(ecosystem).ok_or(SyncError::UnsupportedEcosystem(ecosystem))?;
     let head = fetcher.head(&url)?;
-    if let Some(size) = head.size_bytes {
-        if size > max_bytes {
-            return Err(SyncError::TooLarge {
-                ecosystem,
-                size,
-                limit: max_bytes,
-            });
-        }
+    if let Some(size) = head.size_bytes
+        && size > max_bytes
+    {
+        return Err(SyncError::TooLarge {
+            ecosystem,
+            size,
+            limit: max_bytes,
+        });
     }
 
     let archive = fetcher.get(&url)?;
@@ -587,9 +587,11 @@ mod tests {
     #[test]
     fn uses_osv_ecosystem_names_not_synaptic_ones() {
         assert!(osv_bulk_url(Ecosystem::Pypi).unwrap().contains("/PyPI/"));
-        assert!(osv_bulk_url(Ecosystem::Composer)
-            .unwrap()
-            .contains("/Packagist/"));
+        assert!(
+            osv_bulk_url(Ecosystem::Composer)
+                .unwrap()
+                .contains("/Packagist/")
+        );
         assert!(osv_bulk_url(Ecosystem::Gem).unwrap().contains("/RubyGems/"));
     }
 

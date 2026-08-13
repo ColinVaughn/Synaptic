@@ -4,8 +4,8 @@
 //! claude-CLI backends and return a boxed [`LlmClient`] following the full
 //! provider priority.
 
-use crate::anthropic::{Anthropic, ANTHROPIC_DEFAULT_MODEL};
-use crate::bedrock::{Bedrock, BEDROCK_DEFAULT_MODEL};
+use crate::anthropic::{ANTHROPIC_DEFAULT_MODEL, Anthropic};
+use crate::bedrock::{BEDROCK_DEFAULT_MODEL, Bedrock};
 use crate::claude_cli::ClaudeCli;
 use crate::error::LlmError;
 use crate::provider::{LlmClient, OpenAiCompat};
@@ -443,7 +443,7 @@ mod tests {
     mod wiring {
         use super::*;
         use crate::provider::LlmClient;
-        use serde_json::{json, Value};
+        use serde_json::{Value, json};
         use wiremock::matchers::{header, method, path, query_param};
         use wiremock::{Mock, MockBuilder, MockServer, ResponseTemplate};
 

@@ -1,8 +1,8 @@
 use std::fs;
 
 use synaptic_api::{
-    diff_contracts, normalize_openapi, ApiEventStore, BreakingChangeKind, SourceArtifact,
-    VersionRange,
+    ApiEventStore, BreakingChangeKind, SourceArtifact, VersionRange, diff_contracts,
+    normalize_openapi,
 };
 
 const OLD: &str = r#"{
@@ -86,14 +86,18 @@ fn openapi_json_and_yaml_normalize_and_diff_with_explicit_breaking_rules() {
     assert!(kinds.contains(&BreakingChangeKind::RequiredRequestFieldAdded));
     assert!(kinds.contains(&BreakingChangeKind::RequestFieldTypeChanged));
     assert!(kinds.contains(&BreakingChangeKind::ResponseFieldRemoved));
-    assert!(!event
-        .changes
-        .iter()
-        .any(|change| change.migration_summary.contains("optional_note")));
-    assert!(event
-        .changes
-        .iter()
-        .all(|change| !change.evidence.is_empty()));
+    assert!(
+        !event
+            .changes
+            .iter()
+            .any(|change| change.migration_summary.contains("optional_note"))
+    );
+    assert!(
+        event
+            .changes
+            .iter()
+            .all(|change| !change.evidence.is_empty())
+    );
 
     let replay = diff_contracts(
         &old,

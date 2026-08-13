@@ -589,7 +589,7 @@ fn record_files(root: &Path) -> Result<(Vec<PathBuf>, Vec<RecordFingerprint>), s
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((Vec::new(), Vec::new()))
+            return Ok((Vec::new(), Vec::new()));
         }
         Err(error) => return Err(error),
     };

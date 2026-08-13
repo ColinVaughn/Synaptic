@@ -9,11 +9,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
-use synaptic_predict::{forecast_changes, ForecastOptions};
-use synaptic_prs::{detect_default_branch, SystemCommands};
-use synaptic_sandbox::{render_markdown, speculate, Change, Outcome, SpeculateOptions};
+use synaptic_predict::{ForecastOptions, forecast_changes};
+use synaptic_prs::{SystemCommands, detect_default_branch};
+use synaptic_sandbox::{Change, Outcome, SpeculateOptions, render_markdown, speculate};
 
 use crate::commands::common::{default_graph_path, load_scoped_graph};
 
@@ -181,17 +181,17 @@ fn warn_on_untracked(root: &Path) {
         .arg(root)
         .args(["status", "--porcelain", "--untracked-files=normal"])
         .output();
-    if let Ok(out) = out {
-        if out.status.success() {
-            let n = String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .filter(|l| l.starts_with("??"))
-                .count();
-            if n > 0 {
-                eprintln!(
-                    "[synaptic] note: {n} untracked file(s) are not included in working-tree speculation; use --patch to include new files"
-                );
-            }
+    if let Ok(out) = out
+        && out.status.success()
+    {
+        let n = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| l.starts_with("??"))
+            .count();
+        if n > 0 {
+            eprintln!(
+                "[synaptic] note: {n} untracked file(s) are not included in working-tree speculation; use --patch to include new files"
+            );
         }
     }
 }

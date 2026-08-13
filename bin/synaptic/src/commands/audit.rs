@@ -2,8 +2,8 @@
 
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context, Result};
-use synaptic_readiness::{audit, render::render_markdown, AuditOptions, Profile, Severity};
+use anyhow::{Context, Result, anyhow};
+use synaptic_readiness::{AuditOptions, Profile, Severity, audit, render::render_markdown};
 
 use crate::cli::AuditAction;
 use crate::commands::common::{default_graph_path, load_scoped_graph};

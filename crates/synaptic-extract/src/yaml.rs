@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 #[cfg(feature = "lang-yaml")]
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 #[cfg(feature = "lang-yaml")]
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -139,10 +139,10 @@ impl Yaml<'_> {
                 out.push(m);
             }
         }
-        if out.is_empty() {
-            if let Some(m) = self.first_kind(root, "block_mapping") {
-                out.push(m);
-            }
+        if out.is_empty()
+            && let Some(m) = self.first_kind(root, "block_mapping")
+        {
+            out.push(m);
         }
         out
     }

@@ -2,9 +2,9 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use synaptic_api::{
-    failed_attempt_summary, run_repair_attempts, GateOutcome, GateResult, GeneratedPatch,
-    PatchGenerator, PatchInspection, PatchPolicy, PatchVerifier, RepairBrief, RepairFailure,
-    VerificationReport,
+    GateOutcome, GateResult, GeneratedPatch, PatchGenerator, PatchInspection, PatchPolicy,
+    PatchVerifier, RepairBrief, RepairFailure, VerificationReport, failed_attempt_summary,
+    run_repair_attempts,
 };
 
 struct SequencedGenerator {
@@ -48,7 +48,9 @@ impl PatchVerifier for SequencedVerifier {
 
 fn patch(path: &str, value: &str) -> GeneratedPatch {
     GeneratedPatch {
-        unified_diff: format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old\n+{value}\n"),
+        unified_diff: format!(
+            "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old\n+{value}\n"
+        ),
         rationale: "fixture".into(),
     }
 }

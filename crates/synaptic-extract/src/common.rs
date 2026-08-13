@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde_json::Map;
-use synaptic_core::{make_id, Confidence, Edge, FileType, Node, NodeId};
+use synaptic_core::{Confidence, Edge, FileType, Node, NodeId, make_id};
 
 use crate::result::{ExtractionResult, ImportRecord, RawCall};
 

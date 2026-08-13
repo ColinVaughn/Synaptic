@@ -2,12 +2,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
-use synaptic_core::{make_id, Confidence, Edge, FileType, Node, NodeId};
+use serde_json::{Map, Value, json};
+use synaptic_core::{Confidence, Edge, FileType, Node, NodeId, make_id};
 
 use crate::{
-    scan_dependencies, ApiOperationAnchor, Dependency, InventoryError, VendorConfig, VendorMatch,
-    VendorRegistry,
+    ApiOperationAnchor, Dependency, InventoryError, VendorConfig, VendorMatch, VendorRegistry,
+    scan_dependencies,
 };
 
 pub const API_VENDOR_NODE_TYPE: &str = "api_vendor";
@@ -218,21 +218,20 @@ fn bind_sdk_usages_with_dependencies(
             )
         } else {
             let mut resolved = None;
-            if let Some(package_raw) = package_hint {
-                if let Ok(package) = package_raw.parse::<crate::PackageCoordinate>() {
-                    match registry.match_package(&package) {
-                        VendorMatch::Matched { vendor_id } => {
-                            if let Some(rule) = registry.sdk_binding(&vendor_id, &package, &member)
-                            {
-                                resolved = Some((vendor_id, rule));
-                            }
+            if let Some(package_raw) = package_hint
+                && let Ok(package) = package_raw.parse::<crate::PackageCoordinate>()
+            {
+                match registry.match_package(&package) {
+                    VendorMatch::Matched { vendor_id } => {
+                        if let Some(rule) = registry.sdk_binding(&vendor_id, &package, &member) {
+                            resolved = Some((vendor_id, rule));
                         }
-                        VendorMatch::Ambiguous { .. } => {
-                            report.ambiguous += 1;
-                            continue;
-                        }
-                        VendorMatch::Unmatched => {}
                     }
+                    VendorMatch::Ambiguous { .. } => {
+                        report.ambiguous += 1;
+                        continue;
+                    }
+                    VendorMatch::Unmatched => {}
                 }
             }
             if resolved.is_none() {

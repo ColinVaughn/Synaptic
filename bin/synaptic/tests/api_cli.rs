@@ -1,7 +1,7 @@
 use std::fs;
 use std::process::Command;
 
-use assert_cmd::cargo::{cargo_bin_cmd, CommandCargoExt};
+use assert_cmd::cargo::{CommandCargoExt, cargo_bin_cmd};
 
 fn repository() -> tempfile::TempDir {
     let repo = tempfile::tempdir().unwrap();
@@ -318,10 +318,12 @@ fn api_coverage_reports_unconfigured_surfaces_without_requiring_config() {
         .iter()
         .find(|observation| observation["package"] == "npm:unknown-sdk")
         .unwrap();
-    assert!(dependency["gaps"]
-        .as_array()
-        .unwrap()
-        .contains(&serde_json::json!("provider_identity")));
+    assert!(
+        dependency["gaps"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("provider_identity"))
+    );
     assert_eq!(
         report["behavioral_review_candidates"]
             .as_array()
@@ -415,11 +417,13 @@ export function create() { return client.widgets.create({}); }
     let extracted = fs::read(&coverage_path).expect("extract coverage artifact");
     let report: serde_json::Value = serde_json::from_slice(&extracted).unwrap();
     assert_eq!(report["complete"], false);
-    assert!(report["observations"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entry| { entry["kind"] == "sdk" && entry["package"] == "npm:unknown-sdk" }));
+    assert!(
+        report["observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| { entry["kind"] == "sdk" && entry["package"] == "npm:unknown-sdk" })
+    );
     let candidate_path = repo
         .path()
         .join("synaptic-out/api-maintenance/candidate-profile.toml");
@@ -668,14 +672,18 @@ export function otherCharge() {
         String::from_utf8_lossy(&incremental.stderr)
     );
     let incrementally_updated = api_topology(&repo);
-    assert!(incrementally_updated
-        .0
-        .iter()
-        .any(|node| node.ends_with("|/v1/refunds")));
-    assert!(!incrementally_updated
-        .0
-        .iter()
-        .any(|node| node.contains("|stripe|/v1/charges")));
+    assert!(
+        incrementally_updated
+            .0
+            .iter()
+            .any(|node| node.ends_with("|/v1/refunds"))
+    );
+    assert!(
+        !incrementally_updated
+            .0
+            .iter()
+            .any(|node| node.contains("|stripe|/v1/charges"))
+    );
 
     let fresh_extract = Command::cargo_bin("synaptic")
         .unwrap()
@@ -1015,7 +1023,9 @@ fn api_check_plan_reports_every_polyglot_project_and_fails_closed_on_gaps() {
         .output()
         .unwrap();
     assert!(!incomplete.status.success());
-    assert!(String::from_utf8_lossy(&incomplete.stderr).contains("verification plan is incomplete"));
+    assert!(
+        String::from_utf8_lossy(&incomplete.stderr).contains("verification plan is incomplete")
+    );
 }
 
 #[test]

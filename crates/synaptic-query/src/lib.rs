@@ -9,7 +9,7 @@
 pub mod describe;
 pub mod dynamic;
 
-pub use dynamic::{dependents_caveat, DynamicCaveat, DynamicHazardIndex, SiteRef};
+pub use dynamic::{DynamicCaveat, DynamicHazardIndex, SiteRef, dependents_caveat};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use synaptic_core::{Edge, FileType, Node, NodeId, NodeKind};
 use synaptic_graph::KnowledgeGraph;
 
-pub use describe::{describe_node, NodeDescription};
+pub use describe::{NodeDescription, describe_node};
 
 /// Result of a text query: matched seeds plus the surrounding subgraph.
 ///
@@ -331,10 +331,9 @@ fn query_inflection_variants(token: &str) -> Vec<String> {
         && !token.ends_with("ss")
         && !token.ends_with("us")
         && !token.ends_with("is")
+        && let Some(stem) = token.strip_suffix('s')
     {
-        if let Some(stem) = token.strip_suffix('s') {
-            push(&mut variants, stem.to_string());
-        }
+        push(&mut variants, stem.to_string());
     }
 
     variants.sort();
@@ -1215,19 +1214,19 @@ impl QueryIndex {
         // even with zero query-token overlap. They enter the frontier with a base
         // relevance (the seed-relevant amount carried by their churn-weighted
         // boost), so a changed node with no match still ranks sensibly.
-        if let Some(r) = recency {
-            if r.mode == RecencyMode::Seed {
-                let existing: HashSet<&NodeId> = seeds.iter().collect();
-                let mut inject: Vec<NodeId> = r
-                    .changed
-                    .iter()
-                    .filter(|id| self.adjacency.contains_key(*id) && !existing.contains(*id))
-                    .cloned()
-                    .collect();
-                inject.sort(); // deterministic injection order
-                drop(existing);
-                seeds.extend(inject);
-            }
+        if let Some(r) = recency
+            && r.mode == RecencyMode::Seed
+        {
+            let existing: HashSet<&NodeId> = seeds.iter().collect();
+            let mut inject: Vec<NodeId> = r
+                .changed
+                .iter()
+                .filter(|id| self.adjacency.contains_key(*id) && !existing.contains(*id))
+                .cloned()
+                .collect();
+            inject.sort(); // deterministic injection order
+            drop(existing);
+            seeds.extend(inject);
         }
 
         // Best-first expansion. The frontier is a max-heap keyed by hub-penalised
@@ -1620,10 +1619,10 @@ pub fn resolve_seed(kg: &KnowledgeGraph, query: &str) -> Option<NodeId> {
     // (no split): a label may legitimately contain `@` (e.g. an import specifier
     // `git@github.com`), and that literal meaning wins over the qualifier reading.
     // Only if the whole query resolves to nothing do we fall back to the split.
-    if file_hint.is_some() {
-        if let Some(id) = resolve_cascade(kg, &query.to_lowercase(), |_| true, true) {
-            return Some(id);
-        }
+    if file_hint.is_some()
+        && let Some(id) = resolve_cascade(kg, &query.to_lowercase(), |_| true, true)
+    {
+        return Some(id);
     }
 
     let q = name.to_lowercase();
@@ -1655,10 +1654,8 @@ fn resolve_cascade(
     }) {
         return Some(id);
     }
-    if use_file_stage {
-        if let Some(id) = unique_match(kg, |n| n.source_file.to_lowercase() == q) {
-            return Some(id);
-        }
+    if use_file_stage && let Some(id) = unique_match(kg, |n| n.source_file.to_lowercase() == q) {
+        return Some(id);
     }
     if let Some(id) = unique_match(kg, |n| file_ok(n) && n.label.to_lowercase().contains(q)) {
         return Some(id);
@@ -2886,8 +2883,7 @@ mod tests {
             let label = if i % 2 == 0 { "handle()" } else { ".handle()" };
             owned.push((format!("handle{i}"), label.into()));
         }
-        let long_suffix =
-            "AlphaBetaGammaDeltaEpsilonZetaEtaThetaIotaKappaLambdaMuNuXiOmicronPiRhoSigmaTauUpsilonPhiChiPsiOmega";
+        let long_suffix = "AlphaBetaGammaDeltaEpsilonZetaEtaThetaIotaKappaLambdaMuNuXiOmicronPiRhoSigmaTauUpsilonPhiChiPsiOmega";
         owned.push(("domain_a".into(), format!("Rocket{long_suffix}")));
         owned.push(("domain_b".into(), format!("Planet{long_suffix}")));
         for i in 0..40 {

@@ -313,7 +313,9 @@ fn gh_json(r: &dyn CommandRunner, args: &[&str]) -> Option<Value> {
 /// Errors from PR fetching.
 #[derive(Debug, thiserror::Error)]
 pub enum PrError {
-    #[error("gh CLI not found or not authenticated (run: gh auth login). PR data is skipped; graph audit continues offline.")]
+    #[error(
+        "gh CLI not found or not authenticated (run: gh auth login). PR data is skipped; graph audit continues offline."
+    )]
     GhUnavailable,
 }
 
@@ -324,23 +326,20 @@ pub fn detect_default_branch(r: &dyn CommandRunner, repo: Option<&str>) -> Strin
         args.push("--repo");
         args.push(repo);
     }
-    if let Some(v) = gh_json(r, &args) {
-        if let Some(name) = v
+    if let Some(v) = gh_json(r, &args)
+        && let Some(name) = v
             .get("defaultBranchRef")
             .and_then(|d| d.get("name"))
             .and_then(Value::as_str)
-        {
-            if !name.is_empty() {
-                return name.to_string();
-            }
-        }
+        && !name.is_empty()
+    {
+        return name.to_string();
     }
-    if let Some(out) = r.run("git", &["symbolic-ref", "refs/remotes/origin/HEAD"]) {
-        if let Some(last) = out.trim().rsplit('/').next() {
-            if !last.is_empty() {
-                return last.to_string();
-            }
-        }
+    if let Some(out) = r.run("git", &["symbolic-ref", "refs/remotes/origin/HEAD"])
+        && let Some(last) = out.trim().rsplit('/').next()
+        && !last.is_empty()
+    {
+        return last.to_string();
     }
     "main".to_string()
 }
@@ -358,7 +357,13 @@ pub fn fetch_prs(
         .unwrap_or_else(|| detect_default_branch(r, repo));
     let limit = limit.to_string();
     let mut args = vec![
-        "pr", "list", "--state", "open", "--limit", &limit, "--json",
+        "pr",
+        "list",
+        "--state",
+        "open",
+        "--limit",
+        &limit,
+        "--json",
         "number,title,headRefName,baseRefName,author,isDraft,reviewDecision,statusCheckRollup,updatedAt",
     ];
     if let Some(repo) = repo {
@@ -382,9 +387,11 @@ pub fn fetch_pr(
     expected_base: &str,
 ) -> Option<PrInfo> {
     let num = number.to_string();
-    let mut args =
-        vec![
-        "pr", "view", &num, "--json",
+    let mut args = vec![
+        "pr",
+        "view",
+        &num,
+        "--json",
         "title,headRefName,baseRefName,author,isDraft,reviewDecision,statusCheckRollup,updatedAt",
     ];
     if let Some(repo) = repo {
@@ -428,10 +435,10 @@ pub fn fetch_worktrees(r: &dyn CommandRunner) -> BTreeMap<String, String> {
             current = None;
         } else if let Some(p) = line.strip_prefix("worktree ") {
             current = Some(p.to_string());
-        } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
-            if let Some(path) = &current {
-                mapping.insert(b.to_string(), path.clone());
-            }
+        } else if let Some(b) = line.strip_prefix("branch refs/heads/")
+            && let Some(path) = &current
+        {
+            mapping.insert(b.to_string(), path.clone());
         }
     }
     mapping

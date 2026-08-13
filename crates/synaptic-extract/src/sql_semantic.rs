@@ -3,13 +3,13 @@
 //! best-effort: a parse failure leaves the base object graph untouched.
 
 use regex::Regex;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use sqlparser::ast::{ColumnOption, Expr, Statement, TableConstraint};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
-use synaptic_core::{make_id, Confidence, Edge, FileType, Node, NodeId, NodeKind};
+use std::sync::atomic::{AtomicBool, Ordering};
+use synaptic_core::{Confidence, Edge, FileType, Node, NodeId, NodeKind, make_id};
 
 use crate::result::ExtractionResult;
 
@@ -160,10 +160,10 @@ fn set_object_kinds(result: &mut ExtractionResult) {
         })
         .collect();
     for (id, kind) in tagged {
-        if let Some(n) = result.nodes.iter_mut().find(|n| n.id == id) {
-            if n.kind().is_none() {
-                n.set_kind(kind);
-            }
+        if let Some(n) = result.nodes.iter_mut().find(|n| n.id == id)
+            && n.kind().is_none()
+        {
+            n.set_kind(kind);
         }
     }
 }
@@ -402,11 +402,11 @@ fn enrich_columns_tsql(sql: &str, result: &mut ExtractionResult) {
                     indexed.push(c);
                 } else if upper.contains("UNIQUE") {
                     indexed.push(constraint_columns(&item));
-                } else if upper.contains("FOREIGN KEY") {
-                    if let Some(t) = references_target(&item) {
-                        for c in constraint_columns(&item) {
-                            fk_cols.insert(c, t.clone());
-                        }
+                } else if upper.contains("FOREIGN KEY")
+                    && let Some(t) = references_target(&item)
+                {
+                    for c in constraint_columns(&item) {
+                        fk_cols.insert(c, t.clone());
                     }
                 }
                 continue;

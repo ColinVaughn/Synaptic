@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 
 /// Extension-less path used to namespace symbol ids within a file. Keeping the
 /// full relative path avoids collisions between same-named files in parallel

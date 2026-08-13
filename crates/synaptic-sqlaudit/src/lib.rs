@@ -62,9 +62,10 @@ pub fn audit_with_plan(
         if !snip.trim_start().to_ascii_uppercase().starts_with("SELECT") {
             continue;
         }
-        if let Some(sig) = provider.explain(&snip) {
-            if sig.seq_scan {
-                extra.push(Finding {
+        if let Some(sig) = provider.explain(&snip)
+            && sig.seq_scan
+        {
+            extra.push(Finding {
                     rule_id: "PERF-PLAN-001".into(),
                     severity: Severity::High,
                     category: Category::Performance,
@@ -80,7 +81,6 @@ pub fn audit_with_plan(
                     confidence: 0.9,
                     evidence: Some(sig.raw.chars().take(200).collect()),
                 });
-            }
         }
     }
     if let Some(min) = opts.min_severity {

@@ -8,8 +8,7 @@ use synaptic_core::{Node, NodeId};
 use synaptic_llm::LlmClient;
 
 const BATCH_SIZE: usize = 30;
-const TIEBREAK_SYSTEM: &str =
-    "You decide whether two labels name the same real-world concept. Answer only yes or no per pair.";
+const TIEBREAK_SYSTEM: &str = "You decide whether two labels name the same real-world concept. Answer only yes or no per pair.";
 
 /// Resolve ambiguous concept `pairs` via the LLM; returns the confirmed ("yes")
 /// pairs. A batch whose request errors is skipped (no merges from it).

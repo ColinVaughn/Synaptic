@@ -8,12 +8,12 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use synaptic_core::{Confidence, NodeId, Span};
-use synaptic_graph::{norm_source_file, KnowledgeGraph};
+use synaptic_graph::{KnowledgeGraph, norm_source_file};
 
+use crate::RefactorError;
 use crate::plan::{BlastRadius, Collision, RenameOptions};
 use crate::resolve::{self, Candidate, Selection};
 use crate::sites::{self, EditSite};
-use crate::RefactorError;
 
 /// A move/extract plan. Round-trips into `verify`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,7 +62,7 @@ pub fn plan_relocate(
             return Err(RefactorError::Ambiguous {
                 name: name.to_string(),
                 count: v.len(),
-            })
+            });
         }
     };
 

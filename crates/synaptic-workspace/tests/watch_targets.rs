@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use synaptic_workspace::watch::{classify, member_for_path, resolve_watch_targets, WatchEvent};
+use synaptic_workspace::watch::{WatchEvent, classify, member_for_path, resolve_watch_targets};
 
 fn write(root: &Path, rel: &str, body: &str) {
     let p = root.join(rel);

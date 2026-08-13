@@ -1,8 +1,8 @@
 //! The shard manifest: atomic save/load and validation against disk.
 
+use synaptic_store::DEFAULT_MAX_SHARD_NODES;
 use synaptic_store::manifest::{ShardEntry, ShardManifest};
 use synaptic_store::shard::SCHEMA_VERSION;
-use synaptic_store::DEFAULT_MAX_SHARD_NODES;
 
 fn entry(tag: &str, file: &str) -> ShardEntry {
     ShardEntry {

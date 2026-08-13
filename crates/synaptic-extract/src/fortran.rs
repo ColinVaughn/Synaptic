@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 #[cfg(feature = "lang-fortran")]
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 #[cfg(feature = "lang-fortran")]
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -236,11 +236,12 @@ impl<'tree> Fortran<'_, 'tree> {
                 .map(|c| self.text(c)),
             _ => None,
         };
-        if let Some(callee) = callee {
-            if !callee.is_empty() && !FORTRAN_BUILTINS.contains(&callee.to_lowercase().as_str()) {
-                self.b
-                    .resolve_call(caller, &callee, false, Self::line(node), index, seen, true);
-            }
+        if let Some(callee) = callee
+            && !callee.is_empty()
+            && !FORTRAN_BUILTINS.contains(&callee.to_lowercase().as_str())
+        {
+            self.b
+                .resolve_call(caller, &callee, false, Self::line(node), index, seen, true);
         }
         for c in Self::children(node) {
             self.walk_calls(c, caller, index, seen, depth + 1);

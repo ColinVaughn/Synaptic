@@ -4,11 +4,11 @@
 //! path-shaped ids, qualified labels, `extra` metadata -- so encoded sizes
 //! and compression behavior track the real artifact, not toy strings.
 
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
+use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use serde_json::Map;
 use std::hint::black_box;
 use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
-use synaptic_store::{migrate, ShardStore};
+use synaptic_store::{ShardStore, migrate};
 
 const NODES: usize = 20_000;
 const EDGES: usize = 30_000;

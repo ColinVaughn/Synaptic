@@ -5,9 +5,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use synaptic_core::{GraphData, NodeId};
 use synaptic_graph::KnowledgeGraph;
-use synaptic_query::{QueryIndex, ReverseImpactIndex, DEFAULT_AFFECTED_RELATIONS};
+use synaptic_query::{DEFAULT_AFFECTED_RELATIONS, QueryIndex, ReverseImpactIndex};
 use synaptic_server::{PreparedIndexes, Server};
-use synaptic_store::{Scope, ShardStore, AFFECTED_INDEX_BLOB, QUERY_INDEX_BLOB};
+use synaptic_store::{AFFECTED_INDEX_BLOB, QUERY_INDEX_BLOB, Scope, ShardStore};
 
 /// Which on-disk representation read commands load from. `Json` is today's
 /// single `graph.json`; `Sharded` is the per-repo shard store. Selected by the
@@ -310,15 +310,15 @@ pub(crate) fn warn_if_over_caps(path: &Path, node_count: usize) {
         );
     }
     let byte_cap = synaptic_core::max_graph_bytes();
-    if let Ok(meta) = fs::metadata(path) {
-        if meta.len() > byte_cap {
-            eprintln!(
-                "warning: {} is {} bytes, over the {byte_cap}-byte graph cap; \
+    if let Ok(meta) = fs::metadata(path)
+        && meta.len() > byte_cap
+    {
+        eprintln!(
+            "warning: {} is {} bytes, over the {byte_cap}-byte graph cap; \
                  merge and federation will refuse it (set SYNAPTIC_MAX_GRAPH_MB to raise it; 0 = no cap)",
-                path.display(),
-                meta.len()
-            );
-        }
+            path.display(),
+            meta.len()
+        );
     }
 }
 

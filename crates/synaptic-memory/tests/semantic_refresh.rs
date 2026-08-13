@@ -2,7 +2,7 @@ use serde_json::Map;
 use synaptic_core::{FileType, GraphData, Node, NodeId};
 use synaptic_graph::KnowledgeGraph;
 use synaptic_memory::{
-    refresh_repository_memory, MemoryKind, MemoryQuery, MemoryRelation, MemoryStore,
+    MemoryKind, MemoryQuery, MemoryRelation, MemoryStore, refresh_repository_memory,
 };
 
 fn node(id: &str, file: &str, community: u32) -> Node {
@@ -47,9 +47,11 @@ fn refresh_extracts_root_procedures_and_generates_community_summaries() {
     assert_eq!(report.semantic.created, 2);
 
     let records = store.all().unwrap();
-    assert!(records
-        .iter()
-        .any(|record| record.kind == MemoryKind::Convention));
+    assert!(
+        records
+            .iter()
+            .any(|record| record.kind == MemoryKind::Convention)
+    );
     let auth = store
         .search(&MemoryQuery {
             text: "refresh_session issue_token".into(),
@@ -103,11 +105,13 @@ fn changed_community_summary_supersedes_the_previous_graph_revision() {
         })
         .unwrap();
     assert_eq!(active.len(), 1);
-    assert!(active[0]
-        .record
-        .links
-        .iter()
-        .any(|link| link.relation == MemoryRelation::Supersedes));
+    assert!(
+        active[0]
+            .record
+            .links
+            .iter()
+            .any(|link| link.relation == MemoryRelation::Supersedes)
+    );
     assert_eq!(
         store
             .search(&MemoryQuery {

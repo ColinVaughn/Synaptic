@@ -3,7 +3,7 @@
 use super::Extractor;
 use super::{is_ts_type_noise, module_stem};
 use crate::result::ImportRecord;
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 use tree_sitter::Node as TsNode;
 
 /// Stub-node id for an import specifier.
@@ -283,15 +283,14 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         let stem = module_stem(spec);
         let mut value = call;
         let mut imported = None;
-        if let Some(parent) = call.parent() {
-            if parent.kind() == "member_expression"
-                && self
-                    .field(parent, "object")
-                    .is_some_and(|node| node.id() == call.id())
-            {
-                imported = self.field(parent, "property").map(|node| self.text(node));
-                value = parent;
-            }
+        if let Some(parent) = call.parent()
+            && parent.kind() == "member_expression"
+            && self
+                .field(parent, "object")
+                .is_some_and(|node| node.id() == call.id())
+        {
+            imported = self.field(parent, "property").map(|node| self.text(node));
+            value = parent;
         }
         let value_id = value.id();
         let Some(declarator) = value.parent().filter(|node| {

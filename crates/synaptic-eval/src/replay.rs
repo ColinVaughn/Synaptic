@@ -18,11 +18,11 @@ use serde::{Deserialize, Serialize};
 
 use synaptic_core::is_test_path;
 use synaptic_graph::KnowledgeGraph;
-use synaptic_history::{build, diff, git, DiffOptions};
-use synaptic_predict::{forecast_changes, ForecastOptions};
+use synaptic_history::{DiffOptions, build, diff, git};
+use synaptic_predict::{ForecastOptions, forecast_changes};
 
-use crate::scoring::{aggregate, score_sets, Scores};
 use crate::EvalError;
+use crate::scoring::{Scores, aggregate, score_sets};
 
 /// On-disk schema version for a replay report.
 pub const REPLAY_VERSION: u32 = 1;

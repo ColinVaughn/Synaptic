@@ -54,10 +54,10 @@ pub fn render_markdown(report: &SpeculateReport) -> String {
         "- applied: {}\n",
         if report.applied { "yes" } else { "no" }
     ));
-    if let Some(d) = &report.detected {
-        if let Some(lang) = &d.language {
-            out.push_str(&format!("- detected: {lang}\n"));
-        }
+    if let Some(d) = &report.detected
+        && let Some(lang) = &d.language
+    {
+        out.push_str(&format!("- detected: {lang}\n"));
     }
     out.push('\n');
 

@@ -5,14 +5,14 @@ use synaptic_api::{Dependency, DependencyScope, Ecosystem, PackageCoordinate};
 use synaptic_core::GraphData;
 
 use crate::advisory::Advisory;
-use crate::applicability::{assess_applicability, ApplicabilityInput};
-use crate::finding::{finding_id, Finding};
+use crate::applicability::{ApplicabilityInput, assess_applicability};
+use crate::finding::{Finding, finding_id};
 use crate::lockgraph::{PackageGraph, PackageKey, PackageScope, ResolvedPackage};
-use crate::matching::{match_version, VersionMatch};
+use crate::matching::{VersionMatch, match_version};
 use crate::plan::plan_remediation;
 use crate::policy::VulnPolicy;
-use crate::reach::{parse_line, remediation_scope, CallSite, ImpactIndex, ReachIndex};
-use crate::severity::{assess_severity, prioritize, PriorityInputs};
+use crate::reach::{CallSite, ImpactIndex, ReachIndex, parse_line, remediation_scope};
+use crate::severity::{PriorityInputs, assess_severity, prioritize};
 use crate::source::{AdvisorySource, SourceDescription};
 
 /// Supplies the graph-derived signals the applicability combiner uses.
@@ -1311,12 +1311,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
         );
         let oracle = GraphUsageOracle::new(&graph);
 
-        assert!(oracle
-            .reachable_functions(
-                &PackageCoordinate::new(Ecosystem::Cargo, "serde"),
-                &["Value.get".to_string()]
-            )
-            .is_empty());
+        assert!(
+            oracle
+                .reachable_functions(
+                    &PackageCoordinate::new(Ecosystem::Cargo, "serde"),
+                    &["Value.get".to_string()]
+                )
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1738,11 +1740,13 @@ approved_by = "security-review"
             !report.findings[0].verdict.runtime_reachable,
             "leaf is reachable only through a dev dependency"
         );
-        assert!(report.findings[0]
-            .verdict
-            .evidence
-            .iter()
-            .any(|item| item.kind == crate::EvidenceKind::DevelopmentOnlyDependency));
+        assert!(
+            report.findings[0]
+                .verdict
+                .evidence
+                .iter()
+                .any(|item| item.kind == crate::EvidenceKind::DevelopmentOnlyDependency)
+        );
     }
 
     #[test]
@@ -1840,11 +1844,13 @@ approved_by = "security-review"
             report.findings[0].verdict.state,
             ApplicabilityState::NotApplicable
         );
-        assert!(report.findings[0]
-            .verdict
-            .evidence
-            .iter()
-            .any(|item| item.kind == crate::EvidenceKind::FeatureGated));
+        assert!(
+            report.findings[0]
+                .verdict
+                .evidence
+                .iter()
+                .any(|item| item.kind == crate::EvidenceKind::FeatureGated)
+        );
     }
 
     #[test]
@@ -1860,11 +1866,13 @@ approved_by = "security-review"
         ))
         .unwrap();
 
-        assert!(!report.findings[0]
-            .verdict
-            .evidence
-            .iter()
-            .any(|item| item.kind == crate::EvidenceKind::FeatureGated));
+        assert!(
+            !report.findings[0]
+                .verdict
+                .evidence
+                .iter()
+                .any(|item| item.kind == crate::EvidenceKind::FeatureGated)
+        );
     }
 
     const MAVEN_ADVISORY: &str = r#"{
@@ -1906,10 +1914,12 @@ approved_by = "security-review"
 
         let report = scan(&request).unwrap();
 
-        assert!(report
-            .findings
-            .iter()
-            .any(|finding| finding.package.name == "org.apache.logging.log4j:log4j-core"));
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.package.name == "org.apache.logging.log4j:log4j-core")
+        );
     }
 
     #[test]
@@ -1954,10 +1964,12 @@ approved_by = "security-review"
 
         let report = scan(&request).unwrap();
 
-        assert!(report
-            .findings
-            .iter()
-            .all(|finding| finding.package.ecosystem != Ecosystem::Maven));
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|finding| finding.package.ecosystem != Ecosystem::Maven)
+        );
         assert_eq!(report.packages_partially_audited, 0);
     }
 

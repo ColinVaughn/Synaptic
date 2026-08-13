@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 #[cfg(feature = "lang-elixir")]
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 #[cfg(feature = "lang-elixir")]
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -278,20 +278,13 @@ impl<'tree> Elixir<'_, 'tree> {
         if depth >= MAX_DEPTH {
             return;
         }
-        if node.kind() == "call" {
-            if let Some(callee) = self.call_target(node) {
-                if !callee.is_empty() && !ELIXIR_BUILTINS.contains(&callee.as_str()) {
-                    self.b.resolve_call(
-                        caller,
-                        &callee,
-                        false,
-                        Self::line(node),
-                        index,
-                        seen,
-                        true,
-                    );
-                }
-            }
+        if node.kind() == "call"
+            && let Some(callee) = self.call_target(node)
+            && !callee.is_empty()
+            && !ELIXIR_BUILTINS.contains(&callee.as_str())
+        {
+            self.b
+                .resolve_call(caller, &callee, false, Self::line(node), index, seen, true);
         }
         for c in Self::children(node) {
             self.walk_calls(c, caller, index, seen, depth + 1);
@@ -340,9 +333,11 @@ mod tests {
 
     #[test]
     fn alias_becomes_import() {
-        assert!(rels(&extract(), "imports_from")
-            .iter()
-            .any(|(_, t)| t == "Animal"));
+        assert!(
+            rels(&extract(), "imports_from")
+                .iter()
+                .any(|(_, t)| t == "Animal")
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@
 //! the code really does.
 
 use synaptic_api::{Ecosystem, PackageCoordinate};
-use synaptic_vuln::{parse_lockfile, LockfileKind, PackageGraph, PackageScope};
+use synaptic_vuln::{LockfileKind, PackageGraph, PackageScope, parse_lockfile};
 
 /// One fixture per format: the source, and a package it must resolve.
 struct Fixture {
@@ -448,9 +448,11 @@ fn composer_platform_requirements_are_not_treated_as_packages() {
 fn composer_dev_packages_are_included() {
     let packages = parse_lockfile(LockfileKind::ComposerLock, COMPOSER).unwrap();
 
-    assert!(packages
-        .iter()
-        .any(|package| package.key.coordinate.name == "phpunit/phpunit"));
+    assert!(
+        packages
+            .iter()
+            .any(|package| package.key.coordinate.name == "phpunit/phpunit")
+    );
 }
 
 #[test]

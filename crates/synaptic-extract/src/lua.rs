@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 #[cfg(feature = "lang-lua")]
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 #[cfg(feature = "lang-lua")]
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -242,20 +242,20 @@ impl<'tree> Lua<'_, 'tree> {
         if node.kind() == "function_declaration" {
             return;
         }
-        if node.kind() == "function_call" {
-            if let Some((callee, is_member)) = self.callee(node) {
-                if !callee.is_empty() && !LUA_BUILTINS.contains(&callee.as_str()) {
-                    self.b.resolve_call(
-                        caller,
-                        &callee,
-                        is_member,
-                        Self::line(node),
-                        index,
-                        seen,
-                        true,
-                    );
-                }
-            }
+        if node.kind() == "function_call"
+            && let Some((callee, is_member)) = self.callee(node)
+            && !callee.is_empty()
+            && !LUA_BUILTINS.contains(&callee.as_str())
+        {
+            self.b.resolve_call(
+                caller,
+                &callee,
+                is_member,
+                Self::line(node),
+                index,
+                seen,
+                true,
+            );
         }
         for c in Self::children(node) {
             self.walk_calls(c, caller, index, seen, depth + 1);

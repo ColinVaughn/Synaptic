@@ -6,7 +6,7 @@
 //! documented future addition.)
 
 #[cfg(feature = "lang-verilog")]
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 #[cfg(feature = "lang-verilog")]
 use tree_sitter::{Node as TsNode, Parser};
 

@@ -14,7 +14,7 @@ use crate::result::ExtractionResult;
 #[cfg(feature = "lang-swift")]
 use crate::walker::extract_with_config;
 #[cfg(feature = "lang-swift")]
-use synaptic_core::{make_id, Confidence, Edge, FileType, Node, NodeId, NodeKind};
+use synaptic_core::{Confidence, Edge, FileType, Node, NodeId, NodeKind, make_id};
 
 /// The Swift `LanguageConfig`. `class_declaration` also covers struct/enum/actor
 /// in this grammar. The callee of a `call_expression` is named positionally, so
@@ -72,39 +72,32 @@ fn recover_swift_declarations(path: &str, source: &[u8], result: &mut Extraction
             let words: Vec<_> = trimmed.split_whitespace().collect();
             if let Some(i) = words.iter().position(|word| {
                 matches!(*word, "class" | "struct" | "enum" | "actor" | "extension")
-            }) {
-                if let Some(name) = words.get(i + 1).map(|name| {
-                    name.trim_end_matches(['{', ':'])
-                        .split(['<', ':'])
-                        .next()
-                        .unwrap_or("")
-                }) {
-                    if !name.is_empty() {
-                        let id = NodeId(make_id(&[&stem, name]));
-                        if !result.nodes.iter().any(|node| node.id == id) {
-                            let mut node = Node {
-                                id: id.clone(),
-                                label: name.to_string(),
-                                file_type: FileType::Code,
-                                source_file: path.to_string(),
-                                source_location: Some(format!("L{line}")),
-                                origin: Some("ast_recovery".into()),
-                                extra: Map::new(),
-                                ..Default::default()
-                            };
-                            node.set_kind(NodeKind::Class);
-                            result.nodes.push(node);
-                            result.edges.push(swift_edge(
-                                file.clone(),
-                                id.clone(),
-                                "contains",
-                                path,
-                                line,
-                            ));
-                        }
-                        owner = Some((name.to_string(), id));
-                    }
+            }) && let Some(name) = words.get(i + 1).map(|name| {
+                name.trim_end_matches(['{', ':'])
+                    .split(['<', ':'])
+                    .next()
+                    .unwrap_or("")
+            }) && !name.is_empty()
+            {
+                let id = NodeId(make_id(&[&stem, name]));
+                if !result.nodes.iter().any(|node| node.id == id) {
+                    let mut node = Node {
+                        id: id.clone(),
+                        label: name.to_string(),
+                        file_type: FileType::Code,
+                        source_file: path.to_string(),
+                        source_location: Some(format!("L{line}")),
+                        origin: Some("ast_recovery".into()),
+                        extra: Map::new(),
+                        ..Default::default()
+                    };
+                    node.set_kind(NodeKind::Class);
+                    result.nodes.push(node);
+                    result
+                        .edges
+                        .push(swift_edge(file.clone(), id.clone(), "contains", path, line));
                 }
+                owner = Some((name.to_string(), id));
             }
         }
 

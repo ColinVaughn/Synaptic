@@ -16,7 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use synaptic_core::{Edge, FileType, Node, NodeId};
 
 use crate::paths::file_node_id;
@@ -66,12 +66,11 @@ enum SpecKind {
 /// asset nodes for them.
 fn spec_kind(spec: &str) -> SpecKind {
     let last = spec.rsplit('/').next().unwrap_or(spec);
-    if let Some((_, ext)) = last.rsplit_once('.') {
-        if !ext.is_empty() {
-            if let Some(kind) = classify_asset_ext(&ext.to_ascii_lowercase()) {
-                return SpecKind::Asset(kind);
-            }
-        }
+    if let Some((_, ext)) = last.rsplit_once('.')
+        && !ext.is_empty()
+        && let Some(kind) = classify_asset_ext(&ext.to_ascii_lowercase())
+    {
+        return SpecKind::Asset(kind);
     }
     SpecKind::Code
 }
@@ -328,12 +327,12 @@ pub fn resolve_imports(
             let Some(spec) = label_of.get(&e.target) else {
                 continue;
             };
-            if let Some(id) = resolve_ql_module(spec, &e.source_file, &ql_files) {
-                if id != e.source {
-                    rewired_from.insert(e.target.clone());
-                    e.target = id;
-                    stats.ql_bound += 1;
-                }
+            if let Some(id) = resolve_ql_module(spec, &e.source_file, &ql_files)
+                && id != e.source
+            {
+                rewired_from.insert(e.target.clone());
+                e.target = id;
+                stats.ql_bound += 1;
             }
             continue;
         }
@@ -354,12 +353,12 @@ pub fn resolve_imports(
                         continue;
                     };
                     let key = strip_js_ext(&joined).unwrap_or(joined);
-                    if let Some(id) = by_key.get(&key) {
-                        if *id != e.source {
-                            rewired_from.insert(e.target.clone());
-                            e.target = id.clone();
-                            stats.relative_bound += 1;
-                        }
+                    if let Some(id) = by_key.get(&key)
+                        && *id != e.source
+                    {
+                        rewired_from.insert(e.target.clone());
+                        e.target = id.clone();
+                        stats.relative_bound += 1;
                     }
                 }
                 SpecKind::Asset(kind) => {
@@ -449,9 +448,11 @@ mod xaml_tests {
                 .iter()
                 .find(|edge| edge.context.as_deref() == Some("xaml_code_behind"))
                 .unwrap();
-            assert!(nodes
-                .iter()
-                .any(|node| node.id == edge.target && node.source_file == code_path));
+            assert!(
+                nodes
+                    .iter()
+                    .any(|node| node.id == edge.target && node.source_file == code_path)
+            );
         }
     }
 }
@@ -565,9 +566,11 @@ mod tests {
         let (mut nodes, mut edges) = aggregate(vec![a, idx]);
         assert_eq!(resolve_relative_imports(&mut nodes, &mut edges), 1);
         let idx_id = file_node_id("src/bar/index.ts");
-        assert!(edges
-            .iter()
-            .any(|e| e.relation == "imports_from" && e.target == idx_id));
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.relation == "imports_from" && e.target == idx_id)
+        );
     }
 
     #[test]
@@ -577,9 +580,11 @@ mod tests {
         let (mut nodes, mut edges) = aggregate(vec![a, idx]);
         assert_eq!(resolve_relative_imports(&mut nodes, &mut edges), 1);
         let idx_id = file_node_id("index.ts");
-        assert!(edges
-            .iter()
-            .any(|e| e.relation == "imports_from" && e.target == idx_id));
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.relation == "imports_from" && e.target == idx_id)
+        );
     }
 
     #[test]
@@ -589,9 +594,11 @@ mod tests {
         let (mut nodes, mut edges) = aggregate(vec![a, util]);
         assert_eq!(resolve_relative_imports(&mut nodes, &mut edges), 1);
         let util_id = file_node_id("src/util.ts");
-        assert!(edges
-            .iter()
-            .any(|e| e.relation == "imports_from" && e.target == util_id));
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.relation == "imports_from" && e.target == util_id)
+        );
     }
 
     #[test]
@@ -690,9 +697,11 @@ mod tests {
         assert_eq!(stats.relative_bound, 1, "bound as code");
         assert_eq!(stats.asset_nodes, 0, "no phantom asset minted");
         let core_id = file_node_id("pkg/index.core.ts");
-        assert!(edges
-            .iter()
-            .any(|e| e.relation == "imports_from" && e.target == core_id));
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.relation == "imports_from" && e.target == core_id)
+        );
     }
 
     #[test]
@@ -733,9 +742,11 @@ mod tests {
         let stats = resolve_imports(&mut nodes, &mut edges, &alias_resolver());
         assert_eq!(stats.alias_bound, 1);
         let api_id = file_node_id("src/lib/api.ts");
-        assert!(edges
-            .iter()
-            .any(|e| e.relation == "imports_from" && e.target == api_id));
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.relation == "imports_from" && e.target == api_id)
+        );
         assert!(!nodes.iter().any(|nn| nn.label == "@/lib/api"));
     }
 

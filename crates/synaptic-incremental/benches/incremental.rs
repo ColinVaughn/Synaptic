@@ -14,7 +14,7 @@
 
 use std::collections::HashSet;
 
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
 use synaptic_graph::KnowledgeGraph;

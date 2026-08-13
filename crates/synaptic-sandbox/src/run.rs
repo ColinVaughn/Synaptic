@@ -586,13 +586,15 @@ mod tests {
         bounded_append(&mut buffer, &vec![b'a'; MAX_CAPTURE_BYTES]);
         bounded_append(&mut buffer, b"failure-tail");
         assert_eq!(buffer.len(), MAX_CAPTURE_BYTES);
-        assert!(buffer
-            .iter()
-            .rev()
-            .take(12)
-            .copied()
-            .collect::<Vec<_>>()
-            .starts_with(b"liat"));
+        assert!(
+            buffer
+                .iter()
+                .rev()
+                .take(12)
+                .copied()
+                .collect::<Vec<_>>()
+                .starts_with(b"liat")
+        );
         let tail = buffer.iter().rev().take(12).copied().collect::<Vec<_>>();
         let restored = tail.into_iter().rev().collect::<Vec<_>>();
         assert_eq!(restored, b"failure-tail");

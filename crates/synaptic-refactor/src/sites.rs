@@ -10,9 +10,9 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use synaptic_core::{Confidence, NodeId, Span};
 use synaptic_extract::cached_extract_source;
-use synaptic_graph::{norm_source_file, KnowledgeGraph};
+use synaptic_graph::{KnowledgeGraph, norm_source_file};
 
-use crate::resolve::{normalize, Candidate};
+use crate::resolve::{Candidate, normalize};
 
 /// Cap on a referencing file we will read+parse for column recovery. Past this we
 /// skip the file so a pathological/generated file can't stall a plan.

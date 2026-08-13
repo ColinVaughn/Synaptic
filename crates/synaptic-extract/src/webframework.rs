@@ -157,8 +157,10 @@ mod tests {
 
     #[test]
     fn non_component_returns_empty() {
-        assert!(extract_vue_source("x.vue", b"<template>hi</template>")
-            .nodes
-            .is_empty());
+        assert!(
+            extract_vue_source("x.vue", b"<template>hi</template>")
+                .nodes
+                .is_empty()
+        );
     }
 }

@@ -5,11 +5,11 @@ use std::path::{Component, Path};
 use serde::{Deserialize, Serialize};
 use synaptic_core::NodeId;
 use synaptic_graph::KnowledgeGraph;
-use synaptic_query::{affected_nodes_multi, DEFAULT_AFFECTED_RELATIONS};
+use synaptic_query::{DEFAULT_AFFECTED_RELATIONS, affected_nodes_multi};
 
 use crate::{
-    redaction::redact_sensitive_text, ApiChangeEvent, ApiUsageBinding, ApplicabilityState,
-    EvidenceSpan, RelevanceAssessment,
+    ApiChangeEvent, ApiUsageBinding, ApplicabilityState, EvidenceSpan, RelevanceAssessment,
+    redaction::redact_sensitive_text,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

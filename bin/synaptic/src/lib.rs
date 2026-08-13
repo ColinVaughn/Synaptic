@@ -31,7 +31,7 @@ use commands::query::{
 use commands::refactor::run_refactor;
 use commands::search::run_search;
 use commands::self_update::run_self_update;
-use commands::serve::{run_serve, ServeArgs};
+use commands::serve::{ServeArgs, run_serve};
 use commands::skill::run_skill;
 use commands::speculate::run_speculate;
 use commands::update::run_update;
@@ -59,10 +59,10 @@ fn run() -> Result<()> {
     // Opt-in background update notice (off by default; throttled to once a day;
     // swallows all errors). Skipped for `self-update` itself so the check can't
     // nag mid-update.
-    if !matches!(cli.cmd, Cmd::SelfUpdate { .. }) {
-        if let Some(note) = synaptic_upgrade::check::maybe_notify(env!("CARGO_PKG_VERSION")) {
-            eprintln!("{note}");
-        }
+    if !matches!(cli.cmd, Cmd::SelfUpdate { .. })
+        && let Some(note) = synaptic_upgrade::check::maybe_notify(env!("CARGO_PKG_VERSION"))
+    {
+        eprintln!("{note}");
     }
     match cli.cmd {
         Cmd::Extract {

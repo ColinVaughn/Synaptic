@@ -1,6 +1,6 @@
 //! Plan-augmentation: a seq-scan provider adds a PERF-PLAN-001 finding.
 use synaptic_graph::KnowledgeGraph;
-use synaptic_sqlaudit::{audit_with_plan, AuditOptions, PlanProvider, PlanSignal};
+use synaptic_sqlaudit::{AuditOptions, PlanProvider, PlanSignal, audit_with_plan};
 
 struct AlwaysSeqScan;
 impl PlanProvider for AlwaysSeqScan {

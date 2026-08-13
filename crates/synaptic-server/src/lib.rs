@@ -40,7 +40,7 @@ pub mod session;
 mod source;
 mod vuln_tools;
 pub use http::{serve_http, serve_http_with_ready_file};
-pub use session::{SessionStore, DEFAULT_SESSION_IDLE};
+pub use session::{DEFAULT_SESSION_IDLE, SessionStore};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufRead, Write};
@@ -48,29 +48,29 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
-use synaptic_core::{sanitize_label, GraphData, Node, NodeId};
+use serde_json::{Value, json};
+use synaptic_core::{GraphData, Node, NodeId, sanitize_label};
 use synaptic_graph::{
-    suggest_questions, surprising_connections, GodNode, GraphStats, KnowledgeGraph,
+    GodNode, GraphStats, KnowledgeGraph, suggest_questions, surprising_connections,
 };
-use synaptic_predict::{assess_edit, ChangeForecast, EditKind, ForecastOptions};
+use synaptic_predict::{ChangeForecast, EditKind, ForecastOptions, assess_edit};
 use synaptic_prs::{
-    compute_pr_impact, detect_default_branch, fetch_pr, fetch_pr_files, fetch_prs, fetch_worktrees,
-    format_pr_detail, format_prs_text, today_epoch_days, CommandRunner, ImpactIndex, PrInfo,
-    Status, SystemCommands,
+    CommandRunner, ImpactIndex, PrInfo, Status, SystemCommands, compute_pr_impact,
+    detect_default_branch, fetch_pr, fetch_pr_files, fetch_prs, fetch_worktrees, format_pr_detail,
+    format_prs_text, today_epoch_days,
 };
 use synaptic_query::{
-    affected_including_members, affected_nodes, dependents_caveat, describe_node, explain,
-    is_type_like, references_to, shortest_path, type_member_ids, AffectedHit, DynamicCaveat,
-    QueryIndex, Recency, RecencyMode, ReverseImpactIndex, TraversalMode,
-    DEFAULT_AFFECTED_RELATIONS,
+    AffectedHit, DEFAULT_AFFECTED_RELATIONS, DynamicCaveat, QueryIndex, Recency, RecencyMode,
+    ReverseImpactIndex, TraversalMode, affected_including_members, affected_nodes,
+    dependents_caveat, describe_node, explain, is_type_like, references_to, shortest_path,
+    type_member_ids,
 };
 use synaptic_readiness::{
-    audit as readiness_audit, AuditOptions as ReadinessOptions, Profile as ReadinessProfile,
-    ReadinessReport, Severity as ReadinessSeverity,
+    AuditOptions as ReadinessOptions, Profile as ReadinessProfile, ReadinessReport,
+    Severity as ReadinessSeverity, audit as readiness_audit,
 };
 use synaptic_sandbox::{
-    render_markdown as render_speculate_md, speculate, Change, SpeculateOptions,
+    Change, SpeculateOptions, render_markdown as render_speculate_md, speculate,
 };
 
 /// Protocol versions supported by the legacy `initialize` handshake.
@@ -452,15 +452,18 @@ pub(crate) fn validate_jsonrpc_request(req: &Value) -> Result<ValidatedRequest, 
     let Some(method) = object.get("method").and_then(Value::as_str) else {
         return invalid("Invalid Request: method must be a string");
     };
-    if let Some(params) = object.get("params") {
-        if !params.is_object() && !params.is_array() {
-            return invalid("Invalid Request: params must be an object or array");
-        }
+    if let Some(params) = object.get("params")
+        && !params.is_object()
+        && !params.is_array()
+    {
+        return invalid("Invalid Request: params must be an object or array");
     }
-    if let Some(id) = object.get("id") {
-        if !id.is_null() && !id.is_string() && !id.is_number() {
-            return invalid("Invalid Request: id must be a string, number, or null");
-        }
+    if let Some(id) = object.get("id")
+        && !id.is_null()
+        && !id.is_string()
+        && !id.is_number()
+    {
+        return invalid("Invalid Request: id must be a string, number, or null");
     }
     Ok(ValidatedRequest {
         id: object.get("id").cloned(),
@@ -1227,7 +1230,7 @@ impl Server {
             None => {
                 return Err(format!(
                     "Federated repository {repo:?} has no registered source checkout and may be artifact-only. Artifact-only members cannot be scanned or use vulnerability ledgers/briefs; serve a source-backed checkout for this member."
-                ))
+                ));
             }
         };
         Ok(VulnerabilityScope {
@@ -1357,14 +1360,14 @@ impl Server {
     /// resolved under its own repo root when one is registered; otherwise the
     /// single `source_root` and the raw `source_file` are used.
     fn root_for_node(&self, n: &Node) -> Option<(PathBuf, String)> {
-        if let Some(tag) = n.repo.as_deref() {
-            if let Some(root) = self.repo_roots.get(tag) {
-                let rel = n
-                    .source_file
-                    .strip_prefix(&format!("{tag}/"))
-                    .unwrap_or(&n.source_file);
-                return Some((root.clone(), rel.to_string()));
-            }
+        if let Some(tag) = n.repo.as_deref()
+            && let Some(root) = self.repo_roots.get(tag)
+        {
+            let rel = n
+                .source_file
+                .strip_prefix(&format!("{tag}/"))
+                .unwrap_or(&n.source_file);
+            return Some((root.clone(), rel.to_string()));
         }
         self.source_root
             .as_ref()
@@ -1391,10 +1394,10 @@ impl Server {
     /// under that member's root, otherwise the single `source_root` is used.
     fn root_for_path(&self, file: &str) -> Option<(PathBuf, String)> {
         let norm = file.replace('\\', "/");
-        if let Some((tag, rest)) = norm.split_once('/') {
-            if let Some(root) = self.repo_roots.get(tag) {
-                return Some((root.clone(), rest.to_string()));
-            }
+        if let Some((tag, rest)) = norm.split_once('/')
+            && let Some(root) = self.repo_roots.get(tag)
+        {
+            return Some((root.clone(), rest.to_string()));
         }
         self.source_root.as_ref().map(|r| (r.clone(), norm))
     }
@@ -1503,21 +1506,21 @@ impl Server {
             // fresh handle. Shards rematerialize on demand (persisted indexes
             // keep that cheap) and the aggregate caches drop with the old
             // provider, so nothing stale survives.
-            if let Some(dir) = watch.parent() {
-                if let Ok(store) = synaptic_store::ShardStore::open(dir) {
-                    self.provider = provider::GraphProvider::from_store(store);
-                    self.repo_hashes = read_repo_hashes(self.graph_path.as_deref());
-                    self.reset_graph_report_caches();
-                    self.reload_key = Some(key);
-                }
+            if let Some(dir) = watch.parent()
+                && let Ok(store) = synaptic_store::ShardStore::open(dir)
+            {
+                self.provider = provider::GraphProvider::from_store(store);
+                self.repo_hashes = read_repo_hashes(self.graph_path.as_deref());
+                self.reset_graph_report_caches();
+                self.reload_key = Some(key);
             }
             return;
         }
-        if let Ok(bytes) = std::fs::read(&watch) {
-            if let Ok(gd) = serde_json::from_slice::<GraphData>(&bytes) {
-                self.reindex_from(KnowledgeGraph::from_graph_data(gd));
-                self.reload_key = Some(key);
-            }
+        if let Ok(bytes) = std::fs::read(&watch)
+            && let Ok(gd) = serde_json::from_slice::<GraphData>(&bytes)
+        {
+            self.reindex_from(KnowledgeGraph::from_graph_data(gd));
+            self.reload_key = Some(key);
         }
     }
 
@@ -1551,10 +1554,10 @@ impl Server {
             // Debounce: walk the tree at most once per window. Interior
             // mutability so this gate runs under the HTTP shared read lock.
             let mut last = self.last_fresh_check.lock().ok()?;
-            if let Some(t) = *last {
-                if t.elapsed() < cfg.debounce {
-                    return None;
-                }
+            if let Some(t) = *last
+                && t.elapsed() < cfg.debounce
+            {
+                return None;
             }
             *last = Some(Instant::now());
         }
@@ -1833,25 +1836,25 @@ impl Server {
                             via_relation: e.relation.clone(),
                         });
                     }
-                    if cross_depth < depth {
-                        if let Some(osh) = self.provider.owner_shard(&src) {
-                            let continued = if rels == DEFAULT_AFFECTED_RELATIONS {
-                                osh.affected_index.affected_multi(
-                                    &osh.kg,
-                                    std::slice::from_ref(&src),
-                                    depth - cross_depth,
-                                )
-                            } else {
-                                affected_nodes(&osh.kg, &src, rels, depth - cross_depth)
-                            };
-                            for h2 in continued {
-                                if seen.insert(h2.node_id.clone()) {
-                                    hits.push(AffectedHit {
-                                        node_id: h2.node_id,
-                                        depth: cross_depth + h2.depth,
-                                        via_relation: h2.via_relation,
-                                    });
-                                }
+                    if cross_depth < depth
+                        && let Some(osh) = self.provider.owner_shard(&src)
+                    {
+                        let continued = if rels == DEFAULT_AFFECTED_RELATIONS {
+                            osh.affected_index.affected_multi(
+                                &osh.kg,
+                                std::slice::from_ref(&src),
+                                depth - cross_depth,
+                            )
+                        } else {
+                            affected_nodes(&osh.kg, &src, rels, depth - cross_depth)
+                        };
+                        for h2 in continued {
+                            if seen.insert(h2.node_id.clone()) {
+                                hits.push(AffectedHit {
+                                    node_id: h2.node_id,
+                                    depth: cross_depth + h2.depth,
+                                    via_relation: h2.via_relation,
+                                });
                             }
                         }
                     }
@@ -2600,7 +2603,7 @@ impl Server {
                     return format!(
                         "Invalid `lines` value '{}'. Use 'start-end' (e.g. '108-140') or a single line 'start'.",
                         sanitize_label(spec)
-                    )
+                    );
                 }
             },
             None => (1, window),
@@ -2648,18 +2651,17 @@ impl Server {
             // member (node.repo == tag) and its files live under <source_root>/<tag>
             // (federated graph paths are `tag/rel`). If that subtree exists, search
             // it as the member so the repo filter works and hits carry the tag.
-            if self.graph_has_repo(tag) {
-                if let Some(member) = self
+            if self.graph_has_repo(tag)
+                && let Some(member) = self
                     .source_root
                     .as_ref()
                     .map(|r| r.join(tag))
                     .filter(|p| p.is_dir())
-                {
-                    return vec![search::Root {
-                        tag: Some(tag.to_string()),
-                        path: member,
-                    }];
-                }
+            {
+                return vec![search::Root {
+                    tag: Some(tag.to_string()),
+                    path: member,
+                }];
             }
             return Vec::new();
         }
@@ -2865,7 +2867,7 @@ impl Server {
                     return empty(format!(
                         "dynamic_hazards: invalid path_glob: {}",
                         sanitize_label(&e.to_string())
-                    ))
+                    ));
                 }
             },
             None => None,
@@ -2887,25 +2889,25 @@ impl Server {
         let mut truncated = false;
         let mut rows: Vec<HazardRow> = Vec::new();
         self.provider.for_each_node(&mut |n| {
-            if let Some(r) = repo {
-                if n.repo.as_deref() != Some(r) {
-                    return;
-                }
+            if let Some(r) = repo
+                && n.repo.as_deref() != Some(r)
+            {
+                return;
             }
             if n.source_file.is_empty() {
                 return;
             }
-            if let Some(re) = &glob_re {
-                if !re.is_match(&n.source_file.replace('\\', "/")) {
-                    return;
-                }
+            if let Some(re) = &glob_re
+                && !re.is_match(&n.source_file.replace('\\', "/"))
+            {
+                return;
             }
             for s in n.dynamic_sites() {
                 let ks = s.kind.as_str();
-                if let Some(k) = kind {
-                    if ks != k {
-                        continue;
-                    }
+                if let Some(k) = kind
+                    && ks != k
+                {
+                    continue;
                 }
                 if let Some(tn) = &tnorm {
                     let key_match = s.key.as_deref().is_some_and(|k| hazard_key_seg(k) == *tn);
@@ -3028,10 +3030,10 @@ impl Server {
         };
         for nb in &ex.neighbors {
             *by_relation.entry(nb.relation.clone()).or_default() += 1;
-            if let Some(f) = &rel_filter {
-                if !nb.relation.to_lowercase().contains(f.as_str()) {
-                    continue;
-                }
+            if let Some(f) = &rel_filter
+                && !nb.relation.to_lowercase().contains(f.as_str())
+            {
+                continue;
             }
             total += 1;
             if rows.len() >= cap {
@@ -3461,10 +3463,10 @@ Cross-repo: {} edge(s) span repositories{}",
             // on (the default with bridge edges) the path may take ONE bridge
             // hop (from-shard leg + bridge + to-shard leg); under isolation it
             // is reported honestly instead.
-            if self.provider.cross_repo() {
-                if let Some(path) = self.bridge_hop_path(&sh, &from, &to) {
-                    return self.render_path(source, path, max_hops);
-                }
+            if self.provider.cross_repo()
+                && let Some(path) = self.bridge_hop_path(&sh, &from, &to)
+            {
+                return self.render_path(source, path, max_hops);
             }
             return format!(
                 "No path between {} and {} (they live in different repos{}).",
@@ -3602,10 +3604,10 @@ Cross-repo: {} edge(s) span repositories{}",
                 })
                 .min_by(|(x, _), (y, _)| priority(x).cmp(&priority(y)).then_with(|| x.cmp(y)))
         };
-        if let Some(sh) = self.provider.owner_shard(a) {
-            if let Some(hop) = best(sh.kg.incident_edges(a).cloned().collect()) {
-                return Some(hop);
-            }
+        if let Some(sh) = self.provider.owner_shard(a)
+            && let Some(hop) = best(sh.kg.incident_edges(a).cloned().collect())
+        {
+            return Some(hop);
         }
         // A cross-shard hop's relation and direction live in the bridge, not
         // either shard.
@@ -3779,10 +3781,10 @@ Cross-repo: {} edge(s) span repositories{}",
                 sanitize_label(rel)
             ));
             out.push_str(detail);
-            if let Some(nid) = nid {
-                if let Some(site_list) = sites.get(&(nid.clone(), rel.clone(), dir)) {
-                    out.push_str(&self.render_sites(site_list, "      ", 3));
-                }
+            if let Some(nid) = nid
+                && let Some(site_list) = sites.get(&(nid.clone(), rel.clone(), dir))
+            {
+                out.push_str(&self.render_sites(site_list, "      ", 3));
             }
         }
         if total > cap {
@@ -3861,10 +3863,10 @@ Cross-repo: {} edge(s) span repositories{}",
                 sanitize_label(&r.label),
                 sanitize_label(&r.relation)
             ));
-            if show_sites {
-                if let Some(site_list) = sites.get(&(r.id.clone(), r.relation.clone(), "in")) {
-                    out.push_str(&self.render_sites(site_list, "      ", 3));
-                }
+            if show_sites
+                && let Some(site_list) = sites.get(&(r.id.clone(), r.relation.clone(), "in"))
+            {
+                out.push_str(&self.render_sites(site_list, "      ", 3));
             }
         }
         if total > cap {
@@ -3900,12 +3902,12 @@ Cross-repo: {} edge(s) span repositories{}",
                 return AffectedReport::Ambiguous {
                     query: label.to_string(),
                     hits,
-                }
+                };
             }
             provider::ScopedResolution::NotFound => {
                 return AffectedReport::NotFound {
                     query: label.to_string(),
-                }
+                };
             }
         };
         let rels: Vec<&str> = if relations.is_empty() {
@@ -4551,14 +4553,18 @@ Cross-repo: {} edge(s) span repositories{}",
         let resolved = self.resolve_base(None, repo);
         let Some(mut pr) = fetch_pr(&*self.runner, number, repo, &resolved) else {
             return (
-                format!("PR #{number} not found (gh unavailable, unauthenticated, or no such PR). Graph audit continues offline."),
+                format!(
+                    "PR #{number} not found (gh unavailable, unauthenticated, or no such PR). Graph audit continues offline."
+                ),
                 Vec::new(),
             );
         };
         pr.files_changed = fetch_pr_files(&*self.runner, number, repo);
         if pr.files_changed.is_empty() {
             return (
-                format!("PR #{number}: no changed files found (may require gh auth). Graph audit continues offline."),
+                format!(
+                    "PR #{number}: no changed files found (may require gh auth). Graph audit continues offline."
+                ),
                 Vec::new(),
             );
         }
@@ -4744,13 +4750,13 @@ Cross-repo: {} edge(s) span repositories{}",
         // When nothing statically depends on the seed, attach the honest
         // dynamic-dispatch caveat (if any) so a structured-only reader does not
         // treat total:0 as proof the symbol is unused.
-        if total == 0 {
-            if let Some(c) = dynamic_caveat {
-                obj.insert(
-                    "dynamic_caveat".into(),
-                    serde_json::to_value(c).unwrap_or(Value::Null),
-                );
-            }
+        if total == 0
+            && let Some(c) = dynamic_caveat
+        {
+            obj.insert(
+                "dynamic_caveat".into(),
+                serde_json::to_value(c).unwrap_or(Value::Null),
+            );
         }
         Value::Object(obj)
     }
@@ -4973,10 +4979,10 @@ Cross-repo: {} edge(s) span repositories{}",
             Ok(req) => req,
             Err(error) => return Some(error),
         };
-        if is_modern_request(&req) {
-            if let Err(error) = validate_modern_request(&req) {
-                return Some(error);
-            }
+        if is_modern_request(&req)
+            && let Err(error) = validate_modern_request(&req)
+        {
+            return Some(error);
         }
         self.handle_validated_with_reload(&req)
     }
@@ -5026,10 +5032,10 @@ Cross-repo: {} edge(s) span repositories{}",
     pub fn dispatch_request(&self, req: &Value) -> Option<Value> {
         match validate_jsonrpc_request(req) {
             Ok(req) => {
-                if is_modern_request(&req) {
-                    if let Err(error) = validate_modern_request(&req) {
-                        return Some(error);
-                    }
+                if is_modern_request(&req)
+                    && let Err(error) = validate_modern_request(&req)
+                {
+                    return Some(error);
                 }
                 self.dispatch_validated_request(&req)
             }
@@ -5530,10 +5536,11 @@ Cross-repo: {} edge(s) span repositories{}",
         let want_repo = repo.map(str::to_string);
         self.provider
             .for_each_shard(&mut |tag, sh| {
-                if let Some(want) = &want_repo {
-                    if self.provider.is_sharded() && tag != want {
-                        return Ok(());
-                    }
+                if let Some(want) = &want_repo
+                    && self.provider.is_sharded()
+                    && tag != want
+                {
+                    return Ok(());
                 }
                 let root = self.repo_roots.get(tag).cloned().or_else(|| {
                     self.source_root.as_ref().map(|r| {
@@ -5645,13 +5652,12 @@ Cross-repo: {} edge(s) span repositories{}",
             .and_then(Value::as_array_mut)
             .and_then(|a| a.first_mut())
             .and_then(|c| c.get_mut("text"))
+            && let Some(t) = text.as_str()
         {
-            if let Some(t) = text.as_str() {
-                *text = json!(format!(
-                    "note: graph is STALE -- {n} file(s) changed since it was built \
+            *text = json!(format!(
+                "note: graph is STALE -- {n} file(s) changed since it was built \
                      (above the autofresh cap). Run `synaptic update` to refresh.\n\n{t}"
-                ));
-            }
+            ));
         }
         result
     }
@@ -5914,7 +5920,7 @@ Cross-repo: {} edge(s) span repositories{}",
                     return Ok(json!({
                         "content": [{ "type": "text", "text": e }],
                         "isError": true
-                    }))
+                    }));
                 }
             };
             let verbose = b("verbose");
@@ -6238,7 +6244,7 @@ Cross-repo: {} edge(s) span repositories{}",
                 return Err((
                     -32603,
                     format!("Advertised tool has no implementation: {other}"),
-                ))
+                ));
             }
         };
 
@@ -6372,13 +6378,13 @@ Cross-repo: {} edge(s) span repositories{}",
                         return Err((
                             -32602,
                             format!("Resource template has no argument named '{arg_name}'"),
-                        ))
+                        ));
                     }
                     (Some(uri), _) => {
-                        return Err((-32602, format!("Unknown resource reference: {uri}")))
+                        return Err((-32602, format!("Unknown resource reference: {uri}")));
                     }
                     (None, _) => {
-                        return Err((-32602, "resource ref requires a string 'uri'".to_string()))
+                        return Err((-32602, "resource ref requires a string 'uri'".to_string()));
                     }
                 }
             }
@@ -6394,13 +6400,13 @@ Cross-repo: {} edge(s) span repositories{}",
                     return Err((
                         -32602,
                         format!("Prompt '{name}' has no argument named '{arg_name}'"),
-                    ))
+                    ));
                 }
                 (Some(name), _) => {
-                    return Err((-32602, format!("Unknown prompt reference: {name}")))
+                    return Err((-32602, format!("Unknown prompt reference: {name}")));
                 }
                 (None, _) => {
-                    return Err((-32602, "prompt ref requires a string 'name'".to_string()))
+                    return Err((-32602, "prompt ref requires a string 'name'".to_string()));
                 }
             },
             Some(kind) => return Err((-32602, format!("Unknown completion ref type: {kind}"))),
@@ -6408,7 +6414,7 @@ Cross-repo: {} edge(s) span repositories{}",
                 return Err((
                     -32602,
                     "completion ref requires a string 'type'".to_string(),
-                ))
+                ));
             }
         };
 
@@ -6471,31 +6477,38 @@ Cross-repo: {} edge(s) span repositories{}",
                 let jobs = jobs_rx.clone();
                 let responses = responses_tx.clone();
                 let subscriptions = subscriptions.clone();
-                scope.spawn(move || loop {
-                    let request = {
-                        let receiver = jobs.lock().unwrap_or_else(|error| error.into_inner());
-                        receiver.recv()
-                    };
-                    let Ok(request) = request else {
-                        break;
-                    };
-                    let request_id = request.id.clone();
-                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        dispatch_shared_request(&server, &request)
-                    }));
-                    let response = match outcome {
-                        Ok((reloaded, response)) => {
-                            if reloaded {
-                                send_stdio_resource_updates(&responses, &subscriptions);
+                scope.spawn(move || {
+                    loop {
+                        let request = {
+                            let receiver = jobs.lock().unwrap_or_else(|error| error.into_inner());
+                            receiver.recv()
+                        };
+                        let Ok(request) = request else {
+                            break;
+                        };
+                        let request_id = request.id.clone();
+                        let outcome =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                dispatch_shared_request(&server, &request)
+                            }));
+                        let response = match outcome {
+                            Ok((reloaded, response)) => {
+                                if reloaded {
+                                    send_stdio_resource_updates(&responses, &subscriptions);
+                                }
+                                response
                             }
-                            response
+                            Err(_) => request_id.map(|id| {
+                                jsonrpc_error_response(
+                                    id,
+                                    -32603,
+                                    "Internal request worker failure",
+                                )
+                            }),
+                        };
+                        if let Some(response) = response {
+                            let _ = responses.send(response);
                         }
-                        Err(_) => request_id.map(|id| {
-                            jsonrpc_error_response(id, -32603, "Internal request worker failure")
-                        }),
-                    };
-                    if let Some(response) = response {
-                        let _ = responses.send(response);
                     }
                 });
             }
@@ -7583,15 +7596,15 @@ fn validate_json_schema(value: &Value, schema: &Value, path: &str) -> Result<(),
         }
     }
 
-    if let Some(allowed) = schema.get("enum").and_then(Value::as_array) {
-        if !allowed.iter().any(|candidate| candidate == value) {
-            let choices = allowed
-                .iter()
-                .map(Value::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(format!("{path} must be one of [{choices}]"));
-        }
+    if let Some(allowed) = schema.get("enum").and_then(Value::as_array)
+        && !allowed.iter().any(|candidate| candidate == value)
+    {
+        let choices = allowed
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!("{path} must be one of [{choices}]"));
     }
 
     if let Some(object) = value.as_object() {
@@ -8661,10 +8674,12 @@ mod tests {
     fn get_neighbors_full_response_explains_seed_once() {
         let mut s = hub_server();
         let full = call_tool_full(&mut s, "get_neighbors", json!({"label":"hub","limit":5}));
-        assert!(full["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("Neighbors of Hub (25)"));
+        assert!(
+            full["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Neighbors of Hub (25)")
+        );
         assert_eq!(full["result"]["structuredContent"]["total"], json!(25));
         assert_eq!(
             s.neighbor_explanations
@@ -9183,8 +9198,8 @@ mod tests {
     #[test]
     fn watch_flag_gates_the_staleness_walk() {
         use std::fs;
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
         // With an embedded watcher (`serve --watch`), the per-query staleness
         // walk is gated by an O(1) dirty flag: no FS events means no walk (and
         // no debounce window to wait out); a set flag runs the catch-up and is
@@ -9248,8 +9263,8 @@ mod tests {
     #[test]
     fn stale_note_clears_after_external_refresh_under_watch() {
         use std::fs;
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
         // Under `serve --watch`, a cap trip must re-arm the dirty flag: the
         // external `synaptic update` the note demands only writes under
         // synaptic-out (which the watcher ignores), so without re-arming the
@@ -9693,10 +9708,12 @@ mod tests {
         assert_eq!(sc["found"], true);
         assert_eq!(sc["signature"]["return_type"], "str");
         assert_eq!(sc["callees"][0], "parse()");
-        assert!(sc["summary"]
-            .as_str()
-            .unwrap_or("")
-            .contains("takes (name: str)"));
+        assert!(
+            sc["summary"]
+                .as_str()
+                .unwrap_or("")
+                .contains("takes (name: str)")
+        );
     }
 
     #[test]
@@ -9945,9 +9962,11 @@ mod tests {
             ack["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"],
             "listen-1"
         );
-        assert!(ack["params"]["notifications"]
-            .get("toolsListChanged")
-            .is_none());
+        assert!(
+            ack["params"]["notifications"]
+                .get("toolsListChanged")
+                .is_none()
+        );
     }
 
     #[test]
@@ -9999,12 +10018,13 @@ mod tests {
             .unwrap();
         assert_eq!(duplicate["error"]["code"], -32600, "{duplicate}");
 
-        assert!(s
-            .handle_connection_request(
+        assert!(
+            s.handle_connection_request(
                 &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
                 &mut lifecycle,
             )
-            .is_none());
+            .is_none()
+        );
         assert!(matches!(lifecycle, ConnectionLifecycle::Ready(_)));
         let ready = s.handle_connection_request(&tool, &mut lifecycle).unwrap();
         assert!(ready["result"]["content"].is_array(), "{ready}");
@@ -10019,7 +10039,7 @@ mod tests {
 
     #[test]
     fn stdio_reads_ping_and_cancellation_while_slow_request_runs() {
-        use std::sync::{mpsc, Condvar, Mutex as StdMutex};
+        use std::sync::{Condvar, Mutex as StdMutex, mpsc};
 
         struct GateRunner {
             started: StdMutex<Option<mpsc::Sender<()>>>,
@@ -11394,9 +11414,11 @@ mod tests {
         let values = completion["values"].as_array().unwrap();
         assert_eq!(completion["total"], json!(64));
         assert_eq!(values.len(), 64);
-        assert!(values
-            .windows(2)
-            .all(|pair| { pair[0].as_str().unwrap() < pair[1].as_str().unwrap() }));
+        assert!(
+            values
+                .windows(2)
+                .all(|pair| { pair[0].as_str().unwrap() < pair[1].as_str().unwrap() })
+        );
         assert_eq!(
             s.completion_index_builds
                 .load(std::sync::atomic::Ordering::Relaxed),
@@ -11485,9 +11507,11 @@ mod tests {
         let init = s
             .handle_request(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":init_params(LATEST_PROTOCOL)}))
             .unwrap();
-        assert!(init["result"]["capabilities"]["resources"]
-            .get("subscribe")
-            .is_none());
+        assert!(
+            init["result"]["capabilities"]["resources"]
+                .get("subscribe")
+                .is_none()
+        );
 
         let ack = s
             .handle_request(&json!({
@@ -11505,9 +11529,11 @@ mod tests {
             .handle_request(&json!({"jsonrpc":"2.0","id":1,"method":"resources/templates/list"}))
             .unwrap();
         let templates = tl["result"]["resourceTemplates"].as_array().unwrap();
-        assert!(templates
-            .iter()
-            .any(|t| t["uriTemplate"] == "synaptic://node/{label}"));
+        assert!(
+            templates
+                .iter()
+                .any(|t| t["uriTemplate"] == "synaptic://node/{label}")
+        );
 
         let read = s
             .handle_request(&json!({
@@ -11515,10 +11541,12 @@ mod tests {
                 "params":{"uri":"synaptic://node/AuthService"}
             }))
             .unwrap();
-        assert!(read["result"]["contents"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("AuthService"));
+        assert!(
+            read["result"]["contents"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("AuthService")
+        );
 
         // A static resource still resolves (templates do not shadow it).
         let stats = s
@@ -11527,10 +11555,12 @@ mod tests {
                 "params":{"uri":"synaptic://god-nodes"}
             }))
             .unwrap();
-        assert!(stats["result"]["contents"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("God nodes"));
+        assert!(
+            stats["result"]["contents"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("God nodes")
+        );
     }
 
     #[test]
@@ -11558,10 +11588,12 @@ mod tests {
                 }))
                 .unwrap();
             assert!(response.get("error").is_none(), "{uri}: {response}");
-            assert!(response["result"]["contents"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains(label));
+            assert!(
+                response["result"]["contents"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains(label)
+            );
         }
 
         let community = s
@@ -11863,10 +11895,12 @@ mod tests {
                 "params":{"name":"list_repos","arguments":{}}
             }))
             .unwrap();
-        assert!(resp2["result"]["structuredContent"]["repos"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert!(
+            resp2["result"]["structuredContent"]["repos"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -12066,9 +12100,11 @@ mod tests {
         std::fs::write(root.join("src/helper.py"), b"def helper():\n    return 1\n").unwrap();
         std::fs::write(root.join("tests/test_helper.py"), b"# exercises helper\n").unwrap();
         git(root, &["add", "-A"]);
-        assert!(git(root, &["commit", "-q", "-m", "init", "--no-gpg-sign"])
-            .status
-            .success());
+        assert!(
+            git(root, &["commit", "-q", "-m", "init", "--no-gpg-sign"])
+                .status
+                .success()
+        );
         // An uncommitted edit is the change to speculate.
         std::fs::write(root.join("src/helper.py"), b"def helper():\n    return 2\n").unwrap();
 
@@ -12589,10 +12625,12 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(r["error"]["code"], -32602, "{r}");
-        assert!(r["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("Unknown tool: no_such_tool"));
+        assert!(
+            r["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Unknown tool: no_such_tool")
+        );
     }
 
     #[test]
@@ -12674,10 +12712,12 @@ mod tests {
 
         let empty = call_tool_full(&mut s, "search_text", json!({"pattern": "not_present"}));
         assert_eq!(empty["result"]["isError"], false, "{empty}");
-        assert!(empty["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("no matches"));
+        assert!(
+            empty["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("no matches")
+        );
 
         let mut missing = server().with_runner(Box::new(MissingDependency));
         let dependency = call_tool_full(&mut missing, "list_prs", json!({}));
@@ -12744,10 +12784,12 @@ mod tests {
                 &json!({"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"synaptic://stats"}}),
             )
             .unwrap();
-        assert!(stats["result"]["contents"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("3 nodes"));
+        assert!(
+            stats["result"]["contents"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("3 nodes")
+        );
     }
 
     /// Mock gh/git runner returning a canned PR list.
@@ -13147,8 +13189,8 @@ mod tests {
     /// sequential loop that is 1, with bounded-concurrent fetch it is > 1.
     #[test]
     fn triage_fetches_pr_files_concurrently() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct ConcurRunner {
             inflight: Arc<AtomicUsize>,
@@ -13288,8 +13330,10 @@ mod tests {
         // H3: cached god_nodes/stats must render the current graph exactly, and
         // a rebuilt graph.json must refresh both caches on the next request.
         let mut s = server();
-        assert!(call_tool(&mut s, "god_nodes", json!({"top_n": 1}))
-            .contains("\n  1. AuthService - 2 connections, 0 test(s)"));
+        assert!(
+            call_tool(&mut s, "god_nodes", json!({"top_n": 1}))
+                .contains("\n  1. AuthService - 2 connections, 0 test(s)")
+        );
         let three = call_tool(&mut s, "god_nodes", json!({"top_n": 3}));
         assert!(
             three.contains("\n  1. AuthService - 2 connections, 0 test(s)"),
@@ -13353,7 +13397,7 @@ mod tests {
     /// union (and without hitting an unmigrated accessor panic).
     #[test]
     fn shard_mode_server_answers_tools_end_to_end() {
-        use synaptic_store::{migrate, ShardStore};
+        use synaptic_store::{ShardStore, migrate};
         let mk = |id: &str, label: &str, repo: &str| synaptic_core::Node {
             id: NodeId(id.into()),
             label: label.into(),
@@ -13428,7 +13472,7 @@ mod tests {
     /// drop with the old provider.
     #[test]
     fn shard_mode_hot_reload_picks_up_a_store_rewrite() {
-        use synaptic_store::{migrate, ShardStore};
+        use synaptic_store::{ShardStore, migrate};
         let mk = |id: &str, repo: &str| synaptic_core::Node {
             id: NodeId(id.into()),
             label: format!("{id}_fn"),
@@ -13484,7 +13528,7 @@ mod tests {
     /// covered by shard_mode_isolation_opt_out_stops_at_the_boundary.
     #[test]
     fn shard_mode_cross_repo_walks_follow_the_bridge() {
-        use synaptic_store::{migrate, ShardStore};
+        use synaptic_store::{ShardStore, migrate};
         let mk = |id: &str, label: &str, repo: &str| synaptic_core::Node {
             id: NodeId(id.into()),
             label: label.into(),
@@ -13555,7 +13599,7 @@ mod tests {
     /// the path tool says how to lift the isolation.
     #[test]
     fn shard_mode_isolation_opt_out_stops_at_the_boundary() {
-        use synaptic_store::{migrate, ShardStore};
+        use synaptic_store::{ShardStore, migrate};
         let mk = |id: &str, label: &str, repo: &str| synaptic_core::Node {
             id: NodeId(id.into()),
             label: label.into(),

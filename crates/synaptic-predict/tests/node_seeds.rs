@@ -1,6 +1,6 @@
 use synaptic_core::{GraphData, NodeId};
 use synaptic_graph::KnowledgeGraph;
-use synaptic_predict::{forecast_nodes, ForecastOptions};
+use synaptic_predict::{ForecastOptions, forecast_nodes};
 
 #[test]
 fn arbitrary_operation_seed_forecasts_wrappers_and_tests() {

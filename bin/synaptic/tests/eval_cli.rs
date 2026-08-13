@@ -45,9 +45,11 @@ fn eval_replay_scores_a_commit_against_ground_truth() {
     )
     .unwrap();
     git(root, &["add", "-A"]);
-    assert!(git(root, &["commit", "-q", "-m", "init", "--no-gpg-sign"])
-        .status
-        .success());
+    assert!(
+        git(root, &["commit", "-q", "-m", "init", "--no-gpg-sign"])
+            .status
+            .success()
+    );
     let c1 = String::from_utf8(git(root, &["rev-parse", "HEAD"]).stdout).unwrap();
     let c1 = c1.trim();
 
@@ -101,9 +103,11 @@ fn eval_replay_handles_an_empty_range() {
     }
     std::fs::write(root.join("a.py"), b"def f():\n    return 1\n").unwrap();
     git(root, &["add", "-A"]);
-    assert!(git(root, &["commit", "-q", "-m", "init", "--no-gpg-sign"])
-        .status
-        .success());
+    assert!(
+        git(root, &["commit", "-q", "-m", "init", "--no-gpg-sign"])
+            .status
+            .success()
+    );
     // HEAD..HEAD is empty: a clean, zero-commit report, not an error.
     let p = synaptic(&["eval", "replay", "HEAD", "--json"], root);
     assert!(

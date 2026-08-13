@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use reqwest::Url;
 
-use crate::security::{safe_fetch, safe_fetch_text, FetchError, MAX_FETCH_BYTES};
+use crate::security::{FetchError, MAX_FETCH_BYTES, safe_fetch, safe_fetch_text};
 
 /// What kind of resource a URL points at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -455,8 +455,7 @@ mod tests {
 
     #[test]
     fn html_to_markdown_strips_scripts_tags_entities() {
-        let html =
-            "<html><head><title>T</title><style>x{}</style></head><body><script>evil()</script><p>Hello&nbsp;&amp; world</p></body></html>";
+        let html = "<html><head><title>T</title><style>x{}</style></head><body><script>evil()</script><p>Hello&nbsp;&amp; world</p></body></html>";
         let md = html_to_markdown(html);
         assert!(!md.contains("evil()"), "script dropped: {md}");
         assert!(!md.contains('<'), "tags stripped: {md}");

@@ -1,4 +1,4 @@
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use synaptic_core::{FileType, GraphData, Node, NodeId};
 use synaptic_memory::{
     AccessScope, MemoryKind, MemoryPrincipal, MemoryRecord, MemoryStore, SourceArtifact,
@@ -120,10 +120,12 @@ fn records_and_retrieves_a_failed_change_outcome() {
         searched["result"]["structuredContent"]["total"], 1,
         "{searched}"
     );
-    assert!(searched["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("agent://task/42"));
+    assert!(
+        searched["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("agent://task/42")
+    );
 
     for (tool, args) in [
         ("explain_history", json!({"subject": "refresh_token"})),
@@ -180,10 +182,12 @@ fn record_change_outcome_retries_ignore_only_server_generated_timestamps() {
         }),
     );
     assert_eq!(changed["result"]["isError"], true, "{changed}");
-    assert!(changed["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("different content"));
+    assert!(
+        changed["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("different content")
+    );
 }
 
 #[test]
@@ -222,14 +226,18 @@ fn explain_decision_returns_active_grounded_decisions_only() {
         json!({"subject": "refresh_token"}),
     );
     assert_eq!(result["result"]["structuredContent"]["total"], 1);
-    assert!(result["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("ADR"));
-    assert!(result["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("docs/adr/014.md"));
+    assert!(
+        result["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("ADR")
+    );
+    assert!(
+        result["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("docs/adr/014.md")
+    );
 }
 
 #[test]
@@ -560,10 +568,12 @@ fn pull_request_impact_aggregates_memory_for_changed_files() {
         result["result"]["structuredContent"]["memory_evidence"]["total"], 1,
         "{result}"
     );
-    assert!(result["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("Authentication rollout incident"));
+    assert!(
+        result["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Authentication rollout incident")
+    );
 }
 
 struct WorkingTreeRunner;

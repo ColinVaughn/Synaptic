@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use synaptic_skillgen::Platform;
 
 const PLATFORMS: &str = "claude | agents | codex | opencode | gemini | cursor | copilot | kilo";
@@ -125,6 +125,8 @@ pub(crate) fn print_refresh_summary(summary: &synaptic_skillgen::RefreshSummary)
         println!("  refreshed {host} in {repo}");
     }
     for (repo, host, file) in &summary.skipped_edited {
-        println!("  modified, left as-is: {host} {file} in {repo} (run `synaptic install {host}` to overwrite)");
+        println!(
+            "  modified, left as-is: {host} {file} in {repo} (run `synaptic install {host}` to overwrite)"
+        );
     }
 }

@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use synaptic_api::{
-    scan_repository, ApiMaintenanceConfig, ArtifactFetchRequest, ArtifactFetcher, Ecosystem,
-    FetchedArtifact, PackageCoordinate, ScanDisposition, VendorConfig, VendorRegistry,
-    VendorSource,
+    ApiMaintenanceConfig, ArtifactFetchRequest, ArtifactFetcher, Ecosystem, FetchedArtifact,
+    PackageCoordinate, ScanDisposition, VendorConfig, VendorRegistry, VendorSource,
+    scan_repository,
 };
 use tempfile::tempdir;
 
@@ -174,9 +174,11 @@ fn partial_contracts_are_review_only_and_never_emit_repair_events() {
     );
     assert!(report.events.is_empty());
     assert_eq!(report.review_candidates.len(), 1);
-    assert!(report.review_candidates[0]
-        .confidence_basis
-        .contains("unattended"));
+    assert!(
+        report.review_candidates[0]
+            .confidence_basis
+            .contains("unattended")
+    );
 }
 
 #[test]

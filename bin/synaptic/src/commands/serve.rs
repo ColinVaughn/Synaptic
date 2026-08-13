@@ -1,13 +1,13 @@
 //! `serve` command(s) split from main.rs.
 
 use crate::commands::common::{build_server, default_graph_path};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use synaptic_core::GraphData;
-use synaptic_server::{serve_http_with_ready_file, Server};
+use synaptic_server::{Server, serve_http_with_ready_file};
 
 pub(crate) struct ServeArgs {
     pub(crate) graph: Option<PathBuf>,
@@ -209,8 +209,8 @@ fn spawn_watch_flag(
     notify::RecommendedWatcher,
 )> {
     use notify::{RecursiveMode, Watcher};
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     let flag = Arc::new(AtomicBool::new(true));
     let f = flag.clone();
@@ -285,49 +285,48 @@ fn federated_repo_roots(graph_path: &Path) -> HashMap<String, PathBuf> {
         let store = synaptic_workspace::global::GlobalStore::at(dir.to_path_buf());
         for (tag, entry) in store.list() {
             let src = Path::new(&entry.source_path);
-            if let Some(repo_root) = src.parent().and_then(Path::parent) {
-                if !repo_root.as_os_str().is_empty() {
-                    let root = repo_root
-                        .canonicalize()
-                        .unwrap_or_else(|_| repo_root.to_path_buf());
-                    roots.insert(tag, root);
-                }
+            if let Some(repo_root) = src.parent().and_then(Path::parent)
+                && !repo_root.as_os_str().is_empty()
+            {
+                let root = repo_root
+                    .canonicalize()
+                    .unwrap_or_else(|_| repo_root.to_path_buf());
+                roots.insert(tag, root);
             }
         }
     }
 
     let workspace_root = default_source_root(graph_path);
-    if workspace_root.join("synaptic-workspace.toml").is_file() {
-        if let Ok((members, repos)) =
+    if workspace_root.join("synaptic-workspace.toml").is_file()
+        && let Ok((members, repos)) =
             synaptic_workspace::workspace_build::resolve_members(&workspace_root)
-        {
-            for member in members {
-                let root = member
-                    .path
-                    .canonicalize()
-                    .unwrap_or_else(|_| member.path.clone());
-                roots.insert(member.tag, root);
-            }
-            for repo in repos {
-                let Ok(tag) = repo.resolved_tag() else {
-                    continue;
-                };
-                let candidate = if let Some(path) = repo.path {
-                    Some(workspace_root.join(path))
-                } else if repo.git.is_some() {
-                    Some(
-                        workspace_root
-                            .join("synaptic-out")
-                            .join("workspace-repos")
-                            .join(&tag),
-                    )
-                } else {
-                    None
-                };
-                if let Some(candidate) = candidate.filter(|path| path.is_dir()) {
-                    let root = candidate.canonicalize().unwrap_or(candidate);
-                    roots.insert(tag, root);
-                }
+    {
+        for member in members {
+            let root = member
+                .path
+                .canonicalize()
+                .unwrap_or_else(|_| member.path.clone());
+            roots.insert(member.tag, root);
+        }
+        for repo in repos {
+            let Ok(tag) = repo.resolved_tag() else {
+                continue;
+            };
+            let candidate = if let Some(path) = repo.path {
+                Some(workspace_root.join(path))
+            } else if repo.git.is_some() {
+                Some(
+                    workspace_root
+                        .join("synaptic-out")
+                        .join("workspace-repos")
+                        .join(&tag),
+                )
+            } else {
+                None
+            };
+            if let Some(candidate) = candidate.filter(|path| path.is_dir()) {
+                let root = candidate.canonicalize().unwrap_or(candidate);
+                roots.insert(tag, root);
             }
         }
     }
@@ -371,7 +370,7 @@ mod tests {
     #[test]
     fn workspace_federation_registers_local_external_and_git_cached_roots() {
         use synaptic_workspace::manifest::{
-            write_manifest, RepoMember, WorkspaceManifest, WorkspaceMeta,
+            RepoMember, WorkspaceManifest, WorkspaceMeta, write_manifest,
         };
 
         let workspace = tempfile::tempdir().unwrap();
@@ -461,8 +460,10 @@ mod tests {
         let error = build_verified_json_server(Path::new("missing.json"), "not-a-digest")
             .err()
             .expect("malformed digest must be rejected");
-        assert!(error
-            .to_string()
-            .contains("exactly 64 hexadecimal characters"));
+        assert!(
+            error
+                .to_string()
+                .contains("exactly 64 hexadecimal characters")
+        );
     }
 }

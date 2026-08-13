@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use toml::Value as Toml;
 
-use crate::{make_edge, make_node, Ingested};
+use crate::{Ingested, make_edge, make_node};
 
 fn load_toml(path: &Path) -> Option<Toml> {
     let text = std::fs::read_to_string(path).ok()?;

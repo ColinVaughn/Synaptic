@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{NodeId, make_id};
 use tree_sitter::{Node as TsNode, Parser};
 
 use crate::common::Builder;
@@ -511,36 +511,36 @@ impl<'tree> GoExtractor<'_, 'tree> {
         if matches!(node.kind(), "function_declaration" | "method_declaration") {
             return;
         }
-        if node.kind() == "call_expression" {
-            if let Some(func) = node.child_by_field_name("function") {
-                // cgo `C.fn()` is a native binding, not a Go call (cross-language
-                // feature only); when handled it suppresses the normal call.
-                #[cfg(feature = "cross-language")]
-                let handled = self.try_cgo_call(func, node, caller);
-                #[cfg(not(feature = "cross-language"))]
-                let handled = false;
-                if !handled {
-                    let (callee, is_member) = match func.kind() {
-                        "identifier" => (Some(self.text(func)), false),
-                        "selector_expression" => {
-                            let field = func.child_by_field_name("field").map(|f| self.text(f));
-                            let operand = func
-                                .child_by_field_name("operand")
-                                .map(|o| self.text(o))
-                                .unwrap_or_default();
-                            // Package-qualified call is resolvable; receiver is a member.
-                            (field, !self.imported_pkgs.contains(&operand))
-                        }
-                        _ => (None, false),
-                    };
-                    if let Some(callee) = callee {
-                        if !callee.is_empty() && !GO_BUILTINS.contains(&callee.as_str()) {
-                            let line = Self::line(node);
-                            self.b.resolve_call(
-                                caller, &callee, is_member, line, index, seen_pairs, true,
-                            );
-                        }
+        if node.kind() == "call_expression"
+            && let Some(func) = node.child_by_field_name("function")
+        {
+            // cgo `C.fn()` is a native binding, not a Go call (cross-language
+            // feature only); when handled it suppresses the normal call.
+            #[cfg(feature = "cross-language")]
+            let handled = self.try_cgo_call(func, node, caller);
+            #[cfg(not(feature = "cross-language"))]
+            let handled = false;
+            if !handled {
+                let (callee, is_member) = match func.kind() {
+                    "identifier" => (Some(self.text(func)), false),
+                    "selector_expression" => {
+                        let field = func.child_by_field_name("field").map(|f| self.text(f));
+                        let operand = func
+                            .child_by_field_name("operand")
+                            .map(|o| self.text(o))
+                            .unwrap_or_default();
+                        // Package-qualified call is resolvable; receiver is a member.
+                        (field, !self.imported_pkgs.contains(&operand))
                     }
+                    _ => (None, false),
+                };
+                if let Some(callee) = callee
+                    && !callee.is_empty()
+                    && !GO_BUILTINS.contains(&callee.as_str())
+                {
+                    let line = Self::line(node);
+                    self.b
+                        .resolve_call(caller, &callee, is_member, line, index, seen_pairs, true);
                 }
             }
         }
@@ -634,10 +634,11 @@ mod tests {
         );
         let fmt_id = synaptic_core::make_id(&["go", "pkg", "fmt"]);
         assert!(r.nodes.iter().any(|n| n.id.0 == fmt_id && n.label == "fmt"));
-        assert!(r
-            .edges
-            .iter()
-            .any(|e| e.relation == "imports_from" && e.target.0 == fmt_id));
+        assert!(
+            r.edges
+                .iter()
+                .any(|e| e.relation == "imports_from" && e.target.0 == fmt_id)
+        );
     }
 
     #[test]
