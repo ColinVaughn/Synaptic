@@ -110,6 +110,14 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         for child in Self::children(node) {
             if child.kind() == "import_clause" {
                 imported.extend(self.import_records(child, &stem, line));
+                if let Some(default) = Self::children(child)
+                    .into_iter()
+                    .find(|child| child.kind() == "identifier")
+                {
+                    let local = self.text(default);
+                    imported.push(local.clone());
+                    self.push_import_record(local.clone(), local, stem.clone(), line);
+                }
             }
         }
         self.tag_imported_names(edge_idx, imported);
@@ -181,6 +189,7 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         let tgt = import_stub_id(spec);
         self.add_external_node(tgt.clone(), spec.to_string());
         self.add_edge(file_nid.clone(), tgt, "imports_from", line, Some("import"));
+        self.record_commonjs_binding(node, spec, line);
     }
 
     /// EcmaScript `export { x } from 'm'` re-export: a `re_exports` edge + records.
@@ -245,15 +254,61 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                 continue;
             }
             names.push(imported.clone());
-            self.imports.push(ImportRecord {
-                local_name: local,
-                imported_name: imported,
-                module_stem: stem.to_string(),
-                source_file: self.path.clone(),
-                source_location: Some(format!("L{line}")),
-            });
+            self.push_import_record(local, imported, stem.to_string(), line);
         }
         names
+    }
+
+    fn push_import_record(
+        &mut self,
+        local_name: String,
+        imported_name: String,
+        module_stem: String,
+        line: usize,
+    ) {
+        let record = ImportRecord {
+            local_name,
+            imported_name,
+            module_stem,
+            source_file: self.path.clone(),
+            source_location: Some(format!("L{line}")),
+        };
+        if !self.imports.contains(&record) {
+            self.imports.push(record);
+        }
+    }
+
+    /// CommonJS bindings carry the same import evidence as ES imports.
+    fn record_commonjs_binding(&mut self, call: TsNode<'tree>, spec: &str, line: usize) {
+        let stem = module_stem(spec);
+        let mut value = call;
+        let mut imported = None;
+        if let Some(parent) = call.parent() {
+            if parent.kind() == "member_expression"
+                && self
+                    .field(parent, "object")
+                    .is_some_and(|node| node.id() == call.id())
+            {
+                imported = self.field(parent, "property").map(|node| self.text(node));
+                value = parent;
+            }
+        }
+        let value_id = value.id();
+        let Some(declarator) = value.parent().filter(|node| {
+            node.kind() == "variable_declarator"
+                && self
+                    .field(*node, "value")
+                    .is_some_and(|candidate| candidate.id() == value_id)
+        }) else {
+            return;
+        };
+        let Some(name) = self.field(declarator, "name") else {
+            return;
+        };
+        if name.kind() == "identifier" {
+            let local = self.text(name);
+            self.push_import_record(local.clone(), imported.unwrap_or(local), stem, line);
+        }
     }
 
     /// Emit `references` edges for the parameter/return `type_annotation`s of a

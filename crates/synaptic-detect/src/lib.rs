@@ -371,11 +371,17 @@ mod tests {
             "module.exports = {}\n",
         );
         write(dir.path(), "target/build.rs", "fn main() {}\n");
+        write(
+            dir.path(),
+            "benchmarks/haystacks/code/fixture.rs",
+            "fn fixture() {}\n",
+        );
         let r = detect(dir.path());
         let names = code_names(&r);
         assert!(names.contains(&"app.py".to_string()));
         assert!(!names.iter().any(|n| n == "index.js"));
         assert!(!names.iter().any(|n| n == "build.rs"));
+        assert!(!names.iter().any(|n| n == "fixture.rs"));
     }
 
     #[test]

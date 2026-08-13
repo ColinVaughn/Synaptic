@@ -4,22 +4,13 @@ use std::path::Path;
 
 use synaptic_core::{make_id, NodeId};
 
-/// Stem qualified with the parent dir name: `pkg/mod.py` → `pkg.mod`. Used to
-/// namespace symbol ids within a file.
+/// Extension-less path used to namespace symbol ids within a file. Keeping the
+/// full relative path avoids collisions between same-named files in parallel
+/// source sets (`src/jvmTest/.../testUtil.kt` vs `src/nonJvmTest/.../testUtil.kt`).
 pub(crate) fn file_stem(path: &str) -> String {
-    let p = Path::new(path);
-    let stem = p
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let parent = p
-        .parent()
-        .and_then(|p| p.file_name())
-        .map(|s| s.to_string_lossy().into_owned());
-    match parent {
-        Some(par) if !par.is_empty() && par != "." => format!("{par}.{stem}"),
-        _ => stem,
-    }
+    let mut p = Path::new(path).to_path_buf();
+    p.set_extension("");
+    p.to_string_lossy().replace(['/', '\\'], ".")
 }
 
 /// File-node id derived from the file's path string via `make_id`.
@@ -85,6 +76,10 @@ mod tests {
     fn stem_qualifies_with_parent_dir() {
         assert_eq!(file_stem("pkg/mod.py"), "pkg.mod");
         assert_eq!(file_stem("mod.py"), "mod");
+        assert_ne!(
+            file_stem("src/jvmTest/kotlin/app/testUtil.kt"),
+            file_stem("src/nonJvmTest/kotlin/app/testUtil.kt")
+        );
     }
 
     #[test]

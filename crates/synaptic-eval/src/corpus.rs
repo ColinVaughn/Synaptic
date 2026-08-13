@@ -538,9 +538,8 @@ mod tests {
                 "oo-java" => (100, 100),
                 "systems-go" => (100, 100),
                 "deep-python" => (100, 100),
-                // The cross-lang fixtures label only cross-language couplings,
-                // so they have no call edges (vacuous 100/100); their real
-                // assertion is the cross-edge recall check below.
+                // Cross-language fixtures primarily assert cross-edge recall;
+                // any real call edges they label must remain exact too.
                 "cross-lang-ts-rust" => (100, 100),
                 "cross-lang-grpc" => (100, 100),
                 "cross-lang-queue" => (100, 100),

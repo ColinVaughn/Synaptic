@@ -172,6 +172,8 @@ pub mod zig;
 
 pub use cache::{cached_extract_source, AST_CACHE_VERSION};
 pub use config::{ImportStyle, LanguageConfig, TypeRefStyle};
+#[cfg(feature = "cross-language")]
+pub use crosslang::prune_local_sdk_candidates;
 pub use resolve::{resolve_imports, resolve_relative_imports, ResolveStats};
 #[cfg(feature = "lang-json")]
 pub use resource::{
@@ -281,7 +283,7 @@ pub fn extract_source(path: &str, source: &[u8]) -> Option<ExtractionResult> {
         #[cfg(feature = "lang-astro")]
         "astro" => Some(webframework::extract_astro_source(path, source)),
         #[cfg(feature = "lang-dotnet")]
-        "csproj" | "fsproj" | "vbproj" | "sln" | "slnx" => {
+        "csproj" | "fsproj" | "vbproj" | "sln" | "slnx" | "xaml" => {
             Some(dotnet::extract_dotnet_source(path, source))
         }
         #[cfg(feature = "lang-markdown")]
@@ -352,6 +354,35 @@ mod tests {
     fn dispatch_routes_ts_and_tsx_extensions() {
         assert!(extract_source("a/b.ts", b"function f(): number { return 1; }\n").is_some());
         assert!(extract_source("a/b.tsx", b"function C() { return null; }\n").is_some());
+    }
+
+    #[cfg(feature = "lang-dotnet")]
+    #[test]
+    fn xaml_links_code_behind_resources_and_event_handlers() {
+        let result = extract_source(
+            "Views/MainWindow.xaml",
+            br#"<Window xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                       x:Class="ConsumerVpn.MainWindow" Loaded="OnLoaded">
+                    <ResourceDictionary Source="Themes/Colors.xaml" />
+                    <Button Click="Connect_Click" />
+                </Window>"#,
+        )
+        .expect("XAML extraction");
+
+        assert!(result.edges.iter().any(|edge| {
+            edge.relation == "references" && edge.context.as_deref() == Some("xaml_code_behind")
+        }));
+        assert!(result.edges.iter().any(|edge| {
+            edge.relation == "imports" && edge.context.as_deref() == Some("xaml_resource")
+        }));
+        assert_eq!(
+            result
+                .raw_calls
+                .iter()
+                .map(|call| call.callee.as_str())
+                .collect::<Vec<_>>(),
+            vec!["MainWindow.OnLoaded", "MainWindow.Connect_Click"]
+        );
     }
 
     #[test]

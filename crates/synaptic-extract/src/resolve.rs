@@ -38,6 +38,8 @@ pub struct ResolveStats {
     pub asset_nodes: usize,
     /// QL module imports bound to a real `.qll`/`.ql` file node.
     pub ql_bound: usize,
+    /// XAML code-behind class references bound to their real C# declaration.
+    pub xaml_bound: usize,
 }
 
 /// Strip a known JS/TS extension, returning the extensionless path.
@@ -120,7 +122,9 @@ fn build_code_index(nodes: &[Node]) -> HashMap<String, NodeId> {
         }
         let posix = n.source_file.replace('\\', "/");
         if let Some(key) = strip_js_ext(&posix) {
-            if let Some(dir) = key.strip_suffix("/index") {
+            if key == "index" {
+                index_dirs.push((String::new(), n.id.clone()));
+            } else if let Some(dir) = key.strip_suffix("/index") {
                 index_dirs.push((dir.to_string(), n.id.clone()));
             }
             by_key.entry(key).or_insert_with(|| n.id.clone());
@@ -285,12 +289,41 @@ pub fn resolve_imports(
         .iter()
         .map(|n| (n.id.clone(), n.label.clone()))
         .collect();
+    let mut xaml_code: HashMap<(String, String), Vec<NodeId>> = HashMap::new();
+    for node in nodes.iter().filter(|node| !node.source_file.is_empty()) {
+        xaml_code
+            .entry((
+                node.source_file.replace('\\', "/").to_ascii_lowercase(),
+                node.label.to_ascii_lowercase(),
+            ))
+            .or_default()
+            .push(node.id.clone());
+    }
 
     let mut new_nodes: Vec<Node> = Vec::new();
     let mut rewired_from: HashSet<NodeId> = HashSet::new();
     let mut stats = ResolveStats::default();
 
     for e in edges.iter_mut() {
+        if e.context.as_deref() == Some("xaml_code_behind") {
+            let Some(label) = label_of.get(&e.target) else {
+                continue;
+            };
+            let xaml = e.source_file.replace('\\', "/");
+            let plain = xaml.strip_suffix(".xaml").map(|path| format!("{path}.cs"));
+            let candidates = [Some(format!("{xaml}.cs")), plain];
+            let target = candidates.into_iter().flatten().find_map(|path| {
+                let ids =
+                    xaml_code.get(&(path.to_ascii_lowercase(), label.to_ascii_lowercase()))?;
+                (ids.len() == 1).then(|| ids[0].clone())
+            });
+            if let Some(target) = target {
+                rewired_from.insert(e.target.clone());
+                e.target = target;
+                stats.xaml_bound += 1;
+            }
+            continue;
+        }
         if e.context.as_deref() == Some("ql_import") {
             let Some(spec) = label_of.get(&e.target) else {
                 continue;
@@ -376,7 +409,9 @@ pub fn resolve_imports(
     // Drop specifier stubs (relative-labeled, or any we rewired away from) that
     // are no longer referenced by an edge. Bare-package stubs (`react`) keep
     // their import edge, so they survive.
-    if stats.relative_bound + stats.alias_bound + stats.assets + stats.ql_bound > 0 {
+    if stats.relative_bound + stats.alias_bound + stats.assets + stats.ql_bound + stats.xaml_bound
+        > 0
+    {
         let referenced: HashSet<&NodeId> =
             edges.iter().flat_map(|e| [&e.source, &e.target]).collect();
         nodes.retain(|n| {
@@ -386,6 +421,39 @@ pub fn resolve_imports(
         });
     }
     stats
+}
+
+#[cfg(all(test, feature = "lang-csharp", feature = "lang-dotnet"))]
+mod xaml_tests {
+    use super::*;
+    use crate::{csharp::extract_csharp_source, dotnet::extract_dotnet_source};
+
+    #[test]
+    fn code_behind_binds_for_plain_cs_and_xaml_cs_conventions() {
+        for code_path in ["Views/MainWindow.cs", "Views/MainWindow.xaml.cs"] {
+            let xaml = extract_dotnet_source(
+                "Views/MainWindow.xaml",
+                br#"<Window xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Class="Demo.MainWindow" />"#,
+            );
+            let code = extract_csharp_source(
+                code_path,
+                b"namespace Demo; public partial class MainWindow {}",
+            );
+            let mut nodes = xaml.nodes;
+            nodes.extend(code.nodes);
+            let mut edges = xaml.edges;
+            edges.extend(code.edges);
+            let stats = resolve_imports(&mut nodes, &mut edges, &AliasResolver::default());
+            assert_eq!(stats.xaml_bound, 1, "{code_path}");
+            let edge = edges
+                .iter()
+                .find(|edge| edge.context.as_deref() == Some("xaml_code_behind"))
+                .unwrap();
+            assert!(nodes
+                .iter()
+                .any(|node| node.id == edge.target && node.source_file == code_path));
+        }
+    }
 }
 
 #[cfg(all(test, feature = "lang-ql"))]
@@ -497,6 +565,18 @@ mod tests {
         let (mut nodes, mut edges) = aggregate(vec![a, idx]);
         assert_eq!(resolve_relative_imports(&mut nodes, &mut edges), 1);
         let idx_id = file_node_id("src/bar/index.ts");
+        assert!(edges
+            .iter()
+            .any(|e| e.relation == "imports_from" && e.target == idx_id));
+    }
+
+    #[test]
+    fn relative_import_resolves_to_root_index_file() {
+        let a = extract_ts_source("test/a.ts", b"import root from '../';\n");
+        let idx = extract_ts_source("index.ts", b"export default function root() {}\n");
+        let (mut nodes, mut edges) = aggregate(vec![a, idx]);
+        assert_eq!(resolve_relative_imports(&mut nodes, &mut edges), 1);
+        let idx_id = file_node_id("index.ts");
         assert!(edges
             .iter()
             .any(|e| e.relation == "imports_from" && e.target == idx_id));

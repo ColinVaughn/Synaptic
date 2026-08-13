@@ -394,10 +394,13 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         }
 
         if self.cfg.class_types.contains(&t) {
-            let Some(name_node) = self.field(node, self.cfg.name_field) else {
+            let class_name = if let Some(name_node) = self.field(node, self.cfg.name_field) {
+                self.text(name_node)
+            } else if t == "anonymous_class" {
+                format!("anonymous@{}", Self::line(node))
+            } else {
                 return;
             };
-            let class_name = self.text(name_node);
             let class_nid = NodeId(make_id(&[stem, &class_name]));
             let line = Self::line(node);
             let kind = Self::class_kind(t);
@@ -528,10 +531,16 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                         self.add_rationale(doc, dline, func_nid.clone(), stem);
                     }
                 }
-                self.function_bodies.push((func_nid, body));
+                self.function_bodies.push((func_nid.clone(), body));
                 // Mark this function node as own-bodied so the call pass skips it
                 // (it is walked here) but still recurses into anonymous callbacks.
                 self.owned_fn_nodes.insert(node.id());
+                // Named functions may be nested inside this body. Their calls are
+                // handled separately by `owned_fn_nodes`; walk structurally here
+                // so the declarations themselves are not lost.
+                for child in Self::children(body) {
+                    self.walk(child, file_nid, None, &func_nid.0, depth + 1);
+                }
             }
             return;
         }
@@ -680,16 +689,19 @@ impl<'tree> Extractor<'_, '_, 'tree> {
     /// heritage style) so heritage classification can tell interfaces from base
     /// classes. No-op for languages that don't need it.
     pub(crate) fn pre_scan(&mut self, root: TsNode<'tree>) {
-        let kinds: &[&str] = match self.cfg.heritage_style {
-            Some(HeritageStyle::CSharp) => &["interface_declaration"],
-            Some(HeritageStyle::Swift) => &["protocol_declaration"],
-            _ => return,
-        };
         let mut stack = vec![root];
         while let Some(n) = stack.pop() {
-            if kinds.contains(&n.kind()) {
+            if self.cfg.class_types.contains(&n.kind()) {
                 if let Some(name) = self.field(n, self.cfg.name_field) {
-                    self.interface_names.insert(self.text(name));
+                    let name = self.text(name);
+                    self.declared_types.insert(name.clone());
+                    if matches!(
+                        (self.cfg.heritage_style, n.kind()),
+                        (Some(HeritageStyle::CSharp), "interface_declaration")
+                            | (Some(HeritageStyle::Swift), "protocol_declaration")
+                    ) {
+                        self.interface_names.insert(name);
+                    }
                 }
             }
             for c in Self::children(n) {
@@ -698,21 +710,19 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         }
     }
 
-    pub(crate) fn run_call_pass(&mut self) {
+    pub(crate) fn run_call_pass(&mut self, root: TsNode<'tree>) {
         // Map normalized label -> node id: "run_analysis()" -> "run_analysis",
         // ".forward()" -> "forward" (reference: raw.strip("()").lstrip(".")).
         let mut label_to_nid: HashMap<String, NodeId> = HashMap::new();
-        for n in &self.nodes {
-            let key = n
-                .label
-                .trim_matches(|c| c == '(' || c == ')')
-                .trim_start_matches('.')
-                .to_string();
+        for n in self.nodes.iter().filter(|n| !n.source_file.is_empty()) {
+            let key = n.label.trim_matches(|c| c == '(' || c == ')').to_string();
             label_to_nid.insert(key, n.id.clone());
         }
 
+        let file_nid = file_node_id(&self.path);
         let bodies = std::mem::take(&mut self.function_bodies);
         let mut seen_pairs: HashSet<(NodeId, NodeId)> = HashSet::new();
+        self.walk_calls(root, &file_nid, &label_to_nid, &mut seen_pairs, 0);
         for (caller, body) in bodies {
             self.walk_calls(body, &caller, &label_to_nid, &mut seen_pairs, 0);
         }
@@ -803,7 +813,23 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         if self.cfg.builtins.contains(&callee.as_str()) {
             return;
         }
-        match label_to_nid.get(&callee) {
+        let defer_member = is_member
+            && (matches!(
+                self.cfg.import_style,
+                Some(ImportStyle::Java | ImportStyle::Swift | ImportStyle::CSharp)
+            ) || (matches!(self.cfg.import_style, Some(ImportStyle::Python))
+                && callee.contains('.')));
+        let member_lookup = format!(".{callee}");
+        let target = if defer_member {
+            None
+        } else if is_member {
+            label_to_nid.get(&member_lookup)
+        } else {
+            label_to_nid
+                .get(&callee)
+                .or_else(|| label_to_nid.get(&member_lookup))
+        };
+        match target {
             Some(tgt) if tgt != caller => {
                 let pair = (caller.clone(), tgt.clone());
                 if seen_pairs.insert(pair) {
@@ -829,6 +855,22 @@ impl<'tree> Extractor<'_, '_, 'tree> {
     /// grammars whose call node names the callee positionally, e.g. Kotlin/Swift
     /// `call_expression`).
     fn callee_name(&self, call: TsNode<'tree>) -> Option<(String, bool)> {
+        if matches!(self.cfg.import_style, Some(ImportStyle::Java))
+            && call.kind() == "method_invocation"
+        {
+            let name = self.text(self.field(call, "name")?);
+            return Some(match self.field(call, "object") {
+                Some(object) => (
+                    format!(
+                        "{}.{}",
+                        self.text(object).replace(char::is_whitespace, ""),
+                        name
+                    ),
+                    true,
+                ),
+                None => (name, false),
+            });
+        }
         let func = if self.cfg.call_function_field.is_empty() {
             Self::children(call).into_iter().find(|c| c.is_named())?
         } else {
@@ -845,11 +887,34 @@ impl<'tree> Extractor<'_, '_, 'tree> {
             Some((self.text(func), false))
         } else if self.cfg.call_accessor_node_types.contains(&func.kind()) {
             let attr = self.field(func, self.cfg.call_accessor_field)?;
-            Some((self.text(attr), true))
+            let member = self.text(attr);
+            let full = self.text(func).replace(char::is_whitespace, "");
+            let explicit_type_receiver = matches!(self.cfg.import_style, Some(ImportStyle::Python))
+                && self
+                    .field(func, "object")
+                    .map(|object| self.text(object))
+                    .and_then(|object| object.rsplit('.').next().map(str::to_string))
+                    .and_then(|receiver| receiver.chars().next())
+                    .is_some_and(char::is_uppercase);
+            Some((
+                if (self.cfg.heritage_style == Some(crate::config::HeritageStyle::CSharp)
+                    || explicit_type_receiver)
+                    && full.contains('.')
+                {
+                    full
+                } else {
+                    member
+                },
+                true,
+            ))
         } else if func.kind() == "navigation_expression" {
             // Kotlin/Swift member call `recv.method()`: the member is the last
             // identifier (directly, or inside the last `navigation_suffix`).
-            self.navigation_member(func).map(|m| (m, true))
+            if matches!(self.cfg.import_style, Some(ImportStyle::Swift)) {
+                Some((self.text(func).replace(char::is_whitespace, ""), true))
+            } else {
+                self.navigation_member(func).map(|m| (m, true))
+            }
         } else {
             Some((self.text(func), false))
         }
@@ -877,14 +942,14 @@ impl<'tree> Extractor<'_, '_, 'tree> {
 
     /// Resolve a name to an existing in-file node id, else a global id (creating a
     /// stub node when unseen).
-    pub(crate) fn ensure_named_node(&mut self, name: &str, stem: &str, line: usize) -> NodeId {
+    pub(crate) fn ensure_named_node(&mut self, name: &str, stem: &str, _line: usize) -> NodeId {
         let local = NodeId(make_id(&[stem, name]));
-        if self.seen.contains(&local) {
+        if self.seen.contains(&local) || self.declared_types.contains(name) {
             return local;
         }
         let global = NodeId(make_id(&[name]));
         if !self.seen.contains(&global) {
-            self.add_node(global.clone(), name.to_string(), line);
+            self.add_external_node(global.clone(), name.to_string());
         }
         global
     }

@@ -11,6 +11,8 @@ serde_json = { workspace = true }
 base64 = { workspace = true }
 synaptic-core = { workspace = true }
 synaptic-graph = { workspace = true }
+synaptic-output = { workspace = true }
+synaptic-report = { workspace = true }
 synaptic-query = { workspace = true }
 synaptic-incremental = { workspace = true }
 synaptic-prs = { workspace = true }

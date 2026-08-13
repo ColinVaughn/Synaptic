@@ -225,14 +225,14 @@ impl Builder {
 
     /// Resolve `name` to an existing scoped node id, else a global id (creating a
     /// stub when unseen).
-    pub fn ensure_named_node(&mut self, name: &str, scope: &str, line: usize) -> NodeId {
+    pub fn ensure_named_node(&mut self, name: &str, scope: &str, _line: usize) -> NodeId {
         let local = NodeId(make_id(&[scope, name]));
         if self.seen.contains(&local) {
             return local;
         }
         let global = NodeId(make_id(&[name]));
         if !self.seen.contains(&global) {
-            self.add_node(global.clone(), name.to_string(), line);
+            self.add_external_node(global.clone(), name.to_string());
         }
         global
     }
@@ -241,7 +241,7 @@ impl Builder {
     /// `.bar()`→`bar` (last-write-wins on collision).
     pub fn label_index(&self) -> HashMap<String, NodeId> {
         let mut idx = HashMap::new();
-        for n in &self.nodes {
+        for n in self.nodes.iter().filter(|n| !n.source_file.is_empty()) {
             let key = n
                 .label
                 .trim_matches(|c| c == '(' || c == ')')

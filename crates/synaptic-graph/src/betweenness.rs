@@ -12,7 +12,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use synaptic_core::NodeId;
 
-use crate::graph::KnowledgeGraph;
+use crate::graph::{is_structural_edge, is_structural_node, KnowledgeGraph};
 
 /// Above this node count, node betweenness is sampled.
 const SAMPLE_THRESHOLD: usize = 1000;
@@ -21,13 +21,17 @@ const SAMPLE_K: usize = 100;
 
 /// Sorted node ids + undirected, deduped, self-loop-free adjacency (by index).
 fn undirected_adj(kg: &KnowledgeGraph) -> (Vec<NodeId>, Vec<Vec<usize>>) {
-    let mut ids: Vec<NodeId> = kg.nodes().map(|n| n.id.clone()).collect();
+    let mut ids: Vec<NodeId> = kg
+        .nodes()
+        .filter(|node| is_structural_node(node))
+        .map(|node| node.id.clone())
+        .collect();
     ids.sort();
     ids.dedup();
     let index: HashMap<&NodeId, usize> = ids.iter().enumerate().map(|(i, id)| (id, i)).collect();
     let mut sets: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); ids.len()];
     for e in kg.edges() {
-        if e.source == e.target {
+        if e.source == e.target || !is_structural_edge(e) {
             continue;
         }
         let (Some(&a), Some(&b)) = (index.get(&e.source), index.get(&e.target)) else {

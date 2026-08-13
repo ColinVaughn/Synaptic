@@ -99,6 +99,7 @@ pub fn extract_with_config(path: &str, source: &[u8], cfg: &LanguageConfig) -> E
         seen: HashSet::new(),
         function_bodies: Vec::new(),
         interface_names: HashSet::new(),
+        declared_types: HashSet::new(),
         owned_fn_nodes: HashSet::new(),
     };
 
@@ -112,7 +113,7 @@ pub fn extract_with_config(path: &str, source: &[u8], cfg: &LanguageConfig) -> E
     let stem = file_stem(path);
     ex.pre_scan(tree.root_node());
     ex.walk(tree.root_node(), &file_nid, None, &stem, 0);
-    ex.run_call_pass();
+    ex.run_call_pass(tree.root_node());
     ex.scan_rationale_comments(&file_nid, &stem);
     // Module docstring (Python only; class/function docstrings are handled inline
     // during the walk so there is no second parse). Skips auto-generated files.
@@ -145,6 +146,10 @@ struct Extractor<'cfg, 'src, 'tree> {
     /// classification (C#/Swift) can tell interfaces from base classes. Empty
     /// unless the language's heritage style uses it.
     interface_names: HashSet<String>,
+    /// All type declarations in this file, collected before the main walk so
+    /// references to a type declared later use its scoped id instead of a
+    /// global shadow node.
+    declared_types: HashSet<String>,
     /// tree-sitter ids of the function/method nodes that got their OWN graph node
     /// (and whose body is walked on its own). The call pass uses this to tell a
     /// named nested function (skip -- walked separately) from an anonymous callback

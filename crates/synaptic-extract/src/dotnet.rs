@@ -22,12 +22,12 @@ use std::sync::LazyLock;
 #[cfg(feature = "lang-dotnet")]
 use regex::Regex;
 #[cfg(feature = "lang-dotnet")]
-use synaptic_core::{make_id, FileType, NodeId};
+use synaptic_core::{make_id, FileType, NodeId, RawCall};
 
 #[cfg(feature = "lang-dotnet")]
 use crate::common::Builder;
 #[cfg(feature = "lang-dotnet")]
-use crate::paths::{file_node_id, resolve_relative_path};
+use crate::paths::{file_node_id, file_stem, resolve_relative_path};
 #[cfg(feature = "lang-dotnet")]
 use crate::result::ExtractionResult;
 
@@ -58,6 +58,7 @@ pub fn extract_dotnet_source(path: &str, source: &[u8]) -> ExtractionResult {
     match ext.as_str() {
         "sln" => extract_sln(path, source),
         "slnx" => extract_slnx(path, source),
+        "xaml" => extract_xaml(path, source),
         _ => extract_csproj(path, source), // csproj / fsproj / vbproj
     }
 }
@@ -122,6 +123,116 @@ fn add_framework(b: &mut Builder, file_nid: &NodeId, fw: &str, line: usize) {
         line,
         Some("target_framework"),
     );
+}
+
+#[cfg(feature = "lang-dotnet")]
+const XAML_EVENTS: &[&str] = &[
+    "Activated",
+    "Checked",
+    "Click",
+    "Closing",
+    "Closed",
+    "Deactivated",
+    "Exit",
+    "Initialized",
+    "KeyDown",
+    "KeyUp",
+    "Loaded",
+    "MouseDown",
+    "MouseUp",
+    "SelectionChanged",
+    "Startup",
+    "TextChanged",
+    "Unchecked",
+    "Unloaded",
+];
+
+#[cfg(feature = "lang-dotnet")]
+fn is_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|first| first == '_' || first.is_alphabetic())
+        && chars.all(|character| character == '_' || character.is_alphanumeric())
+}
+
+#[cfg(feature = "lang-dotnet")]
+fn xaml_resource_path(value: &str) -> &str {
+    let value = value.trim_start_matches('/');
+    value
+        .split_once(";component/")
+        .map_or(value, |(_, relative)| relative)
+}
+
+/// WPF/WinUI XAML: connect markup to its code-behind class, resource files, and
+/// named event handlers. XML safety matches the project-file extractor.
+#[cfg(feature = "lang-dotnet")]
+fn extract_xaml(path: &str, source: &[u8]) -> ExtractionResult {
+    let (mut b, file_nid) = builder_with_file(path);
+    let Ok(text) = std::str::from_utf8(source) else {
+        return b.into_result();
+    };
+    if !xml_is_safe(text) {
+        return b.into_result();
+    }
+    let Ok(doc) = roxmltree::Document::parse(text) else {
+        return b.into_result();
+    };
+
+    let root = doc.root_element();
+    let class_name = root
+        .attributes()
+        .find(|attribute| attribute.name() == "Class")
+        .map(|attribute| attribute.value().trim())
+        .filter(|value| !value.is_empty());
+    let class_simple = class_name.and_then(|name| name.rsplit('.').next());
+    if let Some(class_simple) = class_simple {
+        let code_path = format!("{path}.cs");
+        let class_id = NodeId(make_id(&[&file_stem(&code_path), class_simple]));
+        b.add_external_node(class_id.clone(), class_simple.to_string());
+        b.add_edge(
+            file_nid.clone(),
+            class_id,
+            "references",
+            xml_line(&doc, root),
+            Some("xaml_code_behind"),
+        );
+    }
+
+    for node in doc.descendants().filter(roxmltree::Node::is_element) {
+        let line = xml_line(&doc, node);
+        for attribute in node.attributes() {
+            let name = attribute.name();
+            let value = attribute.value().trim();
+            let resource_context = match (node.tag_name().name(), name) {
+                ("Application", "StartupUri") => Some("xaml_startup"),
+                ("ResourceDictionary", "Source") => Some("xaml_resource"),
+                _ => None,
+            };
+            if let Some(context) = resource_context {
+                if value.to_ascii_lowercase().ends_with(".xaml")
+                    && !value.contains("://")
+                    && !value.starts_with("pack:")
+                {
+                    let resolved = resolve_relative_path(path, xaml_resource_path(value));
+                    let target = file_node_id(&resolved);
+                    b.add_external_node(target.clone(), filename(&resolved));
+                    b.add_edge(file_nid.clone(), target, "imports", line, Some(context));
+                }
+            }
+            if class_simple.is_some() && XAML_EVENTS.contains(&name) && is_identifier(value) {
+                b.raw_calls.push(RawCall {
+                    caller: file_nid.clone(),
+                    callee: format!("{}.{}", class_simple.unwrap_or_default(), value),
+                    is_member_call: true,
+                    source_file: path.to_string(),
+                    source_location: Some(format!("L{line}")),
+                    span: None,
+                });
+            }
+        }
+    }
+    b.into_result()
 }
 
 /// `.csproj` / `.fsproj` / `.vbproj` — MSBuild XML.
@@ -518,6 +629,31 @@ EndProject
                 .any(|e| e.relation == "imports" && e.source == app && e.target == lib),
             "{:?}",
             r.edges
+        );
+    }
+
+    #[test]
+    fn xaml_pack_resource_paths_resolve_relative_to_the_markup() {
+        let r = extract_dotnet_source(
+            "Views/App.xaml",
+            br#"<Application xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+                <ResourceDictionary Source="/Demo;component/Styles.xaml" />
+                <ResourceDictionary Source="/Keyboard.xaml" />
+            </Application>"#,
+        );
+        let targets = r
+            .edges
+            .iter()
+            .filter(|edge| edge.context.as_deref() == Some("xaml_resource"))
+            .map(|edge| edge.target.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            targets.contains(&file_node_id("Views/Styles.xaml")),
+            "{targets:?}"
+        );
+        assert!(
+            targets.contains(&file_node_id("Views/Keyboard.xaml")),
+            "{targets:?}"
         );
     }
 }

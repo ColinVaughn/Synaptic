@@ -24,21 +24,31 @@ fn calls_inside_anonymous_callbacks_attribute_to_the_enclosing_fn() {
 }
 
 #[test]
-fn calls_in_nested_named_functions_attribute_to_the_enclosing_named_fn() {
-    // The generic walker does not create a node for a function nested inside a
-    // function body, so its calls would otherwise be lost. They attribute to the
-    // enclosing named fn instead (recovering an otherwise-0-caller helper). The
-    // `owned_fn_nodes` guard means that if the nested function ever DID get its own
-    // node, its calls would stay on it rather than double-attributing here.
+fn calls_in_nested_named_functions_stay_on_the_nested_fn() {
+    // Named nested functions have their own node, so their calls stay on that
+    // node instead of being double-attributed to the enclosing function.
     let src = b"function helper() { return 1; }\nfunction outer() {\n  function inner() { return helper(); }\n  return inner();\n}\n";
     let r = extract_source("n.js", src).unwrap();
     let outer = r.nodes.iter().find(|n| n.label == "outer()").unwrap();
+    let inner = r.nodes.iter().find(|n| n.label == "inner()").unwrap();
     let helper = r.nodes.iter().find(|n| n.label == "helper()").unwrap();
     assert!(
         r.edges
             .iter()
+            .any(|e| e.relation == "calls" && e.source == inner.id && e.target == helper.id),
+        "the nested function owns its call to helper"
+    );
+    assert!(
+        r.edges
+            .iter()
+            .any(|e| e.relation == "calls" && e.source == outer.id && e.target == inner.id),
+        "the enclosing function calls the nested function"
+    );
+    assert!(
+        !r.edges
+            .iter()
             .any(|e| e.relation == "calls" && e.source == outer.id && e.target == helper.id),
-        "a call in a nested (node-less) fn attributes to the enclosing named fn"
+        "the nested call is not double-attributed to the enclosing function"
     );
 }
 

@@ -10,6 +10,43 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.10] - 2026-08-12
+
+### Added
+
+- XAML extraction now links markup to code-behind classes, event handlers, and
+  relative pack resources.
+- JavaScript and TypeScript extraction records module-scope calls, CommonJS
+  bindings, and import evidence used by cross-file resolution.
+- Cross-language evaluation now covers mounted HTTP routes, queue handlers,
+  PyO3 exports, and WebSocket-to-C# handlers with explicit negative examples.
+
+### Changed
+
+- C# and .NET extraction now retains namespaces, receiver-qualified calls,
+  forward type references, solution/project relationships, and SDK evidence
+  without treating repository-owned packages as external dependencies.
+- Symbol resolution is receiver- and language-aware for C#, Rust, Java,
+  Python, Swift, XAML, JavaScript, C, and C++, reducing name-only matches across
+  unrelated owners and languages.
+- Structural analysis excludes SDK-observation nodes and edges from community,
+  clustering, and betweenness calculations while keeping them queryable.
+
+### Fixed
+
+- Nested named functions, PHP anonymous classes, Ruby punctuation-bearing
+  methods, Swift extensions, and declarations recovered from malformed Swift
+  syntax now keep distinct nodes and correct call ownership.
+- File-derived symbol scopes now include the full relative path, preventing
+  same-named files in parallel Kotlin source sets from colliding.
+- Unresolved referenced symbols are external stubs instead of source-located
+  callable nodes, eliminating false call targets in mixed-language graphs.
+- Ordinary source files whose names contain `token`, `password`, or `secret`
+  are no longer discarded as sensitive; exact secret-file patterns remain
+  excluded.
+- Cold-cache audits of eight pinned open-source repositories found no dangling
+  edges, empty call targets, or duplicate call pairs after these corrections.
+
 ## [0.9.9] - 2026-08-09
 
 ### Added
@@ -2285,7 +2322,9 @@ parameters), and `graph.json` gains only additive edge keys.
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.8...HEAD
+[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.10...HEAD
+[0.9.10]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.9...v0.9.10
+[0.9.9]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.8...v0.9.9
 [0.9.8]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.5...v0.9.6

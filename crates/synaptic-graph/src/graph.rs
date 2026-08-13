@@ -5,6 +5,23 @@ use petgraph::visit::EdgeRef;
 use petgraph::{Directed, Direction};
 use synaptic_core::{Edge, GraphData, Hyperedge, Node, NodeId};
 
+/// Observation overlays are useful evidence, but they are not part of the code
+/// structure used for clustering or centrality.
+pub fn is_structural_node(node: &Node) -> bool {
+    !matches!(
+        node.extra
+            .get("_node_type")
+            .and_then(|value| value.as_str()),
+        Some("external_surface_observation" | "sdk_call_candidate")
+    )
+}
+
+/// Zero-weight annotations and provisional SDK candidates are evidence overlays,
+/// not structural connections. Bound SDK usage is represented by `uses_api`.
+pub fn is_structural_edge(edge: &Edge) -> bool {
+    edge.weight > 0.0 && edge.relation != "calls_sdk"
+}
+
 /// A built knowledge graph: a `petgraph` of `Node`s and `Edge`s plus the
 /// `NodeId → NodeIndex` lookup, hyperedges, and provenance. Internally always
 /// `Directed` (edge weights carry the logical `source`/`target`); `directed`

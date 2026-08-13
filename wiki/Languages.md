@@ -46,9 +46,9 @@ Edge relations:
 
 ### Python (`.py`)
 
-Classes and functions/methods; `import` and `from ... import` with relative
-import resolution; `inherits` from base classes; parameter and return type
-references; intra-file `calls`. Module, class, and function docstrings and
+Classes and functions/methods, including nested named functions; `import` and
+`from ... import` with relative import resolution; `inherits` from base classes; parameter and return type
+references; receiver-aware `calls`. Module, class, and function docstrings and
 marked comments become rationale nodes (`rationale_for` edges). Auto-generated
 files (protobuf, Alembic, Django migrations) skip docstring rationale.
 
@@ -80,7 +80,8 @@ Functions, methods, and struct/enum/trait types; `imports_from` for `use`;
 Classes and interfaces, methods and constructors; `imports` (tail of a dotted
 name, wildcard imports use the package's last segment); `inherits` (extends),
 `implements`; type `references` for parameters, returns, fields, generic args,
-and `@`-annotations; `calls`.
+and `@`-annotations; receiver-aware `calls` that do not bind an explicit static
+receiver to an unrelated same-named method.
 
 ### C# (`.cs`)
 
@@ -98,10 +99,12 @@ member calls.
 
 ### Swift (`.swift`)
 
-Classes and protocols; functions, plus `init`, `deinit`, and `subscript`
-members; module imports; `inherits` (class base) vs `implements` (protocols)
-classified by an in-file protocol pre-scan; parameter, return, and field type
-references; `calls`.
+Classes and protocols; functions and extension members, plus `init`, `deinit`,
+and `subscript` members; module imports; `inherits` (class base) vs `implements`
+(protocols) classified by an in-file protocol pre-scan; parameter, return, and field type
+references; receiver-aware `calls`. A bounded source recovery pass preserves
+declarations when malformed syntax causes the Swift grammar to swallow the
+remainder of an extension.
 
 ### Scala (`.scala`, `.sc`)
 
@@ -129,14 +132,16 @@ return, and field type `references`; `calls`.
 
 ### Ruby (`.rb`)
 
-Classes and modules; methods; `inherits` from a superclass; `mixes_in` for
+Classes and modules; methods, including declarations nested in metaprogramming
+blocks; punctuation-bearing names such as `call!` and `accept?` retain distinct
+identities; `inherits` from a superclass; `mixes_in` for
 `include` / `extend` / `prepend`; `imports_from` for `require`,
 `require_relative`, and `load`; `calls`.
 
 ### PHP (`.php`)
 
-Classes, interfaces, traits, enums; methods and functions; `use A\B\C` imports
-(tail); `inherits` / `implements`; property, parameter, and return type
+Classes, interfaces, traits, enums, and anonymous classes; methods and functions;
+`use A\B\C` imports (tail); `inherits` / `implements`; property, parameter, and return type
 references; `calls` including `$this->method()`. A second Laravel-aware pass adds
 framework edges (see below).
 

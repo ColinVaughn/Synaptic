@@ -54,6 +54,175 @@ fn is_resolvable(n: &Node) -> bool {
     !normalize_label(label).is_empty()
 }
 
+fn member_call_index(kg: &KnowledgeGraph) -> HashMap<(String, String), Vec<NodeId>> {
+    let mut index: HashMap<(String, String), Vec<NodeId>> = HashMap::new();
+    for edge in kg.edges().filter(|edge| edge.relation == "method") {
+        let (Some(owner), Some(method)) = (kg.node(&edge.source), kg.node(&edge.target)) else {
+            continue;
+        };
+        index
+            .entry((
+                normalize_label(&owner.label),
+                normalize_label(&method.label),
+            ))
+            .or_default()
+            .push(method.id.clone());
+    }
+    index
+}
+
+fn owned_member_call_index(kg: &KnowledgeGraph) -> HashMap<(NodeId, String), Vec<NodeId>> {
+    let mut index = HashMap::new();
+    for edge in kg.edges().filter(|edge| edge.relation == "method") {
+        let Some(method) = kg.node(&edge.target) else {
+            continue;
+        };
+        index
+            .entry((edge.source.clone(), normalize_label(&method.label)))
+            .or_insert_with(Vec::new)
+            .push(method.id.clone());
+    }
+    index
+}
+
+fn method_owners(kg: &KnowledgeGraph) -> HashMap<NodeId, String> {
+    kg.edges()
+        .filter(|edge| edge.relation == "method")
+        .filter_map(|edge| {
+            Some((
+                edge.target.clone(),
+                normalize_label(&kg.node(&edge.source)?.label),
+            ))
+        })
+        .collect()
+}
+
+fn typed_member_target(
+    kg: &KnowledgeGraph,
+    call: &RawCall,
+    members: &HashMap<(String, String), Vec<NodeId>>,
+    owned_members: &HashMap<(NodeId, String), Vec<NodeId>>,
+    owners: &HashMap<NodeId, String>,
+) -> Option<NodeId> {
+    if !call.is_member_call {
+        return None;
+    }
+    let (receiver, member) = call.callee.rsplit_once('.')?;
+    let source = call.source_file.to_ascii_lowercase();
+    if source.ends_with(".xaml") {
+        let owner = kg
+            .edges()
+            .find(|edge| {
+                edge.source == call.caller && edge.context.as_deref() == Some("xaml_code_behind")
+            })?
+            .target
+            .clone();
+        let candidates = owned_members.get(&(owner, normalize_label(member)))?;
+        return (candidates.len() == 1).then(|| candidates[0].clone());
+    }
+    if source.ends_with(".rs") {
+        let receiver = receiver.rsplit("::").next().unwrap_or(receiver);
+        let owner = if matches!(receiver, "self" | "Self") {
+            owners.get(&call.caller)?.clone()
+        } else {
+            normalize_label(receiver)
+        };
+        let candidates = members.get(&(owner, normalize_label(member)))?;
+        return (candidates.len() == 1).then(|| candidates[0].clone());
+    }
+    if !matches!(
+        Path::new(&source).extension().and_then(|ext| ext.to_str()),
+        Some("cs" | "java" | "swift" | "py")
+    ) {
+        return None;
+    }
+    let receiver = receiver.rsplit('.').next().unwrap_or(receiver);
+    let owner = if matches!(receiver, "this" | "self" | "Self") {
+        owners.get(&call.caller).cloned()
+    } else if receiver.chars().next().is_some_and(char::is_uppercase) {
+        Some(normalize_label(receiver))
+    } else {
+        kg.node(&call.caller)
+            .and_then(Node::signature)
+            .and_then(|signature| {
+                signature
+                    .params
+                    .into_iter()
+                    .find(|param| param.name == receiver)
+                    .and_then(|param| param.type_ref)
+            })
+            .map(|ty| {
+                normalize_label(
+                    ty.trim_end_matches('?')
+                        .rsplit(['.', ':'])
+                        .next()
+                        .unwrap_or(&ty),
+                )
+            })
+    };
+    if let Some(owner) = owner {
+        let candidates = members.get(&(owner, normalize_label(member)))?;
+        return (candidates.len() == 1).then(|| candidates[0].clone());
+    }
+
+    // Java local fields are not part of method signatures. Preserve the old
+    // useful fallback only when the receiver is a value (not an explicit type)
+    // and exactly one Java method has that name repository-wide.
+    if source.ends_with(".java") {
+        let member = normalize_label(member);
+        let candidates: Vec<_> = members
+            .iter()
+            .filter(|((_, name), _)| name == &member)
+            .flat_map(|(_, ids)| ids)
+            .filter(|id| {
+                kg.node(id)
+                    .is_some_and(|node| node.source_file.to_ascii_lowercase().ends_with(".java"))
+            })
+            .collect();
+        return (candidates.len() == 1).then(|| candidates[0].clone());
+    }
+    None
+}
+
+fn source_family(path: &str) -> Option<String> {
+    let extension = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+    Some(
+        match extension.as_str() {
+            "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" => "ecmascript",
+            "rs" => "rust",
+            "c" | "h" | "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" => "native",
+            "java" | "kt" | "kts" | "groovy" | "scala" => "jvm",
+            _ => extension.as_str(),
+        }
+        .to_string(),
+    )
+}
+
+fn call_candidates(kg: &KnowledgeGraph, call: &RawCall, ids: &[NodeId]) -> Vec<NodeId> {
+    let family = source_family(&call.source_file);
+    ids.iter()
+        .filter_map(|id| {
+            let node = kg.node(id)?;
+            if family.is_some() && source_family(&node.source_file) != family {
+                return None;
+            }
+            if matches!(family.as_deref(), Some("ecmascript" | "rust" | "native"))
+                && !matches!(
+                    node.kind(),
+                    Some(
+                        synaptic_core::NodeKind::Function
+                            | synaptic_core::NodeKind::Method
+                            | synaptic_core::NodeKind::Constructor
+                    )
+                )
+            {
+                return None;
+            }
+            Some(id.clone())
+        })
+        .collect()
+}
+
 fn source_stem(source_file: &str) -> String {
     Path::new(source_file)
         .file_stem()
@@ -462,6 +631,38 @@ pub fn resolve_symbols(
     let mut out: Vec<Edge> = resolve_bash_sources(kg, raw_calls, &bash_sourced, &mut known);
     out.extend(resolve_ql_calls(kg, raw_calls, imports, &mut known));
 
+    // C# keeps the member receiver (`Type.Method` / `this.Method` / typed
+    // parameter calls), so exact owner+method matches can resolve across files
+    // without guessing by globally-unique method name.
+    let members = member_call_index(kg);
+    let owned_members = owned_member_call_index(kg);
+    let owners = method_owners(kg);
+    for call in raw_calls {
+        let Some(target) = typed_member_target(kg, call, &members, &owned_members, &owners) else {
+            continue;
+        };
+        if call.caller == target
+            || !known.insert((call.caller.clone(), target.clone(), "calls".to_string()))
+        {
+            continue;
+        }
+        out.push(calls_edge(
+            call.caller.clone(),
+            target,
+            Confidence::Extracted,
+            1.0,
+            if call.source_file.to_ascii_lowercase().ends_with(".xaml") {
+                "xaml_event_handler"
+            } else if call.source_file.to_ascii_lowercase().ends_with(".rs") {
+                "rust_typed_member_call"
+            } else {
+                "typed_member_call"
+            },
+            call.source_file.clone(),
+            call.source_location.clone(),
+        ));
+    }
+
     // Pass 1: import-guided (EXTRACTED, 1.0)
     let symbol_index = build_symbol_index(kg);
     let mut aliases_by_file: HashMap<&str, HashMap<&str, &ImportRecord>> = HashMap::new();
@@ -475,7 +676,10 @@ pub fn resolve_symbols(
             .insert(imp.local_name.as_str(), imp);
     }
     for rc in raw_calls {
-        if rc.is_member_call || rc.callee.starts_with("ql:") {
+        if rc.is_member_call
+            || rc.callee.starts_with("ql:")
+            || rc.source_file.to_ascii_lowercase().ends_with(".cs")
+        {
             continue;
         }
         let callee = rc.callee.trim();
@@ -495,6 +699,7 @@ pub fn resolve_symbols(
         let Some(cands) = symbol_index.get(&key) else {
             continue;
         };
+        let cands = call_candidates(kg, rc, cands);
         if cands.len() != 1 {
             continue;
         }
@@ -536,7 +741,10 @@ pub fn resolve_symbols(
     // Pass 2: cross-file single-candidate (INFERRED, 0.8)
     let label_index = build_label_index(kg);
     for rc in raw_calls {
-        if rc.is_member_call || rc.callee.starts_with("ql:") {
+        if rc.is_member_call
+            || rc.callee.starts_with("ql:")
+            || rc.source_file.to_ascii_lowercase().ends_with(".cs")
+        {
             continue;
         }
         let callee = rc.callee.trim();
@@ -546,6 +754,7 @@ pub fn resolve_symbols(
         let Some(cands) = label_index.get(&callee.to_lowercase()) else {
             continue;
         };
+        let cands = call_candidates(kg, rc, cands);
         if cands.len() != 1 {
             continue;
         }
@@ -587,6 +796,12 @@ mod tests {
             extra: Map::new(),
             ..Default::default()
         }
+    }
+
+    fn function_node(id: &str, label: &str, sf: &str) -> Node {
+        let mut n = node(id, label, sf);
+        n.set_kind(synaptic_core::NodeKind::Function);
+        n
     }
 
     fn kg(nodes: Vec<Node>, links: Vec<Edge>) -> KnowledgeGraph {
@@ -783,6 +998,90 @@ mod tests {
     }
 
     #[test]
+    fn rust_scoped_member_resolves_to_named_owner() {
+        let g = kg(
+            vec![
+                function_node("caller", "run()", "runner.rs"),
+                node("runner", "Runner", "runner.rs"),
+                function_node("runner_new", ".new()", "runner.rs"),
+                node("three", "Three", "other.rs"),
+                function_node("three_new", ".new()", "other.rs"),
+            ],
+            vec![
+                Edge {
+                    source: NodeId("runner".into()),
+                    target: NodeId("runner_new".into()),
+                    relation: "method".into(),
+                    confidence: Confidence::Extracted,
+                    confidence_score: Some(1.0),
+                    source_file: "runner.rs".into(),
+                    source_location: Some("L1".into()),
+                    weight: 1.0,
+                    context: None,
+                    cross_repo: false,
+                    extra: Map::new(),
+                },
+                Edge {
+                    source: NodeId("three".into()),
+                    target: NodeId("three_new".into()),
+                    relation: "method".into(),
+                    confidence: Confidence::Extracted,
+                    confidence_score: Some(1.0),
+                    source_file: "other.rs".into(),
+                    source_location: Some("L1".into()),
+                    weight: 1.0,
+                    context: None,
+                    cross_repo: false,
+                    extra: Map::new(),
+                },
+            ],
+        );
+        let edges = resolve_symbols(&g, &[raw("caller", "Runner.new", true, "runner.rs")], &[]);
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        assert_eq!(edges[0].target, NodeId("runner_new".into()));
+    }
+
+    #[test]
+    fn c_call_ignores_same_named_symbol_from_another_language() {
+        let g = kg(
+            vec![
+                function_node("caller", "run()", "a.c"),
+                function_node("c_target", "deflateParams()", "deflate.c"),
+                function_node("pascal_target", "deflateParams()", "pascal.pas"),
+            ],
+            vec![],
+        );
+        let edges = resolve_symbols(&g, &[raw("caller", "deflateParams", false, "a.c")], &[]);
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        assert_eq!(edges[0].target, NodeId("c_target".into()));
+    }
+
+    #[test]
+    fn ecmascript_call_does_not_resolve_to_a_type() {
+        let mut mapper = node("mapper", "Mapper", "index.d.ts");
+        mapper.set_kind(synaptic_core::NodeKind::Class);
+        let g = kg(
+            vec![function_node("caller", "run()", "index.js"), mapper],
+            vec![],
+        );
+        let edges = resolve_symbols(&g, &[raw("caller", "mapper", false, "index.js")], &[]);
+        assert!(edges.is_empty(), "{edges:?}");
+    }
+
+    #[test]
+    fn python_call_does_not_resolve_to_same_named_ruby_symbol() {
+        let g = kg(
+            vec![
+                function_node("caller", "summary.py", "summary.py"),
+                function_node("ruby_run", ".run()", "summary.rb"),
+            ],
+            vec![],
+        );
+        let edges = resolve_symbols(&g, &[raw("caller", "run", false, "summary.py")], &[]);
+        assert!(edges.is_empty(), "{edges:?}");
+    }
+
+    #[test]
     fn ambiguous_label_is_not_resolved() {
         // Two `transform()` definitions: cross-file refuses to guess.
         let g = kg(
@@ -811,6 +1110,150 @@ mod tests {
         );
         let edges = resolve_symbols(&g, &[raw("a_caller", "transform", true, "a.py")], &[]);
         assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn qualified_csharp_member_call_resolves_to_the_named_type() {
+        let g = kg(
+            vec![
+                node("caller", ".OnStartup()", "App.cs"),
+                node(
+                    "coordinator",
+                    "StandaloneUpdateCoordinator",
+                    "Coordinator.cs",
+                ),
+                node("prepare", ".PrepareForUninstall()", "Coordinator.cs"),
+            ],
+            vec![Edge {
+                source: NodeId("coordinator".into()),
+                target: NodeId("prepare".into()),
+                relation: "method".into(),
+                confidence: Confidence::Extracted,
+                confidence_score: Some(1.0),
+                source_file: "Coordinator.cs".into(),
+                source_location: Some("L2".into()),
+                weight: 1.0,
+                context: None,
+                cross_repo: false,
+                extra: Map::new(),
+            }],
+        );
+        let edges = resolve_symbols(
+            &g,
+            &[raw(
+                "caller",
+                "StandaloneUpdateCoordinator.PrepareForUninstall",
+                true,
+                "App.cs",
+            )],
+            &[],
+        );
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        assert_eq!(edges[0].target, NodeId("prepare".into()));
+    }
+
+    #[test]
+    fn csharp_bare_call_does_not_guess_a_unique_cross_file_method() {
+        let g = kg(
+            vec![
+                node("caller", ".Apply()", "App.cs"),
+                node("equals", ".Equals()", "Other.cs"),
+            ],
+            vec![],
+        );
+        let edges = resolve_symbols(&g, &[raw("caller", "Equals", false, "App.cs")], &[]);
+        assert!(
+            edges.is_empty(),
+            "C# bare call guessed across files: {edges:?}"
+        );
+    }
+
+    #[test]
+    fn java_static_call_resolves_only_to_its_named_owner() {
+        let g = kg(
+            vec![
+                node("caller", ".run()", "Test.java"),
+                node("json_array", "JsonArray", "JsonArray.java"),
+                node("as_list", ".asList()", "JsonArray.java"),
+            ],
+            vec![Edge {
+                source: NodeId("json_array".into()),
+                target: NodeId("as_list".into()),
+                relation: "method".into(),
+                confidence: Confidence::Extracted,
+                confidence_score: Some(1.0),
+                source_file: "JsonArray.java".into(),
+                source_location: Some("L2".into()),
+                weight: 1.0,
+                context: None,
+                cross_repo: false,
+                extra: Map::new(),
+            }],
+        );
+        let edges = resolve_symbols(
+            &g,
+            &[raw("caller", "Arrays.asList", true, "Test.java")],
+            &[],
+        );
+        assert!(edges.is_empty(), "{edges:?}");
+    }
+
+    #[test]
+    fn xaml_event_resolves_through_its_code_behind_owner() {
+        let mut code_behind = imports_from_edge("xaml", "window", "Views/MainWindow.xaml");
+        code_behind.relation = "references".into();
+        code_behind.context = Some("xaml_code_behind".into());
+        let g = kg(
+            vec![
+                node("xaml", "MainWindow.xaml", "Views/MainWindow.xaml"),
+                node("window", "MainWindow", "Views/MainWindow.cs"),
+                node("click", ".Connect_Click()", "Views/MainWindow.cs"),
+                node("other", "MainWindow", "Other/MainWindow.cs"),
+                node("other_click", ".Connect_Click()", "Other/MainWindow.cs"),
+            ],
+            vec![
+                code_behind,
+                Edge {
+                    source: NodeId("window".into()),
+                    target: NodeId("click".into()),
+                    relation: "method".into(),
+                    confidence: Confidence::Extracted,
+                    confidence_score: Some(1.0),
+                    source_file: "Views/MainWindow.cs".into(),
+                    source_location: Some("L2".into()),
+                    weight: 1.0,
+                    context: None,
+                    cross_repo: false,
+                    extra: Map::new(),
+                },
+                Edge {
+                    source: NodeId("other".into()),
+                    target: NodeId("other_click".into()),
+                    relation: "method".into(),
+                    confidence: Confidence::Extracted,
+                    confidence_score: Some(1.0),
+                    source_file: "Other/MainWindow.cs".into(),
+                    source_location: Some("L2".into()),
+                    weight: 1.0,
+                    context: None,
+                    cross_repo: false,
+                    extra: Map::new(),
+                },
+            ],
+        );
+        let edges = resolve_symbols(
+            &g,
+            &[raw(
+                "xaml",
+                "MainWindow.Connect_Click",
+                true,
+                "Views/MainWindow.xaml",
+            )],
+            &[],
+        );
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        assert_eq!(edges[0].target, NodeId("click".into()));
+        assert_eq!(edges[0].context.as_deref(), Some("xaml_event_handler"));
     }
 
     #[test]

@@ -97,7 +97,7 @@ pub fn extract_ruby_source(path: &str, source: &[u8]) -> ExtractionResult {
         src: source,
         b: Builder::new(path),
         file_nid: file_nid.clone(),
-        stem: file_stem(path),
+        stem: format!("{}_rb", file_stem(path)),
         function_bodies: Vec::new(),
     };
     ex.b.add_node(file_nid, filename, 1);
@@ -126,6 +126,22 @@ struct Ruby<'a, 'tree> {
 
 #[cfg(feature = "lang-ruby")]
 impl<'tree> Ruby<'_, 'tree> {
+    fn symbol_key(name: &str) -> String {
+        let mut punctuation: String = name
+            .chars()
+            .filter(|c| !c.is_alphanumeric() && *c != '_')
+            .map(|c| format!("{:x}", c as u32))
+            .collect();
+        if name.starts_with('_') || name.ends_with('_') {
+            punctuation.push_str("5f");
+        }
+        if punctuation.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name}_{punctuation}")
+        }
+    }
+
     fn text(&self, n: TsNode<'tree>) -> String {
         n.utf8_text(self.src).unwrap_or("").to_string()
     }
@@ -177,15 +193,16 @@ impl<'tree> Ruby<'_, 'tree> {
                     return;
                 };
                 let name = self.text(name_node);
+                let key = Self::symbol_key(&name);
                 let line = Self::line(node);
                 let nid = if let Some(cls) = &scope {
-                    let m = NodeId(make_id(&[cls.as_str(), &name]));
+                    let m = NodeId(make_id(&[cls.as_str(), &key]));
                     self.b.add_node(m.clone(), format!(".{name}()"), line);
                     self.b
                         .add_edge(cls.clone(), m.clone(), "method", line, None);
                     m
                 } else {
-                    let f = NodeId(make_id(&[&self.stem, &name]));
+                    let f = NodeId(make_id(&[&self.stem, &key]));
                     self.b.add_node(f.clone(), format!("{name}()"), line);
                     self.b
                         .add_edge(self.file_nid.clone(), f.clone(), "contains", line, None);
@@ -193,6 +210,12 @@ impl<'tree> Ruby<'_, 'tree> {
                 };
                 if let Some(body) = node.child_by_field_name("body") {
                     self.function_bodies.push((nid, body));
+                    // Ruby permits method declarations inside class_eval/module
+                    // blocks nested in another method. Preserve the lexical type
+                    // scope while discovering those declarations.
+                    for child in Self::children(body) {
+                        self.walk(child, scope.clone(), depth + 1);
+                    }
                 }
             }
             "call" => {
@@ -326,6 +349,7 @@ impl<'tree> Ruby<'_, 'tree> {
 mod tests {
     use super::extract_ruby_source;
     use crate::result::ExtractionResult;
+    use std::collections::HashSet;
 
     fn extract() -> ExtractionResult {
         extract_ruby_source(
@@ -359,6 +383,43 @@ mod tests {
         assert!(ls.contains(&"Dog".to_string()), "{ls:?}");
         assert!(ls.contains(&".bark()".to_string()));
         assert!(ls.contains(&".sound()".to_string()));
+    }
+
+    #[test]
+    fn punctuation_bearing_methods_have_distinct_ids() {
+        let r = extract_ruby_source(
+            "lib/request.rb",
+            b"class Request\n  def accept; end\n  def accept?; end\n  def required; end\n  def _required; end\n  def call; end\n  def call!; end\n  def []=(key, value); end\n  def outer\n    def nested; end\n  end\nend\n",
+        );
+        for label in [
+            ".accept()",
+            ".accept?()",
+            ".required()",
+            "._required()",
+            ".call()",
+            ".call!()",
+            ".[]=()",
+            ".nested()",
+        ] {
+            assert!(
+                r.nodes.iter().any(|node| node.label == label),
+                "{label}: {:?}",
+                r.nodes
+            );
+        }
+        let ids: HashSet<_> = r.nodes.iter().map(|node| &node.id).collect();
+        assert_eq!(ids.len(), r.nodes.len());
+    }
+
+    #[test]
+    fn symbols_do_not_collide_with_same_named_python_file() {
+        let r = extract();
+        let dog = r.nodes.iter().find(|n| n.label == "Dog").expect("Dog");
+        let python_id = synaptic_core::NodeId(synaptic_core::make_id(&[
+            &crate::paths::file_stem("lib/dog.py"),
+            "Dog",
+        ]));
+        assert_ne!(dog.id, python_id);
     }
 
     #[test]

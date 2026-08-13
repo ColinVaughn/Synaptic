@@ -50,6 +50,22 @@ use synaptic_graph::{
     BuildOptions, ClusterOptions, KnowledgeGraph,
 };
 
+/// Current repository commit for graph provenance. Repositories without a
+/// readable HEAD simply omit the optional field.
+pub fn git_head(root: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    let sha = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (output.status.success()
+        && (40..=64).contains(&sha.len())
+        && sha.chars().all(|character| character.is_ascii_hexdigit()))
+    .then_some(sha)
+}
+
 /// AST-extracted node — origin stamped by the extractors (`_origin == "ast"`).
 /// Semantic/concept nodes are NOT ast and so survive an AST-only rebuild.
 fn is_ast(node: &Node) -> bool {
@@ -638,6 +654,7 @@ pub fn rebuild_with_detect(
     // non-code imports (css/json/assets) to classified asset nodes.
     let aliases = synaptic_extract::load_alias_resolver(root, &det.ts_config_files);
     synaptic_extract::resolve_imports(&mut nodes, &mut edges, &aliases);
+    synaptic_extract::prune_local_sdk_candidates(root, &mut nodes, &mut edges);
     // Bind resource references + emit generated-shadow edges over the full merged
     // set, matching the full-extract pipeline (parity is asserted in tests).
     synaptic_extract::resolve_resource_refs(&mut nodes, &mut edges);
@@ -692,6 +709,7 @@ pub fn rebuild_with_detect(
         &sbom,
     );
     kg = build_from_parts(n, e, parts.hyperedges, &build_opts);
+    kg.built_at_commit = git_head(&opts.root);
 
     // Refuse a silent shrink (unless forced or an explicit deletion happened).
     // An incremental rebuild is scoped to explicitly-changed files, so any shrink
@@ -719,7 +737,7 @@ pub fn rebuild_with_detect(
     // community assignment, skip re-clustering, and tell the caller nothing needs
     // rewriting.
     if let Some(prev) = existing {
-        if same_topology(&kg, prev) {
+        if same_topology(&kg, prev) && kg.built_at_commit == prev.built_at_commit {
             let mut communities: BTreeMap<u32, Vec<NodeId>> = BTreeMap::new();
             for (id, c) in previous_communities(prev) {
                 communities.entry(c).or_default().push(id);

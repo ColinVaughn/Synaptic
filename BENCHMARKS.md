@@ -73,7 +73,7 @@ Reverse-impact uses the same relation vocabulary (`DEFAULT_AFFECTED_RELATIONS`) 
 the affected/predict tools sees, so the benchmark measures real reachability. A preflight
 resolves every labeled symbol first and fails the run if any does not resolve.
 
-### Current results (7 fixtures, 6 language families, 26 labeled symbols)
+### Current results (11 fixtures, 6 language families, 42 labeled symbols)
 
 | Fixture | Family | Call P/R/F1 | Aff-test rec | Blast rec/excl/size | Cross P/R/F1 |
 |---|---|---|---|---|---|
@@ -84,10 +84,15 @@ resolves every labeled symbol first and fails the run if any does not resolve.
 | systems-go | systems-go | 100/100/100 | — | 100%/100%/1.0 | — |
 | deep-python (multi-hop) | scripting-python | 100/100/100 | 100% | 100%/100%/3.0 | — |
 | cross-lang-ts-rust | cross-lang | — | — | — | 100/100/100 |
+| cross-lang-grpc | cross-lang | — | — | — | 100/100/100 |
+| cross-lang-queue | cross-lang | 100/100/100 | — | — | 100/100/100 |
+| cross-lang-pyo3 | cross-lang | 100/100/100 | — | — | 100/100/100 |
+| cross-lang-ws | cross-lang | 100/100/100 | — | — | 100/100/100 |
 
-Pooled: call edges precision 100% / recall 93% / F1 96% over 15 labeled edges; blast recall
+Pooled: call edges precision 100% / recall 94% / F1 97% over 18 labeled edges; blast recall
 100% with 0 distractors leaked; affected-test recall 100% with the labeled unrelated test
-excluded; cross-language precision 100% / recall 100% with 2 distractors correctly unconnected.
+excluded; cross-language precision 100% / recall 100% over 6 labeled couplings with 6
+distractors correctly unconnected.
 
 `—` marks a metric a fixture does not label. The harness prints `n/a` for these rather than a
 vacuous 100%, so an empty label set is never mistaken for a perfect score.

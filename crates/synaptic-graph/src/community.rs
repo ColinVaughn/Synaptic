@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use synaptic_core::NodeId;
 
 use crate::graph::KnowledgeGraph;
+use crate::is_structural_edge;
 
 /// Weighted undirected graph with integer nodes `0..n`.
 pub(crate) struct WGraph {
@@ -38,6 +39,9 @@ pub(crate) fn build_wgraph(kg: &KnowledgeGraph, nodes: &[NodeId]) -> WGraph {
     let mut pair_weight: HashMap<(usize, usize), f64> = HashMap::new();
     let mut self_loops = vec![0.0_f64; n];
     for e in kg.edges() {
+        if !is_structural_edge(e) {
+            continue;
+        }
         let (Some(&i), Some(&j)) = (index.get(&e.source), index.get(&e.target)) else {
             continue;
         };

@@ -307,19 +307,19 @@ below is exact set-comparison against those labels, reproducible with `synaptic 
 | deep-python (multi-hop) | scripting-python | 100/100/100 | 100% | 100% / 100% / 3.0 | — |
 | cross-lang-ts-rust | cross-lang | — | — | — | 100/100/100 |
 | cross-lang-grpc | cross-lang | — | — | — | 100/100/100 |
-| cross-lang-queue | cross-lang | — | — | — | 100/100/100 |
+| cross-lang-queue | cross-lang | 100/100/100 | — | — | 100/100/100 |
 | cross-lang-pyo3 | cross-lang | 100/100/100 | — | — | 100/100/100 |
 | cross-lang-ws | cross-lang | 100/100/100 | — | — | 100/100/100 |
 
-Across 11 fixtures / 6 language families / 41 labeled symbols (all resolved): pooled call edges
-**precision 100% / recall 94% / F1 96%** over 17 labeled edges; blast-radius **recall 100% with
+Across 11 fixtures / 6 language families / 42 labeled symbols (all resolved): pooled call edges
+**precision 100% / recall 94% / F1 97%** over 18 labeled edges; blast-radius **recall 100% with
 0 distractors leaked**; affected-test **recall 100%** over the labeled linkages with the one
 labeled *unrelated* test correctly **not** selected; cross-language **precision 100% / recall
 100% / F1 100%** over 6 labeled couplings with 6 distractor couplings (look-alike routes, a
 wrong-service gRPC stub, an unregistered PyO3 helper, ...) correctly **not** connected. Reading
 the numbers honestly:
 
-- **No false call edges were observed** in this 17-edge corpus (precision 100%); that is a
+- **No false call edges were observed** in this 18-edge corpus (precision 100%); that is a
   result on the corpus, not a guarantee at scale.
 - **Recall is 100%** for Python/TypeScript/Java/Go, which resolve cross-file calls. The **50%**
   on Rust is real and expected: Rust call resolution is intra-file, so a module-qualified

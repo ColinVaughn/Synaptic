@@ -273,4 +273,25 @@ namespace Demo {
             assert!(ids.contains(&e.source), "dangling source: {}", e.source);
         }
     }
+
+    #[test]
+    fn forward_type_reference_uses_the_later_scoped_declaration() {
+        let r = extract_csharp_source(
+            "Models.cs",
+            b"class Snapshot { public Current Value { get; set; } }\nclass Current {}\n",
+        );
+        let current: Vec<_> = r.nodes.iter().filter(|n| n.label == "Current").collect();
+        assert_eq!(
+            current.len(),
+            1,
+            "forward reference created a shadow node: {current:?}"
+        );
+        assert!(r.edges.iter().any(|e| {
+            e.relation == "references"
+                && r.nodes
+                    .iter()
+                    .any(|n| n.id == e.source && n.label == "Snapshot")
+                && e.target == current[0].id
+        }));
+    }
 }

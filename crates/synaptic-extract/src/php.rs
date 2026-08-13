@@ -83,6 +83,7 @@ pub fn php_config() -> LanguageConfig {
             "interface_declaration",
             "trait_declaration",
             "enum_declaration",
+            "anonymous_class",
         ],
         function_types: &["method_declaration", "function_definition"],
         call_types: &[
@@ -503,6 +504,19 @@ mod tests {
     use super::extract_php_source;
     use crate::result::ExtractionResult;
     use synaptic_core::Confidence;
+
+    #[test]
+    fn anonymous_class_methods_are_extracted() {
+        let r = extract_php_source(
+            "test/CacheTest.php",
+            b"<?php $cache = new class implements Cache { public function get(string $key): array { return []; } };",
+        );
+        assert!(
+            r.nodes.iter().any(|node| node.label == ".get()"),
+            "{:?}",
+            r.nodes
+        );
+    }
 
     const SAMPLE: &[u8] = b"<?php\nnamespace App;\nuse Lib\\Base;\n\nclass Dog extends Animal implements Greeter {\n  private Leash $leash;\n  public function bark(Food $f): string { return $this->sound(); }\n  public function sound(): string { return \"woof\"; }\n}\n";
 

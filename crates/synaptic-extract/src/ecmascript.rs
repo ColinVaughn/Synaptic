@@ -402,6 +402,35 @@ mod tests {
             && r.nodes
                 .iter()
                 .any(|n| n.id == e.target && n.label == "react")));
+        assert!(r.imports.iter().any(|i| i.local_name == "React"
+            && i.imported_name == "React"
+            && i.module_stem == "react"));
+    }
+
+    #[cfg(feature = "lang-javascript")]
+    #[test]
+    fn js_module_scope_calls_and_commonjs_bindings_are_recorded() {
+        let r = super::extract_js_source(
+            "a.js",
+            b"const shouldSkip = require('./utils').shouldSkip;\nshouldSkip();\n",
+        );
+        assert!(r.imports.iter().any(|i| i.local_name == "shouldSkip"
+            && i.imported_name == "shouldSkip"
+            && i.module_stem == "utils"));
+        assert!(r
+            .raw_calls
+            .iter()
+            .any(|c| c.callee == "shouldSkip" && c.caller == crate::paths::file_node_id("a.js")));
+    }
+
+    #[cfg(feature = "lang-javascript")]
+    #[test]
+    fn js_member_call_does_not_bind_to_free_function() {
+        let r = super::extract_js_source(
+            "a.js",
+            b"function count() {}\nfunction run() { User.count(); }\n",
+        );
+        assert!(!call_pairs(&r).contains(&("run()".into(), "count()".into())));
     }
 
     #[cfg(feature = "lang-typescript")]

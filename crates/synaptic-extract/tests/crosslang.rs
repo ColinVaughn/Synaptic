@@ -7,6 +7,97 @@
 
 use synaptic_core::Confidence;
 use synaptic_extract::extract_source;
+use synaptic_extract::prune_local_sdk_candidates;
+
+#[test]
+fn repository_packages_are_not_external_sdk_candidates() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("pyproject.toml"),
+        "[project]\nname = \"click\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join("go.mod"),
+        "module github.com/spf13/cobra\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.path().join("src/Polly.Core")).unwrap();
+    std::fs::write(
+        root.path().join("src/Polly.Core/Polly.Core.csproj"),
+        "<Project><PropertyGroup><RootNamespace>Polly</RootNamespace></PropertyGroup></Project>",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.path().join("benchmarks/shared")).unwrap();
+    std::fs::write(
+        root.path().join("benchmarks/shared/Cargo.toml"),
+        "[package]\nname = \"shared\"\n",
+    )
+    .unwrap();
+    let results = [
+        extract_source(
+            "tests/test_cli.py",
+            b"from click import Option\nOption(['--flag'])\n",
+        )
+        .unwrap(),
+        extract_source(
+            "doc/doc.go",
+            b"package doc\nimport cobra \"github.com/spf13/cobra\"\nfunc f() { cobra.Commands() }\n",
+        )
+        .unwrap(),
+        extract_source(
+            "src/Polly.Core/Polly.Core.csproj",
+            b"<Project><PropertyGroup><RootNamespace>Polly</RootNamespace></PropertyGroup></Project>",
+        )
+        .unwrap(),
+        extract_source(
+            "src/Snippets/Retry.cs",
+            b"using Polly;\nnamespace Snippets;\nclass Retry { void Run() { PollyClient.Create(); } }\n",
+        )
+        .unwrap(),
+        extract_source(
+            "benchmarks/engines/libc/main.rs",
+            b"use shared::Benchmark;\nfn run() { Benchmark::from_stdin(); }\n",
+        )
+        .unwrap(),
+    ];
+    let mut nodes: Vec<_> = results
+        .iter()
+        .flat_map(|result| result.nodes.clone())
+        .collect();
+    let mut edges: Vec<_> = results
+        .iter()
+        .flat_map(|result| result.edges.clone())
+        .collect();
+    assert_eq!(
+        edges
+            .iter()
+            .filter(|edge| edge.relation == "calls_sdk")
+            .count(),
+        4
+    );
+    let candidates = nodes
+        .iter()
+        .filter(|node| {
+            node.extra
+                .get("_node_type")
+                .and_then(|value| value.as_str())
+                == Some("sdk_call_candidate")
+        })
+        .map(|node| node.extra.clone())
+        .collect::<Vec<_>>();
+    let removed = prune_local_sdk_candidates(root.path(), &mut nodes, &mut edges);
+    assert_eq!(
+        removed,
+        4,
+        "before={candidates:?}, remaining={:?}",
+        nodes
+            .iter()
+            .filter_map(|node| node.extra.get("sdk_import"))
+            .collect::<Vec<_>>()
+    );
+    assert!(edges.iter().all(|edge| edge.relation != "calls_sdk"));
+}
 
 #[cfg(feature = "lang-java")]
 #[test]
@@ -925,6 +1016,35 @@ var session = await service.CreateAsync(options);
             .filter(|edge| edge.relation == "calls_sdk")
             .map(|edge| &edge.extra)
             .collect::<Vec<_>>()
+    );
+}
+
+#[cfg(feature = "lang-csharp")]
+#[test]
+fn dotnet_local_namespaces_and_bcl_calls_are_not_sdk_candidates() {
+    let result = extract_source(
+        "App.cs",
+        br#"using System.IO;
+using ConsumerVpn.Platform;
+using ConsumerVpn.Services;
+namespace ConsumerVpn.App;
+class App {
+  void Run() {
+    ConsumerVpn.Platform.Host.Start();
+    Path.Combine("a", "b");
+    using var stream = File.OpenRead("a");
+  }
+}"#,
+    )
+    .expect("C# extraction");
+    let candidates = result
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == "calls_sdk")
+        .collect::<Vec<_>>();
+    assert!(
+        candidates.is_empty(),
+        "fabricated SDK candidates: {candidates:?}"
     );
 }
 

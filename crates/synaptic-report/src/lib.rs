@@ -9,7 +9,10 @@ use std::io;
 use std::path::Path;
 
 use synaptic_core::{Confidence, NodeId};
-use synaptic_graph::{partition_cohesion_scores, AnalysisResult, KnowledgeGraph};
+use synaptic_graph::{
+    is_structural_edge, is_structural_node, partition_cohesion_scores, AnalysisResult,
+    KnowledgeGraph,
+};
 
 /// Communities smaller than this are omitted from the per-community listing and
 /// counted as a knowledge gap.
@@ -17,11 +20,16 @@ const THIN_COMMUNITY_SIZE: usize = 3;
 /// Nodes with at most this many connections are flagged as isolated.
 const ISOLATED_MAX_DEGREE: usize = 1;
 
-/// Edge counts per confidence tier + the average score of scored INFERRED edges.
-fn confidence_breakdown(kg: &KnowledgeGraph) -> (usize, usize, usize, Option<f64>) {
+/// Structural edge counts per confidence tier, average scored INFERRED
+/// confidence, and the separately-reported provisional SDK candidate count.
+fn confidence_breakdown(kg: &KnowledgeGraph) -> (usize, usize, usize, Option<f64>, usize) {
     let (mut ext, mut inf, mut amb) = (0usize, 0usize, 0usize);
     let (mut inf_sum, mut inf_scored) = (0.0f64, 0usize);
-    for e in kg.edges() {
+    let sdk_candidates = kg
+        .edges()
+        .filter(|edge| edge.relation == "calls_sdk")
+        .count();
+    for e in kg.edges().filter(|edge| is_structural_edge(edge)) {
         match e.confidence {
             Confidence::Extracted => ext += 1,
             Confidence::Inferred => {
@@ -35,7 +43,7 @@ fn confidence_breakdown(kg: &KnowledgeGraph) -> (usize, usize, usize, Option<f64
         }
     }
     let inf_avg = (inf_scored > 0).then(|| inf_sum / inf_scored as f64);
-    (ext, inf, amb, inf_avg)
+    (ext, inf, amb, inf_avg, sdk_candidates)
 }
 
 /// Cross-repo edge count and the graph's cross-language edge count, counted by
@@ -56,8 +64,12 @@ fn cross_repo_breakdown(kg: &KnowledgeGraph) -> (usize, usize) {
 
 /// Incident-edge count per node (self-loops ignored).
 fn node_degrees(kg: &KnowledgeGraph) -> HashMap<NodeId, usize> {
-    let mut deg: HashMap<NodeId, usize> = kg.nodes().map(|n| (n.id.clone(), 0)).collect();
-    for e in kg.edges() {
+    let mut deg: HashMap<NodeId, usize> = kg
+        .nodes()
+        .filter(|node| is_structural_node(node))
+        .map(|node| (node.id.clone(), 0))
+        .collect();
+    for e in kg.edges().filter(|edge| is_structural_edge(edge)) {
         if e.source == e.target {
             continue;
         }
@@ -84,7 +96,7 @@ pub fn graph_report(
     let mut s = String::new();
     let _ = writeln!(s, "# Graph Report\n");
 
-    let (ext, inf, amb, inf_avg) = confidence_breakdown(kg);
+    let (ext, inf, amb, inf_avg, sdk_candidates) = confidence_breakdown(kg);
     let total_edges = ext + inf + amb;
 
     let _ = writeln!(s, "## Overview\n");
@@ -103,6 +115,12 @@ pub fn graph_report(
             let _ = write!(line, " ({inf} INFERRED edges, avg confidence {avg:.2})");
         }
         let _ = writeln!(s, "{line}");
+    }
+    if sdk_candidates > 0 {
+        let _ = writeln!(
+            s,
+            "- **SDK candidates:** {sdk_candidates} provisional usage edge(s), excluded from structural confidence until bound"
+        );
     }
     // Cross-language coupling is counted by relation (so a polyglot single repo
     // shows it too); cross-repo is the federated subset of ALL edges. The two are
@@ -263,6 +281,7 @@ pub fn graph_report(
     let degrees = node_degrees(kg);
     let isolated: Vec<String> = kg
         .nodes()
+        .filter(|node| is_structural_node(node))
         .filter(|n| degrees.get(&n.id).copied().unwrap_or(0) <= ISOLATED_MAX_DEGREE)
         .map(|n| n.label.clone())
         .collect();
@@ -477,6 +496,22 @@ mod tests {
             "ambiguous edge not listed:\n{md}"
         );
         assert!(md.contains("isolated"), "isolated node not flagged:\n{md}");
+    }
+
+    #[test]
+    fn provisional_sdk_candidates_do_not_depress_structural_confidence() {
+        let (g, comms) = kg();
+        let mut data = g.to_graph_data();
+        data.links[0].confidence_score = Some(0.8);
+        let mut sdk = data.links[0].clone();
+        sdk.relation = "calls_sdk".into();
+        sdk.confidence_score = Some(0.5);
+        data.links.push(sdk);
+        let g = KnowledgeGraph::from_graph_data(data);
+        let analysis = analyze(&g, &comms, &BTreeMap::new());
+        let md = graph_report(&g, &analysis, &comms, &BTreeMap::new());
+        assert!(md.contains("avg confidence 0.80"), "{md}");
+        assert!(md.contains("SDK candidates:** 1"), "{md}");
     }
 
     #[test]

@@ -4,11 +4,11 @@
 //! Functions → `name()` (or `.name()` scoped under an `impl`); struct/enum/trait
 //! items → type nodes with `references` (fields) / `inherits` (supertraits);
 //! `impl Trait for T` → `implements`; `use` → `imports_from`; intra-file calls →
-//! `calls`/`raw_calls` (scoped `Type::method` calls match in-file only).
+//! `calls`/`raw_calls` (scoped calls retain their receiver for graph resolution).
 
 use std::collections::{HashMap, HashSet};
 
-use synaptic_core::{make_id, NodeId};
+use synaptic_core::{make_id, ImportRecord, NodeId, RawCall};
 use tree_sitter::{Node as TsNode, Parser};
 
 use crate::common::Builder;
@@ -404,7 +404,7 @@ impl<'tree> RustExtractor<'_, 'tree> {
         if module_name.is_empty() {
             return;
         }
-        let tgt = NodeId(make_id(&[module_name]));
+        let tgt = NodeId(make_id(&["rust_import", &raw]));
         self.b
             .add_external_node(tgt.clone(), module_name.to_string());
         self.b.add_edge(
@@ -414,6 +414,22 @@ impl<'tree> RustExtractor<'_, 'tree> {
             Self::line(node),
             Some("import"),
         );
+        if !raw.contains('{') && !raw.contains('*') {
+            let path = raw.split(" as ").next().unwrap_or(&raw);
+            let mut parts = path.rsplit("::").filter(|part| !part.is_empty());
+            if let (Some(imported), Some(module)) = (parts.next(), parts.next()) {
+                let local = raw
+                    .split_once(" as ")
+                    .map_or(imported, |(_, alias)| alias.trim());
+                self.b.imports.push(ImportRecord {
+                    local_name: local.to_string(),
+                    imported_name: imported.to_string(),
+                    module_stem: module.to_string(),
+                    source_file: self.b.path.clone(),
+                    source_location: Some(format!("L{}", Self::line(node))),
+                });
+            }
+        }
     }
 
     /// Parameter + return type references.
@@ -528,37 +544,56 @@ impl<'tree> RustExtractor<'_, 'tree> {
         }
         if node.kind() == "call_expression" {
             if let Some(func) = node.child_by_field_name("function") {
-                let (callee, is_member, is_scoped) = match func.kind() {
-                    "identifier" => (Some(self.text(func)), false, false),
-                    "field_expression" => (
-                        func.child_by_field_name("field").map(|f| self.text(f)),
-                        true,
-                        false,
-                    ),
-                    "scoped_identifier" => (
-                        func.child_by_field_name("name").map(|n| self.text(n)),
-                        false,
-                        true,
-                    ),
-                    _ => (None, false, false),
+                let (callee, is_member) = match func.kind() {
+                    "identifier" => (Some(self.text(func)), false),
+                    "field_expression" => {
+                        let receiver = func.child_by_field_name("value").map(|n| self.text(n));
+                        let member = func.child_by_field_name("field").map(|n| self.text(n));
+                        (
+                            receiver
+                                .zip(member)
+                                .map(|(receiver, member)| format!("{receiver}.{member}")),
+                            true,
+                        )
+                    }
+                    "scoped_identifier" => {
+                        let receiver = func.child_by_field_name("path").map(|n| self.text(n));
+                        let member = func.child_by_field_name("name").map(|n| self.text(n));
+                        (
+                            receiver
+                                .zip(member)
+                                .map(|(receiver, member)| format!("{receiver}.{member}")),
+                            true,
+                        )
+                    }
+                    _ => (None, false),
                 };
                 if let Some(callee) = callee {
-                    if !callee.is_empty() && !RUST_BUILTINS.contains(&callee.as_str()) {
-                        // Scoped (`Type::method`) and blocklisted trait-method names
-                        // may still match in-file, but never enqueue a raw call.
-                        let enqueue_raw = !is_scoped
-                            && !RUST_TRAIT_METHOD_BLOCKLIST
-                                .contains(&callee.to_lowercase().as_str());
+                    let member = callee.rsplit('.').next().unwrap_or(&callee);
+                    if !member.is_empty() && !RUST_BUILTINS.contains(&member) {
                         let line = Self::line(node);
-                        self.b.resolve_call(
-                            caller,
-                            &callee,
-                            is_member,
-                            line,
-                            index,
-                            seen_pairs,
-                            enqueue_raw,
-                        );
+                        if is_member {
+                            self.b.raw_calls.push(RawCall {
+                                caller: caller.clone(),
+                                callee,
+                                is_member_call: true,
+                                source_file: self.b.path.clone(),
+                                source_location: Some(format!("L{line}")),
+                                span: None,
+                            });
+                        } else {
+                            let enqueue_raw = !RUST_TRAIT_METHOD_BLOCKLIST
+                                .contains(&member.to_lowercase().as_str());
+                            self.b.resolve_call(
+                                caller,
+                                member,
+                                false,
+                                line,
+                                index,
+                                seen_pairs,
+                                enqueue_raw,
+                            );
+                        }
                     }
                 }
             }
@@ -634,11 +669,19 @@ mod tests {
     #[test]
     fn use_declaration_becomes_import_edge() {
         let r = extract_rust_source("src/lib.rs", b"use std::collections::HashMap;\nfn f() {}\n");
-        let hashmap = synaptic_core::make_id(&["HashMap"]);
-        assert!(r
+        let edge = r
             .edges
             .iter()
-            .any(|e| e.relation == "imports_from" && e.target.0 == hashmap));
+            .find(|e| e.relation == "imports_from")
+            .expect("imports_from edge");
+        assert_ne!(edge.target.0, synaptic_core::make_id(&["HashMap"]));
+        assert!(r
+            .nodes
+            .iter()
+            .any(|n| n.id == edge.target && n.label == "HashMap"));
+        assert!(r.imports.iter().any(|i| i.local_name == "HashMap"
+            && i.imported_name == "HashMap"
+            && i.module_stem == "collections"));
     }
 
     #[test]
@@ -690,12 +733,22 @@ mod tests {
     }
 
     #[test]
-    fn scoped_call_does_not_enqueue_raw() {
-        // `Config::load()` is scoped, so no raw_call (avoids cross-crate INFERRED
-        // noise), and `new` is blocklisted.
+    fn scoped_call_keeps_receiver_in_raw_fact() {
         let src = b"fn run() {\n    let c = Config::load();\n    let v = Vec::new();\n}\n";
         let r = extract_rust_source("src/lib.rs", src);
-        assert!(r.raw_calls.iter().all(|c| c.callee != "load"));
-        assert!(r.raw_calls.iter().all(|c| c.callee != "new"));
+        assert!(r.raw_calls.iter().any(|c| c.callee == "Config.load"));
+        assert!(r.raw_calls.iter().any(|c| c.callee == "Vec.new"));
+    }
+
+    #[test]
+    fn imported_free_call_keeps_resolution_evidence() {
+        let r = extract_rust_source(
+            "src/defs.rs",
+            b"use crate::flags::parse::parse_low_raw;\nfn check() { parse_low_raw([]); }\n",
+        );
+        assert!(r.raw_calls.iter().any(|c| c.callee == "parse_low_raw"));
+        assert!(r.imports.iter().any(|i| i.local_name == "parse_low_raw"
+            && i.imported_name == "parse_low_raw"
+            && i.module_stem == "parse"));
     }
 }

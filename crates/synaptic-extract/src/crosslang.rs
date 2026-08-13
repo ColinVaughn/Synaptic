@@ -341,7 +341,7 @@ fn scan_jvm_sdk_candidates(_ext: &str, path: &str, text: &str, result: &mut Extr
             },
         );
     }
-    scan_dot_namespace_calls("maven", path, text, result, &aliases, &wildcards, true);
+    scan_dot_namespace_calls("maven", path, text, result, &aliases, &wildcards, false);
 }
 
 fn is_jvm_standard_import(import: &str) -> bool {
@@ -354,15 +354,26 @@ fn scan_dotnet_sdk_candidates(path: &str, text: &str, result: &mut ExtractionRes
     static USING: OnceLock<Regex> = OnceLock::new();
     let using_re = USING.get_or_init(|| {
         Regex::new(
-            r"(?m)^\s*@?(?:global\s+)?using\s+(?:(?:static\s+)?([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)|([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*))\s*;?",
+            r"(?m)^\s*@?(?:global\s+)?using\s+(?:(?:static\s+)?([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)|([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*))\s*(?:;|$)",
         )
         .expect("valid C# using regex")
     });
+    static NAMESPACE: OnceLock<Regex> = OnceLock::new();
+    let namespace_re = NAMESPACE.get_or_init(|| {
+        Regex::new(r"(?m)^\s*namespace\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*(?:;|\{)")
+            .expect("valid C# namespace regex")
+    });
+    let local_roots = namespace_re
+        .captures_iter(text)
+        .filter_map(|captures| captures[1].split('.').next().map(str::to_string))
+        .collect::<HashSet<String>>();
     let mut aliases = HashMap::<String, NamespaceImport>::new();
     let mut namespaces = Vec::new();
     for captures in using_re.captures_iter(text) {
         if let Some(import) = captures.get(1) {
-            if !is_dotnet_standard_import(import.as_str()) {
+            if !is_dotnet_standard_import(import.as_str())
+                && !local_roots.contains(import.as_str().split('.').next().unwrap_or_default())
+            {
                 namespaces.push(import.as_str().to_string());
             }
             continue;
@@ -373,7 +384,9 @@ fn scan_dotnet_sdk_candidates(path: &str, text: &str, result: &mut ExtractionRes
         let Some(import) = captures.get(3) else {
             continue;
         };
-        if is_dotnet_standard_import(import.as_str()) {
+        if is_dotnet_standard_import(import.as_str())
+            || local_roots.contains(import.as_str().split('.').next().unwrap_or_default())
+        {
             continue;
         }
         aliases.insert(
@@ -397,6 +410,10 @@ fn is_dotnet_standard_import(import: &str) -> bool {
         || import.starts_with("System.")
         || import == "Microsoft.CSharp"
         || import.starts_with("Microsoft.CSharp.")
+        || import == "Microsoft.Extensions"
+        || import.starts_with("Microsoft.Extensions.")
+        || import == "Microsoft.AspNetCore"
+        || import.starts_with("Microsoft.AspNetCore.")
 }
 
 fn scan_swift_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResult) {
@@ -423,7 +440,15 @@ fn scan_swift_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResu
             )
         })
         .collect::<Vec<_>>();
-    scan_dot_namespace_calls("swift", path, text, result, &HashMap::new(), &modules, true);
+    scan_dot_namespace_calls(
+        "swift",
+        path,
+        text,
+        result,
+        &HashMap::new(),
+        &modules,
+        false,
+    );
 }
 
 fn scan_apex_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResult) {
@@ -444,7 +469,7 @@ fn scan_apex_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResul
             },
         );
     }
-    scan_dot_namespace_calls("salesforce", path, text, result, &aliases, &[], true);
+    scan_dot_namespace_calls("salesforce", path, text, result, &aliases, &[], false);
 }
 
 fn scan_pascal_sdk_candidates(path: &str, text: &str, result: &mut ExtractionResult) {
@@ -466,7 +491,15 @@ fn scan_pascal_sdk_candidates(path: &str, text: &str, result: &mut ExtractionRes
             )
         })
         .collect::<Vec<_>>();
-    scan_dot_namespace_calls("nuget", path, text, result, &HashMap::new(), &modules, true);
+    scan_dot_namespace_calls(
+        "nuget",
+        path,
+        text,
+        result,
+        &HashMap::new(),
+        &modules,
+        false,
+    );
 }
 
 fn scan_dot_namespace_calls(
@@ -476,7 +509,7 @@ fn scan_dot_namespace_calls(
     result: &mut ExtractionResult,
     aliases: &HashMap<String, NamespaceImport>,
     wildcard_imports: &[String],
-    require_type_root: bool,
+    strict_direct: bool,
 ) {
     let shared_root_fallback = ecosystem == "nuget";
     static CALL: OnceLock<Regex> = OnceLock::new();
@@ -506,12 +539,13 @@ fn scan_dot_namespace_calls(
                 join_sdk_member(&resolved.member_prefix, &segments[1..].join(".")),
             )
         } else {
-            if require_type_root && !starts_like_rust_type(segments[0]) {
+            if !starts_like_rust_type(segments[0]) {
                 continue;
             }
-            let Some(import) =
-                select_namespace_for_type(wildcard_imports, segments[0], shared_root_fallback)
-            else {
+            let import = (!strict_direct && wildcard_imports.len() == 1)
+                .then(|| wildcard_imports[0].clone())
+                .or_else(|| select_namespace_for_type(wildcard_imports, segments[0], false));
+            let Some(import) = import else {
                 continue;
             };
             let member = if segments[0].eq_ignore_ascii_case(
@@ -669,19 +703,16 @@ fn select_namespace_for_type(
     matching.dedup();
     match matching.as_slice() {
         [only] => Some(only.clone()),
-        [] if imports.len() == 1 => Some(imports[0].clone()),
+        [] if imports.len() == 1 && package_name_matches_type(&imports[0], type_name) => {
+            Some(imports[0].clone())
+        }
         [] if shared_root_fallback => {
-            let mut counts = HashMap::<&str, usize>::new();
-            for import in imports {
-                let root = import.split(['.', ':', '\\', '/']).next().unwrap_or(import);
-                *counts.entry(root).or_default() += 1;
-            }
-            let max_count = counts.values().copied().max().unwrap_or_default();
-            let roots = counts
-                .into_iter()
-                .filter_map(|(root, count)| (count == max_count && count > 1).then_some(root))
-                .collect::<Vec<_>>();
-            (roots.len() == 1).then(|| roots[0].to_string())
+            let roots = imports
+                .iter()
+                .filter_map(|import| import.split(['.', ':', '\\', '/']).next())
+                .collect::<HashSet<_>>();
+            (roots.len() == 1 && imports.len() > 1)
+                .then(|| roots.into_iter().next().unwrap_or_default().to_string())
         }
         _ => None,
     }
@@ -2075,6 +2106,167 @@ fn emit_sdk_namespace_candidate(
         }
         edge.extra.insert("sdk_member_chain".into(), json!(member));
     }
+}
+
+/// Drop SDK observations that name the repository currently being extracted.
+/// Per-file scanners cannot know that `click` or `github.com/spf13/cobra` is
+/// local; root manifests can, so resolve that ambiguity once after aggregation.
+pub fn prune_local_sdk_candidates(
+    root: &Path,
+    nodes: &mut Vec<Node>,
+    edges: &mut Vec<Edge>,
+) -> usize {
+    let mut local = HashSet::<(String, String)>::new();
+    for (file, table, ecosystem) in [
+        ("pyproject.toml", "project", "pypi"),
+        ("Cargo.toml", "package", "cargo"),
+    ] {
+        let name = std::fs::read_to_string(root.join(file))
+            .ok()
+            .and_then(|text| toml_section_name(&text, table));
+        if let Some(name) = name {
+            local.insert((ecosystem.into(), normalize_local_package(ecosystem, &name)));
+        }
+    }
+    let npm_name = std::fs::read_to_string(root.join("package.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| value.get("name")?.as_str().map(str::to_string));
+    if let Some(name) = npm_name {
+        local.insert(("npm".into(), normalize_local_package("npm", &name)));
+    }
+    let go_module = std::fs::read_to_string(root.join("go.mod"))
+        .ok()
+        .and_then(|text| {
+            text.lines().find_map(|line| {
+                line.trim()
+                    .strip_prefix("module ")
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string)
+            })
+        });
+    if let Some(module) = go_module {
+        local.insert(("go".into(), module));
+    }
+    if nodes.iter().any(|node| {
+        node.extra
+            .get("sdk_ecosystem")
+            .and_then(|value| value.as_str())
+            == Some("cargo")
+    }) {
+        let mut directories = vec![root.to_path_buf()];
+        while let Some(directory) = directories.pop() {
+            let Ok(entries) = std::fs::read_dir(directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if file_type.is_dir() {
+                    if !matches!(
+                        entry.file_name().to_str(),
+                        Some(".git" | "node_modules" | "synaptic-out" | "target")
+                    ) {
+                        directories.push(entry.path());
+                    }
+                } else if file_type.is_file() && entry.file_name() == "Cargo.toml" {
+                    if let Some(name) = std::fs::read_to_string(entry.path())
+                        .ok()
+                        .and_then(|text| toml_section_name(&text, "package"))
+                    {
+                        local.insert(("cargo".into(), normalize_local_package("cargo", &name)));
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(feature = "lang-dotnet")]
+    for project in nodes
+        .iter()
+        .filter(|node| node.source_file.ends_with(".csproj"))
+    {
+        let Ok(text) = std::fs::read_to_string(root.join(&project.source_file)) else {
+            continue;
+        };
+        let Ok(document) = roxmltree::Document::parse(&text) else {
+            continue;
+        };
+        for name in document.descendants().filter_map(|node| {
+            matches!(node.tag_name().name(), "RootNamespace" | "AssemblyName")
+                .then(|| node.text())
+                .flatten()
+        }) {
+            local.insert(("nuget".into(), normalize_local_package("nuget", name)));
+        }
+    }
+    if local.is_empty() {
+        return 0;
+    }
+
+    let removed_nodes = nodes
+        .iter()
+        .filter(|node| {
+            node.extra
+                .get("_node_type")
+                .and_then(|value| value.as_str())
+                == Some("sdk_call_candidate")
+        })
+        .filter_map(|node| {
+            let ecosystem = node.extra.get("sdk_ecosystem")?.as_str()?;
+            let import = node.extra.get("sdk_import")?.as_str()?;
+            let normalized = normalize_local_package(ecosystem, import);
+            local
+                .iter()
+                .any(|(local_ecosystem, package)| {
+                    local_ecosystem == ecosystem
+                        && (normalized == *package
+                            || (ecosystem == "go"
+                                && normalized.starts_with(&format!("{package}/")))
+                            || (ecosystem == "nuget"
+                                && normalized
+                                    .strip_prefix(package)
+                                    .is_some_and(|suffix| suffix.starts_with('.'))))
+                })
+                .then(|| node.id.clone())
+        })
+        .collect::<HashSet<_>>();
+    if removed_nodes.is_empty() {
+        return 0;
+    }
+    let before = edges.len();
+    edges.retain(|edge| {
+        !removed_nodes.contains(&edge.source) && !removed_nodes.contains(&edge.target)
+    });
+    nodes.retain(|node| !removed_nodes.contains(&node.id));
+    before - edges.len()
+}
+
+fn normalize_local_package(ecosystem: &str, package: &str) -> String {
+    let package = package.trim().to_ascii_lowercase();
+    if matches!(ecosystem, "pypi" | "cargo") {
+        package.replace(['-', '.', '_'], "-")
+    } else {
+        package
+    }
+}
+
+fn toml_section_name(text: &str, section: &str) -> Option<String> {
+    let mut matches_section = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            matches_section = line == format!("[{section}]");
+        } else if matches_section {
+            if let Some(value) = line
+                .strip_prefix("name")
+                .and_then(|value| value.trim_start().strip_prefix('='))
+            {
+                return Some(value.trim().trim_matches(['\'', '"']).to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Same-length view of an SFC keeping only `<script ...>` block bodies (Vue,

@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use synaptic_core::NodeId;
 use synaptic_detect::{detect, FileType, Manifest};
 use synaptic_extract::{
-    cached_extract_source, load_alias_resolver, resolve_imports, ExtractionResult,
+    cached_extract_source, load_alias_resolver, prune_local_sdk_candidates, resolve_imports,
+    ExtractionResult,
 };
 use synaptic_graph::{
     ambiguous_concept_pairs, analyze, apply_communities, build_from_parts, cluster,
@@ -147,6 +148,7 @@ pub(crate) fn run_extract(
     // non-code imports (css/json/assets) -> distinct classified asset nodes.
     let aliases = load_alias_resolver(&root, &det.ts_config_files);
     let stats = resolve_imports(&mut nodes, &mut edges, &aliases);
+    let local_sdk_calls = prune_local_sdk_candidates(&root, &mut nodes, &mut edges);
     println!(
         "Extracted {extracted} code files → {} nodes, {} edges (pre-build); \
          {} relative, {} alias, {} QL module, {} asset import(s) resolved ({} asset nodes)",
@@ -158,6 +160,9 @@ pub(crate) fn run_extract(
         stats.assets,
         stats.asset_nodes,
     );
+    if local_sdk_calls > 0 {
+        println!("Dropped {local_sdk_calls} SDK candidate(s) that resolve to this repository");
+    }
     // Markdown structure: heading hierarchy -> `document` nodes + `contains`
     // edges. Deterministic + cheap (a line scan), so it runs unconditionally,
     // independent of the opt-in LLM semantic pass, which still adds concepts on
@@ -470,6 +475,7 @@ pub(crate) fn run_extract(
         }
     }
 
+    kg.built_at_commit = synaptic_incremental::git_head(&root);
     let communities = cluster(&kg, &ClusterOptions::default());
     apply_communities(&mut kg, &communities);
     // Name communities via the LLM when a backend is available (semantic mode);
@@ -591,7 +597,7 @@ pub(crate) fn community_member_labels(
 ) -> BTreeMap<u32, Vec<String>> {
     let mut deg: std::collections::HashMap<&NodeId, usize> = std::collections::HashMap::new();
     for e in kg.edges() {
-        if e.source == e.target {
+        if e.source == e.target || !synaptic_graph::is_structural_edge(e) {
             continue;
         }
         *deg.entry(&e.source).or_default() += 1;

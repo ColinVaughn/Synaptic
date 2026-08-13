@@ -1603,6 +1603,37 @@ impl Server {
         }
     }
 
+    fn refresh_existing_artifacts(
+        out_dir: &Path,
+        kg: &KnowledgeGraph,
+        communities: &BTreeMap<u32, Vec<NodeId>>,
+    ) -> std::io::Result<()> {
+        type Writer = fn(&KnowledgeGraph, &Path) -> std::io::Result<()>;
+        let writers: &[(&str, Writer)] = &[
+            ("graph.html", synaptic_output::to_html),
+            ("callflow.html", synaptic_output::to_mermaid),
+            ("tree.html", synaptic_output::to_tree_html),
+            ("graph.svg", synaptic_output::to_svg),
+            ("graph.graphml", synaptic_output::to_graphml),
+            ("graph.cypher", synaptic_output::to_cypher),
+            ("graph.dot", synaptic_output::to_dot),
+            ("graph-3d.html", synaptic_output::to_force3d),
+        ];
+        for (name, write) in writers {
+            let path = out_dir.join(name);
+            if path.exists() {
+                write(kg, &path)?;
+            }
+        }
+        let report_path = out_dir.join("GRAPH_REPORT.md");
+        if report_path.exists() {
+            let labels = BTreeMap::new();
+            let analysis = synaptic_graph::analyze(kg, communities, &labels);
+            synaptic_report::write_report(kg, &analysis, communities, &labels, &report_path)?;
+        }
+        Ok(())
+    }
+
     /// Run a synchronous incremental rebuild under the rebuild lock, persist
     /// `graph.json` + the provenance manifest, and refresh the in-memory indices.
     /// Reuses the detect result and freshly built manifest from `report` so the
@@ -1673,12 +1704,17 @@ impl Server {
             // agree, then update reload_key so that check is a no-op. Temp +
             // rename: a concurrent reader (CLI query, second serve) must never
             // observe a truncated graph.json.
-            graph_written = false;
-            if let Ok(bytes) = serde_json::to_vec_pretty(&outcome.kg.to_graph_data()) {
-                graph_written = synaptic_core::write_atomic(&graph_path, &bytes).is_ok();
-                if graph_written {
-                    self.reload_key = reload_key_for(&graph_path);
+            graph_written = synaptic_output::to_json(&outcome.kg, &graph_path).is_ok();
+            if graph_written {
+                if let Err(error) = Self::refresh_existing_artifacts(
+                    &cfg.out_dir,
+                    &outcome.kg,
+                    &outcome.communities,
+                ) {
+                    eprintln!("[synaptic] auto-freshen: artifact refresh failed: {error}");
+                    graph_written = false;
                 }
+                self.reload_key = reload_key_for(&graph_path);
             }
         }
         // The rebuild's manifest advances exactly what it ingested (targets
@@ -9066,6 +9102,7 @@ mod tests {
             serde_json::to_vec(&outcome.kg.to_graph_data()).unwrap(),
         )
         .unwrap();
+        fs::write(out.join("GRAPH_REPORT.md"), "STALE").unwrap();
         synaptic_incremental::persist_manifest(&out, &root).unwrap();
 
         let mut server = Server::load(graph_path)
@@ -9085,6 +9122,11 @@ mod tests {
         assert!(
             text.contains("beta_func"),
             "new file's symbol must be queryable after auto-freshen: {text}"
+        );
+        let report = fs::read_to_string(out.join("GRAPH_REPORT.md")).unwrap();
+        assert!(
+            report.contains("# Graph Report") && !report.contains("STALE"),
+            "auto-freshen must refresh existing derived artifacts: {report}"
         );
     }
 

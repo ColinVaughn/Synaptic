@@ -61,6 +61,28 @@ mod tests {
     use crate::result::ExtractionResult;
     use synaptic_core::Confidence;
 
+    #[test]
+    fn explicit_static_receiver_is_not_rebound_by_method_name() {
+        let r = extract_java_source(
+            "src/Test.java",
+            b"class Test { void asList() {} void run() { Arrays.asList(1, 2); } }",
+        );
+        assert!(
+            r.raw_calls
+                .iter()
+                .any(|call| call.callee == "Arrays.asList" && call.is_member_call),
+            "raw calls: {:?}",
+            r.raw_calls
+        );
+        assert!(!r.edges.iter().any(|edge| {
+            edge.relation == "calls"
+                && r.nodes
+                    .iter()
+                    .find(|node| node.id == edge.target)
+                    .is_some_and(|node| node.label == ".asList()")
+        }));
+    }
+
     const SAMPLE: &[u8] = br#"
 package com.example;
 

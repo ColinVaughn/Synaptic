@@ -82,6 +82,27 @@ const BUILTIN_NOISE_LABELS: &[&str] = &[
     "PathBuf",
     "Duration",
     "Instant",
+    // .NET framework types and test attributes are ubiquitous type-reference
+    // targets, not architectural hubs.
+    "Task",
+    "CancellationToken",
+    "IEnumerable",
+    "ICollection",
+    "IList",
+    "Dictionary",
+    "DateTime",
+    "DateTimeOffset",
+    "TimeSpan",
+    "Guid",
+    "Uri",
+    "Exception",
+    "IDisposable",
+    "EventArgs",
+    "Func",
+    "Action",
+    "Fact",
+    "Theory",
+    "InlineData",
 ];
 const JSON_NOISE_LABELS: &[&str] = &[
     "start",
@@ -222,7 +243,7 @@ fn degree_map(kg: &KnowledgeGraph) -> HashMap<NodeId, usize> {
         nbr.entry(n.id.clone()).or_default();
     }
     for e in kg.edges() {
-        if e.source == e.target {
+        if e.source == e.target || !crate::is_structural_edge(e) {
             continue;
         }
         nbr.entry(e.source.clone())
@@ -863,7 +884,7 @@ fn neighbor_map(kg: &KnowledgeGraph) -> HashMap<NodeId, HashSet<NodeId>> {
         m.entry(n.id.clone()).or_default();
     }
     for e in kg.edges() {
-        if e.source == e.target {
+        if e.source == e.target || !crate::is_structural_edge(e) {
             continue;
         }
         m.entry(e.source.clone())

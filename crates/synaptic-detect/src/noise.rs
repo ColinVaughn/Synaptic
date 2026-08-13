@@ -64,6 +64,15 @@ pub fn is_noise_dir(name: &str, parent: &Path) -> bool {
     if name.ends_with("_venv") || name.ends_with("_env") || name.ends_with(".egg-info") {
         return true;
     }
+    // Scoped heuristic for checked-in benchmark input corpora.
+    if name == "haystacks"
+        && parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "benchmarks")
+    {
+        return true;
+    }
     // worktrees/ nested inside a dotted dir (e.g. .git/worktrees/).
     if name == "worktrees"
         && parent

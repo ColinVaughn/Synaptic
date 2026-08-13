@@ -8,3 +8,8 @@ to = "worker/consumer.js::run"
 [[cross_nonedge]]
 from = "orders/producer.py::publish_audit"
 to = "worker/consumer.js::run"
+
+# The worker starts its top-level async entry point.
+[[call_edge]]
+from = "worker/consumer.js::consumer.js"
+to = "worker/consumer.js::run"

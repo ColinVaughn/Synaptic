@@ -173,6 +173,22 @@ mod tests {
     use synaptic_core::FileType;
 
     #[test]
+    fn nested_functions_are_extracted_and_explicit_types_are_not_name_rebound() {
+        let r = extract_python_source(
+            "m.py",
+            b"class Tokens:\n    def __init__(self): pass\n\ndef outer():\n    def inner(): pass\n    SystemExit.__init__(None)\n",
+        );
+        assert!(r.nodes.iter().any(|node| node.label == "inner()"));
+        assert!(
+            r.raw_calls
+                .iter()
+                .any(|call| call.callee == "SystemExit.__init__"),
+            "{:?}",
+            r.raw_calls
+        );
+    }
+
+    #[test]
     fn comment_markers_become_rationale_nodes() {
         let r = extract_python_source(
             "m.py",

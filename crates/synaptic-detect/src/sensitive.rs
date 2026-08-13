@@ -105,6 +105,38 @@ pub fn is_sensitive(path: &Path) -> bool {
     if SENSITIVE_PATTERNS.iter().any(|re| re.is_match(name)) {
         return true;
     }
+    // Generic words such as `token` and `password` describe ordinary source
+    // modules (`authenticity_token.rb`, `password_policy.py`). Exact secret-file
+    // patterns and sensitive parent directories above still apply to all files.
+    if matches!(
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some(
+            "c" | "cc"
+                | "cpp"
+                | "cs"
+                | "go"
+                | "h"
+                | "hpp"
+                | "java"
+                | "js"
+                | "jsx"
+                | "kt"
+                | "kts"
+                | "php"
+                | "py"
+                | "rb"
+                | "rs"
+                | "scala"
+                | "swift"
+                | "ts"
+                | "tsx"
+        )
+    ) {
+        return false;
+    }
     generic_keyword_hit(name)
 }
 
@@ -140,5 +172,7 @@ mod tests {
         assert!(!is_sensitive(Path::new("tokenize.py")));
         assert!(!is_sensitive(Path::new("token-economics-of-recall.md")));
         assert!(!is_sensitive(Path::new("password-policy-discussion.md")));
+        assert!(!is_sensitive(Path::new("lib/authenticity_token.rb")));
+        assert!(!is_sensitive(Path::new("src/password_policy.py")));
     }
 }

@@ -35,6 +35,6 @@ pub use dedup::{
 };
 pub use dynamic_link::link_dynamic_refs;
 pub use error::GraphError;
-pub use graph::KnowledgeGraph;
+pub use graph::{is_structural_edge, is_structural_node, KnowledgeGraph};
 pub use ids::{norm_source_file, normalize_id};
 pub use symbol_resolution::resolve_symbols;

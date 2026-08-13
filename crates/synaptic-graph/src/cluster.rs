@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use synaptic_core::NodeId;
 
 use crate::community::{build_wgraph, leiden, louvain};
-use crate::graph::KnowledgeGraph;
+use crate::graph::{is_structural_edge, is_structural_node, KnowledgeGraph};
 
 const MAX_COMMUNITY_FRACTION: f64 = 0.25;
 const MIN_SPLIT_SIZE: usize = 10;
@@ -55,7 +55,7 @@ pub fn cohesion_score(kg: &KnowledgeGraph, nodes: &[NodeId]) -> f64 {
     let set: HashSet<&NodeId> = nodes.iter().collect();
     let mut pairs: HashSet<(&NodeId, &NodeId)> = HashSet::new();
     for e in kg.edges() {
-        if e.source == e.target {
+        if e.source == e.target || !is_structural_edge(e) {
             continue;
         }
         if set.contains(&e.source) && set.contains(&e.target) {
@@ -104,7 +104,7 @@ pub fn partition_cohesion_scores<'a>(
     let mut pairs: Vec<HashSet<(&NodeId, &NodeId)>> =
         (0..groups.len()).map(|_| HashSet::new()).collect();
     for edge in kg.edges() {
-        if edge.source == edge.target {
+        if edge.source == edge.target || !is_structural_edge(edge) {
             continue;
         }
         let (Some(&source_group), Some(&target_group)) =
@@ -139,11 +139,11 @@ pub fn partition_cohesion_scores<'a>(
 
 fn undirected_neighbors(kg: &KnowledgeGraph) -> HashMap<NodeId, HashSet<NodeId>> {
     let mut m: HashMap<NodeId, HashSet<NodeId>> = HashMap::new();
-    for n in kg.nodes() {
+    for n in kg.nodes().filter(|node| is_structural_node(node)) {
         m.entry(n.id.clone()).or_default();
     }
     for e in kg.edges() {
-        if e.source == e.target {
+        if e.source == e.target || !is_structural_edge(e) {
             continue;
         }
         m.entry(e.source.clone())
@@ -201,7 +201,11 @@ fn split_community(
 /// Run community detection. Returns `{community_id: [node_ids]}` with `0` = the
 /// largest community. Deterministic.
 pub fn cluster(kg: &KnowledgeGraph, opts: &ClusterOptions) -> BTreeMap<u32, Vec<NodeId>> {
-    let mut all_nodes: Vec<NodeId> = kg.nodes().map(|n| n.id.clone()).collect();
+    let mut all_nodes: Vec<NodeId> = kg
+        .nodes()
+        .filter(|node| is_structural_node(node))
+        .map(|node| node.id.clone())
+        .collect();
     all_nodes.sort();
     let n = all_nodes.len();
     if n == 0 {
@@ -474,6 +478,58 @@ mod tests {
         let comms = cluster(&kg, &ClusterOptions::default());
         assert_eq!(comms.len(), 3);
         assert_eq!(coverage(&comms), all_ids(&kg));
+    }
+
+    #[test]
+    fn observation_overlay_is_not_a_structural_community() {
+        let mut data = kg_from(
+            &["a", "b", "observation"],
+            &[("a", "b"), ("a", "observation")],
+        )
+        .to_graph_data();
+        data.nodes
+            .iter_mut()
+            .find(|node| node.id.0 == "observation")
+            .unwrap()
+            .extra
+            .insert(
+                "_node_type".into(),
+                serde_json::json!("external_surface_observation"),
+            );
+        data.links
+            .iter_mut()
+            .find(|edge| edge.target.0 == "observation")
+            .unwrap()
+            .weight = 0.0;
+        let communities = cluster(
+            &KnowledgeGraph::from_graph_data(data),
+            &ClusterOptions::default(),
+        );
+        assert_eq!(
+            coverage(&communities),
+            ids(&["a", "b"]).into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn sdk_candidate_is_not_a_structural_community() {
+        let mut data =
+            kg_from(&["caller", "candidate"], &[("caller", "candidate")]).to_graph_data();
+        data.nodes
+            .iter_mut()
+            .find(|node| node.id.0 == "candidate")
+            .unwrap()
+            .extra
+            .insert("_node_type".into(), serde_json::json!("sdk_call_candidate"));
+        data.links[0].relation = "calls_sdk".into();
+        let communities = cluster(
+            &KnowledgeGraph::from_graph_data(data),
+            &ClusterOptions::default(),
+        );
+        assert_eq!(
+            coverage(&communities),
+            ids(&["caller"]).into_iter().collect()
+        );
     }
 
     #[test]
