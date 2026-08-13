@@ -1,0 +1,403 @@
+{
+  "env": {
+    "os": "windows",
+    "arch": "x86_64",
+    "logical_cpus": 16,
+    "synaptic_version": "0.9.10",
+    "source_revision": "a679e4800e7facb07d685cd8ebd2709d7a99f966",
+    "source_dirty": true
+  },
+  "results": [
+    {
+      "name": "memchr",
+      "url": "https://github.com/BurntSushi/memchr",
+      "sha": "581faf00de3143f43384be6a253698d8dd9b51c5",
+      "family": "systems-rust",
+      "tier": "small",
+      "files": 69,
+      "lines": 17855,
+      "nodes": 1082,
+      "edges": 2265,
+      "reps": 5,
+      "cold_secs": [
+        0.1530632,
+        0.119516,
+        0.1218117,
+        0.1168162,
+        0.1210091
+      ],
+      "warm_secs": [
+        0.0680558,
+        0.0755385,
+        0.0693437,
+        0.0674432,
+        0.0709416
+      ],
+      "incremental_secs": [
+        0.0637879,
+        0.0655689,
+        0.0627016,
+        0.0703112,
+        0.0643356
+      ],
+      "cold_secs_median": 0.1210091,
+      "cold_secs_p95": 0.1530632,
+      "warm_secs_median": 0.0693437,
+      "warm_secs_p95": 0.0755385,
+      "incremental_secs_median": 0.0643356,
+      "incremental_file": "src/lib.rs"
+    },
+    {
+      "name": "click",
+      "url": "https://github.com/pallets/click",
+      "sha": "8a1b1a33d739be05b7e91251e3c0dde77c5e152f",
+      "family": "scripting-python",
+      "tier": "medium",
+      "files": 113,
+      "lines": 35080,
+      "nodes": 3780,
+      "edges": 5881,
+      "reps": 5,
+      "cold_secs": [
+        0.2943536,
+        0.2592655,
+        0.2627562,
+        0.2537779,
+        0.3422604
+      ],
+      "warm_secs": [
+        0.1527632,
+        0.1393132,
+        0.1356992,
+        0.1671622,
+        0.2088382
+      ],
+      "incremental_secs": [
+        0.1509544,
+        0.1365465,
+        0.1373649,
+        0.1328812,
+        0.1237924
+      ],
+      "cold_secs_median": 0.2627562,
+      "cold_secs_p95": 0.3422604,
+      "warm_secs_median": 0.1527632,
+      "warm_secs_p95": 0.2088382,
+      "incremental_secs_median": 0.1365465,
+      "incremental_file": "src/click/core.py"
+    },
+    {
+      "name": "p-map",
+      "url": "https://github.com/sindresorhus/p-map",
+      "sha": "65aaa8f4d7e757a5254a146c4c39403efa9e2139",
+      "family": "web-ts",
+      "tier": "small",
+      "files": 10,
+      "lines": 1501,
+      "nodes": 108,
+      "edges": 120,
+      "reps": 5,
+      "cold_secs": [
+        0.0513578,
+        0.0469363,
+        0.0467201,
+        0.0557818,
+        0.0486765
+      ],
+      "warm_secs": [
+        0.0342722,
+        0.034146,
+        0.0344689,
+        0.0333311,
+        0.0344787
+      ],
+      "incremental_secs": [
+        0.036495,
+        0.0361699,
+        0.0339971,
+        0.0334991,
+        0.034237
+      ],
+      "cold_secs_median": 0.0486765,
+      "cold_secs_p95": 0.0557818,
+      "warm_secs_median": 0.0342722,
+      "warm_secs_p95": 0.0344787,
+      "incremental_secs_median": 0.034237,
+      "incremental_file": "index.js"
+    },
+    {
+      "name": "cobra",
+      "url": "https://github.com/spf13/cobra",
+      "sha": "ad460ea8f249db69c943a365fb84f3a59042d54e",
+      "family": "go",
+      "tier": "medium",
+      "files": 55,
+      "lines": 19514,
+      "nodes": 923,
+      "edges": 2451,
+      "reps": 5,
+      "cold_secs": [
+        0.1384212,
+        0.1317957,
+        0.1348111,
+        0.1296296,
+        0.1171389
+      ],
+      "warm_secs": [
+        0.0678804,
+        0.0730818,
+        0.0639082,
+        0.0613352,
+        0.0625962
+      ],
+      "incremental_secs": [
+        0.0537654,
+        0.0545259,
+        0.0549014,
+        0.0554664,
+        0.0527918
+      ],
+      "cold_secs_median": 0.1317957,
+      "cold_secs_p95": 0.1384212,
+      "warm_secs_median": 0.0639082,
+      "warm_secs_p95": 0.0730818,
+      "incremental_secs_median": 0.0545259,
+      "incremental_file": "command.go"
+    },
+    {
+      "name": "axum",
+      "url": "https://github.com/tokio-rs/axum",
+      "sha": "485c603dddcee45bb4bc40aab492b47576e2a2f8",
+      "family": "systems-rust",
+      "tier": "large",
+      "files": 350,
+      "lines": 52990,
+      "nodes": 5842,
+      "edges": 11705,
+      "reps": 5,
+      "cold_secs": [
+        0.5482802,
+        0.579776,
+        0.6000934,
+        0.6552131,
+        0.5671726
+      ],
+      "warm_secs": [
+        0.325359,
+        0.3456501,
+        0.3824205,
+        0.3487893,
+        0.3405075
+      ],
+      "incremental_secs": [
+        0.2873691,
+        0.265019,
+        0.2517727,
+        0.2498744,
+        0.2366547
+      ],
+      "cold_secs_median": 0.579776,
+      "cold_secs_p95": 0.6552131,
+      "warm_secs_median": 0.3456501,
+      "warm_secs_p95": 0.3824205,
+      "incremental_secs_median": 0.2517727,
+      "incremental_file": "axum/src/lib.rs"
+    },
+    {
+      "name": "gson",
+      "url": "https://github.com/google/gson",
+      "sha": "119818bc666d3b9f897d6c0ca7546ce28e9bbcac",
+      "family": "jvm-java",
+      "tier": "medium",
+      "files": 287,
+      "lines": 58882,
+      "nodes": 7593,
+      "edges": 20165,
+      "reps": 5,
+      "cold_secs": [
+        1.0266795,
+        1.0461293,
+        0.9616264,
+        1.0350078,
+        1.0178467
+      ],
+      "warm_secs": [
+        0.5192091,
+        0.5396605,
+        0.4885558,
+        0.4718603,
+        0.4940223
+      ],
+      "incremental_secs": [
+        0.3665038,
+        0.4941003,
+        0.516888,
+        0.4407198,
+        0.4624621
+      ],
+      "cold_secs_median": 1.0266795,
+      "cold_secs_p95": 1.0461293,
+      "warm_secs_median": 0.4940223,
+      "warm_secs_p95": 0.5396605,
+      "incremental_secs_median": 0.4624621,
+      "incremental_file": "gson/src/main/java/com/google/gson/Gson.java"
+    },
+    {
+      "name": "fmt",
+      "url": "https://github.com/fmtlib/fmt",
+      "sha": "be39437ee71162931d3d06d523b4544029656955",
+      "family": "systems-cpp",
+      "tier": "medium",
+      "files": 100,
+      "lines": 80762,
+      "nodes": 3938,
+      "edges": 8174,
+      "reps": 5,
+      "cold_secs": [
+        0.6947618,
+        0.6478315,
+        0.6663401,
+        0.6073387,
+        0.6324927
+      ],
+      "warm_secs": [
+        0.2605391,
+        0.2383038,
+        0.2486913,
+        0.1775444,
+        0.2362119
+      ],
+      "incremental_secs": [
+        0.1749678,
+        0.1621438,
+        0.1596602,
+        0.1454325,
+        0.1480245
+      ],
+      "cold_secs_median": 0.6478315,
+      "cold_secs_p95": 0.6947618,
+      "warm_secs_median": 0.2383038,
+      "warm_secs_p95": 0.2605391,
+      "incremental_secs_median": 0.1596602,
+      "incremental_file": "include/fmt/format.h"
+    },
+    {
+      "name": "Humanizer",
+      "url": "https://github.com/Humanizr/Humanizer",
+      "sha": "ffc2b77c0f30d2fb176875841424379319d0ae9b",
+      "family": "dotnet-csharp",
+      "tier": "medium",
+      "files": 2563,
+      "lines": 476967,
+      "nodes": 44548,
+      "edges": 54985,
+      "reps": 5,
+      "cold_secs": [
+        8.4256775,
+        6.8506987,
+        6.8083952,
+        7.0728551,
+        7.3553931
+      ],
+      "warm_secs": [
+        2.6941959,
+        2.8348269999999998,
+        2.6560361,
+        2.6678055,
+        2.7721697
+      ],
+      "incremental_secs": [
+        1.8352206,
+        1.8890276,
+        1.8860138,
+        1.9291703,
+        1.9812446000000001
+      ],
+      "cold_secs_median": 7.0728551,
+      "cold_secs_p95": 8.4256775,
+      "warm_secs_median": 2.6941959,
+      "warm_secs_p95": 2.8348269999999998,
+      "incremental_secs_median": 1.8890276,
+      "incremental_file": "src/Humanizer/StringHumanizeExtensions.cs"
+    },
+    {
+      "name": "rack",
+      "url": "https://github.com/rack/rack",
+      "sha": "7ff327f48dcfc2d257a9106a1e8ae65936b458b8",
+      "family": "scripting-ruby",
+      "tier": "medium",
+      "files": 106,
+      "lines": 23181,
+      "nodes": 1531,
+      "edges": 2020,
+      "reps": 5,
+      "cold_secs": [
+        0.2455524,
+        0.2020547,
+        0.1881794,
+        0.1924926,
+        0.2017817
+      ],
+      "warm_secs": [
+        0.0943496,
+        0.1086239,
+        0.0938127,
+        0.1045065,
+        0.1053605
+      ],
+      "incremental_secs": [
+        0.0765511,
+        0.0825162,
+        0.0736076,
+        0.0733704,
+        0.0729352
+      ],
+      "cold_secs_median": 0.2017817,
+      "cold_secs_p95": 0.2455524,
+      "warm_secs_median": 0.1045065,
+      "warm_secs_p95": 0.1086239,
+      "incremental_secs_median": 0.0736076,
+      "incremental_file": "lib/rack.rb"
+    },
+    {
+      "name": "Slim",
+      "url": "https://github.com/slimphp/Slim",
+      "sha": "80900fb39cafce3ae53b18a2c4f642a122f03095",
+      "family": "web-php",
+      "tier": "small",
+      "files": 135,
+      "lines": 17196,
+      "nodes": 2092,
+      "edges": 4085,
+      "reps": 5,
+      "cold_secs": [
+        0.4531687,
+        0.3694527,
+        0.3892844,
+        0.3334821,
+        0.4160517
+      ],
+      "warm_secs": [
+        0.1347388,
+        0.1514206,
+        0.1379962,
+        0.1029552,
+        0.150755
+      ],
+      "incremental_secs": [
+        0.1373107,
+        0.1251977,
+        0.118483,
+        0.1169288,
+        0.1136349
+      ],
+      "cold_secs_median": 0.3892844,
+      "cold_secs_p95": 0.4531687,
+      "warm_secs_median": 0.1379962,
+      "warm_secs_p95": 0.1514206,
+      "incremental_secs_median": 0.118483,
+      "incremental_file": "Slim/App.php"
+    }
+  ],
+  "skipped": []
+}

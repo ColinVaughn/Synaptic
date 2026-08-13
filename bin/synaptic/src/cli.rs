@@ -811,7 +811,7 @@ pub(crate) enum EvalAction {
         /// Restrict to one tier (small|medium|large).
         #[arg(long)]
         tier: Option<String>,
-        /// Repetitions per repo (median + p95 are reported over these).
+        /// Repetitions per repo (median + tail; tail is max below 20 reps).
         #[arg(long, default_value_t = 3)]
         reps: usize,
         /// Clone cache directory (default: synaptic-out/bench).
@@ -823,6 +823,9 @@ pub(crate) enum EvalAction {
         /// Emit the report as JSON to stdout.
         #[arg(long)]
         json: bool,
+        /// Return success even when a repository could not be measured.
+        #[arg(long)]
+        allow_skips: bool,
     },
 }
 

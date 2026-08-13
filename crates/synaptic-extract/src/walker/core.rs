@@ -414,15 +414,7 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                 for arg in Self::children(args) {
                     if arg.kind() == "identifier" {
                         let base = self.text(arg);
-                        let local = NodeId(make_id(&[stem, &base]));
-                        let base_nid = if self.seen.contains(&local) {
-                            local
-                        } else {
-                            let global = NodeId(make_id(&[base.as_str()]));
-                            self.add_external_node(global.clone(), base.clone());
-                            global
-                        };
-                        self.add_edge(class_nid.clone(), base_nid, "inherits", line, None);
+                        self.link_heritage(&class_nid, base, stem, line, "inherits");
                     }
                 }
             }
@@ -574,7 +566,7 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         relation: &str,
     ) {
         let local = NodeId(make_id(&[stem, &base]));
-        let base_nid = if self.seen.contains(&local) {
+        let base_nid = if local != *class_nid && self.seen.contains(&local) {
             local
         } else {
             let global = NodeId(make_id(&[base.as_str()]));

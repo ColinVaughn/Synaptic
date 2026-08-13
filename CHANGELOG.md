@@ -10,6 +10,22 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- The workspace now targets Rust 1.97.1, MSRV 1.97, and Edition 2024 with the
+  matching Rustfmt style across local builds, CI, releases, audits, and Docker
+  images. All-target, all-feature Clippy runs warning-free without lint
+  allowances.
+
+### Fixed
+
+- Incremental rebuilds no longer repeatedly merge parser-owned Markdown
+  headings as semantic duplicates; unchanged updates now preserve heading
+  identities and produce byte-stable graphs.
+- Case-folded Python inheritance such as `class Dict(dict)` no longer becomes a
+  self-edge, and unrelated entity dedup no longer conditionally removes existing
+  self-edges during incremental rebuilds.
+
 ## [0.9.10] - 2026-08-12
 
 ### Added

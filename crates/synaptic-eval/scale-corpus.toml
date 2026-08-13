@@ -2,34 +2,74 @@
 # Each is cloned at its SHA and extracted cold + warm. Spans size tiers and
 # language families. Network + git required; opt-in (not run in CI).
 #
-# SHAs pinned 2026-06-19. Refresh deliberately; a moved SHA changes the numbers.
+# SHAs pinned 2026-08-12. Refresh deliberately; a moved SHA changes the numbers.
 
 [[repo]]
 url = "https://github.com/BurntSushi/memchr"
 sha = "581faf00de3143f43384be6a253698d8dd9b51c5"
 family = "systems-rust"
 tier = "small"
+incremental_file = "src/lib.rs"
 
 [[repo]]
 url = "https://github.com/pallets/click"
 sha = "8a1b1a33d739be05b7e91251e3c0dde77c5e152f"
 family = "scripting-python"
 tier = "medium"
+incremental_file = "src/click/core.py"
 
 [[repo]]
 url = "https://github.com/sindresorhus/p-map"
 sha = "65aaa8f4d7e757a5254a146c4c39403efa9e2139"
 family = "web-ts"
 tier = "small"
+incremental_file = "index.js"
 
 [[repo]]
 url = "https://github.com/spf13/cobra"
 sha = "ad460ea8f249db69c943a365fb84f3a59042d54e"
 family = "go"
 tier = "medium"
+incremental_file = "command.go"
 
 [[repo]]
 url = "https://github.com/tokio-rs/axum"
 sha = "485c603dddcee45bb4bc40aab492b47576e2a2f8"
 family = "systems-rust"
 tier = "large"
+incremental_file = "axum/src/lib.rs"
+
+[[repo]]
+url = "https://github.com/google/gson"
+sha = "119818bc666d3b9f897d6c0ca7546ce28e9bbcac"
+family = "jvm-java"
+tier = "medium"
+incremental_file = "gson/src/main/java/com/google/gson/Gson.java"
+
+[[repo]]
+url = "https://github.com/fmtlib/fmt"
+sha = "be39437ee71162931d3d06d523b4544029656955"
+family = "systems-cpp"
+tier = "medium"
+incremental_file = "include/fmt/format.h"
+
+[[repo]]
+url = "https://github.com/Humanizr/Humanizer"
+sha = "ffc2b77c0f30d2fb176875841424379319d0ae9b"
+family = "dotnet-csharp"
+tier = "medium"
+incremental_file = "src/Humanizer/StringHumanizeExtensions.cs"
+
+[[repo]]
+url = "https://github.com/rack/rack"
+sha = "7ff327f48dcfc2d257a9106a1e8ae65936b458b8"
+family = "scripting-ruby"
+tier = "medium"
+incremental_file = "lib/rack.rb"
+
+[[repo]]
+url = "https://github.com/slimphp/Slim"
+sha = "80900fb39cafce3ae53b18a2c4f642a122f03095"
+family = "web-php"
+tier = "small"
+incremental_file = "Slim/App.php"

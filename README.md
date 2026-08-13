@@ -363,24 +363,16 @@ a predictor that is miscalibrated on this history. Methodology in [BENCHMARKS.md
 
 Extraction throughput across real OSS repositories spanning size tiers and language families,
 each cloned at a pinned SHA (`synaptic eval scale`; network + git, opt-in). Each timing is the
-median of 3 reps. **Cold** clears the AST cache first (genuinely cold); **warm** is cache-hot;
-**incr** re-extracts a single file. Measured on Windows / x86_64 / 16 logical CPUs:
+median of 5 reps. The 2026-08-12 run covered **10 repositories, 9 language families, 783,928
+supported LOC, 71,437 nodes, and 111,851 edges** with no skips. Warm throughput ranged from
+44k to 339k LOC/s; median cold-to-warm speedup ranged from 1.4x to 2.8x. The largest checkout
+measured here, Humanizer (476,967 supported LOC), took 7.07s cold and 2.69s warm.
 
-| Repo | Family | Tier | Files | LOC | Nodes | Edges | Cold (s) | Warm (s) | Incr (s) | Files/s |
-|---|---|---|--:|--:|--:|--:|--:|--:|--:|--:|
-| memchr | systems-rust | small | 75 | 70,044 | 3,849 | 13,592 | 12.5 | 7.5 | 4.3 | 10 |
-| click | scripting-python | medium | 112 | 35,063 | 2,189 | 3,475 | 2.4 | 1.7 | 0.8 | 66 |
-| p-map | web-ts | small | 10 | 1,501 | 85 | 83 | 0.07 | 0.04 | 0.04 | 269 |
-| cobra | go | medium | 55 | 19,514 | 846 | 2,362 | 1.1 | 0.7 | 0.4 | 82 |
-| axum | systems-rust | large | 348 | 52,969 | 3,656 | 9,510 | 4.7 | 3.6 | 3.5 | 97 |
-
-The absolute times are machine-dependent; the reproducible signals are the **cold→warm ratio**
-(~1.4-2x; the Rust AST cache removes re-parsing on rebuilds) and that throughput scales with
-repo content rather than collapsing on the large tier. Note `memchr` is slow per-file: it is
-macro-heavy and edge-dense (13.6k edges over 75 files), which the benchmark surfaces rather than
-hides. `incr` re-extracts one file but still re-runs graph assembly, so it is not free. The
-pinned SHAs make a run reproducible; refresh them deliberately. Full method and the manifest are
-in [BENCHMARKS.md](BENCHMARKS.md).
+Those are machine-specific development-worktree results, not universal or clean-release
+claims. "Cold" clears Synaptic's AST cache but the checkout and OS file cache were warm;
+incremental timing re-extracts a named unchanged source file and is not patch latency. Full
+method, per-repository results, limitations, exact SHAs, and raw samples are in
+[BENCHMARKS.md](BENCHMARKS.md).
 
 ## Install
 

@@ -1,10 +1,10 @@
 //! Scale benchmark: clone pinned external repositories at fixed SHAs and measure
 //! `extract` throughput across size tiers and language families.
 //!
-//! For each repo it reports, over several repetitions (median + p95): a **cold**
-//! full build (AST cache cleared first, so cold is genuinely cold), a **warm**
-//! full build (AST cache hot), and an **incremental** rebuild of a single file
-//! (the steady-state edit latency), plus files, lines, and graph nodes/edges.
+//! For each repo it reports raw samples and summaries: an AST-cache-**cold** full
+//! build, a cache-**warm** full build, and unchanged-file **incremental** path
+//! overhead, plus files, lines, and graph nodes/edges. The renderer calls the
+//! nearest-rank tail sample `max` below 20 repetitions and `p95` otherwise.
 //! Environment (OS/arch/CPUs/version) is recorded so a published number is
 //! interpretable.
 //!
@@ -19,7 +19,7 @@ use std::time::Instant;
 use serde::Deserialize;
 
 use synaptic_core::GraphData;
-use synaptic_incremental::{ChangeSet, RebuildOptions, rebuild};
+use synaptic_incremental::{ChangeSet, RebuildOptions, rebuild, topology};
 
 /// One pinned external repository.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -29,6 +29,8 @@ pub struct ScaleRepo {
     pub family: String,
     /// Size tier: "small" | "medium" | "large" (advisory grouping label).
     pub tier: String,
+    /// Representative primary-language file used for incremental-path timing.
+    pub incremental_file: Option<String>,
 }
 
 /// The scale manifest.
@@ -51,6 +53,8 @@ pub struct ScaleEnv {
     pub arch: String,
     pub logical_cpus: usize,
     pub synaptic_version: String,
+    pub source_revision: Option<String>,
+    pub source_dirty: Option<bool>,
 }
 
 impl ScaleEnv {
@@ -62,6 +66,17 @@ impl ScaleEnv {
                 .map(|n| n.get())
                 .unwrap_or(0),
             synaptic_version: env!("CARGO_PKG_VERSION").to_string(),
+            source_revision: git_output(
+                &["rev-parse", "HEAD"],
+                Some(Path::new(env!("CARGO_MANIFEST_DIR"))),
+            )
+            .ok(),
+            source_dirty: git_output(
+                &["status", "--porcelain"],
+                Some(Path::new(env!("CARGO_MANIFEST_DIR"))),
+            )
+            .ok()
+            .map(|output| !output.is_empty()),
         }
     }
 }
@@ -70,6 +85,8 @@ impl ScaleEnv {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ScaleResult {
     pub name: String,
+    pub url: String,
+    pub sha: String,
     pub family: String,
     pub tier: String,
     pub files: usize,
@@ -77,12 +94,18 @@ pub struct ScaleResult {
     pub nodes: usize,
     pub edges: usize,
     pub reps: usize,
+    /// Raw samples are retained so published summaries can be audited.
+    pub cold_secs: Vec<f64>,
+    pub warm_secs: Vec<f64>,
+    pub incremental_secs: Vec<f64>,
     pub cold_secs_median: f64,
     pub cold_secs_p95: f64,
     pub warm_secs_median: f64,
     pub warm_secs_p95: f64,
-    /// Single-file incremental rebuild latency (median), the steady-state edit cost.
+    /// Median overhead of re-extracting one unchanged file through the incremental path.
     pub incremental_secs_median: f64,
+    /// Deterministically selected unchanged file re-extracted by the incremental sample.
+    pub incremental_file: Option<String>,
 }
 
 impl ScaleResult {
@@ -154,6 +177,10 @@ fn repo_name(url: &str) -> &str {
 }
 
 fn git(args: &[&str], cwd: Option<&Path>) -> Result<(), String> {
+    git_output(args, cwd).map(|_| ())
+}
+
+fn git_output(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
     let mut cmd = Command::new("git");
     if let Some(dir) = cwd {
         cmd.arg("-C").arg(dir);
@@ -163,7 +190,7 @@ fn git(args: &[&str], cwd: Option<&Path>) -> Result<(), String> {
         .output()
         .map_err(|e| format!("running git {args:?}: {e}"))?;
     if out.status.success() {
-        Ok(())
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
         Err(format!(
             "git {args:?} failed: {}",
@@ -205,8 +232,7 @@ fn build_full(dir: &Path) -> Result<GraphData, String> {
     Ok(out.kg.to_graph_data())
 }
 
-/// Remove the build cache so the next build is genuinely cold. The AST cache and
-/// graph artifacts live under `<dir>/synaptic-out`.
+/// Remove Synaptic's build cache. This does not clear the OS filesystem cache.
 fn clear_cache(dir: &Path) {
     let _ = std::fs::remove_dir_all(dir.join("synaptic-out"));
 }
@@ -226,6 +252,20 @@ fn count_lines(dir: &Path, gd: &GraphData) -> usize {
         .sum()
 }
 
+const PROGRAMMING_EXTENSIONS: &[&str] = &[
+    "py", "ts", "tsx", "js", "jsx", "go", "rs", "java", "groovy", "cpp", "cc", "cxx", "c", "h",
+    "hpp", "hh", "rb", "swift", "kt", "kts", "cs", "scala", "php", "lua", "zig", "ps1", "ex",
+    "exs", "m", "mm", "jl", "dart", "v", "sql", "f", "f90", "f95", "f03", "f08", "for", "sh",
+    "bash", "ql", "qll",
+];
+
+fn is_programming_source(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| PROGRAMMING_EXTENSIONS.contains(&ext))
+}
+
 /// Measure one repo over `reps` repetitions.
 fn measure(dir: &Path, repo: &ScaleRepo, reps: usize) -> Result<ScaleResult, String> {
     let reps = reps.max(1);
@@ -234,7 +274,7 @@ fn measure(dir: &Path, repo: &ScaleRepo, reps: usize) -> Result<ScaleResult, Str
     let mut last_gd: Option<GraphData> = None;
 
     for _ in 0..reps {
-        clear_cache(dir); // genuinely cold: no AST cache from a prior build/run
+        clear_cache(dir); // AST-cache-cold; the OS filesystem cache may be warm
         let t = Instant::now();
         let gd = build_full(dir)?;
         cold.push(t.elapsed().as_secs_f64());
@@ -246,18 +286,27 @@ fn measure(dir: &Path, repo: &ScaleRepo, reps: usize) -> Result<ScaleResult, Str
     }
     let gd = last_gd.expect("at least one rep");
 
-    // Incremental: re-extract a single existing code file against the prior graph.
+    // Incremental: re-extract one deterministic, unchanged code file against the prior graph.
     let mut incr = Vec::with_capacity(reps);
-    if let Some(one) = gd
-        .nodes
-        .iter()
-        .map(|n| n.source_file.clone())
-        .find(|s| !s.is_empty() && dir.join(s).is_file())
-    {
+    let incremental_file = if let Some(path) = &repo.incremental_file {
+        if !dir.join(path).is_file() || !gd.nodes.iter().any(|node| node.source_file == *path) {
+            return Err(format!(
+                "configured incremental file was not extracted: {path}"
+            ));
+        }
+        Some(path.clone())
+    } else {
+        gd.nodes
+            .iter()
+            .map(|n| n.source_file.clone())
+            .filter(|s| is_programming_source(s) && dir.join(s).is_file())
+            .min()
+    };
+    if let Some(one) = &incremental_file {
         let path = PathBuf::from(&one);
         for _ in 0..reps {
             let t = Instant::now();
-            let _ = rebuild(
+            let outcome = rebuild(
                 &RebuildOptions {
                     root: dir.to_path_buf(),
                     directed: true,
@@ -268,6 +317,33 @@ fn measure(dir: &Path, repo: &ScaleRepo, reps: usize) -> Result<ScaleResult, Str
             )
             .map_err(|e| e.to_string())?;
             incr.push(t.elapsed().as_secs_f64());
+            if outcome.reextracted != 1 || !outcome.unreadable.is_empty() || outcome.changed {
+                let (before_nodes, before_edges) = topology(&gd);
+                let after = outcome.kg.to_graph_data();
+                let (after_nodes, after_edges) = topology(&after);
+                let before_nodes = before_nodes
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>();
+                let after_nodes = after_nodes
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>();
+                let before_edges = before_edges
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>();
+                let after_edges = after_edges
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>();
+                return Err(format!(
+                    "unchanged incremental validation failed for {one}: reextracted={}, unreadable={}, topology_changed={}; first node -/+ {:?}/{:?}; first edge -/+ {:?}/{:?}",
+                    outcome.reextracted,
+                    outcome.unreadable.len(),
+                    outcome.changed,
+                    before_nodes.difference(&after_nodes).next(),
+                    after_nodes.difference(&before_nodes).next(),
+                    before_edges.difference(&after_edges).next(),
+                    after_edges.difference(&before_edges).next(),
+                ));
+            }
         }
     }
 
@@ -281,6 +357,8 @@ fn measure(dir: &Path, repo: &ScaleRepo, reps: usize) -> Result<ScaleResult, Str
 
     Ok(ScaleResult {
         name: repo_name(&repo.url).to_string(),
+        url: repo.url.clone(),
+        sha: repo.sha.clone(),
         family: repo.family.clone(),
         tier: repo.tier.clone(),
         files,
@@ -288,11 +366,15 @@ fn measure(dir: &Path, repo: &ScaleRepo, reps: usize) -> Result<ScaleResult, Str
         nodes: gd.nodes.len(),
         edges: gd.links.len(),
         reps,
+        cold_secs: cold.clone(),
+        warm_secs: warm.clone(),
+        incremental_secs: incr.clone(),
         cold_secs_median: median(&cold),
         cold_secs_p95: p95(&cold),
         warm_secs_median: median(&warm),
         warm_secs_p95: p95(&warm),
         incremental_secs_median: median(&incr),
+        incremental_file,
     })
 }
 
@@ -345,10 +427,12 @@ url = "https://github.com/x/y"
 sha = "deadbeef"
 family = "systems-rust"
 tier = "small"
+incremental_file = "src/lib.rs"
 "#;
         let m = ScaleManifest::parse(src).unwrap();
         assert_eq!(m.repos.len(), 1);
         assert_eq!(m.repos[0].tier, "small");
+        assert_eq!(m.repos[0].incremental_file.as_deref(), Some("src/lib.rs"));
     }
 
     #[test]
@@ -374,6 +458,8 @@ tier = "small"
     fn throughput_is_safe_when_instant() {
         let r = ScaleResult {
             name: "x".into(),
+            url: "https://example.com/x".into(),
+            sha: "deadbeef".into(),
             family: "f".into(),
             tier: "small".into(),
             files: 10,
@@ -381,11 +467,15 @@ tier = "small"
             nodes: 1,
             edges: 0,
             reps: 1,
+            cold_secs: vec![1.0],
+            warm_secs: vec![0.0],
+            incremental_secs: vec![0.0],
             cold_secs_median: 1.0,
             cold_secs_p95: 1.0,
             warm_secs_median: 0.0,
             warm_secs_p95: 0.0,
             incremental_secs_median: 0.0,
+            incremental_file: None,
         };
         assert_eq!(r.warm_files_per_sec(), 0.0);
         assert_eq!(r.warm_loc_per_sec(), 0.0);
@@ -396,5 +486,12 @@ tier = "small"
         let e = ScaleEnv::detect();
         assert!(!e.os.is_empty());
         assert!(!e.synaptic_version.is_empty());
+    }
+
+    #[test]
+    fn incremental_sample_uses_programming_sources() {
+        assert!(is_programming_source("src/main.rs"));
+        assert!(!is_programming_source(".github/workflows/ci.yml"));
+        assert!(!is_programming_source("README.md"));
     }
 }

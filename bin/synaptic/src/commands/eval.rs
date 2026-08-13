@@ -51,7 +51,8 @@ pub(crate) fn run_eval(action: EvalAction) -> Result<()> {
             cache,
             out,
             json,
-        } => run_scale_cmd(manifest, tier, reps, cache, out, json),
+            allow_skips,
+        } => run_scale_cmd(manifest, tier, reps, cache, out, json, allow_skips),
     }
 }
 
@@ -66,6 +67,7 @@ fn run_scale_cmd(
     cache: Option<PathBuf>,
     out: Option<PathBuf>,
     json: bool,
+    allow_skips: bool,
 ) -> Result<()> {
     let manifest = manifest.unwrap_or_else(default_scale_manifest);
     if !manifest.exists() {
@@ -100,6 +102,9 @@ fn run_scale_cmd(
             "warning: {} repo(s) skipped; scale results are partial",
             report.skipped.len()
         );
+        if !allow_skips {
+            bail!("incomplete scale run (pass --allow-skips for exploratory runs)");
+        }
     }
     Ok(())
 }
@@ -107,23 +112,29 @@ fn run_scale_cmd(
 fn scale_markdown(report: &ScaleReport) -> String {
     let mut s = String::from("# Extraction scale\n\n");
     let e = &report.env;
+    let reps = report.results.first().map(|r| r.reps).unwrap_or(0);
+    let tail = if reps < 20 { "max" } else { "p95" };
     s.push_str(&format!(
-        "Environment: {} / {} / {} logical CPUs / synaptic {}. Median over {} rep(s); cold clears the AST cache first, warm is cache-hot, incremental re-extracts one file.\n\n",
+        "Environment: {} / {} / {} logical CPUs / synaptic {} / source {}{}. Median over {} rep(s); tail is {}; cold clears the AST cache first, warm is cache-hot, incremental re-extracts one file.\n\n",
         e.os,
         e.arch,
         e.logical_cpus,
         e.synaptic_version,
-        report.results.first().map(|r| r.reps).unwrap_or(0),
+        e.source_revision.as_deref().unwrap_or("unknown"),
+        if e.source_dirty == Some(true) { " (dirty)" } else { "" },
+        reps,
+        tail,
     ));
     if report.results.is_empty() {
         s.push_str("No repositories measured (all skipped or filtered).\n");
     } else {
-        s.push_str("| Repo | Family | Tier | Files | LOC | Nodes | Edges | Cold med/p95 (s) | Warm med/p95 (s) | Incr (s) | Files/s |\n");
-        s.push_str("|---|---|---|--:|--:|--:|--:|--:|--:|--:|--:|\n");
+        s.push_str(&format!("| Repo | SHA | Family | Tier | Files | LOC | Nodes | Edges | Cold med/{tail} (s) | Warm med/{tail} (s) | Unchanged-file incr (s) | LOC/s |\n"));
+        s.push_str("|---|---|---|---|--:|--:|--:|--:|--:|--:|--:|--:|\n");
         for r in &report.results {
             s.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {} | {} | {:.2}/{:.2} | {:.2}/{:.2} | {:.3} | {:.0} |\n",
+                "| {} | `{}` | {} | {} | {} | {} | {} | {} | {:.2}/{:.2} | {:.2}/{:.2} | {:.3} | {:.0} |\n",
                 r.name,
+                &r.sha[..r.sha.len().min(12)],
                 r.family,
                 r.tier,
                 r.files,
@@ -135,7 +146,7 @@ fn scale_markdown(report: &ScaleReport) -> String {
                 r.warm_secs_median,
                 r.warm_secs_p95,
                 r.incremental_secs_median,
-                r.warm_files_per_sec(),
+                r.warm_loc_per_sec(),
             ));
         }
     }

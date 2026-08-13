@@ -80,6 +80,18 @@ fn inherits_creates_external_base_and_edge() {
     }
 }
 
+#[test]
+fn builtin_base_differing_only_by_case_is_not_self_inheritance() {
+    let r = extract_python_source("support/docopt.py", b"class Dict(dict):\n    pass\n");
+    let edge = r.edges.iter().find(|e| e.relation == "inherits").unwrap();
+    assert_ne!(edge.source, edge.target);
+    assert!(
+        r.nodes
+            .iter()
+            .any(|node| node.id == edge.target && node.label == "dict")
+    );
+}
+
 const CALLS: &[u8] = b"def compute_score(data):\n    return sum(data)\n\n\ndef normalize(value):\n    return value / 100.0\n\n\ndef run_analysis(data):\n    score = compute_score(data)\n    return normalize(score)\n\n\nclass Analyzer:\n    def process(self, data):\n        return run_analysis(data)\n\n    def score(self, data):\n        return compute_score(data)\n\n    def full_pipeline(self, data):\n        raw = self.score(data)\n        return normalize(raw)\n";
 
 fn call_pairs(src: &[u8]) -> std::collections::HashSet<(String, String)> {

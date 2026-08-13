@@ -389,13 +389,14 @@ fn apply_components(
         .collect();
     let mut deduped_edges: Vec<Edge> = Vec::with_capacity(edges.len());
     for mut e in edges {
+        let was_self_edge = e.source == e.target;
         if let Some(w) = remap.get(&e.source) {
             e.source = w.clone();
         }
         if let Some(w) = remap.get(&e.target) {
             e.target = w.clone();
         }
-        if e.source != e.target {
+        if was_self_edge || e.source != e.target {
             deduped_edges.push(e);
         }
     }
@@ -700,6 +701,21 @@ mod tests {
             out_edges.is_empty(),
             "self-edge after merge dropped: {out_edges:?}"
         );
+    }
+
+    #[test]
+    fn unrelated_merge_preserves_existing_self_edge() {
+        let nodes = vec![
+            n("c1", "Knowledge Graph", FileType::Concept, "doc.md"),
+            n("c2", "knowledge-graph", FileType::Concept, "doc.md"),
+            n("code", "Code", FileType::Code, "code.py"),
+        ];
+        let (_, edges) = deduplicate_entities(
+            nodes,
+            vec![edge("c2", "c1"), edge("code", "code")],
+            &HashMap::new(),
+        );
+        assert_eq!(edges, vec![edge("code", "code")]);
     }
 
     #[test]

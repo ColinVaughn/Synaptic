@@ -177,27 +177,49 @@ synaptic eval scale --json
 
 For each repo the harness clones at the pinned SHA into a cache dir (`--filter=blob:none` to
 keep the transfer small), times a **cold** build and then a **warm** build (AST cache hot), and
-records files, graph nodes/edges, both timings, and warm files/sec. A repo that cannot be
-cloned or built is logged to stderr and skipped, never fatal.
+records the pinned SHA, raw timing samples, files, LOC, graph nodes/edges, both summary
+timings, and warm LOC/sec. The incremental sample re-extracts the manifest's named,
+primary-language **unchanged** file; it measures incremental-path overhead, not patch latency.
+The repository fails validation unless exactly one file is re-extracted without a read fallback
+and the resulting topology is unchanged.
+A repo that cannot be cloned or built is retained in the report and makes the command fail
+unless `--allow-skips` is passed for an explicitly partial exploratory run.
 
-### Results (pinned 2026-06-19; Windows / x86_64 / 16 logical CPUs; median of 3 reps)
+### Results (pinned 2026-08-12; Windows / x86_64 / 16 logical CPUs; median of 5 reps)
 
-| Repo | Family | Tier | Files | LOC | Nodes | Edges | Cold (s) | Warm (s) | Incr (s) | Files/s |
-|---|---|---|--:|--:|--:|--:|--:|--:|--:|--:|
-| memchr | systems-rust | small | 75 | 70,044 | 3,849 | 13,592 | 12.5 | 7.5 | 4.3 | 10 |
-| click | scripting-python | medium | 112 | 35,063 | 2,189 | 3,475 | 2.4 | 1.7 | 0.8 | 66 |
-| p-map | web-ts | small | 10 | 1,501 | 85 | 83 | 0.07 | 0.04 | 0.04 | 269 |
-| cobra | go | medium | 55 | 19,514 | 846 | 2,362 | 1.1 | 0.7 | 0.4 | 82 |
-| axum | systems-rust | large | 348 | 52,969 | 3,656 | 9,510 | 4.7 | 3.6 | 3.5 | 97 |
+Run from Synaptic 0.9.10 source `a679e4800e7facb07d685cd8ebd2709d7a99f966`
+with a dirty working tree containing these benchmark changes. The dirty flag is part of the
+report, so this is development evidence rather than a clean release baseline. All ten
+repositories completed; none were skipped. Exact SHAs, selected incremental files, and raw
+samples: [`eval/scale-results-2026-08-12.json`](eval/scale-results-2026-08-12.json).
+
+| Repo | Family | Files | LOC | Nodes | Edges | Cold med/max (s) | Warm med/max (s) | Unchanged-file incr (s) | Warm LOC/s |
+|---|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| memchr | systems-rust | 69 | 17,855 | 1,082 | 2,265 | 0.12/0.15 | 0.07/0.08 | 0.064 | 257,486 |
+| click | scripting-python | 113 | 35,080 | 3,780 | 5,881 | 0.26/0.34 | 0.15/0.21 | 0.137 | 229,636 |
+| p-map | web-ts | 10 | 1,501 | 108 | 120 | 0.05/0.06 | 0.03/0.03 | 0.034 | 43,796 |
+| cobra | go | 55 | 19,514 | 923 | 2,451 | 0.13/0.14 | 0.06/0.07 | 0.055 | 305,344 |
+| axum | systems-rust | 350 | 52,990 | 5,842 | 11,705 | 0.58/0.66 | 0.35/0.38 | 0.252 | 153,305 |
+| gson | jvm-java | 287 | 58,882 | 7,593 | 20,165 | 1.03/1.05 | 0.49/0.54 | 0.462 | 119,189 |
+| fmt | systems-cpp | 100 | 80,762 | 3,938 | 8,174 | 0.65/0.69 | 0.24/0.26 | 0.160 | 338,904 |
+| Humanizer | dotnet-csharp | 2,563 | 476,967 | 44,548 | 54,985 | 7.07/8.43 | 2.69/2.83 | 1.889 | 177,035 |
+| rack | scripting-ruby | 106 | 23,181 | 1,531 | 2,020 | 0.20/0.25 | 0.10/0.11 | 0.074 | 221,814 |
+| Slim | web-php | 135 | 17,196 | 2,092 | 4,085 | 0.39/0.45 | 0.14/0.15 | 0.118 | 124,612 |
+| **Total represented** | **9 families** | **3,788** | **783,928** | **71,437** | **111,851** | — | — | — | — |
 
 Notes on reading these:
 
-- Absolute times are machine-dependent; the reproducible signals are the **cold→warm ratio**
-  (~1.4-2x; the AST cache removes re-parsing) and that throughput tracks repo content rather
-  than collapsing on the large tier.
+- Absolute times are machine-dependent. Median cold-to-warm speedup ranged from 1.4x to 2.8x
+  in this run; that is evidence for these pinned inputs on this host, not a universal claim.
+- The checkout and operating-system file cache were already warm. "Cold" means Synaptic's AST
+  cache was deleted; it does not mean a cold disk, a fresh clone, or a newly started machine.
+- Scale measures extraction completion and throughput, not graph correctness or superiority to
+  another tool. The hand-labeled accuracy corpus above is a separate, much smaller evaluation.
 - `Files` counts distinct source files that produced graph nodes (not every file on disk);
   `LOC` sums lines across those files.
-- `Incr` re-extracts a single file against the prior graph but still re-runs graph assembly, so
-  it is the steady-state edit cost, not a parse-only number.
+- `Incr` re-extracts one unchanged file against the prior graph and still re-runs graph
+  assembly. It measures incremental-path overhead, not the latency of applying a real edit.
+- Below 20 repetitions, the tail column is labeled as the observed maximum; at 20 or more it
+  is nearest-rank p95. Raw samples remain in `report.json` either way.
 - The harness records skipped repos in the report and warns prominently; a published run with
   skips is partial by construction. Refresh the pinned SHAs deliberately.
