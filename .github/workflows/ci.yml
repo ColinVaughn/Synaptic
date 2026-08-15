@@ -84,10 +84,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --no-deps --all-features --locked
 
-  # One job per language grammar: each `lang-*` feature is built and tested in
-  # isolation, so a grammar bump that silently drops nodes/edges (or breaks a
+  # One job per language: every `lang-*` feature in `default` is built and tested
+  # in isolation, so a grammar bump that silently drops nodes/edges (or breaks a
   # single language's compile) fails CI on its own rather than hiding in the
-  # all-features build.
+  # all-features build. The list must stay in step with synaptic-extract's
+  # `default` feature: a shipped language missing here is one nothing ever builds
+  # alone, so an optional dep it never enables goes unnoticed.
   extract-langs:
     strategy:
       fail-fast: false
@@ -123,9 +125,15 @@ jobs:
           - objc
           - verilog
           - fortran
+          - ql
           - vue
           - svelte
           - astro
+          - dotnet
+          - markdown
+          - apex
+          - pascal
+          - razor
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

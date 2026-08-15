@@ -25,6 +25,13 @@ cache-binary = ["dep:rmp-serde"]
 # source, so it needs the regex dep. On by default; turn off to drop the extra
 # inferred edges (and the regex build cost on single-language builds).
 cross-language = ["dep:regex"]
+# `decl-recovery`: bounded declaration recovery for sources whose grammar errors
+# out (see `src/recovery.rs`). Regex-driven, so it needs the regex dep. Not meant
+# to be named directly -- every `lang-*` feature `recovery::scan` has patterns for
+# turns it on, which keeps a single-language build of a language it does not cover
+# free of the regex build cost. Add it alongside the grammar dep when a language
+# gains recovery patterns.
+decl-recovery = ["dep:regex"]
 default = ["cache-binary", "cross-language", "lang-python", "lang-javascript", "lang-typescript", "lang-go", "lang-rust", "lang-java", "lang-csharp", "lang-kotlin", "lang-swift", "lang-c", "lang-cpp", "lang-json", "lang-yaml", "lang-hcl", "lang-sql", "lang-ruby", "lang-php", "lang-lua", "lang-bash", "lang-powershell", "lang-scala", "lang-dart", "lang-elixir", "lang-julia", "lang-zig", "lang-asp", "lang-groovy", "lang-objc", "lang-verilog", "lang-fortran", "lang-ql", "lang-vue", "lang-svelte", "lang-astro", "lang-dotnet", "lang-markdown", "lang-apex", "lang-pascal", "lang-razor"]
 lang-python = ["dep:tree-sitter-python"]
 lang-javascript = ["dep:tree-sitter-javascript"]
@@ -45,16 +52,16 @@ lang-ruby = ["dep:tree-sitter-ruby"]
 lang-php = ["dep:tree-sitter-php"]
 lang-lua = ["dep:tree-sitter-lua"]
 lang-bash = ["dep:tree-sitter-bash"]
-lang-powershell = ["dep:tree-sitter-powershell"]
+lang-powershell = ["dep:tree-sitter-powershell", "decl-recovery"]
 lang-scala = ["dep:tree-sitter-scala"]
 lang-elixir = ["dep:tree-sitter-elixir"]
-lang-julia = ["dep:tree-sitter-julia"]
+lang-julia = ["dep:tree-sitter-julia", "decl-recovery"]
 lang-dart = ["dep:tree-sitter-dart", "dep:regex"]
 lang-zig = ["dep:tree-sitter-zig"]
 lang-asp = ["dep:regex"]
-lang-groovy = ["dep:tree-sitter-groovy"]
-lang-objc = ["dep:tree-sitter-objc"]
-lang-verilog = ["dep:tree-sitter-verilog"]
+lang-groovy = ["dep:tree-sitter-groovy", "decl-recovery"]
+lang-objc = ["dep:tree-sitter-objc", "decl-recovery"]
+lang-verilog = ["dep:tree-sitter-verilog", "decl-recovery"]
 lang-fortran = ["dep:tree-sitter-fortran"]
 lang-ql = ["dep:tree-sitter-ql", "dep:regex"]
 lang-vue = ["lang-typescript", "lang-javascript"]

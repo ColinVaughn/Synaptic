@@ -62,6 +62,7 @@ pub mod crosslang;
 pub mod dynamic;
 pub mod paths;
 pub mod python;
+#[cfg(feature = "decl-recovery")]
 mod recovery;
 pub mod resolve;
 pub mod result;
@@ -101,7 +102,10 @@ pub mod c;
     feature = "lang-markdown",
     feature = "lang-apex",
     feature = "lang-pascal",
-    feature = "lang-php"
+    feature = "lang-php",
+    // Not a language: `recovery` builds its nodes through the same `Builder`, and
+    // it is reachable from languages (groovy) that are not otherwise listed here.
+    feature = "decl-recovery"
 ))]
 pub(crate) mod common;
 #[cfg(feature = "lang-cpp")]
@@ -387,6 +391,7 @@ pub fn extract_source(path: &str, source: &[u8]) -> Option<ExtractionResult> {
         // Bounded recovery first: when the grammar errored and not one symbol came
         // out, scan for declaration-shaped lines so the file is not a silent hole.
         // No-op unless the file was a total loss (see `recovery::apply`).
+        #[cfg(feature = "decl-recovery")]
         recovery::apply(path, ext, source, &mut result);
         let fid = paths::file_node_id(path);
         if let Some(file) = result.nodes.iter_mut().find(|n| n.id == fid) {
