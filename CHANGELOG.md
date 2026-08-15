@@ -10,6 +10,23 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.13] - 2026-08-15
+
+### Fixed
+
+- `synaptic-extract` builds again for a single language. The bounded declaration
+  recovery pass added in 0.9.12 imported `regex` unconditionally, but the crate
+  takes `regex` as an optional dependency, so `--no-default-features --features
+  lang-<name>` failed to compile for every language whose feature does not pull
+  `regex` in. Recovery now sits behind an internal `decl-recovery` feature that
+  the five languages it has patterns for -- Groovy, Julia, Objective-C,
+  PowerShell and SystemVerilog -- enable, so a single-language build of any other
+  language still pays no regex build cost. Default and `--all-features` builds
+  behave exactly as before.
+- Every `lang-*` feature that ships in `default` is now built and tested in
+  isolation by CI. Six of them (CodeQL, .NET project files, Markdown, Apex,
+  Pascal, Razor) had no isolated job, so nothing ever built them alone.
+
 ## [0.9.12] - 2026-08-15
 
 ### Added
@@ -2395,7 +2412,8 @@ parameters), and `graph.json` gains only additive edge keys.
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.12...HEAD
+[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.13...HEAD
+[0.9.13]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.9...v0.9.10
