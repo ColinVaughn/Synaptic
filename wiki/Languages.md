@@ -261,6 +261,18 @@ crate plus a regex recovery pass. Object nodes for `CREATE TABLE` / `VIEW` /
 touches (`queries` / `writes_to` / `calls_proc`). This SQL-aware graph powers the
 [SQL Auditing](SQL-Auditing) rules (`synaptic sql audit` / `advise`).
 
+**dbt.** A dbt model is a `.sql` file that is not valid SQL: it carries Jinja
+(`{{ ref('stg_orders') }}`, `{% set %}`, `{#- … -#}`), which defeats the SQL
+grammar outright. Jinja is neutralized first, rewriting each span to the same
+byte length so every line number stays exact, and a single-line `ref()` /
+`source()` is replaced by the name it points at so the ordinary SQL passes
+resolve it with no special case. The model is reported under its file's name --
+that is how dbt names models -- and each `ref()` / `source()` becomes a
+`reads_from` edge, which is what makes dbt lineage a graph.
+
+Recovery scans raw text per statement, so SQL comments are blanked first: a
+comment that merely mentions DDL would otherwise invent a table.
+
 ## Regex-based languages
 
 These have no usable tree-sitter grammar and are extracted with regular
@@ -322,6 +334,18 @@ produces. A component with no script block yields nothing.
 The `@code` / `@functions` block is extracted, wrapped in a synthetic class named
 after the file, and handed to the C# extractor, producing a component class node
 with its member methods and properties.
+
+A Razor component is declared by its **file**, not by any text inside it, so the
+component node is anchored at line 1 and is emitted whether or not the file has a
+`@code` block -- a markup-only component is still a component -- and whether or
+not that block is anything the C# grammar can read (an inline Razor template such
+as `@<div>…</div>` returning a `RenderFragment` is valid Razor and invalid C#).
+Members inside `@code` keep their own lines.
+
+The directives that live outside `@code` are read as evidence: `@inherits` and
+`@implements` as `inherits` / `implements`, `@inject` as `uses` (Blazor's
+dependency injection), and `@using` as import evidence for cross-file
+resolution.
 
 ## Framework-aware edges
 

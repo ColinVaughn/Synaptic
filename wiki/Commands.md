@@ -578,7 +578,9 @@ See [`predict`](#predict) (forecast the same change without running it) and [`di
 
 Calibrate Synaptic's own inference quality. `eval replay` measures
 change-forecast quality by replaying git history; `eval cross-language` measures
-how grounded the inferred cross-language edges are on a single graph.
+how grounded the inferred cross-language edges are on a single graph; `eval
+quality` measures extraction correctness across a pinned real-world corpus and
+gates it against per-repository baselines.
 
 `eval replay` re-predicts each commit in a range from the **parent**-state graph (built in a throwaway worktree) and scores the prediction against git ground truth: the tests co-edited in the commit (that already existed at the parent) and the public APIs the time-travel diff reports as removed. It reports pooled recall/precision and blast-radius selectivity, and can gate CI on a recall floor. This turns prediction quality into a regression-testable metric.
 
@@ -644,6 +646,78 @@ Calibration is advisory: it measures detector precision across releases, it does
 not retune anything.
 
 See [`predict`](#predict), [`speculate`](#speculate), and [`diff`](#diff).
+
+### eval quality
+
+Measure extraction **correctness** across the pinned real-world corpus
+(`crates/synaptic-eval/repo-corpus.toml`), using properties that need no hand
+labels. `eval scale` times extraction; a graph that anchored every
+declaration to the wrong line would post identical timings. Network + git are
+required, so this is opt-in and never runs in CI.
+
+Syntax:
+
+```sh
+synaptic eval quality [--manifest <PATH>] [--baselines <PATH>] [--language <NAME>]
+                      [--repo <NAME>] [--skip-oracle] [--cache <DIR>] [--out <DIR>]
+                      [--json] [--allow-skips] [--pin]
+                      [--update-baselines [--allow-regression]]
+```
+
+| Name | Default | Description |
+| --- | --- | --- |
+| `--manifest` | in-tree `repo-corpus.toml` | Pinned repositories, shared with `eval scale`. |
+| `--baselines` | in-tree `quality-baselines.toml` | Pinned per-repository bounds. |
+| `--language` | all | Only repositories declaring this language. |
+| `--repo` | all | Only this repository, by name. |
+| `--skip-oracle` | off | Skip the universal-ctags comparison even when it is installed. |
+| `--cache` | `synaptic-out/bench` | Clone cache directory. |
+| `--out` | `synaptic-out/eval/quality` | Output directory for `report.json` + `report.md`. |
+| `--json` | off | Print the full report as JSON to stdout. |
+| `--allow-skips` | off | Succeed even when a repository could not be measured. |
+| `--pin` | off | Resolve every manifest URL's current HEAD, rewrite its SHA, and exit. |
+| `--update-baselines` | off | Rewrite the baselines from this run. |
+| `--allow-regression` | off | Permit `--update-baselines` to loosen a bound. |
+
+Four measurements:
+
+- **Anchor exactness** — the recorded `(file, line)` for a declaration really
+  does contain that declaration. An anchor resolves three ways: the name is on
+  the line; the line is the declaration's true start (its annotation, attribute
+  or docstring block, or the first line of a wrapped signature) and the name
+  follows within it; or the declaration is named by its file (a dbt model, a
+  Blazor component) and is anchored at line 1. The middle two are counted correct
+  but reported in their own columns rather than folded in silently. A blank line
+  always ends the walk, because an anchor landing on one is the signature of the
+  off-by-one this metric exists to catch.
+- **Parse and recovery health** — per language, the share of files whose grammar
+  errored, the share that produced nothing but their own file node, and how much
+  the bounded recovery pass rescued.
+- **Self-consistency** — two absolute assertions with no baseline: extracting the
+  same revision twice must produce identical graphs, and a full rebuild must
+  match an incremental one. Both hard-fail.
+- **Independent oracle** — [universal-ctags](https://ctags.io/) over the same
+  checkout, reported as a *symmetric difference* (agreement, ctags-only,
+  synaptic-only) rather than a recall score. ctags is a genuinely independent
+  second opinion, not ground truth, and it models a different granularity. A
+  missing binary skips only this stage, loudly.
+
+A run that breaches a pinned bound exits non-zero naming the repository, metric
+and delta. `--update-baselines` tightens a bound freely but **refuses to loosen**
+one without `--allow-regression`, so a regression has to be an explicit decision
+rather than a side effect of re-running the benchmark.
+
+```sh
+synaptic eval quality                      # measure, then gate
+synaptic eval quality --language pascal    # one language
+synaptic eval quality --repo axum          # one repository
+synaptic eval quality --pin                # refresh every pinned SHA
+```
+
+Methodology and the current results are in
+[BENCHMARKS.md](https://github.com/ColinVaughn/Synaptic/blob/master/BENCHMARKS.md).
+
+See [`eval replay`](#eval-replay) and [`eval cross-language`](#eval-cross-language).
 
 ## audit
 

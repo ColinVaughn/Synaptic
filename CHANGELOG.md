@@ -10,6 +10,47 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.12] - 2026-08-15
+
+### Added
+
+- `synaptic eval quality` measures extraction correctness across 60 pinned
+  real-world repositories covering every shipped language, without hand labels:
+  anchor exactness, parse and recovery health, determinism, incremental
+  equivalence, and an independent universal-ctags comparison. Results are gated
+  against pinned per-repository baselines; `--update-baselines` tightens a bound
+  freely but refuses to loosen one without `--allow-regression`.
+- The scale and quality suites now share one pinned repository manifest, and a
+  test fails when a shipped extractor has no repository exercising it, so a new
+  language cannot ship unmeasured.
+- dbt-templated SQL is now extracted: Jinja is neutralized without moving a
+  single byte, so line numbers stay exact, and `ref()`/`source()` become model
+  lineage. Previously every dbt model produced no declarations at all.
+- Razor components now record the `@inherits`, `@implements`, `@inject` and
+  `@using` directives that live outside `@code` as inheritance, interface,
+  dependency and import evidence.
+
+### Fixed
+
+- SQL recovery anchored every recovered procedure, trigger and table at line 1
+  instead of its declaration line; `CREATE` modifiers such as `MATERIALIZED`,
+  `EXTERNAL` and `TRANSIENT` dropped the object entirely; only the first
+  `CREATE` in a semicolon-delimited chunk was recovered; and comments were
+  scanned as code, inventing tables from prose that merely mentioned DDL.
+- Razor files with no `@code` block, or whose `@code` holds an inline Razor
+  template (`@<div>…</div>` returning a `RenderFragment`), produced no node at
+  all -- not even a file node. Components are now declared regardless, and are
+  anchored at the file that names them rather than at their `@code` block.
+- Bounded declaration recovery now rescues declarations from sources whose
+  grammar reports an error, and `parse_error` is recorded on the file node so an
+  unparsed file is no longer indistinguishable from one that declares nothing.
+- Julia, Pascal, Objective-C, Elixir, Ruby and Fortran extraction now report
+  exact declaration anchors; uppercase extensions such as `.F90` are dispatched,
+  and `.h` headers are content-sniffed for Objective-C.
+- Benchmark checkouts now enable `core.longpaths` and retry with `--force`, so a
+  repository with long paths is not skipped on Windows and an interrupted run
+  does not poison its own clone cache.
+
 ## [0.9.11] - 2026-08-13
 
 ### Changed
@@ -2354,7 +2395,8 @@ parameters), and `graph.json` gains only additive edge keys.
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.11...HEAD
+[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.12...HEAD
+[0.9.12]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.9...v0.9.10
 [0.9.9]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.8...v0.9.9

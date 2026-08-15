@@ -276,10 +276,11 @@ loudly; the other three still run everywhere.
 
 ### Results
 
-60 repositories, 39 languages, 80,061 files, 938,001 nodes. Windows / x86_64 / 16 logical CPUs,
-Synaptic 0.9.11 at source revision `8633719899a1` with a dirty working tree (these benchmark
-changes), so this is development evidence rather than a clean release baseline. No repository was
-skipped. Full per-repository and per-language tables: `synaptic-out/eval/quality/report.md`.
+60 repositories, 39 languages, 80,061 files, 938,001 nodes. Windows / x86_64 / 16 logical CPUs.
+Measured on the code released as 0.9.12, from a working tree the harness recorded as dirty and
+still version-stamped 0.9.11 (the run predates the release commit), so this is development
+evidence on release content rather than a clean-release baseline. No repository was skipped. Full
+per-repository and per-language tables: `synaptic-out/eval/quality/report.md`.
 
 **Pooled anchor exactness: 735,198 / 735,493 = 99.96%.** Of those, 31,810 resolved through a
 declaration's leading annotation block, 9,862 are named by their file rather than by any text

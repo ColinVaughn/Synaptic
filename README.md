@@ -374,6 +374,24 @@ incremental timing re-extracts a named unchanged source file and is not patch la
 method, per-repository results, limitations, exact SHAs, and raw samples are in
 [BENCHMARKS.md](BENCHMARKS.md).
 
+## Extraction quality at scale
+
+Scale measures how *fast* extraction runs; a graph that anchored every declaration to the wrong
+line would post identical timings. `synaptic eval quality` measures whether the graph is **right**,
+across **60 pinned repositories covering all 39 shipped languages** (80,061 files, 938,001 nodes),
+using properties that need no hand labels: anchor exactness, parse and recovery health,
+determinism, incremental equivalence, and an independent universal-ctags comparison.
+
+The 2026-08-15 run: **pooled anchor exactness 735,198 / 735,493 (99.96%)**, with **60/60
+repositories deterministic and incrementally equivalent** and no skips. 30 of 39 languages are
+exact on every checked declaration.
+
+The corpus is language-complete by construction — a test fails when a shipped extractor has no
+repository exercising it — and each repository carries pinned bounds, so a regression exits
+non-zero naming the repository and metric. The oracle is published as a symmetric difference,
+never a recall score: ctags is an independent second opinion, not ground truth. Method,
+per-language results, and the defects this benchmark found are in [BENCHMARKS.md](BENCHMARKS.md).
+
 ## Install
 
 Synaptic builds with a stable Rust toolchain (pinned to 1.97.1 via
@@ -454,6 +472,7 @@ A code-only corpus runs fully offline; the optional LLM semantic pass over docs 
 | `audit readiness` | Static port/readiness audit: ranks framework sentinel returns, placeholders/stubs, generated-resource noise, and project metadata. Flags: `--profile`, `--severity`, `--repo`, `--json` |
 | `sql <action>` | `audit` SQL for performance + security over the SQL-aware graph, or `advise --query "<sql>"` on a candidate query before writing it. Flags: `--severity`, `--explain --db-url` (live EXPLAIN, needs `--features live-explain`) |
 | `eval replay [from]` | Replay history to score forecast quality against git ground truth (CI-gateable). Flag: `--min-test-recall` |
+| `eval quality` | Measure extraction correctness across the pinned real-world corpus, gated against per-repo baselines (network + git, opt-in). Flags: `--language`, `--repo`, `--pin`, `--update-baselines` |
 | `update [paths...]` | Incrementally rebuild after files change (`--full` for a full rebuild) |
 | `watch` | Rebuild automatically as files change (single repo; use `workspace build --watch` for a workspace) |
 | `serve` | Run the MCP server (stdio, or `--http <addr> --api-key <key>`) |
