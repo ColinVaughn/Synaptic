@@ -34,10 +34,18 @@ use crate::result::ExtractionResult;
 #[cfg(feature = "lang-sql")]
 const QNAME: &str =
     r#"((?:\[[^\]]+\]|"[^"]+"|`[^`]+`|\w+)(?:\.(?:\[[^\]]+\]|"[^"]+"|`[^`]+`|\w+))*)"#;
+/// Modifiers a dialect may put between `CREATE` and the object kind. Allowing
+/// only `global`/`temp*` dropped the object outright for every warehouse
+/// dialect: on a 2,575-file corpus `CREATE MATERIALIZED VIEW` and `CREATE
+/// EXTERNAL TABLE` alone accounted for 112 of 125 missing declarations. Repeated
+/// rather than optional-once, because dialects stack them
+/// (`CREATE OR REPLACE SECURE TRANSIENT TABLE`).
+#[cfg(feature = "lang-sql")]
+const CREATE_MODIFIERS: &str = r"(?:or\s+replace|global|temporary|temp|external|materialized|unlogged|secure|transient|volatile|virtual|dynamic|managed|streaming|foreign|iceberg|hybrid|local|private|public|shared|cached|live|incremental)\s+";
 #[cfg(feature = "lang-sql")]
 static CREATE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r#"(?is)\bcreate\s+(?:or\s+replace\s+)?(?:global\s+|temp\w*\s+)?(table|view|function|procedure|trigger)\s+(?:if\s+not\s+exists\s+)?{QNAME}"#
+        r#"(?is)\bcreate\s+(?:{CREATE_MODIFIERS})*(table|view|function|procedure|trigger)\s+(?:if\s+not\s+exists\s+)?{QNAME}"#
     ))
     .expect("create regex")
 });
@@ -51,6 +59,65 @@ static REFERENCES_RE: LazyLock<Regex> =
 static FROM_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(r#"(?is)\b(?:from|join)\s+{QNAME}"#)).expect("from regex")
 });
+
+/// Blank out SQL comments, preserving every byte offset and newline.
+///
+/// The recovery pass scans raw text, so a comment that merely mentions DDL
+/// ("-- CREATE DYNAMIC TABLE clauses") invented a table. String literals are
+/// tracked so a `--` inside one stays data: blanking from there would swallow
+/// the rest of a real statement.
+#[cfg(feature = "lang-sql")]
+fn blank_comments(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out: Vec<u8> = bytes.to_vec();
+    let mut i = 0usize;
+    // Blank a range, keeping newlines so line numbers are unchanged.
+    let blank = |out: &mut Vec<u8>, from: usize, to: usize| {
+        for b in &mut out[from..to] {
+            if *b != b'\n' {
+                *b = b' ';
+            }
+        }
+    };
+    while i < bytes.len() {
+        match bytes[i] {
+            // Quoted string or identifier: skip to its close, honouring the
+            // doubled-quote escape both SQL dialects use.
+            q @ (b'\'' | b'"' | b'`') => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == q {
+                        if bytes.get(i + 1) == Some(&q) {
+                            i += 2;
+                            continue;
+                        }
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                let start = i;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                blank(&mut out, start, i);
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                let start = i;
+                i += 2;
+                while i < bytes.len() && !(bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/')) {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+                blank(&mut out, start, i);
+            }
+            _ => i += 1,
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| text.to_string())
+}
 
 /// The last identifier of a possibly-qualified, possibly-bracketed name
 /// (`[schema].[name]` -> `name`, `dbo.t` -> `t`).
@@ -67,6 +134,14 @@ fn last_segment(qualified: &str) -> String {
 /// Extract a SQL file already in memory.
 #[cfg(feature = "lang-sql")]
 pub fn extract_sql_source(path: &str, source: &[u8]) -> ExtractionResult {
+    // dbt models are `.sql` files that are not valid SQL. Neutralize the Jinja
+    // first, preserving every byte offset, so the grammar sees parseable text and
+    // every line number below still refers to the real file. Plain SQL comes
+    // through this untouched.
+    let raw = String::from_utf8_lossy(source);
+    let neutralized = crate::dbt::neutralize(&raw);
+    let source: &[u8] = neutralized.as_bytes();
+
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_sequel::LANGUAGE.into())
@@ -84,6 +159,7 @@ pub fn extract_sql_source(path: &str, source: &[u8]) -> ExtractionResult {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     b.add_node(file_nid.clone(), filename, 1);
+    b.note_parse_health(root);
 
     // Pass 1: a node per CREATE TABLE / VIEW / FUNCTION; remember name -> id.
     let mut ids: HashMap<String, NodeId> = HashMap::new();
@@ -134,11 +210,37 @@ pub fn extract_sql_source(path: &str, source: &[u8]) -> ExtractionResult {
     // (regex fallback).
     ex.regex_recover(
         &mut b,
-        &String::from_utf8_lossy(source),
+        &blank_comments(&neutralized),
         &file_nid,
         &mut ids,
         &mut emitted,
     );
+
+    // dbt lineage. The model is named for its file (that is how dbt names it),
+    // so it is anchored at line 1: the declaration really is the whole file, and
+    // no line inside ever spells the name.
+    if crate::dbt::is_dbt(&raw)
+        && let Some(model) = crate::dbt::model_name(path)
+    {
+        let model_l = model.to_lowercase();
+        let model_id = ids.get(&model_l).cloned().unwrap_or_else(|| {
+            let id = NodeId(make_id(&["sql", &model_l]));
+            b.add_node(id.clone(), model.clone(), 1);
+            b.add_edge(file_nid.clone(), id.clone(), "contains", 1, Some("view"));
+            ids.insert(model_l.clone(), id.clone());
+            id
+        });
+        for r in crate::dbt::references(&raw) {
+            let tgt = ex.resolve(&mut b, &ids, &r.name);
+            if tgt == model_id {
+                continue;
+            }
+            let key = (model_id.0.clone(), "reads_from".to_string(), tgt.0.clone());
+            if emitted.insert(key) {
+                b.add_edge(model_id.clone(), tgt, "reads_from", r.line, Some("dbt_ref"));
+            }
+        }
+    }
 
     let mut result = b.into_result();
     let emit_columns = crate::sql_semantic::emit_sql_columns();
@@ -290,44 +392,74 @@ impl Sql<'_> {
         let references = &*REFERENCES_RE;
         let from = &*FROM_RE;
 
-        for chunk in text.split(';') {
-            let Some(caps) = create.captures(chunk) else {
-                continue;
-            };
-            let kind = caps[1].to_lowercase();
-            let name = last_segment(&caps[2]);
-            let name_l = name.to_lowercase();
-            if name_l.is_empty() {
-                continue;
-            }
-            // Node: reuse an AST node, else create one (procedures/triggers) and
-            // give it a `contains` edge (AST nodes already have one).
-            let was_new = !ids.contains_key(&name_l);
-            let src_id = ids.get(&name_l).cloned().unwrap_or_else(|| {
-                let id = NodeId(make_id(&["sql", &name_l]));
-                b.add_node(id.clone(), name.clone(), 1);
-                ids.insert(name_l.clone(), id.clone());
-                id
-            });
-            if was_new {
-                b.add_edge(file_nid.clone(), src_id.clone(), "contains", 1, Some(&kind));
-            }
+        // Statements are matched inside `;`-delimited chunks, but a node's line
+        // has to be expressed against the whole file. Track each chunk's absolute
+        // offset and binary-search the newline table, rather than anchoring every
+        // recovered object at line 1 -- which sent "go to definition" to the file
+        // header for every procedure and trigger in the corpus.
+        let newlines: Vec<usize> = text.match_indices('\n').map(|(i, _)| i).collect();
+        let line_at = |offset: usize| newlines.partition_point(|&n| n < offset) + 1;
 
-            match kind.as_str() {
-                "trigger" => {
-                    if let Some(t) = on.captures(chunk) {
-                        self.recover_ref(b, &src_id, "triggers", &t[1], ids, emitted);
-                    }
+        let mut chunk_start = 0usize;
+        for chunk in text.split(';') {
+            let chunk_offset = chunk_start;
+            // `+ 1` steps over the `;` that `split` consumed.
+            chunk_start += chunk.len() + 1;
+
+            // A chunk can hold more than one statement when a file omits its
+            // semicolons, so every CREATE is recovered, and each one's
+            // REFERENCES/ON/FROM are read from its own slice rather than from the
+            // whole chunk -- otherwise one statement's tables would be attributed
+            // to its neighbour.
+            let starts: Vec<usize> = create.find_iter(chunk).map(|m| m.start()).collect();
+            for (i, &begin) in starts.iter().enumerate() {
+                let end = starts.get(i + 1).copied().unwrap_or(chunk.len());
+                let chunk = &chunk[begin..end];
+                let Some(caps) = create.captures(chunk) else {
+                    continue;
+                };
+                let line = line_at(chunk_offset + begin);
+                let kind = caps[1].to_lowercase();
+                let name = last_segment(&caps[2]);
+                let name_l = name.to_lowercase();
+                if name_l.is_empty() {
+                    continue;
                 }
-                "table" => {
-                    for t in references.captures_iter(chunk) {
-                        self.recover_ref(b, &src_id, "references", &t[1], ids, emitted);
-                    }
+                // Node: reuse an AST node, else create one (procedures/triggers) and
+                // give it a `contains` edge (AST nodes already have one).
+                let was_new = !ids.contains_key(&name_l);
+                let src_id = ids.get(&name_l).cloned().unwrap_or_else(|| {
+                    let id = NodeId(make_id(&["sql", &name_l]));
+                    b.add_node(id.clone(), name.clone(), line);
+                    ids.insert(name_l.clone(), id.clone());
+                    id
+                });
+                if was_new {
+                    b.add_edge(
+                        file_nid.clone(),
+                        src_id.clone(),
+                        "contains",
+                        line,
+                        Some(&kind),
+                    );
                 }
-                _ => {
-                    // view / function / procedure read tables.
-                    for t in from.captures_iter(chunk) {
-                        self.recover_ref(b, &src_id, "reads_from", &t[1], ids, emitted);
+
+                match kind.as_str() {
+                    "trigger" => {
+                        if let Some(t) = on.captures(chunk) {
+                            self.recover_ref(b, &src_id, "triggers", &t[1], ids, emitted, line);
+                        }
+                    }
+                    "table" => {
+                        for t in references.captures_iter(chunk) {
+                            self.recover_ref(b, &src_id, "references", &t[1], ids, emitted, line);
+                        }
+                    }
+                    _ => {
+                        // view / function / procedure read tables.
+                        for t in from.captures_iter(chunk) {
+                            self.recover_ref(b, &src_id, "reads_from", &t[1], ids, emitted, line);
+                        }
                     }
                 }
             }
@@ -335,6 +467,7 @@ impl Sql<'_> {
     }
 
     /// Emit `obj → resolved(name)` for a recovered reference (deduped).
+    #[allow(clippy::too_many_arguments)]
     fn recover_ref(
         &self,
         b: &mut Builder,
@@ -343,6 +476,7 @@ impl Sql<'_> {
         name: &str,
         ids: &HashMap<String, NodeId>,
         emitted: &mut HashSet<(String, String, String)>,
+        line: usize,
     ) {
         let tgt = self.resolve(b, ids, &last_segment(name));
         if obj == &tgt {
@@ -350,7 +484,7 @@ impl Sql<'_> {
         }
         let key = (obj.0.clone(), relation.to_string(), tgt.0.clone());
         if emitted.insert(key) {
-            b.add_edge(obj.clone(), tgt, relation, 1, Some("sql"));
+            b.add_edge(obj.clone(), tgt, relation, line, Some("sql"));
         }
     }
 }
@@ -471,6 +605,171 @@ mod tests {
             reads.contains(&("recent".to_string(), "orders".to_string())),
             "reads_from: {reads:?}"
         );
+    }
+
+    /// Every regex-recovered object was anchored at line 1 regardless of where
+    /// it was declared, because the recovery pass split the text on `;` and had
+    /// no byte offset to derive a line from. A procedure 40 lines into a file
+    /// reported `L1`, so "go to definition" landed on the file header and the
+    /// anchor benchmark scored it wrong.
+    #[test]
+    fn recovered_objects_are_anchored_at_their_declaration_line() {
+        let src = b"-- header\n-- more header\n\nCREATE TABLE users (id INT);\n\nCREATE PROCEDURE sync_audit() BEGIN SELECT * FROM users; END;\n\nCREATE TRIGGER trg AFTER INSERT ON users FOR EACH ROW BEGIN UPDATE users SET n=1; END;\n";
+        let r = extract_sql_source("schema.sql", src);
+        let line_of = |label: &str| {
+            r.nodes
+                .iter()
+                .find(|n| n.label == label)
+                .unwrap_or_else(|| {
+                    let all: Vec<&str> = r.nodes.iter().map(|n| n.label.as_str()).collect();
+                    panic!("no node {label}; got {all:?}")
+                })
+                .source_location
+                .clone()
+        };
+        assert_eq!(line_of("sync_audit").as_deref(), Some("L6"));
+        assert_eq!(line_of("trg").as_deref(), Some("L8"));
+        // The AST pass already anchored correctly; it must not regress.
+        assert_eq!(line_of("users").as_deref(), Some("L4"));
+    }
+
+    /// A file whose only statement is recovered by regex still declares
+    /// something. Anchoring it at line 1 collided with the file node's own line
+    /// and made the declaration indistinguishable from the file header.
+    #[test]
+    fn a_recovered_object_on_line_one_still_reports_line_one() {
+        let src = b"CREATE PROCEDURE first_thing() BEGIN SELECT 1; END;\n";
+        let r = extract_sql_source("p.sql", src);
+        let n = r
+            .nodes
+            .iter()
+            .find(|n| n.label == "first_thing")
+            .expect("recovered procedure");
+        assert_eq!(n.source_location.as_deref(), Some("L1"));
+    }
+
+    /// A dbt model is a `.sql` file that is not valid SQL. Before Jinja was
+    /// neutralized the grammar errored on the whole file and it contributed
+    /// nothing but its own file node, so every dbt project was invisible.
+    #[test]
+    fn dbt_model_declares_itself_and_its_refs() {
+        let src = b"{% set methods = ['card', 'coupon'] %}\n\nwith orders as (\n\n    select * from {{ ref('stg_orders') }}\n\n),\n\npayments as (\n\n    select * from {{ source('raw', 'payments') }}\n\n)\n\nselect * from orders\n";
+        let r = extract_sql_source("models/customers.sql", src);
+        let labels: Vec<&str> = r.nodes.iter().map(|n| n.label.as_str()).collect();
+        assert!(
+            labels.contains(&"customers"),
+            "the model is named for its file; got {labels:?}"
+        );
+
+        let reads = rels(&r, "reads_from");
+        assert!(
+            reads.contains(&("customers".to_string(), "stg_orders".to_string())),
+            "ref() lineage missing: {reads:?}"
+        );
+        assert!(
+            reads.contains(&("customers".to_string(), "payments".to_string())),
+            "source() lineage missing: {reads:?}"
+        );
+    }
+
+    /// Neutralization must not shift line numbers: the anchor benchmark scores
+    /// every node against the line it claims.
+    #[test]
+    fn dbt_neutralization_keeps_declaration_lines_exact() {
+        let src = b"{% set x = 1 %}\n\n{#- a comment -#}\n\nCREATE TABLE late_table (id INT);\n";
+        let r = extract_sql_source("models/m.sql", src);
+        let t = r
+            .nodes
+            .iter()
+            .find(|n| n.label == "late_table")
+            .expect("table after jinja");
+        assert_eq!(t.source_location.as_deref(), Some("L5"));
+    }
+
+    /// Plain SQL must not acquire a dbt model node just for living in a repo
+    /// that also uses dbt.
+    #[test]
+    fn plain_sql_gets_no_dbt_model_node() {
+        let r = extract_sql_source("schema.sql", b"CREATE TABLE users (id INT);\n");
+        let labels: Vec<&str> = r.nodes.iter().map(|n| n.label.as_str()).collect();
+        assert!(!labels.contains(&"schema"), "{labels:?}");
+        assert!(labels.contains(&"users"));
+    }
+
+    /// The recovery regex allowed only `global`/`temp*` between CREATE and the
+    /// object kind, so every warehouse dialect's modifiers dropped the object
+    /// entirely. Measured on a 2,575-file dialect corpus this was 112 of 125
+    /// missing declarations -- 90% of the total miss.
+    #[test]
+    fn create_modifiers_do_not_hide_the_object() {
+        let cases: &[(&str, &str)] = &[
+            (
+                "CREATE MATERIALIZED VIEW mydataset.my_mv AS SELECT 1;",
+                "my_mv",
+            ),
+            (
+                "CREATE MATERIALIZED VIEW IF NOT EXISTS mydataset.my_mv2 AS SELECT 1;",
+                "my_mv2",
+            ),
+            ("CREATE EXTERNAL TABLE dataset.ext_t (id INT);", "ext_t"),
+            ("CREATE TRANSIENT TABLE t_trans (id INT);", "t_trans"),
+            ("CREATE SECURE VIEW v_secure AS SELECT 1;", "v_secure"),
+            ("CREATE UNLOGGED TABLE t_unlogged (id INT);", "t_unlogged"),
+            ("CREATE OR REPLACE TEMPORARY TABLE t_tmp (id INT);", "t_tmp"),
+            (
+                "CREATE EXTERNAL FUNCTION exfunc_sum() RETURNS INT;",
+                "exfunc_sum",
+            ),
+        ];
+        for (src, want) in cases {
+            let r = extract_sql_source("d.sql", src.as_bytes());
+            let labels: Vec<&str> = r.nodes.iter().map(|n| n.label.as_str()).collect();
+            assert!(
+                labels.iter().any(|l| l.eq_ignore_ascii_case(want)),
+                "{src:?} should declare {want}; got {labels:?}"
+            );
+        }
+    }
+
+    /// Recovery matched one CREATE per `;`-delimited chunk, so a file that omits
+    /// its final semicolons lost every statement after the first.
+    #[test]
+    fn every_create_in_a_chunk_is_recovered() {
+        // No semicolon anywhere, so `split(';')` yields a single chunk holding
+        // both statements.
+        let src = b"CREATE PROCEDURE p_one() BEGIN SELECT 1 END\nCREATE PROCEDURE p_two() BEGIN SELECT 2 END\n";
+        let r = extract_sql_source("multi.sql", src);
+        let labels: Vec<&str> = r.nodes.iter().map(|n| n.label.as_str()).collect();
+        assert!(labels.contains(&"p_one"), "{labels:?}");
+        assert!(
+            labels.contains(&"p_two"),
+            "second CREATE in the chunk: {labels:?}"
+        );
+    }
+
+    /// The recovery regex scans raw text, so a comment that merely *mentions*
+    /// DDL invented a node. A dialect corpus had 121 such comment lines, each
+    /// one a phantom table in the graph.
+    #[test]
+    fn a_create_inside_a_comment_declares_nothing() {
+        let src = b"-- CREATE DYNAMIC TABLE clauses\n/* CREATE VIEW old_view AS SELECT 1; */\nCREATE TABLE real_table (id INT);\n";
+        let r = extract_sql_source("c.sql", src);
+        let labels: Vec<&str> = r.nodes.iter().map(|n| n.label.as_str()).collect();
+        assert!(labels.contains(&"real_table"), "{labels:?}");
+        assert!(!labels.contains(&"clauses"), "line comment: {labels:?}");
+        assert!(!labels.contains(&"old_view"), "block comment: {labels:?}");
+    }
+
+    /// A `--` inside a string literal is data, not a comment; blanking it would
+    /// silently eat the rest of a real statement.
+    #[test]
+    fn a_comment_marker_inside_a_string_is_not_a_comment() {
+        let src =
+            b"CREATE TABLE t_dash (note TEXT DEFAULT 'a -- b');\nCREATE TABLE after_it (id INT);\n";
+        let r = extract_sql_source("s.sql", src);
+        let labels: Vec<&str> = r.nodes.iter().map(|n| n.label.as_str()).collect();
+        assert!(labels.contains(&"t_dash"), "{labels:?}");
+        assert!(labels.contains(&"after_it"), "{labels:?}");
     }
 
     #[test]

@@ -62,6 +62,7 @@ pub mod crosslang;
 pub mod dynamic;
 pub mod paths;
 pub mod python;
+mod recovery;
 pub mod resolve;
 pub mod result;
 pub mod signature;
@@ -109,6 +110,8 @@ pub mod cpp;
 pub mod csharp;
 #[cfg(feature = "lang-dart")]
 pub mod dart;
+#[cfg(feature = "lang-sql")]
+mod dbt;
 #[cfg(feature = "lang-dotnet")]
 pub mod dotnet;
 #[cfg(any(feature = "lang-javascript", feature = "lang-typescript"))]
@@ -189,6 +192,22 @@ pub use walker::extract_with_config;
 /// `.h` is shared by C and C++. Prefer C++ only when the source contains a
 /// declaration form C cannot express; plain C headers keep the C grammar.
 #[cfg(feature = "lang-cpp")]
+/// True when a `.h` is an Objective-C header. Checked before the C/C++ sniff,
+/// which only ever chose between C and C++ — an Obj-C header parses as neither, so
+/// the public interface of an Obj-C project (its `@interface`/`@protocol`
+/// declarations) yielded no symbols at all. Keyed on `@`-directives that have no
+/// meaning in C or C++, so plain headers are unaffected.
+#[cfg(feature = "lang-objc")]
+fn looks_like_objc_header(source: &[u8]) -> bool {
+    String::from_utf8_lossy(source).lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("@interface")
+            || line.starts_with("@protocol")
+            || line.starts_with("@implementation")
+            || line.starts_with("@end")
+    })
+}
+
 fn looks_like_cpp_header(source: &[u8]) -> bool {
     String::from_utf8_lossy(source).lines().any(|line| {
         let line = line.trim_start();
@@ -233,7 +252,16 @@ pub use python::{extract_python_file, extract_python_source};
     allow(unused_variables)
 )]
 pub fn extract_source(path: &str, source: &[u8]) -> Option<ExtractionResult> {
-    let ext = Path::new(path).extension().and_then(|e| e.to_str())?;
+    // Case-folded: `.F90` (preprocessed Fortran), `.PAS`, `.CLS` and friends are
+    // ordinary spellings, and a case-sensitive match routes them to no extractor at
+    // all — the file is counted as code and then silently yields nothing. The Unix
+    // `.C`-means-C++ convention is deliberately not honoured here; folding it to the
+    // C extractor beats dropping the file, and ambiguous `.h` already content-sniffs.
+    let ext_owned = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())?
+        .to_ascii_lowercase();
+    let ext = ext_owned.as_str();
     #[allow(unused_mut)]
     let mut result = (match ext {
         #[cfg(feature = "lang-python")]
@@ -258,7 +286,15 @@ pub fn extract_source(path: &str, source: &[u8]) -> Option<ExtractionResult> {
         "swift" => Some(swift::extract_swift_source(path, source)),
         #[cfg(feature = "lang-c")]
         "c" => Some(c::extract_c_source(path, source)),
-        #[cfg(all(feature = "lang-c", feature = "lang-cpp"))]
+        #[cfg(all(feature = "lang-c", feature = "lang-cpp", feature = "lang-objc"))]
+        "h" => Some(if looks_like_objc_header(source) {
+            objc::extract_objc_source(path, source)
+        } else if looks_like_cpp_header(source) {
+            cpp::extract_cpp_source(path, source)
+        } else {
+            c::extract_c_source(path, source)
+        }),
+        #[cfg(all(feature = "lang-c", feature = "lang-cpp", not(feature = "lang-objc")))]
         "h" => Some(if looks_like_cpp_header(source) {
             cpp::extract_cpp_source(path, source)
         } else {
@@ -343,6 +379,21 @@ pub fn extract_source(path: &str, source: &[u8]) -> Option<ExtractionResult> {
         "razor" | "cshtml" => Some(razor::extract_razor_source(path, source)),
         _ => None,
     })?;
+    // Stamp incomplete extraction onto the file node. The console summary scrolls
+    // away; the graph is what queries and MCP tools read, and without this a file
+    // the grammar could not understand is indistinguishable from a file that simply
+    // declares nothing. Only stamped when true, so clean graphs are unchanged.
+    if result.parse_error {
+        // Bounded recovery first: when the grammar errored and not one symbol came
+        // out, scan for declaration-shaped lines so the file is not a silent hole.
+        // No-op unless the file was a total loss (see `recovery::apply`).
+        recovery::apply(path, ext, source, &mut result);
+        let fid = paths::file_node_id(path);
+        if let Some(file) = result.nodes.iter_mut().find(|n| n.id == fid) {
+            file.extra
+                .insert("parse_error".into(), serde_json::Value::Bool(true));
+        }
+    }
     #[cfg(feature = "cross-language")]
     crosslang::augment(path, source, &mut result);
     Some(result)
@@ -380,6 +431,156 @@ mod tests {
             orphans.is_empty(),
             "extensions classified as Code but with no extractor (silent drop): {orphans:?}"
         );
+    }
+
+    /// `.F90` is the conventional spelling for preprocessed Fortran, and
+    /// `.PAS`/`.CLS` turn up in Delphi and Salesforce trees exported from
+    /// case-insensitive filesystems. Extension dispatch must not be case-sensitive
+    /// or those files route to no extractor and vanish without a diagnostic.
+    #[cfg(feature = "lang-fortran")]
+    #[test]
+    fn dispatch_routes_uppercase_fortran_extension() {
+        let src = b"module m\ncontains\nsubroutine go()\nend subroutine go\nend module m\n";
+        let upper = extract_source("src/thing.F90", src).expect("uppercase .F90 must extract");
+        let lower = extract_source("src/thing.f90", src).expect("lowercase .f90 must extract");
+        assert!(
+            upper.nodes.iter().any(|n| n.label == ".go()"),
+            "{:?}",
+            upper.nodes.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+        assert_eq!(upper.nodes.len(), lower.nodes.len());
+    }
+
+    #[cfg(feature = "default")]
+    #[test]
+    fn dispatch_is_case_insensitive_for_every_code_extension() {
+        let orphans: Vec<String> = synaptic_detect::file_type::CODE_EXTENSIONS
+            .iter()
+            .map(|ext| ext.to_uppercase())
+            .filter(|ext| extract_source(&format!("probe.{ext}"), b"\n").is_none())
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "uppercase extensions with no extractor (silent drop): {orphans:?}"
+        );
+    }
+
+    /// `.h` sniffing only ever chose between C and C++, so Objective-C headers —
+    /// where the public interface of an Obj-C project actually lives — parsed as
+    /// neither and yielded no symbols at all.
+    #[cfg(all(feature = "lang-objc", feature = "lang-c"))]
+    #[test]
+    fn objc_header_routes_to_the_objc_extractor() {
+        let src = b"#import <Foundation/Foundation.h>\n\n@interface AFSecurityPolicy : NSObject\n- (BOOL)evaluateServerTrust:(SecTrustRef)trust;\n@end\n";
+        let r = extract_source("AFNetworking/AFSecurityPolicy.h", src).expect("header extracts");
+        let labels: Vec<&str> = r.nodes.iter().map(|n| n.label.as_str()).collect();
+        assert!(
+            labels.contains(&"AFSecurityPolicy"),
+            "expected the Obj-C class, got {labels:?}"
+        );
+        assert!(!r.parse_error, "Obj-C header should parse cleanly");
+    }
+
+    /// The Obj-C sniff must not steal plain C or C++ headers.
+    #[cfg(all(feature = "lang-c", feature = "lang-cpp"))]
+    #[test]
+    fn objc_sniff_leaves_c_and_cpp_headers_alone() {
+        let cpp = extract_source("g/Hero.h", b"class Hero {\npublic:\n  void Run();\n};\n")
+            .expect("cpp header");
+        assert!(cpp.nodes.iter().any(|n| n.label == "Hero"));
+        let c = extract_source("g/util.h", b"int add(int a, int b) { return a + b; }\n")
+            .expect("c header");
+        assert!(
+            c.nodes.iter().any(|n| n.label.contains("add")),
+            "{:?}",
+            c.nodes.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+    }
+
+    /// A console line scrolls away; the graph is what downstream tools read. A file
+    /// whose extraction is incomplete must say so on its own file node, so a query
+    /// can tell "no symbols here" from "no symbols understood here".
+    #[cfg(feature = "lang-objc")]
+    #[test]
+    fn incomplete_extraction_is_stamped_on_the_file_node() {
+        let broken = extract_source(
+            "src/Broken.m",
+            b"@interface Broken : NSObject\n@property (nonatomic) *** ;;; @@@\n@end\n",
+        )
+        .expect("extracts");
+        let file = broken
+            .nodes
+            .iter()
+            .find(|n| n.label == "Broken.m")
+            .expect("file node");
+        assert_eq!(
+            file.extra.get("parse_error").and_then(|v| v.as_bool()),
+            Some(true),
+            "file node extra: {:?}",
+            file.extra
+        );
+
+        let clean = extract_source(
+            "src/Ok.m",
+            b"@interface Ok : NSObject\n@end\n@implementation Ok\n- (void)go { }\n@end\n",
+        )
+        .expect("extracts");
+        let file = clean
+            .nodes
+            .iter()
+            .find(|n| n.label == "Ok.m")
+            .expect("file node");
+        assert!(
+            !file.extra.contains_key("parse_error"),
+            "clean parse must not be stamped: {:?}",
+            file.extra
+        );
+    }
+
+    /// A `generate`-style `if … begin : label` whose body is a macro invocation
+    /// defeats tree-sitter-verilog outright — the real pattern behind 156 total
+    /// losses across pulp-platform/axi, Cores-VeeR-EL2 and cva6. The module must
+    /// still reach the graph, marked as recovered rather than parsed.
+    #[cfg(feature = "lang-verilog")]
+    #[test]
+    fn a_module_the_grammar_cannot_parse_is_recovered() {
+        let src = b"module m_gen #(\n  parameter int unsigned NoMstPorts = 32'd0\n) (\n  input logic clk\n);\n  if (NoMstPorts == 32'h1) begin : gen_no_demux\n    `AXI_ASSIGN_REQ_STRUCT(a, b)\n  end else begin\n    logic x;\n  end\nendmodule\n";
+        let r = extract_source("src/m_gen.sv", src).expect("extracts");
+        assert!(r.parse_error, "fixture must actually defeat the grammar");
+        let m = r
+            .nodes
+            .iter()
+            .find(|n| n.label == "m_gen")
+            .unwrap_or_else(|| {
+                panic!(
+                    "module lost: {:?}",
+                    r.nodes.iter().map(|n| &n.label).collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(m.source_location, Some("L1".to_string()));
+        assert_eq!(
+            m.extra.get("recovered").and_then(|v| v.as_bool()),
+            Some(true),
+            "recovered symbols must be marked"
+        );
+    }
+
+    /// Recovery must never second-guess a grammar that produced something. A file
+    /// that parsed keeps exactly the structure the walk found.
+    #[cfg(feature = "lang-verilog")]
+    #[test]
+    fn a_module_that_parses_is_not_touched_by_recovery() {
+        let r = extract_source(
+            "src/ok.sv",
+            b"module ok (input logic clk);\nendmodule\n\nmodule second (input logic c);\nendmodule\n",
+        )
+        .expect("extracts");
+        assert!(!r.parse_error);
+        assert!(
+            r.nodes.iter().all(|n| !n.extra.contains_key("recovered")),
+            "clean parse must have no recovered nodes"
+        );
+        assert_eq!(r.nodes.iter().filter(|n| n.label == "ok").count(), 1);
     }
 
     #[cfg(feature = "lang-python")]

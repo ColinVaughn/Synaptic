@@ -805,7 +805,7 @@ pub(crate) enum EvalAction {
     /// size tiers and language families. Clones each repo at its pinned SHA and
     /// times a cold and a warm (AST-cache-hot) build. Network + git required.
     Scale {
-        /// Manifest of pinned repos (default: the in-tree scale-corpus.toml).
+        /// Manifest of pinned repos (default: the in-tree repo-corpus.toml).
         #[arg(long)]
         manifest: Option<PathBuf>,
         /// Restrict to one tier (small|medium|large).
@@ -826,6 +826,51 @@ pub(crate) enum EvalAction {
         /// Return success even when a repository could not be measured.
         #[arg(long)]
         allow_skips: bool,
+    },
+    /// Measure extraction QUALITY across the pinned real-world corpus: anchor
+    /// exactness (does the recorded line really declare the symbol), parse and
+    /// recovery health, determinism and incremental equivalence, and an
+    /// independent comparison against universal-ctags. Gated against pinned
+    /// per-repo baselines. Network + git required.
+    Quality {
+        /// Manifest of pinned repos (default: the in-tree repo-corpus.toml).
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// Baselines file (default: the in-tree quality-baselines.toml).
+        #[arg(long)]
+        baselines: Option<PathBuf>,
+        /// Restrict to repositories declaring this language.
+        #[arg(long)]
+        language: Option<String>,
+        /// Restrict to one repository by name.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Skip the universal-ctags comparison even when it is installed.
+        #[arg(long)]
+        skip_oracle: bool,
+        /// Clone cache directory (default: synaptic-out/bench).
+        #[arg(long)]
+        cache: Option<PathBuf>,
+        /// Output directory for report.json + report.md (default: synaptic-out/eval/quality).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Emit the report as JSON to stdout.
+        #[arg(long)]
+        json: bool,
+        /// Return success even when a repository could not be measured.
+        #[arg(long)]
+        allow_skips: bool,
+        /// Resolve every manifest URL's current HEAD and rewrite its pinned SHA,
+        /// then exit without measuring.
+        #[arg(long)]
+        pin: bool,
+        /// Rewrite the baselines from this run. Tightens freely; loosening a
+        /// bound also requires --allow-regression.
+        #[arg(long)]
+        update_baselines: bool,
+        /// Permit --update-baselines to loosen a bound (i.e. record a regression).
+        #[arg(long)]
+        allow_regression: bool,
     },
 }
 

@@ -102,6 +102,7 @@ pub fn extract_ruby_source(path: &str, source: &[u8]) -> ExtractionResult {
     };
     ex.b.add_node(file_nid, filename, 1);
     let root = tree.root_node();
+    ex.b.note_parse_health(root);
     ex.walk(root, None, 0);
     ex.run_call_pass();
     ex.b.into_result()
@@ -127,19 +128,7 @@ struct Ruby<'a, 'tree> {
 #[cfg(feature = "lang-ruby")]
 impl<'tree> Ruby<'_, 'tree> {
     fn symbol_key(name: &str) -> String {
-        let mut punctuation: String = name
-            .chars()
-            .filter(|c| !c.is_alphanumeric() && *c != '_')
-            .map(|c| format!("{:x}", c as u32))
-            .collect();
-        if name.starts_with('_') || name.ends_with('_') {
-            punctuation.push_str("5f");
-        }
-        if punctuation.is_empty() {
-            name.to_string()
-        } else {
-            format!("{name}_{punctuation}")
-        }
+        crate::common::symbol_key(name)
     }
 
     fn text(&self, n: TsNode<'tree>) -> String {

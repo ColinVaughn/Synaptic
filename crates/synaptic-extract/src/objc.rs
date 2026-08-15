@@ -45,6 +45,7 @@ pub fn extract_objc_source(path: &str, source: &[u8]) -> ExtractionResult {
         function_bodies: Vec::new(),
     };
     ex.b.add_node(file_nid, filename, 1);
+    ex.b.note_parse_health(tree.root_node());
     ex.walk(tree.root_node(), 0);
     ex.run_call_pass();
     ex.b.into_result()
@@ -117,7 +118,10 @@ impl<'tree> ObjC<'_, 'tree> {
                     }
                 }
             }
-            "class_interface" => {
+            // A protocol declares an interface contract and is usually header-only,
+            // so nothing else in the corpus defines it. Same shape as an
+            // `@interface`: a name identifier then `method_declaration` children.
+            "class_interface" | "protocol_declaration" => {
                 let Some(class_nid) = self.class_node(node) else {
                     return;
                 };
@@ -285,6 +289,55 @@ mod tests {
         let r = extract();
         assert!(rels(&r, "inherits").contains(&("Dog".to_string(), "Animal".to_string())));
         assert!(rels(&r, "imports_from").iter().any(|(_, t)| t == "animal"));
+    }
+
+    /// A file the grammar cannot parse yields only the file node, which is
+    /// indistinguishable from a file that genuinely declares nothing. The result
+    /// must say so, otherwise the loss is silent.
+    #[test]
+    fn a_clean_parse_reports_no_parse_error() {
+        assert!(!extract().parse_error);
+    }
+
+    #[test]
+    fn an_unparseable_file_is_flagged() {
+        let r = extract_objc_source(
+            "src/Broken.m",
+            b"@interface Broken : NSObject\n@property (nonatomic) *** ;;; @@@\n@end\n",
+        );
+        assert!(
+            r.parse_error,
+            "expected parse_error for malformed source, got nodes {:?}",
+            r.nodes.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+    }
+
+    /// `@protocol` declarations are an Obj-C codebase's interface contracts and are
+    /// routinely header-only, so nothing else in the corpus declares them. Without
+    /// this they existed only as unresolved external stubs — AFNetworking's
+    /// `AFURLRequestSerialization`, `AFURLResponseSerialization` and
+    /// `AFMultipartFormData` were all missing from the graph.
+    #[test]
+    fn protocol_declarations_become_nodes_with_their_methods() {
+        let r = extract_objc_source(
+            "net/Serialization.h",
+            b"@protocol AFURLRequestSerialization <NSObject>\n- (NSURLRequest *)requestBySerializingRequest:(NSURLRequest *)request;\n@end\n",
+        );
+        let ls = labels(&r);
+        assert!(
+            ls.contains(&"AFURLRequestSerialization".to_string()),
+            "{ls:?}"
+        );
+        assert!(
+            ls.contains(&".requestBySerializingRequest()".to_string()),
+            "{ls:?}"
+        );
+        let p = r
+            .nodes
+            .iter()
+            .find(|n| n.label == "AFURLRequestSerialization")
+            .expect("protocol node");
+        assert_eq!(p.source_location, Some("L1".to_string()));
     }
 
     #[test]

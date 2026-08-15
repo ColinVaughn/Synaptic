@@ -156,6 +156,7 @@ fn php_framework_pass(path: &str, source: &[u8]) -> ExtractionResult {
         in_file_classes: HashSet::new(),
         b: Builder::new(path),
     };
+    fw.b.note_parse_health(tree.root_node());
     fw.collect_classes(tree.root_node(), 0);
     fw.walk(tree.root_node(), None, None, 0);
     fw.b.into_result()

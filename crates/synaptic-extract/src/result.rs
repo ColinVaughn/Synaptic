@@ -15,6 +15,12 @@ pub struct ExtractionResult {
     pub edges: Vec<Edge>,
     pub raw_calls: Vec<RawCall>,
     pub imports: Vec<ImportRecord>,
+    /// The grammar reported `ERROR`/`MISSING` nodes for this file, so the symbols
+    /// below are incomplete. Without this a file that failed to parse looks exactly
+    /// like a file that declares nothing, and the loss is silent. Skipped in
+    /// serialization when false so cached extractions stay byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parse_error: bool,
 }
 
 #[cfg(test)]

@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 
 use synaptic_eval::{
-    CalibrationReport, CorpusReport, ReplayOptions, ReplayReport, ScaleReport,
-    calibrate_cross_language, calibrate_history, replay, run_corpus, run_scale,
+    Baselines, CalibrationReport, CorpusReport, QualityFilter, QualityReport, ReplayOptions,
+    ReplayReport, ScaleReport, baselines, calibrate_cross_language, calibrate_history,
+    pin_manifest, replay, run_corpus, run_quality, run_scale,
 };
 
 use crate::cli::EvalAction;
@@ -53,11 +54,319 @@ pub(crate) fn run_eval(action: EvalAction) -> Result<()> {
             json,
             allow_skips,
         } => run_scale_cmd(manifest, tier, reps, cache, out, json, allow_skips),
+        EvalAction::Quality {
+            manifest,
+            baselines,
+            language,
+            repo,
+            skip_oracle,
+            cache,
+            out,
+            json,
+            allow_skips,
+            pin,
+            update_baselines,
+            allow_regression,
+        } => run_quality_cmd(QualityArgs {
+            manifest,
+            baselines,
+            language,
+            repo,
+            skip_oracle,
+            cache,
+            out,
+            json,
+            allow_skips,
+            pin,
+            update_baselines,
+            allow_regression,
+        }),
     }
 }
 
 fn default_scale_manifest() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/synaptic-eval/scale-corpus.toml")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/synaptic-eval/repo-corpus.toml")
+}
+
+fn default_baselines() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/synaptic-eval/quality-baselines.toml")
+}
+
+struct QualityArgs {
+    manifest: Option<PathBuf>,
+    baselines: Option<PathBuf>,
+    language: Option<String>,
+    repo: Option<String>,
+    skip_oracle: bool,
+    cache: Option<PathBuf>,
+    out: Option<PathBuf>,
+    json: bool,
+    allow_skips: bool,
+    pin: bool,
+    update_baselines: bool,
+    allow_regression: bool,
+}
+
+fn run_quality_cmd(args: QualityArgs) -> Result<()> {
+    let manifest = args.manifest.unwrap_or_else(default_scale_manifest);
+    if !manifest.exists() {
+        bail!(
+            "no corpus manifest at {} (pass --manifest)",
+            manifest.display()
+        );
+    }
+
+    if args.pin {
+        let (pinned, failures) = pin_manifest(&manifest).map_err(|e| anyhow!("pinning: {e}"))?;
+        println!("pinned {pinned} repositories in {}", manifest.display());
+        for f in &failures {
+            eprintln!("UNRESOLVED {f}");
+        }
+        if !failures.is_empty() {
+            bail!(
+                "{} repository URL(s) could not be resolved; their existing pins were kept",
+                failures.len()
+            );
+        }
+        return Ok(());
+    }
+
+    let cache = args
+        .cache
+        .unwrap_or_else(|| PathBuf::from("synaptic-out/bench"));
+    let filter = QualityFilter {
+        language: args.language,
+        repo: args.repo,
+        skip_oracle: args.skip_oracle,
+    };
+    let report =
+        run_quality(&manifest, &cache, &filter).map_err(|e| anyhow!("quality run: {e}"))?;
+
+    let md = quality_markdown(&report);
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        let out_dir = args
+            .out
+            .unwrap_or_else(|| PathBuf::from("synaptic-out/eval/quality"));
+        std::fs::create_dir_all(&out_dir)
+            .with_context(|| format!("creating {}", out_dir.display()))?;
+        std::fs::write(
+            out_dir.join("report.json"),
+            serde_json::to_string_pretty(&report)?,
+        )?;
+        std::fs::write(out_dir.join("report.md"), &md)?;
+        print!("{md}");
+        println!("  report: {}", out_dir.join("report.json").display());
+    }
+
+    let baselines_path = args.baselines.unwrap_or_else(default_baselines);
+    let existing = if baselines_path.exists() {
+        Baselines::parse(&std::fs::read_to_string(&baselines_path)?)
+            .map_err(|e| anyhow!("parsing {}: {e}", baselines_path.display()))?
+    } else {
+        Baselines::default()
+    };
+
+    // The gate is evaluated against whatever the baselines are AFTER an update,
+    // so a run that just pinned 53 repositories does not then report all 53 as
+    // unpinned.
+    let mut effective = existing.clone();
+    if args.update_baselines {
+        match baselines::ratchet(&existing, &report.results, args.allow_regression) {
+            Ok(next) => {
+                std::fs::write(&baselines_path, next.render())?;
+                println!("  baselines updated: {}", baselines_path.display());
+                effective = next;
+            }
+            Err(loosened) => {
+                for l in &loosened {
+                    eprintln!("REFUSED {l}");
+                }
+                bail!(
+                    "refusing to loosen {} baseline bound(s); pass --allow-regression to record \
+                     the regression deliberately",
+                    loosened.len()
+                );
+            }
+        }
+    }
+
+    // Self-consistency has a principled correct answer, so it hard-fails
+    // regardless of any baseline.
+    let inconsistent: Vec<&synaptic_eval::RepoQuality> = report
+        .results
+        .iter()
+        .filter(|r| !r.consistency.deterministic || !r.consistency.incremental_equivalent)
+        .collect();
+    for r in &inconsistent {
+        eprintln!(
+            "INCONSISTENT {}: {}",
+            r.name,
+            r.consistency.detail.as_deref().unwrap_or("(no detail)")
+        );
+    }
+
+    let (breaches, unpinned) = baselines::check(&effective, &report.results);
+    for b in &breaches {
+        eprintln!("REGRESSION {b}");
+    }
+    if !unpinned.is_empty() {
+        eprintln!(
+            "note: {} repo(s) carry no baseline yet ({}); run --update-baselines to pin them",
+            unpinned.len(),
+            unpinned.join(", ")
+        );
+    }
+
+    if !report.skipped.is_empty() {
+        for s in &report.skipped {
+            eprintln!("SKIPPED {}: {}", s.url, s.reason);
+        }
+        eprintln!(
+            "warning: {} repo(s) skipped; quality results are partial",
+            report.skipped.len()
+        );
+    }
+
+    if !inconsistent.is_empty() {
+        bail!(
+            "{} repo(s) failed a self-consistency assertion",
+            inconsistent.len()
+        );
+    }
+    if !breaches.is_empty() && !args.update_baselines {
+        bail!("{} baseline bound(s) breached", breaches.len());
+    }
+    if !report.skipped.is_empty() && !args.allow_skips {
+        bail!("incomplete quality run (pass --allow-skips for exploratory runs)");
+    }
+    Ok(())
+}
+
+fn quality_markdown(report: &QualityReport) -> String {
+    let mut s = String::from("# Extraction quality at scale\n\n");
+    let e = &report.env;
+    s.push_str(&format!(
+        "{} repositories measured on {}/{} ({} logical CPUs), Synaptic {}.\n",
+        report.results.len(),
+        e.os,
+        e.arch,
+        e.logical_cpus,
+        e.synaptic_version
+    ));
+    if let Some(rev) = &e.source_revision {
+        s.push_str(&format!(
+            "Source revision `{rev}`{}.\n",
+            match e.source_dirty {
+                Some(true) => " with a dirty working tree",
+                _ => "",
+            }
+        ));
+    }
+    if !report.oracle_available {
+        s.push_str(&format!(
+            "\n> **Oracle stage did not run.** {}\n> The anchor, parse-health and self-consistency \
+             measurements below are unaffected.\n",
+            report
+                .oracle_unavailable_reason
+                .as_deref()
+                .unwrap_or("reason not recorded")
+        ));
+    }
+
+    s.push_str("\n## Per language (pooled)\n\n");
+    s.push_str(
+        "| Language | Files | Anchors ok/checked | Exact | via annot. | Parse err | Zero-decl | Recovered ok/checked |\n\
+         |---|--:|--:|--:|--:|--:|--:|--:|\n",
+    );
+    for l in report.pooled_by_language() {
+        s.push_str(&format!(
+            "| {} | {} | {}/{} | {:.2}% | {} | {:.2}% | {:.2}% | {}/{} |\n",
+            l.language,
+            l.files,
+            l.anchors_exact,
+            l.anchors_checked,
+            l.anchor_exactness() * 100.0,
+            l.anchors_via_leading_matter,
+            l.parse_error_rate() * 100.0,
+            l.zero_decl_file_rate() * 100.0,
+            l.recovered_exact,
+            l.recovered_checked,
+        ));
+    }
+    s.push_str(
+        "\n`via annot.` counts anchors that land on the head of the declaration's \
+         annotation/attribute block rather than on its signature line. Those are correct -- an \
+         annotated declaration's syntax node starts at its first annotation -- but they are \
+         reported separately rather than folded in silently.\n",
+    );
+
+    s.push_str("\n## Per repository\n\n");
+    s.push_str(
+        "| Repo | Family | Files | Nodes | Anchors ok/checked | Exact | Determinism | Incremental |\n\
+         |---|---|--:|--:|--:|--:|:-:|:-:|\n",
+    );
+    for r in &report.results {
+        s.push_str(&format!(
+            "| {} | {} | {} | {} | {}/{} | {:.2}% | {} | {} |\n",
+            r.name,
+            r.family,
+            r.files,
+            r.nodes,
+            r.anchors_exact,
+            r.anchors_checked,
+            r.anchor_exactness() * 100.0,
+            if r.consistency.deterministic {
+                "pass"
+            } else {
+                "FAIL"
+            },
+            if r.consistency.incremental_equivalent {
+                "pass"
+            } else {
+                "FAIL"
+            },
+        ));
+    }
+
+    let checked: usize = report.results.iter().map(|r| r.anchors_checked).sum();
+    s.push_str(&format!(
+        "\nPooled anchor exactness: **{:.4}%** over {} checked declarations.\n",
+        report.pooled_anchor_exactness() * 100.0,
+        checked
+    ));
+
+    if report.oracle_available {
+        s.push_str("\n## Independent oracle (universal-ctags)\n\n");
+        s.push_str("| Repo | Language | Agree | ctags-only | synaptic-only | Missed |\n|---|---|--:|--:|--:|--:|\n");
+        for r in &report.results {
+            for l in &r.oracle.per_language {
+                s.push_str(&format!(
+                    "| {} | {} | {} | {} | {} | {:.2}% |\n",
+                    r.name,
+                    l.language,
+                    l.agreement,
+                    l.ctags_only,
+                    l.synaptic_only,
+                    l.missed_rate() * 100.0
+                ));
+            }
+        }
+        s.push_str(
+            "\n`ctags-only` is the actionable column. `synaptic-only` is expected: Synaptic models \
+             methods, framework constructs and cross-file structure that ctags never emits.\n",
+        );
+    }
+
+    if !report.skipped.is_empty() {
+        s.push_str("\n## Skipped\n\n");
+        for k in &report.skipped {
+            s.push_str(&format!("- `{}`: {}\n", k.url, k.reason));
+        }
+    }
+    s
 }
 
 fn run_scale_cmd(

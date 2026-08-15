@@ -93,6 +93,7 @@ pub fn extract_rust_source(path: &str, source: &[u8]) -> ExtractionResult {
         function_bodies: Vec::new(),
     };
     ex.b.add_node(file_nid, file_label, 1);
+    ex.b.note_parse_health(tree.root_node());
     ex.walk(tree.root_node(), None, 0);
     ex.run_call_pass();
     ex.b.into_result()

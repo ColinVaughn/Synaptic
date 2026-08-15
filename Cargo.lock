@@ -3117,6 +3117,8 @@ dependencies = [
  "serde",
  "serde_json",
  "synaptic-core",
+ "synaptic-detect",
+ "synaptic-extract",
  "synaptic-graph",
  "synaptic-history",
  "synaptic-incremental",

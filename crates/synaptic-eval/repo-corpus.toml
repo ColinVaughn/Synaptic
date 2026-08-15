@@ -1,0 +1,477 @@
+# Pinned external repositories for the benchmark suites.
+#
+#   suites = ["scale"]    timed by `synaptic eval scale`   (cold/warm/incremental)
+#   suites = ["quality"]  scored by `synaptic eval quality` (anchors/parse/oracle)
+#
+# An entry with no `suites` key is quality-only. The scale subset is deliberately
+# small and size-tiered so its published timings stay comparable across releases;
+# the quality suite is language-complete instead, because a language with no real
+# repository behind it is a language whose extractor has never been checked
+# against code anyone wrote. `.F90` routing to no extractor at all, and Pascal
+# losing 58% of its anchors, both survived exactly that gap.
+#
+# `languages` is enforced: `every_extractor_is_benchmarked` fails when a shipped
+# extractor appears in no entry here, so a new language cannot ship unmeasured.
+#
+# Network + git required; opt-in (never run in CI).
+#
+# SHAs are pinned deliberately -- a moved SHA changes the numbers. Refresh with
+# `synaptic eval quality --pin`, which resolves every URL's current HEAD.
+
+# ---------------------------------------------------------------------------
+# Throughput subset (also scored for quality). Pinned 2026-08-12.
+# ---------------------------------------------------------------------------
+
+[[repo]]
+url = "https://github.com/BurntSushi/memchr"
+sha = "bd6068c30e9074a90c285e47912fa0b047d07597"
+family = "systems-rust"
+tier = "small"
+suites = ["scale", "quality"]
+languages = ["rust"]
+incremental_file = "src/lib.rs"
+
+[[repo]]
+url = "https://github.com/pallets/click"
+sha = "8b44edfff7d9a6c895fa804148c16b3a0bc9efb5"
+family = "scripting-python"
+tier = "medium"
+suites = ["scale", "quality"]
+languages = ["python"]
+incremental_file = "src/click/core.py"
+
+[[repo]]
+url = "https://github.com/sindresorhus/p-map"
+sha = "bc26cf03f81292325236a1188063dac8e7a4de0f"
+family = "web-ts"
+tier = "small"
+suites = ["scale", "quality"]
+languages = ["javascript"]
+incremental_file = "index.js"
+
+[[repo]]
+url = "https://github.com/spf13/cobra"
+sha = "adbc8813901bba65827259daa8e22ff94ec1f30e"
+family = "go"
+tier = "medium"
+suites = ["scale", "quality"]
+languages = ["go"]
+incremental_file = "command.go"
+
+[[repo]]
+url = "https://github.com/tokio-rs/axum"
+sha = "6ab6f99aac9428f1acc0e21871e86f12a1e5384e"
+family = "systems-rust"
+tier = "large"
+suites = ["scale", "quality"]
+languages = ["rust"]
+incremental_file = "axum/src/lib.rs"
+
+[[repo]]
+url = "https://github.com/google/gson"
+sha = "dae37cf0fe12235b76fb09f01118a0a8c8823f42"
+family = "jvm-java"
+tier = "medium"
+suites = ["scale", "quality"]
+languages = ["java"]
+incremental_file = "gson/src/main/java/com/google/gson/Gson.java"
+
+[[repo]]
+url = "https://github.com/fmtlib/fmt"
+sha = "cde18a38bbd960a2e803b76880fbbf4b4ffb3cd7"
+family = "systems-cpp"
+tier = "medium"
+suites = ["scale", "quality"]
+languages = ["cpp"]
+incremental_file = "include/fmt/format.h"
+
+[[repo]]
+url = "https://github.com/Humanizr/Humanizer"
+sha = "ffc2b77c0f30d2fb176875841424379319d0ae9b"
+family = "dotnet-csharp"
+tier = "medium"
+suites = ["scale", "quality"]
+languages = ["csharp", "dotnet"]
+incremental_file = "src/Humanizer/StringHumanizeExtensions.cs"
+
+[[repo]]
+url = "https://github.com/rack/rack"
+sha = "8bf4eb078498edc9105fb04add80d89c5340e60b"
+family = "scripting-ruby"
+tier = "medium"
+suites = ["scale", "quality"]
+languages = ["ruby"]
+incremental_file = "lib/rack.rb"
+
+[[repo]]
+url = "https://github.com/slimphp/Slim"
+sha = "80900fb39cafce3ae53b18a2c4f642a122f03095"
+family = "web-php"
+tier = "small"
+suites = ["scale", "quality"]
+languages = ["php"]
+incremental_file = "Slim/App.php"
+
+# ---------------------------------------------------------------------------
+# Quality-only corpus. One or more real repositories per shipped extractor.
+# ---------------------------------------------------------------------------
+
+[[repo]]
+url = "https://github.com/clap-rs/clap"
+sha = "5b81f1012da19f1474decfe7ffcfb437f59ccba4"
+family = "systems-rust"
+tier = "large"
+languages = ["rust"]
+
+[[repo]]
+url = "https://github.com/psf/requests"
+sha = "8068356288978c4f54661ae6f95afe0e0831885e"
+family = "scripting-python"
+tier = "medium"
+languages = ["python"]
+
+[[repo]]
+url = "https://github.com/expressjs/express"
+sha = "a3714473feb3d2908add734d340e7755fd85e0a3"
+family = "web-js"
+tier = "medium"
+languages = ["javascript"]
+
+[[repo]]
+url = "https://github.com/colinhacks/zod"
+sha = "5e608851fbc7659855e096239e36b9147af8a187"
+family = "web-ts"
+tier = "medium"
+languages = ["typescript"]
+
+[[repo]]
+url = "https://github.com/gin-gonic/gin"
+sha = "34dac209ffb6ef85cc78c5d217bbb7ad001d68fd"
+family = "go"
+tier = "medium"
+languages = ["go"]
+
+[[repo]]
+url = "https://github.com/junit-team/junit4"
+sha = "890f3c972647de378f25e7271d8fbbd9d3456b79"
+family = "jvm-java"
+tier = "medium"
+languages = ["java"]
+
+[[repo]]
+url = "https://github.com/Kotlin/kotlinx.serialization"
+sha = "25c2a755cbe6926a63003f3a51527bb731e8cd14"
+family = "jvm-kotlin"
+tier = "medium"
+languages = ["kotlin", "groovy"]
+
+[[repo]]
+url = "https://github.com/Alamofire/Alamofire"
+sha = "0455bfb650893e86ad07ace16e5f2d36dadf46f4"
+family = "apple-swift"
+tier = "medium"
+languages = ["swift"]
+
+[[repo]]
+url = "https://github.com/libuv/libuv"
+sha = "a6d06ba716b6facdf00e29306aa5013d51e070d4"
+family = "systems-c"
+tier = "medium"
+languages = ["c"]
+
+[[repo]]
+url = "https://github.com/nlohmann/json"
+sha = "cdf52ae9bef77a0844e02e42df6d2df83a55c4b9"
+family = "systems-cpp"
+tier = "large"
+languages = ["cpp"]
+
+[[repo]]
+url = "https://github.com/AFNetworking/AFNetworking"
+sha = "d9f589cc2c1fe9d55eb5eea00558010afea7a41e"
+family = "apple-objc"
+tier = "medium"
+languages = ["objc"]
+
+[[repo]]
+url = "https://github.com/SDWebImage/SDWebImage"
+sha = "c3ad5e1a9bf55c9b76d4c362430b5fcded96c502"
+family = "apple-objc"
+tier = "medium"
+languages = ["objc"]
+
+[[repo]]
+url = "https://github.com/SchemaStore/schemastore"
+sha = "7df1868317a201a138bc7e9eee0fbc05b4c288ff"
+family = "data-json"
+tier = "large"
+languages = ["json"]
+
+[[repo]]
+url = "https://github.com/docker/awesome-compose"
+sha = "30f4b7f6a6c3b0c0ecf4d4efb0de203c48d11562"
+family = "data-yaml"
+tier = "medium"
+languages = ["yaml"]
+
+[[repo]]
+url = "https://github.com/terraform-aws-modules/terraform-aws-vpc"
+sha = "0a36bd54069c64be2da788b2afb5df0a8e8e7398"
+family = "infra-hcl"
+tier = "small"
+languages = ["hcl"]
+
+[[repo]]
+url = "https://github.com/dbt-labs/jaffle_shop"
+sha = "fd7bfacae4f497ff044a6a0275268676bf1b64c3"
+family = "data-sql"
+tier = "small"
+languages = ["sql"]
+
+[[repo]]
+url = "https://github.com/nvm-sh/nvm"
+sha = "65ded65d46c16481dbbe8e93f8ba9e6b35f20740"
+family = "scripting-bash"
+tier = "medium"
+languages = ["bash"]
+
+[[repo]]
+url = "https://github.com/bats-core/bats-core"
+sha = "ae4b94d7cc35f62468297791aa4ab8c3af7377ba"
+family = "scripting-bash"
+tier = "small"
+languages = ["bash"]
+
+[[repo]]
+url = "https://github.com/nvim-telescope/telescope.nvim"
+sha = "427b576c16792edad01a92b89721d923c19ad60f"
+family = "scripting-lua"
+tier = "medium"
+languages = ["lua"]
+
+[[repo]]
+url = "https://github.com/sinatra/sinatra"
+sha = "cb22afd7902b566b6eaba6c4ea89739494a65d12"
+family = "scripting-ruby"
+tier = "medium"
+languages = ["ruby"]
+
+[[repo]]
+url = "https://github.com/pester/Pester"
+sha = "cb007b26382a65e9687fd0f112b388c5b5ea6ff7"
+family = "scripting-powershell"
+tier = "medium"
+languages = ["powershell"]
+
+[[repo]]
+url = "https://github.com/dfinke/ImportExcel"
+sha = "5387c061461c811d106b125588f064c4739342cb"
+family = "scripting-powershell"
+tier = "medium"
+languages = ["powershell"]
+
+[[repo]]
+url = "https://github.com/guzzle/guzzle"
+sha = "d1cbca76970939a9c2ced55b1e25ea26f34fc773"
+family = "web-php"
+tier = "medium"
+languages = ["php"]
+
+[[repo]]
+url = "https://github.com/com-lihaoyi/os-lib"
+sha = "86e5ddb65fe62305afb5885fcc0f8da50aba4b48"
+family = "jvm-scala"
+tier = "small"
+languages = ["scala"]
+
+[[repo]]
+url = "https://github.com/dart-lang/http"
+sha = "a9176ac97402a42e1b275a26eb20a9deaec92184"
+family = "dart"
+tier = "small"
+languages = ["dart"]
+
+[[repo]]
+url = "https://github.com/elixir-ecto/ecto"
+sha = "b71f51b4e83b5eaf3bded33bd913a04a4824c94f"
+family = "beam-elixir"
+tier = "medium"
+languages = ["elixir"]
+
+[[repo]]
+url = "https://github.com/phoenixframework/phoenix"
+sha = "52aa2cbd3b9283830ddfaf03173e20350c0b1d22"
+family = "beam-elixir"
+tier = "medium"
+languages = ["elixir"]
+
+[[repo]]
+url = "https://github.com/JuliaData/DataFrames.jl"
+sha = "13c6af11d36401cccdfa929b2dca1ddcb7c776fe"
+family = "scientific-julia"
+tier = "medium"
+languages = ["julia"]
+
+[[repo]]
+url = "https://github.com/zigtools/zls"
+sha = "8da87d4f3305a550e7b739bad764e34bf1e46a08"
+family = "systems-zig"
+tier = "medium"
+languages = ["zig"]
+
+[[repo]]
+url = "https://github.com/rcdmk/aspJSON"
+sha = "c28ed37bfef865291c95d276a9f901bc204ac113"
+family = "legacy-asp"
+tier = "small"
+languages = ["asp"]
+
+[[repo]]
+url = "https://github.com/spockframework/spock"
+sha = "37e5e9a663ac6bc1ed1f72ac8374a81b879c66b0"
+family = "jvm-groovy"
+tier = "medium"
+languages = ["groovy"]
+
+[[repo]]
+url = "https://github.com/fortran-lang/stdlib"
+sha = "9a15c7772f1a76a6c497b9f3abb793841fc81f74"
+family = "scientific-fortran"
+tier = "medium"
+languages = ["fortran"]
+
+[[repo]]
+url = "https://github.com/Reference-LAPACK/lapack"
+sha = "51b349470b3b26c948d068deb45c9b120a47ed32"
+family = "scientific-fortran"
+tier = "large"
+languages = ["fortran"]
+
+[[repo]]
+url = "https://github.com/github/codeql"
+sha = "3aecce9c1c53bc10cebe5e8021e3137d884fb574"
+family = "analysis-ql"
+tier = "large"
+languages = ["ql"]
+
+[[repo]]
+url = "https://github.com/lowRISC/ibex"
+sha = "7b5df75a041affe56e8c235260f98a09b3319008"
+family = "hardware-verilog"
+tier = "medium"
+languages = ["verilog"]
+
+[[repo]]
+url = "https://github.com/PanJiaChen/vue-element-admin"
+sha = "6858a9ad67483025f6a9432a926beb9327037be3"
+family = "web-vue"
+tier = "medium"
+languages = ["vue"]
+
+[[repo]]
+url = "https://github.com/sveltejs/realworld"
+sha = "df796708040f5200ec572b28ab7f88ecee5794dd"
+family = "web-svelte"
+tier = "small"
+languages = ["svelte"]
+
+[[repo]]
+url = "https://github.com/withastro/starlight"
+sha = "c632e120bddad0d830df137d8cd56dc115c66547"
+family = "web-astro"
+tier = "medium"
+languages = ["astro"]
+
+[[repo]]
+url = "https://github.com/dotnet-architecture/eShopOnWeb"
+sha = "4da8212117e87d808d4bbc7da6286fd2147ce606"
+family = "dotnet-razor"
+tier = "medium"
+languages = ["razor", "csharp", "dotnet"]
+
+[[repo]]
+url = "https://github.com/jlevy/the-art-of-command-line"
+sha = "6b50745d2e788add2e8f1ed29010e72659a9a074"
+family = "docs-markdown"
+tier = "small"
+languages = ["markdown"]
+
+[[repo]]
+url = "https://github.com/trailheadapps/apex-recipes"
+sha = "144421334a98322026d2a782ccb174b9b2806f0b"
+family = "salesforce-apex"
+tier = "medium"
+languages = ["apex"]
+
+[[repo]]
+url = "https://github.com/trailheadapps/dreamhouse-lwc"
+sha = "02ed5e4c5a59339e87e9520a80d8e5844d3af842"
+family = "salesforce-apex"
+tier = "small"
+languages = ["apex"]
+
+[[repo]]
+url = "https://github.com/synopse/mORMot2"
+sha = "89e95097843ceb1760fa455ce329c286f7700568"
+family = "pascal"
+tier = "large"
+languages = ["pascal"]
+
+[[repo]]
+url = "https://github.com/graphql-dotnet/graphql-dotnet"
+sha = "09b0ccc8d0f4244f76272e6773d3053e755e4c5a"
+family = "dotnet-csharp"
+tier = "medium"
+languages = ["csharp", "dotnet"]
+
+# SQL. The corpus previously reached SQL only through incidental seed scripts:
+# 24 files and 7 checkable anchors across 54 repositories, which is not a
+# measurement. These three cover the shapes real SQL actually takes -- warehouse
+# dialects, canonical DDL, and dbt's Jinja-templated models.
+
+[[repo]]
+url = "https://github.com/sqlfluff/sqlfluff"
+sha = "d803adf57ccf73d5645c5976d70b3540a775df7e"
+family = "data-sql"
+tier = "large"
+languages = ["sql", "python"]
+
+[[repo]]
+url = "https://github.com/lerocha/chinook-database"
+sha = "7f67772503d71ba90f19283c38e93923addb43fa"
+family = "data-sql"
+tier = "small"
+languages = ["sql"]
+
+[[repo]]
+url = "https://github.com/dbt-labs/dbt-utils"
+sha = "700764ce230b2fb775b5338b6bc77a72233ea34c"
+family = "data-sql"
+tier = "small"
+languages = ["sql"]
+
+# Razor / Blazor. Razor reached the suite only through two incidental fixtures
+# (20 files, 52 anchors). These are real component libraries: markup-heavy
+# components, `@code` blocks the C# grammar cannot read, and the directive
+# vocabulary (`@inherits`/`@inject`/`@implements`) that lives outside `@code`.
+
+[[repo]]
+url = "https://github.com/MudBlazor/MudBlazor"
+sha = "27377a9857d74d3731cbc18ba43a1e64887938aa"
+family = "dotnet-razor"
+tier = "large"
+languages = ["razor", "csharp", "dotnet"]
+
+[[repo]]
+url = "https://github.com/ant-design-blazor/ant-design-blazor"
+sha = "11397d04a56277f4b634088d7fbafa78387c32af"
+family = "dotnet-razor"
+tier = "medium"
+languages = ["razor", "csharp"]
+
+[[repo]]
+url = "https://github.com/microsoft/fluentui-blazor"
+sha = "ddcb82b1f5bfd1c779eca7553e1abf0bcadee4d0"
+family = "dotnet-razor"
+tier = "medium"
+languages = ["razor", "csharp"]

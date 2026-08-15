@@ -30,8 +30,12 @@ static INCLUDE_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 #[cfg(feature = "lang-asp")]
 static DEF_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?im)^\s*(?:public\s+|private\s+|default\s+)*(function|sub|class)\s+(\w+)")
-        .expect("def re")
+    // `[ \t]*` not `\s*`: `\s` matches a newline, which would start the match on
+    // a preceding blank line and report the declaration one or more lines early.
+    Regex::new(
+        r"(?im)^[ \t]*(?:public[ \t]+|private[ \t]+|default[ \t]+)*(function|sub|class)[ \t]+(\w+)",
+    )
+    .expect("def re")
 });
 #[cfg(feature = "lang-asp")]
 static BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -54,9 +58,14 @@ pub fn extract_asp_source(path: &str, source: &[u8]) -> ExtractionResult {
     let stem = file_stem(path);
     b.add_node(file_nid.clone(), filename, 1);
 
+    // Precompute newline offsets once, then a per-match line lookup is O(log n).
+    let newlines: Vec<usize> = text.match_indices('\n').map(|(i, _)| i).collect();
+    let line_at = |byte: usize| newlines.partition_point(|&nl| nl < byte) + 1;
+
     // `<!--#include file="..."-->` / `virtual="..."` imports the base name.
     let include_re = &*INCLUDE_RE;
     for cap in include_re.captures_iter(&text) {
+        let line = line_at(cap.get(0).expect("regex group 0 is the full match").start());
         let inc = &cap[1];
         let last = inc.rsplit(['/', '\\']).next().unwrap_or(inc);
         let base = last
@@ -66,7 +75,7 @@ pub fn extract_asp_source(path: &str, source: &[u8]) -> ExtractionResult {
         if !base.is_empty() {
             let tgt = NodeId(make_id(&["asp", "inc", base]));
             b.add_external_node(tgt.clone(), base.to_string());
-            b.add_edge(file_nid.clone(), tgt, "imports_from", 1, Some("include"));
+            b.add_edge(file_nid.clone(), tgt, "imports_from", line, Some("include"));
         }
     }
 
@@ -74,16 +83,24 @@ pub fn extract_asp_source(path: &str, source: &[u8]) -> ExtractionResult {
     let def_re = &*DEF_RE;
     let mut funcs: HashMap<String, NodeId> = HashMap::new(); // lower-name -> id (Function/Sub only)
     for cap in def_re.captures_iter(&text) {
+        let line = line_at(cap.get(0).expect("regex group 0 is the full match").start());
         let kind = cap[1].to_lowercase();
         let name = cap[2].to_string();
-        let id = NodeId(make_id(&["asp", &stem, &name.to_lowercase()]));
+        // `make_id` trims leading/trailing `_`, so `UnShift` and `UnShift_` share an
+        // id and the second is dropped. VBScript libraries pair `Sub Name` with
+        // `Function Name_` as a convention, so the collision deletes half the API.
+        let id = NodeId(make_id(&[
+            "asp",
+            &stem,
+            &crate::common::symbol_key(&name.to_lowercase()),
+        ]));
         let label = if kind == "class" {
             name.clone()
         } else {
             format!("{name}()")
         };
-        b.add_node(id.clone(), label, 1);
-        b.add_edge(file_nid.clone(), id.clone(), "contains", 1, Some(&kind));
+        b.add_node(id.clone(), label, line);
+        b.add_edge(file_nid.clone(), id.clone(), "contains", line, Some(&kind));
         if kind != "class" {
             funcs.insert(name.to_lowercase(), id);
         }
@@ -98,20 +115,20 @@ pub fn extract_asp_source(path: &str, source: &[u8]) -> ExtractionResult {
         let Some(caller) = funcs.get(&caller_name).cloned() else {
             continue;
         };
-        let body = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+        let Some(body_m) = cap.get(2) else { continue };
+        let (body, body_start) = (body_m.as_str(), body_m.start());
         for c in call_re.captures_iter(body) {
-            let callee = c
-                .get(1)
-                .or_else(|| c.get(2))
-                .map(|m| m.as_str().to_lowercase());
-            let Some(callee) = callee else { continue };
+            let hit = c.get(1).or_else(|| c.get(2));
+            let Some(hit) = hit else { continue };
+            let callee = hit.as_str().to_lowercase();
             if callee == caller_name {
                 continue;
             }
             if let Some(tgt) = funcs.get(&callee) {
                 let key = (caller.0.clone(), tgt.0.clone());
                 if emitted.insert(key) {
-                    b.add_edge(caller.clone(), tgt.clone(), "calls", 1, Some("call"));
+                    let line = line_at(body_start + hit.start());
+                    b.add_edge(caller.clone(), tgt.clone(), "calls", line, Some("call"));
                 }
             }
         }
@@ -184,6 +201,53 @@ mod tests {
             "{calls:?}"
         );
         assert!(!calls.iter().any(|(_, t)| t.starts_with("Response")));
+    }
+
+    #[test]
+    fn definitions_carry_their_own_line() {
+        // SAMPLE: Class Account on line 4, Function Greet on 7, Sub Sound on 11.
+        let r = extract();
+        let at = |label: &str| {
+            r.nodes
+                .iter()
+                .find(|n| n.label == label)
+                .unwrap_or_else(|| panic!("no node {label}"))
+                .source_location
+                .clone()
+        };
+        assert_eq!(at("Account"), Some("L4".to_string()));
+        assert_eq!(at("Greet()"), Some("L7".to_string()));
+        assert_eq!(at("Sound()"), Some("L11".to_string()));
+    }
+
+    #[test]
+    fn a_definition_after_blank_lines_is_not_pulled_up() {
+        // `^\s*` would let \s match the newlines and start the match on line 2.
+        let r = extract_asp_source("x.asp", b"<%\n\n\nFunction Late(a)\nEnd Function\n%>\n");
+        let n = r
+            .nodes
+            .iter()
+            .find(|n| n.label == "Late()")
+            .expect("Late() node");
+        assert_eq!(n.source_location, Some("L4".to_string()));
+    }
+
+    /// `make_id` trims leading/trailing `_`, so `UnShift` and `UnShift_` collapsed
+    /// onto one id and the second was dropped. easyasp runs a three-way convention
+    /// throughout its list and string APIs -- `Search`, `Search_`, `Search__` -- so
+    /// the tag has to distinguish one underscore from two, not merely flag that
+    /// some are present.
+    #[test]
+    fn underscore_suffixed_names_are_distinct_symbols() {
+        let src = b"<%\nPublic Sub Search(s)\nEnd Sub\n\nPublic Function Search_(s)\nEnd Function\n\nPrivate Sub Search__(s, keep)\nEnd Sub\n%>\n";
+        let r = extract_asp_source("core/easp.list.asp", src);
+        let ls = labels(&r);
+        for want in ["Search()", "Search_()", "Search__()"] {
+            assert!(ls.contains(&want.to_string()), "missing {want}: {ls:?}");
+        }
+        let ids: Vec<&str> = r.nodes.iter().map(|n| n.id.0.as_str()).collect();
+        let uniq: std::collections::HashSet<&&str> = ids.iter().collect();
+        assert_eq!(ids.len(), uniq.len(), "ids must be distinct: {ids:?}");
     }
 
     #[test]

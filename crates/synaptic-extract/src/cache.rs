@@ -237,6 +237,7 @@ mod msgpack_format_tests {
             edges: vec![edge],
             raw_calls: vec![],
             imports: vec![],
+            parse_error: false,
         }
     }
 
@@ -295,6 +296,7 @@ mod msgpack_format_tests {
             edges: vec![],
             raw_calls: vec![],
             imports: vec![],
+            parse_error: false,
         };
 
         // Exercise the exact cache encode/decode path.

@@ -93,6 +93,7 @@ pub fn extract_elixir_source(path: &str, source: &[u8]) -> ExtractionResult {
         function_bodies: Vec::new(),
     };
     ex.b.add_node(file_nid, filename, 1);
+    ex.b.note_parse_health(tree.root_node());
     ex.walk(tree.root_node(), None, 0);
     ex.run_call_pass();
     ex.b.into_result()
@@ -209,13 +210,17 @@ impl<'tree> Elixir<'_, 'tree> {
                     });
                     if let Some(fname) = fname.filter(|n| !n.is_empty()) {
                         let line = Self::line(node);
+                        // `valid?`/`valid` and `fetch!`/`fetch` are different
+                        // functions; keyed on the bare name they share one id and
+                        // only one of each pair survives.
+                        let key = crate::common::symbol_key(&fname);
                         let nid = if let Some(m) = &scope {
-                            let f = NodeId(make_id(&[m.as_str(), &fname]));
+                            let f = NodeId(make_id(&[m.as_str(), &key]));
                             self.b.add_node(f.clone(), format!(".{fname}()"), line);
                             self.b.add_edge(m.clone(), f.clone(), "method", line, None);
                             f
                         } else {
-                            let f = NodeId(make_id(&[&self.stem, &fname]));
+                            let f = NodeId(make_id(&[&self.stem, &key]));
                             self.b.add_node(f.clone(), format!("{fname}()"), line);
                             self.b.add_edge(
                                 self.file_nid.clone(),
@@ -348,5 +353,26 @@ mod tests {
             "{:?}",
             rels(&extract(), "calls")
         );
+    }
+
+    /// `?` and `!` suffixes are idiomatic Elixir and mark genuinely different
+    /// functions (`Map.fetch` vs `Map.fetch!`, `valid?`). `make_id` erases them, so
+    /// each pair collapsed onto one id and one function disappeared.
+    #[test]
+    fn punctuation_suffixed_names_are_distinct_functions() {
+        let r = extract_elixir_source(
+            "lib/m.ex",
+            b"defmodule M do
+  def valid?(x), do: x
+  def valid(x), do: x
+  def fetch!(x), do: x
+  def fetch(x), do: x
+end
+",
+        );
+        let ls = labels(&r);
+        for want in [".valid?()", ".valid()", ".fetch!()", ".fetch()"] {
+            assert!(ls.contains(&want.to_string()), "missing {want}: {ls:?}");
+        }
     }
 }

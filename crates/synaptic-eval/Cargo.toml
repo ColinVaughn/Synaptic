@@ -21,6 +21,10 @@ toml = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 criterion = { workspace = true }
+# Only the corpus-coverage test needs these: it probes the real extractor
+# dispatch so a new language cannot ship without a repository behind it.
+synaptic-detect = { workspace = true }
+synaptic-extract = { workspace = true }
 
 [[bench]]
 name = "eval"

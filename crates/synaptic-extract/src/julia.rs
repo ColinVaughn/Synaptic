@@ -52,6 +52,7 @@ pub fn extract_julia_source(path: &str, source: &[u8]) -> ExtractionResult {
         function_bodies: Vec::new(),
     };
     ex.b.add_node(file_nid, filename, 1);
+    ex.b.note_parse_health(tree.root_node());
     ex.walk(tree.root_node(), None, 0);
     ex.run_call_pass();
     ex.b.into_result()
@@ -89,6 +90,44 @@ impl<'tree> Julia<'_, 'tree> {
         n.children(&mut c).collect()
     }
 
+    /// Name being *defined* by a signature or short-form left-hand side.
+    ///
+    /// `function Base.size(t, i)` defines `size`, not `Base`: the callee is a
+    /// `field_expression` (`value: Base`, then the method identifier), so a plain
+    /// BFS for the first identifier picks up the module qualifier and collapses
+    /// every `Base.*` extension in a file onto one node. Take the last identifier
+    /// of the qualified path instead.
+    fn defined_name(&self, node: TsNode<'tree>) -> Option<String> {
+        let call = if node.kind() == "call_expression" {
+            node
+        } else {
+            Self::descendant_call(node)?
+        };
+        let callee = call.child(0)?;
+        if callee.kind() == "field_expression" {
+            return Self::children(callee)
+                .into_iter()
+                .rfind(|c| c.kind() == "identifier")
+                .map(|c| self.text(c));
+        }
+        self.first_identifier(callee)
+    }
+
+    /// Nearest `call_expression` under `node` (BFS), skipping `where`/parametric
+    /// wrappers the signature may carry.
+    fn descendant_call(node: TsNode<'tree>) -> Option<TsNode<'tree>> {
+        let mut q = std::collections::VecDeque::from([node]);
+        while let Some(n) = q.pop_front() {
+            if n.kind() == "call_expression" {
+                return Some(n);
+            }
+            for c in Self::children(n) {
+                q.push_back(c);
+            }
+        }
+        None
+    }
+
     /// First `identifier` anywhere under `node` (BFS).
     fn first_identifier(&self, node: TsNode<'tree>) -> Option<String> {
         let mut q = std::collections::VecDeque::from([node]);
@@ -101,6 +140,29 @@ impl<'tree> Julia<'_, 'tree> {
             }
         }
         None
+    }
+
+    /// Add the node and ownership edge for a function definition, module-scoped
+    /// (`.name()` via `method`) or file-scoped (`name()` via `contains`).
+    fn declare_function(&mut self, name: &str, scope: &Option<NodeId>, line: usize) -> NodeId {
+        // `make_unique!` and `make_unique` are different functions in Julia; keyed on
+        // the bare name they share one id and the graph keeps only one of them.
+        let key = crate::common::symbol_key(name);
+        match scope {
+            Some(m) => {
+                let f = NodeId(make_id(&[m.as_str(), &key]));
+                self.b.add_node(f.clone(), format!(".{name}()"), line);
+                self.b.add_edge(m.clone(), f.clone(), "method", line, None);
+                f
+            }
+            None => {
+                let f = NodeId(make_id(&[&self.stem, &key]));
+                self.b.add_node(f.clone(), format!("{name}()"), line);
+                self.b
+                    .add_edge(self.file_nid.clone(), f.clone(), "contains", line, None);
+                f
+            }
+        }
     }
 
     fn walk(&mut self, node: TsNode<'tree>, scope: Option<NodeId>, depth: usize) {
@@ -156,25 +218,33 @@ impl<'tree> Julia<'_, 'tree> {
                     self.b.add_edge(parent, nid, "contains", line, None);
                 }
             }
+            // A short-form definition (`f(x) = 1`, `Base.length(t) = 1`) parses as an
+            // `assignment` whose left-hand side is a `call_expression`. Plain
+            // assignments (`x = f(y)`, `arr[i] = ...`, `obj.field = ...`) put an
+            // identifier / index_expression / field_expression there instead, so this
+            // test admits definitions only.
+            "assignment"
+                if Self::children(node)
+                    .first()
+                    .is_some_and(|c| c.kind() == "call_expression") =>
+            {
+                let lhs = Self::children(node)[0];
+                if let Some(name) = self.defined_name(lhs).filter(|n| !n.is_empty()) {
+                    let line = Self::line(node);
+                    let nid = self.declare_function(&name, &scope, line);
+                    for child in Self::children(node).into_iter().skip(1) {
+                        self.function_bodies.push((nid.clone(), child));
+                    }
+                }
+            }
             "function_definition" | "short_function_definition" => {
                 let name = Self::children(node)
                     .into_iter()
                     .find(|c| c.kind() == "signature")
-                    .and_then(|s| self.first_identifier(s));
+                    .and_then(|s| self.defined_name(s));
                 if let Some(name) = name.filter(|n| !n.is_empty()) {
                     let line = Self::line(node);
-                    let nid = if let Some(m) = &scope {
-                        let f = NodeId(make_id(&[m.as_str(), &name]));
-                        self.b.add_node(f.clone(), format!(".{name}()"), line);
-                        self.b.add_edge(m.clone(), f.clone(), "method", line, None);
-                        f
-                    } else {
-                        let f = NodeId(make_id(&[&self.stem, &name]));
-                        self.b.add_node(f.clone(), format!("{name}()"), line);
-                        self.b
-                            .add_edge(self.file_nid.clone(), f.clone(), "contains", line, None);
-                        f
-                    };
+                    let nid = self.declare_function(&name, &scope, line);
                     // Body = every non-signature child (the signature's own
                     // call_expression is the declaration, not a call).
                     for child in Self::children(node) {
@@ -284,6 +354,32 @@ mod tests {
         );
     }
 
+    /// `function Base.size(...)` extends a function owned by another module. The
+    /// node must be named for the method, not the module qualifier, and each
+    /// extended method needs its own identity.
+    #[test]
+    fn qualified_definitions_are_named_for_the_method() {
+        let r = extract_julia_source(
+            "src/M.jl",
+            b"module M\nstruct Thing end\nfunction Base.size(t::Thing, i::Integer)\n  i\nend\nfunction Base.isequal(a::Thing, b::Thing)\n  true\nend\nend\n",
+        );
+        let ls = labels(&r);
+        assert!(ls.contains(&".size()".to_string()), "{ls:?}");
+        assert!(ls.contains(&".isequal()".to_string()), "{ls:?}");
+        assert!(!ls.iter().any(|l| l == ".Base()"), "{ls:?}");
+    }
+
+    #[test]
+    fn short_form_qualified_definition_is_extracted() {
+        let r = extract_julia_source(
+            "src/M.jl",
+            b"module M\nstruct Thing end\nBase.length(t::Thing) = 1\nend\n",
+        );
+        let ls = labels(&r);
+        assert!(ls.contains(&".length()".to_string()), "{ls:?}");
+        assert!(!ls.iter().any(|l| l == ".Base()"), "{ls:?}");
+    }
+
     #[test]
     fn calls_resolve() {
         assert!(
@@ -291,5 +387,27 @@ mod tests {
             "{:?}",
             rels(&extract(), "calls")
         );
+    }
+
+    /// In Julia the mutating and non-mutating forms are two different functions
+    /// (`sort!` vs `sort`, `push!`, `empty!`). `make_id` erases the `!`, so both
+    /// collapsed onto one id and one of the pair vanished from the graph entirely.
+    #[test]
+    fn bang_and_plain_names_are_distinct_functions() {
+        let r = extract_julia_source(
+            "src/utils.jl",
+            b"function make_unique!(n)
+end
+
+function make_unique(n)
+end
+",
+        );
+        let ls = labels(&r);
+        assert!(ls.contains(&"make_unique!()".to_string()), "{ls:?}");
+        assert!(ls.contains(&"make_unique()".to_string()), "{ls:?}");
+        let ids: Vec<&str> = r.nodes.iter().map(|n| n.id.0.as_str()).collect();
+        let uniq: std::collections::HashSet<&&str> = ids.iter().collect();
+        assert_eq!(ids.len(), uniq.len(), "ids must be distinct: {ids:?}");
     }
 }

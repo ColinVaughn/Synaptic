@@ -476,6 +476,7 @@ pub fn extract_with_config(path: &str, source: &[u8], cfg: &LanguageConfig) -> E
         edges: ex.edges,
         raw_calls: ex.raw_calls,
         imports: ex.imports,
+        parse_error: tree.root_node().has_error(),
     }
 }
 

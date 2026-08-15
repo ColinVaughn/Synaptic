@@ -99,6 +99,7 @@ pub fn extract_ql_source(path: &str, source: &[u8]) -> ExtractionResult {
         types: HashMap::new(),
     };
     ex.b.add_node(file_nid.clone(), file_label, 1);
+    ex.b.note_parse_health(tree.root_node());
     if let Some(file) = ex.b.nodes.iter_mut().find(|n| n.id == file_nid) {
         file.extra.insert("_language".into(), json!("ql"));
         file.extra.insert(

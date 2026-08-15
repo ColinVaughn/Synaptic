@@ -1,0 +1,425 @@
+# Pinned quality bounds for `synaptic eval quality`.
+#
+# Tightened automatically by `--update-baselines`; loosening one also
+# requires `--allow-regression`, so a regression has to be an explicit
+# decision rather than a side effect of re-running the benchmark.
+
+[[repo]]
+name = "AFNetworking"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.1725
+zero_decl_file_rate_max = 0.4828
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "Alamofire"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0695
+zero_decl_file_rate_max = 0.2014
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "DataFrames.jl"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0197
+zero_decl_file_rate_max = 0.1079
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "Humanizer"
+anchor_exactness_min = 0.9993
+parse_error_rate_max = 0.0059
+zero_decl_file_rate_max = 0.1502
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "ImportExcel"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.4814
+zero_decl_file_rate_max = 0.5404
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "MudBlazor"
+anchor_exactness_min = 0.9992
+parse_error_rate_max = 0.0013
+zero_decl_file_rate_max = 0.0422
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "Pester"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.1746
+zero_decl_file_rate_max = 0.3196
+ctags_missed_rate_max = 0.9923
+
+[[repo]]
+name = "SDWebImage"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.296
+zero_decl_file_rate_max = 0.6106
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "Slim"
+anchor_exactness_min = 0.994
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.0149
+ctags_missed_rate_max = 0.8346
+
+[[repo]]
+name = "ant-design-blazor"
+anchor_exactness_min = 0.9996
+parse_error_rate_max = 0.0057
+zero_decl_file_rate_max = 0.095
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "apex-recipes"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.0859
+ctags_missed_rate_max = 0.9937
+
+[[repo]]
+name = "aspJSON"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.3334
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "awesome-compose"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.3423
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "axum"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.0794
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "bats-core"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.2892
+ctags_missed_rate_max = 0.9167
+
+[[repo]]
+name = "chinook-database"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.2038
+zero_decl_file_rate_max = 0.3149
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "clap"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0317
+zero_decl_file_rate_max = 0.219
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "click"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.0704
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "cobra"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.0182
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "codeql"
+anchor_exactness_min = 0.9997
+parse_error_rate_max = 0.018
+zero_decl_file_rate_max = 0.2501
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "dbt-utils"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.4627
+zero_decl_file_rate_max = 0.1269
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "dreamhouse-lwc"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.341
+ctags_missed_rate_max = 0.9936
+
+[[repo]]
+name = "eShopOnWeb"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.0912
+ctags_missed_rate_max = 0.9793
+
+[[repo]]
+name = "ecto"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.048
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "express"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.6867
+ctags_missed_rate_max = 0.9793
+
+[[repo]]
+name = "fluentui-blazor"
+anchor_exactness_min = 0.9998
+parse_error_rate_max = 0.0118
+zero_decl_file_rate_max = 0.1677
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "fmt"
+anchor_exactness_min = 0.9993
+parse_error_rate_max = 0.27
+zero_decl_file_rate_max = 0.21
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "gin"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.0179
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "graphql-dotnet"
+anchor_exactness_min = 0.9968
+parse_error_rate_max = 0.0178
+zero_decl_file_rate_max = 0.0618
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "gson"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.0697
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "guzzle"
+anchor_exactness_min = 0.9949
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.0128
+ctags_missed_rate_max = 0.8734
+
+[[repo]]
+name = "http"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0367
+zero_decl_file_rate_max = 0.6156
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "ibex"
+anchor_exactness_min = 0.9995
+parse_error_rate_max = 0.2449
+zero_decl_file_rate_max = 0.1178
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "jaffle_shop"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.125
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "json"
+anchor_exactness_min = 0.9963
+parse_error_rate_max = 0.1548
+zero_decl_file_rate_max = 0.0931
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "junit4"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.0888
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "kotlinx.serialization"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0051
+zero_decl_file_rate_max = 0.3063
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "lapack"
+anchor_exactness_min = 0.9988
+parse_error_rate_max = 0.9873
+zero_decl_file_rate_max = 0.7972
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "libuv"
+anchor_exactness_min = 0.9902
+parse_error_rate_max = 0.1559
+zero_decl_file_rate_max = 0.1429
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "mORMot2"
+anchor_exactness_min = 0.9997
+parse_error_rate_max = 0.0634
+zero_decl_file_rate_max = 0.1872
+ctags_missed_rate_max = 0.9914
+
+[[repo]]
+name = "memchr"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.3189
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "nvm"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.2143
+ctags_missed_rate_max = 0.8162
+
+[[repo]]
+name = "os-lib"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.0442
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "p-map"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.0
+ctags_missed_rate_max = 0.9273
+
+[[repo]]
+name = "phoenix"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.0936
+ctags_missed_rate_max = 0.9894
+
+[[repo]]
+name = "rack"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0187
+zero_decl_file_rate_max = 0.1309
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "realworld"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.5653
+ctags_missed_rate_max = 0.855
+
+[[repo]]
+name = "requests"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.1552
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "schemastore"
+anchor_exactness_min = 0.9996
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.5239
+ctags_missed_rate_max = 0.9966
+
+[[repo]]
+name = "sinatra"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.2125
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "spock"
+anchor_exactness_min = 0.9983
+parse_error_rate_max = 0.407
+zero_decl_file_rate_max = 0.0902
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "sqlfluff"
+anchor_exactness_min = 0.9997
+parse_error_rate_max = 0.6042
+zero_decl_file_rate_max = 0.7081
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "starlight"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0049
+zero_decl_file_rate_max = 0.3538
+ctags_missed_rate_max = 0.9891
+
+[[repo]]
+name = "stdlib"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.008
+zero_decl_file_rate_max = 0.036
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "telescope.nvim"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.4303
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "terraform-aws-vpc"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.3085
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "the-art-of-command-line"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0
+zero_decl_file_rate_max = 0.0
+ctags_missed_rate_max = 1.0
+
+[[repo]]
+name = "vue-element-admin"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0045
+zero_decl_file_rate_max = 0.2623
+ctags_missed_rate_max = 0.9207
+
+[[repo]]
+name = "zls"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0417
+zero_decl_file_rate_max = 0.125
+ctags_missed_rate_max = 0.7554
+
+[[repo]]
+name = "zod"
+anchor_exactness_min = 1.0
+parse_error_rate_max = 0.0154
+zero_decl_file_rate_max = 0.3583
+ctags_missed_rate_max = 0.9871

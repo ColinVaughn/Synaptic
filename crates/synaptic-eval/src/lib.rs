@@ -11,15 +11,20 @@
 //! Calibration is advisory: the harness measures, it does not silently retune.
 #![forbid(unsafe_code)]
 
+pub mod baselines;
 mod calibrate;
 mod corpus;
 mod cross_language;
 pub mod groundtruth;
 mod ledger;
+pub mod oracle;
+pub mod quality;
 mod replay;
-mod scale;
+pub mod repo_corpus;
+pub mod scale;
 mod scoring;
 
+pub use baselines::{Baseline, Baselines, Breach};
 pub use calibrate::{
     Bin, CalibrationReport, Sample, brier, calibrate_history, reliability, samples_from_history,
 };
@@ -30,8 +35,13 @@ pub use corpus::{
 pub use cross_language::{CrossLanguageReport, calibrate_cross_language};
 pub use groundtruth::{GroundTruth, Manifest};
 pub use ledger::{Ledger, PredictionRecord};
+pub use oracle::{OracleLanguage, OracleOutcome};
+pub use quality::{
+    LanguageQuality, QualityFilter, QualityReport, RepoQuality, pin_manifest, run_quality,
+};
 pub use replay::{CommitEval, ReplayOptions, ReplayReport, replay, score_commit};
-pub use scale::{ScaleEnv, ScaleManifest, ScaleRepo, ScaleReport, ScaleResult, Skip, run_scale};
+pub use repo_corpus::{CorpusManifest, CorpusRepo, LANGUAGES, Language};
+pub use scale::{ScaleEnv, ScaleReport, ScaleResult, Skip, run_scale};
 pub use scoring::{Scores, aggregate, score_sets};
 
 /// Errors the evaluation pipeline can surface.

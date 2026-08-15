@@ -114,6 +114,7 @@ pub fn extract_json_source(path: &str, source: &[u8]) -> ExtractionResult {
     let mut b = Builder::new(path);
     let file_nid = file_node_id(path);
     b.add_node(file_nid.clone(), filename, 1);
+    b.note_parse_health(root);
 
     if is_unreal {
         extract_unreal_metadata(&mut b, &file_nid, path, source);

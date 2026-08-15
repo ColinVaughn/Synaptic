@@ -179,6 +179,8 @@ pub fn extract_resource_source(path: &str, source: &[u8]) -> ExtractionResult {
         edges,
         raw_calls: Vec::new(),
         imports: Vec::new(),
+        // Resource files are indexed opaquely, so there is no parse to fail.
+        parse_error: false,
     }
 }
 

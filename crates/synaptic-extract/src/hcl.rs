@@ -46,6 +46,7 @@ pub fn extract_hcl_source(path: &str, source: &[u8]) -> ExtractionResult {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     b.add_node(file_nid.clone(), filename, 1);
+    b.note_parse_health(tree.root_node());
 
     let Some(body) = ex.first_kind(tree.root_node(), "body") else {
         return b.into_result();

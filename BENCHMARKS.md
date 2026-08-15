@@ -1,11 +1,13 @@
 # Synaptic benchmarks
 
 Synaptic's claims are backed by reproducible benchmarks rather than assertion. There are
-three families:
+four families:
 
 1. **Token economy** — how much smaller a graph query is than reading source (see the README).
 2. **Accuracy** — extraction correctness against a hand-labeled corpus (this document).
 3. **Scale** — extraction throughput across repository sizes and language families.
+4. **Extraction quality at scale** — correctness on 60 real repositories covering every
+   shipped language, measured without hand labels and gated against pinned baselines.
 
 All accuracy numbers are exact set-comparison against human-verified labels; nothing here is
 estimated or self-reported by the tool.
@@ -223,3 +225,186 @@ Notes on reading these:
   is nearest-rank p95. Raw samples remain in `report.json` either way.
 - The harness records skipped repos in the report and warns prominently; a published run with
   skips is partial by construction. Refresh the pinned SHAs deliberately.
+
+## Extraction quality at scale
+
+Scale (above) measures how *fast* extraction runs. A graph that anchored every declaration to
+the wrong line would post identical timings. This measures whether the graph is **right**, on
+54 pinned real-world repositories covering every language Synaptic ships, using properties
+that need no hand labels.
+
+It exists because the accuracy corpus, while exact, is 11 hand-written fixtures and 42 labeled
+symbols — and because a 2026-08-13 audit found 1,475 of 31,732 anchors wrong across a set of
+real repositories. That audit was ad hoc: nothing in the tree encoded its corpus or its checks,
+so the same class of defect could return unnoticed. This makes it repeatable and gated.
+
+Manifest: `crates/synaptic-eval/repo-corpus.toml` (shared with the scale suite via a `suites`
+tag, so a repository is added in one place). Baselines: `crates/synaptic-eval/quality-baselines.toml`.
+Network + git required; opt-in, never run in CI.
+
+```sh
+synaptic eval quality                      # measure, then gate against baselines
+synaptic eval quality --language pascal    # one language
+synaptic eval quality --repo axum          # one repository
+synaptic eval quality --update-baselines   # ratchet bounds (refuses to loosen)
+synaptic eval quality --pin                # re-resolve every URL's HEAD
+```
+
+### What is measured
+
+**Anchor exactness.** For every node carrying a line, read the source at that line and confirm
+the declaration is really there. Anchors resolve three ways: the name is *on the line*; the line
+is the declaration's true start — its annotation/attribute block, its docstring opener, or the
+first line of a signature wrapped across lines — and the name follows *within* it; or the anchor
+does not reach the declaration at all. The middle case is counted correct but reported in its own
+column, because an annotated declaration's syntax node genuinely starts at its first annotation,
+and folding that in silently would overstate precision. A blank line always ends the walk: an
+anchor landing on a blank line is the signature of the `^\s*` regex bug that cost Pascal 58% of
+its anchors, and admitting blanks would hide the defect this metric exists to catch.
+
+**Parse and recovery health.** Per language: the share of files whose grammar errored, the share
+that produced nothing but their own file node (a silent hole, indistinguishable in the graph from
+a file that genuinely declares nothing), and how much the bounded recovery pass rescued.
+
+**Self-consistency.** Two absolute assertions with no baseline, because they have a principled
+correct answer: extracting the same SHA twice must produce identical graphs, and a full rebuild
+must match an incremental rebuild over touched files. Both hard-fail.
+
+**Independent oracle.** universal-ctags — a completely different, hand-written parser — run over
+the same checkout, compared as a *symmetric difference*. Missing ctags skips only this stage,
+loudly; the other three still run everywhere.
+
+### Results
+
+60 repositories, 39 languages, 80,061 files, 938,001 nodes. Windows / x86_64 / 16 logical CPUs,
+Synaptic 0.9.11 at source revision `8633719899a1` with a dirty working tree (these benchmark
+changes), so this is development evidence rather than a clean release baseline. No repository was
+skipped. Full per-repository and per-language tables: `synaptic-out/eval/quality/report.md`.
+
+**Pooled anchor exactness: 735,198 / 735,493 = 99.96%.** Of those, 31,810 resolved through a
+declaration's leading annotation block, 9,862 are named by their file rather than by any text
+inside it, and 238 nodes carried no name to look for (excluded from the ratio rather than scored
+either way).
+
+**Self-consistency: 60 / 60 deterministic, 60 / 60 incrementally equivalent.**
+
+Per-language anchor exactness, worst first:
+
+| Language | Anchors ok/checked | Exact | Parse err | Zero-decl |
+|---|--:|--:|--:|--:|
+| yaml | 984/999 | 98.50% | 0.00% | 35.52% |
+| groovy | 1109/1118 | 99.19% | 83.39% | 15.96% |
+| php | 3799/3823 | 99.37% | 0.00% | 1.16% |
+| cpp | 15421/15517 | 99.38% | 22.20% | 13.19% |
+| sql | 1022/1026 | 99.61% | 75.02% | 84.35% |
+| c | 20795/20863 | 99.67% | 60.94% | 64.01% |
+| csharp | 175017/175092 | 99.96% | 1.70% | 9.67% |
+| razor | 9287/9290 | 99.97% | 0.00% | 0.00% |
+| python | 29482/29483 | 100.00% | 1.20% | 23.36% |
+| the remaining 30 languages | — | 100.00% | — | — |
+
+The residuals are real and are reported rather than tuned away:
+
+- **yaml (98%)** — synthesized composite labels (`Service/1234`) that do not appear verbatim.
+
+### What the benchmark caught: Razor / Blazor
+
+Razor reached the suite through two incidental fixtures -- 20 files and 52 anchors -- and scored
+73%. Adding three real component libraries (MudBlazor, ant-design-blazor, fluentui-blazor) took
+Razor to **4,505 files and 9,290 anchors** and exposed that the score was the smaller problem:
+
+| Defect | Effect | Evidence |
+|---|---|---|
+| No `@code` block meant no delegation | The file produced no node at all, not even a file node | **735 of 1,999 MudBlazor files (36.8%) invisible to every query** |
+| `@code` holding an inline Razor template | Same, for valid Razor that is not valid C# (`@<div>…</div>` returning a `RenderFragment`) | MudChart, MudColorPicker, MudTimePicker absent |
+| Component anchored at its `@code` block | "Go to definition" landed in the middle of the markup | **0 of 1,261 components at line 1** |
+| Directives never read | `@inherits`, `@implements`, `@inject` live outside `@code`, so the base class, interfaces and injected services were all missing | 12.4% / 1.2% / 9.7% of a 4,023-file corpus |
+| Two `@code` blocks in one file | The class node is emitted twice and only the first was re-anchored | four `App.razor` template files |
+
+A Razor component is declared by its *file*, not by any text inside it, so it is now anchored at
+line 1 and emitted whether or not the file has a `@code` block and whether or not that block is
+anything the C# grammar can read. Directives became **1,383 edges** (499 `inherits`, 832 `uses`,
+52 `implements`) across the three libraries -- a 100% capture of the directives present.
+
+Measured effect: invisible files **36.8% -> 0%**, and Razor anchor exactness **73.08% -> 99.97%**
+over 179x more anchors.
+
+Two of these were bugs in the *fix* rather than the extractor, both caught by re-measuring rather
+than by assuming: re-anchoring only the first of several duplicate class nodes, and rewriting the
+`source_location` string while leaving the typed `span` -- which consumers read first, so the
+components were still reported at their `@code` line. The tests now assert both fields.
+
+### What the benchmark caught: SQL
+
+SQL was the corpus's blind spot rather than a passing grade. It reached the suite only through
+incidental seed scripts — **24 files and 7 checkable anchors across the whole corpus**, which is
+not a measurement. Adding three real SQL repositories (`sqlfluff` for warehouse dialects,
+`chinook-database` for canonical DDL, `dbt-utils` for Jinja-templated models) took SQL to
+**2,722 files and 1,026 anchors**, and immediately surfaced five defects, each now fixed and
+covered by a test:
+
+| Defect | Effect | Evidence |
+|---|---|---|
+| Regex recovery hard-coded line 1 | Every recovered procedure, trigger and table pointed at the file header | A procedure declared on line 5 reported `L1` |
+| dbt Jinja defeated the grammar | Every dbt model yielded zero declarations and no lineage | jaffle_shop: 5/5 files parse-error, 0 declarations |
+| `CREATE` modifiers unrecognized | `MATERIALIZED VIEW` / `EXTERNAL TABLE` dropped the object entirely | 112 of 125 missing declarations on the dialect corpus |
+| One `CREATE` per `;`-chunk | Files omitting semicolons lost every statement after the first | — |
+| Comments scanned as code | A comment mentioning DDL invented a table | 121 comment lines across the dialect corpus |
+
+Measured effect: true DDL miss rate **7.6% → 1.7%**, declarations 737 → 917 on the dialect
+corpus, and jaffle_shop from 0 declarations to 5 models with 8 `reads_from` lineage edges.
+SQL anchor exactness is now **99.61%** over 1,026 anchors.
+
+A sixth defect was caught by the SQL fuzz corpus rather than by the benchmark: Jinja
+neutralization replaced each *character* with one space, so a multi-byte character shortened the
+file and shifted every line below it. The invariant (byte length and newline count preserved) is
+now asserted directly.
+
+Two limitations stay visible in the table above. SQL's `parse err` (75.0%) and `zero-decl` (84.4%)
+rates are high because `tree-sitter-sequel` does not cover warehouse dialects — a bare `commit`
+or a `select top 1` defeats it. That is reported rather than hidden, and it is measured as
+costing only 1.7% of declarations, because the regex recovery pass catches CREATE objects
+regardless of parse state. Replacing the grammar would move a health signal, not the graph.
+
+High `parse err` and `zero-decl` rates are honest coverage signals, not anchor defects: Fortran
+(88.87%), Groovy (83.39%), Verilog (68.90%) and C (60.94%) defeat their grammars often, which is
+why the recovery pass exists — it contributed 1,361 Groovy, 548 Verilog and 49 PowerShell
+declarations in this run, every one of them anchor-exact.
+
+### The oracle, read correctly
+
+Across 27 languages ctags could parse: **321,944 declarations found by both**, 570,314 found only
+by ctags, 55,727 found only by Synaptic.
+
+The large ctags-only column is a **granularity difference, not a recall deficit**, which is
+exactly why this is published as a symmetric difference and never as a recall percentage. ctags
+emits a tag for every JSON key (278,983 of the ctags-only total is JSON alone), every struct
+member and every macro; Synaptic models the declarations a dependency graph needs and adds
+structure ctags has no concept of — cross-file edges, framework routes, and 32,059 Markdown
+headings ctags never emits. Neither tool is ground truth. What is actionable is the asymmetry
+per language, which is why the report breaks it out that way.
+
+### Gating
+
+Each repository carries pinned bounds: `anchor_exactness_min`, `parse_error_rate_max`,
+`zero_decl_file_rate_max`, `ctags_missed_rate_max`. A run that breaches one exits non-zero naming
+the repository, metric and delta. `--update-baselines` tightens freely but **refuses to loosen a
+bound** without `--allow-regression`, so a regression has to be an explicit decision rather than a
+side effect of re-running the benchmark. Bounds round outward to four places so a rerun of the
+same pin cannot fail on float noise.
+
+A test (`every_extractor_is_benchmarked`) fails when a shipped extractor appears in no manifest
+entry, so a new language cannot ship without a real repository behind it. The corpus this replaced
+reached 9 of 39 languages; the remaining 30 extractors had never been checked against code anyone
+wrote, which is how a case-sensitive extension match that routed `.F90` to no extractor at all
+survived to be found by hand.
+
+### Limitations
+
+- Anchor exactness asks whether the recorded line contains the declaration. It does not check
+  that the *right* declaration was found, that edges are correct, or that nothing was missed —
+  the hand-labeled corpus and the oracle diff cover those, from different directions.
+- ctags does not know every language Synaptic does (Apex, QL, Razor); those report the other
+  three measurements and no oracle number, rather than a fabricated zero.
+- The corpus is pinned. A moved SHA changes the numbers; refresh with `--pin` deliberately.
+- Absolute file and node counts are machine-independent, but the run is opt-in and single-host.

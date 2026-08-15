@@ -26,13 +26,15 @@ use crate::result::ExtractionResult;
 #[cfg(feature = "lang-apex")]
 static TYPE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?im)^\s*(?:(?:global|public|private|protected|virtual|abstract|with\s+sharing|without\s+sharing|inherited\s+sharing|static|override|final)\s+)*(class|interface|enum)\s+(\w+)",
+        // `[ \t]*` not `\s*`: `\s` matches a newline, which would start the match on
+        // a preceding blank line and report the declaration one or more lines early.
+        r"(?im)^[ \t]*(?:(?:global|public|private|protected|virtual|abstract|with[ \t]+sharing|without[ \t]+sharing|inherited[ \t]+sharing|static|override|final)[ \t]+)*(class|interface|enum)[ \t]+(\w+)",
     )
     .expect("valid apex type regex")
 });
 #[cfg(feature = "lang-apex")]
 static TRIGGER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?im)^\s*trigger\s+(\w+)\s+on\s+(\w+)").expect("valid trigger re")
+    Regex::new(r"(?im)^[ \t]*trigger[ \t]+(\w+)[ \t]+on[ \t]+(\w+)").expect("valid trigger re")
 });
 #[cfg(feature = "lang-apex")]
 static METHOD_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -40,7 +42,7 @@ static METHOD_RE: LazyLock<Regex> = LazyLock::new(|| {
     // type, then `name(`. The leading-modifier requirement excludes control flow
     // (`if (`, `for (`) and plain calls.
     Regex::new(
-        r"(?im)^\s*(?:(?:global|public|private|protected|static|virtual|override|abstract|final|testmethod|webservice|transient)\s+)+(?:[\w.<>\[\],]+(?:\s*<[^>]*>)?\s+)?(\w+)\s*\(",
+        r"(?im)^[ \t]*(?:(?:global|public|private|protected|static|virtual|override|abstract|final|testmethod|webservice|transient)[ \t]+)+(?:[\w.<>\[\],]+(?:[ \t]*<[^>]*>)?[ \t]+)?(\w+)[ \t]*\(",
     )
     .expect("valid apex method regex")
 });
@@ -206,5 +208,34 @@ mod tests {
                 .map(|n| n.file_type),
             Some(FileType::Concept)
         );
+    }
+
+    fn line_of(r: &ExtractionResult, label: &str) -> Option<String> {
+        r.nodes
+            .iter()
+            .find(|n| n.label == label)
+            .and_then(|n| n.source_location.clone())
+    }
+
+    #[test]
+    fn a_method_after_a_blank_line_keeps_its_own_line() {
+        // `^\s*` lets \s match the newline, starting the match on the blank line.
+        let src = b"public class C {\n  private Integer n;\n\n  public Boolean hasNext() {\n    return true;\n  }\n}\n";
+        let r = extract_apex_source("classes/C.cls", src);
+        assert_eq!(line_of(&r, "hasNext()"), Some("L4".to_string()));
+    }
+
+    #[test]
+    fn a_class_after_blank_lines_keeps_its_own_line() {
+        let src = b"// header\n\n\npublic with sharing class Late {\n}\n";
+        let r = extract_apex_source("classes/Late.cls", src);
+        assert_eq!(line_of(&r, "Late"), Some("L4".to_string()));
+    }
+
+    #[test]
+    fn a_trigger_after_a_blank_line_keeps_its_own_line() {
+        let src = b"// c\n\ntrigger T on Account (before insert) {\n}\n";
+        let r = extract_apex_source("triggers/T.trigger", src);
+        assert_eq!(line_of(&r, "T"), Some("L3".to_string()));
     }
 }

@@ -106,38 +106,35 @@ pub fn is_sensitive(path: &Path) -> bool {
         return true;
     }
     // Generic words such as `token` and `password` describe ordinary source
-    // modules (`authenticity_token.rb`, `password_policy.py`). Exact secret-file
-    // patterns and sensitive parent directories above still apply to all files.
-    if matches!(
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some(
-            "c" | "cc"
-                | "cpp"
-                | "cs"
-                | "go"
-                | "h"
-                | "hpp"
-                | "java"
-                | "js"
-                | "jsx"
-                | "kt"
-                | "kts"
-                | "php"
-                | "py"
-                | "rb"
-                | "rs"
-                | "scala"
-                | "swift"
-                | "ts"
-                | "tsx"
-        )
-    ) {
+    // modules (`authenticity_token.rb`, `password_policy.py`, and Snitz Forums'
+    // `password.asp`). Exempt programming-language sources from the keyword rule;
+    // exact secret-file patterns and sensitive parent directories above still apply
+    // to every file regardless. Data and config formats are deliberately NOT exempt
+    // -- `credentials.yaml` is precisely what the keyword rule is for.
+    if let Some(ext) = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        && is_language_source_extension(&ext)
+    {
         return false;
     }
     generic_keyword_hit(name)
+}
+
+/// Code extensions whose files routinely *hold* secrets, so a name like
+/// `credentials.*` stays a red flag: data, config, build and project formats.
+const SECRET_PRONE_DATA_EXTENSIONS: &[&str] = &[
+    "json", "yaml", "yml", "tf", "tfvars", "hcl", "sql", "sh", "bash", "gradle", "xaml", "csproj",
+    "fsproj", "vbproj", "sln", "slnx", "uproject", "uplugin", "uasset", "umap",
+];
+
+/// True when `ext` is a programming-language source file rather than a data or
+/// config format. Derived from [`crate::file_type::CODE_EXTENSIONS`] minus
+/// [`SECRET_PRONE_DATA_EXTENSIONS`], so a newly supported language is exempt
+/// automatically instead of silently vanishing from the graph the way `.asp` did.
+fn is_language_source_extension(ext: &str) -> bool {
+    crate::file_type::CODE_EXTENSIONS.contains(&ext) && !SECRET_PRONE_DATA_EXTENSIONS.contains(&ext)
 }
 
 #[cfg(test)]
@@ -164,6 +161,65 @@ mod tests {
         assert!(is_sensitive(Path::new("oauth_token.json")));
         assert!(is_sensitive(Path::new("app_secret.yaml")));
         assert!(is_sensitive(Path::new("github-personal-access-token.txt")));
+    }
+
+    /// The "ordinary source module" exemption was a hand-written extension list that
+    /// happened to cover the mainstream languages and nothing else, so a normal page
+    /// like Snitz Forums' `password.asp` was dropped from the graph as a secrets
+    /// file. Programming-language sources are code whatever the language.
+    #[test]
+    fn source_files_are_not_secrets_whatever_the_language() {
+        for p in [
+            "password.asp",
+            "forum/password.asp",
+            "lib/token.ex",
+            "src/secret.jl",
+            "src/credentials.lua",
+            "Modules/password.psm1",
+            "src/secret_store.zig",
+            "lib/password.dart",
+            "src/Token.pas",
+            "classes/SecretManager.cls",
+            "src/password.groovy",
+            "rtl/secret_key.sv",
+        ] {
+            assert!(!is_sensitive(Path::new(p)), "{p} is source, not a secret");
+        }
+    }
+
+    /// Data and config formats keep the keyword rule: a file actually named
+    /// `credentials.yaml` is the case the rule exists for.
+    #[test]
+    fn data_and_config_formats_stay_sensitive() {
+        for p in [
+            "credentials.yaml",
+            "secrets.json",
+            "app_secret.yml",
+            "terraform/secret.tfvars",
+            "deploy/secrets.sh",
+            "android/secrets.gradle",
+        ] {
+            assert!(is_sensitive(Path::new(p)), "{p} must stay flagged");
+        }
+    }
+
+    /// Every extension Synaptic treats as code must be deliberately classified as
+    /// either a programming-language source (exempt from the generic-keyword rule)
+    /// or a secret-prone data/config format (not exempt). Without this, adding a
+    /// language silently re-creates the `password.asp` bug, and adding a config
+    /// format silently starts ingesting secrets.
+    #[test]
+    fn every_code_extension_is_classified() {
+        let unclassified: Vec<&str> = crate::file_type::CODE_EXTENSIONS
+            .iter()
+            .copied()
+            .filter(|e| !SECRET_PRONE_DATA_EXTENSIONS.contains(e))
+            .filter(|e| !is_language_source_extension(e))
+            .collect();
+        assert!(
+            unclassified.is_empty(),
+            "code extensions not classified as language-source or secret-prone: {unclassified:?}"
+        );
     }
 
     #[test]

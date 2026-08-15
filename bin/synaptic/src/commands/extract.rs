@@ -135,8 +135,22 @@ pub(crate) fn run_extract(
     let mut raw_calls = Vec::new();
     let mut imports = Vec::new();
     let mut extracted = 0usize;
-    for res in results.into_iter().flatten() {
+    // A file whose grammar errored yields partial (often only file-node) output,
+    // which is indistinguishable from a file that declares nothing. Track it so the
+    // loss is reported instead of silently missing from the graph.
+    let mut parse_errors = 0usize;
+    let mut lost_files: Vec<String> = Vec::new();
+    for (res, file) in results.into_iter().zip(code_files.iter()) {
+        let Some(res) = res else { continue };
         extracted += 1;
+        if res.parse_error {
+            parse_errors += 1;
+            // Only the file node survived: every symbol in this file is missing.
+            if res.nodes.len() <= 1 {
+                let rel = file.strip_prefix(&root).unwrap_or(file);
+                lost_files.push(rel.to_string_lossy().into_owned());
+            }
+        }
         nodes.extend(res.nodes);
         edges.extend(res.edges);
         raw_calls.extend(res.raw_calls);
@@ -160,6 +174,19 @@ pub(crate) fn run_extract(
         stats.assets,
         stats.asset_nodes,
     );
+    if parse_errors > 0 {
+        let lost = lost_files.len();
+        print!("Parse errors: {parse_errors} file(s) had grammar errors");
+        if lost > 0 {
+            let sample: Vec<&str> = lost_files.iter().take(3).map(String::as_str).collect();
+            print!(
+                "; {lost} yielded no symbols at all ({}{})",
+                sample.join(", "),
+                if lost > sample.len() { ", ..." } else { "" }
+            );
+        }
+        println!();
+    }
     if local_sdk_calls > 0 {
         println!("Dropped {local_sdk_calls} SDK candidate(s) that resolve to this repository");
     }

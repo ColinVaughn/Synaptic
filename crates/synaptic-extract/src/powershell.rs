@@ -45,6 +45,7 @@ pub fn extract_powershell_source(path: &str, source: &[u8]) -> ExtractionResult 
         function_bodies: Vec::new(),
     };
     ex.b.add_node(file_nid, filename, 1);
+    ex.b.note_parse_health(tree.root_node());
     ex.walk(tree.root_node(), 0);
     ex.run_call_pass();
     ex.b.into_result()

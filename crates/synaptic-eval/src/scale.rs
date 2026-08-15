@@ -16,35 +16,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use serde::Deserialize;
-
 use synaptic_core::GraphData;
 use synaptic_incremental::{ChangeSet, RebuildOptions, rebuild, topology};
 
-/// One pinned external repository.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct ScaleRepo {
-    pub url: String,
-    pub sha: String,
-    pub family: String,
-    /// Size tier: "small" | "medium" | "large" (advisory grouping label).
-    pub tier: String,
-    /// Representative primary-language file used for incremental-path timing.
-    pub incremental_file: Option<String>,
-}
-
-/// The scale manifest.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-pub struct ScaleManifest {
-    #[serde(default, rename = "repo")]
-    pub repos: Vec<ScaleRepo>,
-}
-
-impl ScaleManifest {
-    pub fn parse(src: &str) -> Result<Self, toml::de::Error> {
-        toml::from_str(src)
-    }
-}
+use crate::repo_corpus::{CorpusManifest, CorpusRepo, SUITE_SCALE, repo_name};
 
 /// Host/build environment, so absolute timings are interpretable.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -168,19 +143,11 @@ fn p95(xs: &[f64]) -> f64 {
     v[rank.min(v.len() - 1)]
 }
 
-fn repo_name(url: &str) -> &str {
-    url.trim_end_matches('/')
-        .trim_end_matches(".git")
-        .rsplit('/')
-        .next()
-        .unwrap_or(url)
-}
-
 fn git(args: &[&str], cwd: Option<&Path>) -> Result<(), String> {
     git_output(args, cwd).map(|_| ())
 }
 
-fn git_output(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
+pub(crate) fn git_output(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
     let mut cmd = Command::new("git");
     if let Some(dir) = cwd {
         cmd.arg("-C").arg(dir);
@@ -199,12 +166,20 @@ fn git_output(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
     }
 }
 
-fn ensure_checkout(cache_dir: &Path, repo: &ScaleRepo) -> Result<PathBuf, String> {
+pub(crate) fn ensure_checkout(cache_dir: &Path, repo: &CorpusRepo) -> Result<PathBuf, String> {
     std::fs::create_dir_all(cache_dir).map_err(|e| e.to_string())?;
     let dir = cache_dir.join(repo_name(&repo.url));
     if !dir.join(".git").exists() {
+        // `core.longpaths` is set per-clone rather than assumed from global git
+        // config. Real corpora contain paths past Windows' 260-character
+        // MAX_PATH (spock's AST snapshot fixtures are ~200 characters of test
+        // name alone); without it the checkout fails and the repository is
+        // recorded as a skip on Windows only, quietly making the corpus
+        // platform-dependent.
         git(
             &[
+                "-c",
+                "core.longpaths=true",
                 "clone",
                 "--quiet",
                 "--filter=blob:none",
@@ -214,7 +189,21 @@ fn ensure_checkout(cache_dir: &Path, repo: &ScaleRepo) -> Result<PathBuf, String
             None,
         )?;
     }
-    git(&["checkout", "--quiet", &repo.sha], Some(&dir))?;
+    // A run interrupted mid-checkout leaves tracked files on disk that a plain
+    // checkout then refuses to overwrite, so the cache would stay poisoned for
+    // every later run until someone deleted it by hand. The checkout is a
+    // disposable artifact pinned to a SHA, so forcing it is the correct repair.
+    let checkout = |force: bool| {
+        let mut args = vec!["-c", "core.longpaths=true", "checkout", "--quiet"];
+        if force {
+            args.push("--force");
+        }
+        args.push(&repo.sha);
+        git(&args, Some(&dir))
+    };
+    if checkout(false).is_err() {
+        checkout(true)?;
+    }
     Ok(dir)
 }
 
@@ -267,7 +256,7 @@ fn is_programming_source(path: &str) -> bool {
 }
 
 /// Measure one repo over `reps` repetitions.
-fn measure(dir: &Path, repo: &ScaleRepo, reps: usize) -> Result<ScaleResult, String> {
+fn measure(dir: &Path, repo: &CorpusRepo, reps: usize) -> Result<ScaleResult, String> {
     let reps = reps.max(1);
     let mut cold = Vec::with_capacity(reps);
     let mut warm = Vec::with_capacity(reps);
@@ -387,11 +376,14 @@ pub fn run_scale(
     reps: usize,
 ) -> Result<ScaleReport, String> {
     let manifest =
-        ScaleManifest::parse(&std::fs::read_to_string(manifest_path).map_err(|e| e.to_string())?)
+        CorpusManifest::parse(&std::fs::read_to_string(manifest_path).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
     let mut results = Vec::new();
     let mut skipped = Vec::new();
-    for repo in &manifest.repos {
+    // The manifest also carries the (larger) quality corpus; timing runs only
+    // the deliberately size-tiered subset, so the published numbers stay
+    // comparable across releases.
+    for repo in manifest.in_suite(SUITE_SCALE) {
         if let Some(t) = tier_filter
             && repo.tier != t
         {
@@ -419,30 +411,30 @@ pub fn run_scale(
 mod tests {
     use super::*;
 
+    /// Timing measures only the size-tiered subset. A quality-only entry
+    /// joining the shared manifest must not silently enter the throughput
+    /// numbers, which are published and compared across releases.
     #[test]
-    fn parses_scale_manifest() {
+    fn only_scale_suite_members_are_timed() {
         let src = r#"
 [[repo]]
-url = "https://github.com/x/y"
+url = "https://github.com/x/timed"
 sha = "deadbeef"
 family = "systems-rust"
 tier = "small"
+suites = ["scale", "quality"]
 incremental_file = "src/lib.rs"
-"#;
-        let m = ScaleManifest::parse(src).unwrap();
-        assert_eq!(m.repos.len(), 1);
-        assert_eq!(m.repos[0].tier, "small");
-        assert_eq!(m.repos[0].incremental_file.as_deref(), Some("src/lib.rs"));
-    }
 
-    #[test]
-    fn repo_name_is_last_segment() {
-        assert_eq!(repo_name("https://github.com/BurntSushi/memchr"), "memchr");
-        assert_eq!(
-            repo_name("https://github.com/BurntSushi/memchr.git"),
-            "memchr"
-        );
-        assert_eq!(repo_name("https://github.com/a/b/"), "b");
+[[repo]]
+url = "https://github.com/x/quality-only"
+sha = "cafebabe"
+family = "scripting-lua"
+tier = "small"
+"#;
+        let m = CorpusManifest::parse(src).unwrap();
+        let timed: Vec<&str> = m.in_suite(SUITE_SCALE).map(|r| r.name()).collect();
+        assert_eq!(timed, vec!["timed"]);
+        assert_eq!(m.repos.len(), 2, "both entries still parse");
     }
 
     #[test]

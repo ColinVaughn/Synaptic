@@ -28,11 +28,16 @@ static USES_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)\buses\b\s+(.*?);").expect("valid uses regex"));
 #[cfg(feature = "lang-pascal")]
 static ROUTINE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?im)^\s*(?:procedure|function)\s+(\w+(?:\.\w+)?)").expect("valid routine regex")
+    // `[ \t]` not `\s` on both sides: `\s` matches a newline, which would (a) start
+    // the match on a preceding blank/comment-blanked line and report the routine
+    // early, and (b) let an unnamed Delphi anonymous method (`procedure` alone on a
+    // line) capture the next line's first token as its name.
+    Regex::new(r"(?im)^[ \t]*(?:procedure|function)[ \t]+(\w+(?:\.\w+)?)")
+        .expect("valid routine regex")
 });
 #[cfg(feature = "lang-pascal")]
 static TYPE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?im)^\s*(\w+)\s*=\s*(?:packed\s+)?(class|record|interface|object)\b")
+    Regex::new(r"(?im)^[ \t]*(\w+)[ \t]*=[ \t]*(?:packed[ \t]+)?(class|record|interface|object)\b")
         .expect("valid pascal type regex")
 });
 
@@ -223,6 +228,56 @@ mod tests {
         assert!(!ls.iter().any(|l| l.contains("Fake")), "{ls:?}");
         let imps = targets(&r, "imports_from");
         assert!(!imps.iter().any(|t| t == "BogusBrace"), "{imps:?}");
+    }
+
+    fn line_of(r: &ExtractionResult, label: &str) -> Option<String> {
+        r.nodes
+            .iter()
+            .find(|n| n.label == label)
+            .and_then(|n| n.source_location.clone())
+    }
+
+    #[test]
+    fn a_routine_after_blank_lines_keeps_its_own_line() {
+        // `^\s*` lets \s span the newlines, starting the match on line 2.
+        let src = b"unit U;\nimplementation\n\n\nprocedure Later;\nbegin\nend;\nend.\n";
+        let r = extract_pascal_source("src/U.pas", src);
+        assert_eq!(line_of(&r, "Later()"), Some("L5".to_string()));
+    }
+
+    #[test]
+    fn a_routine_below_a_comment_block_keeps_its_own_line() {
+        // strip_comments blanks comment bodies in place, so a comment block above a
+        // routine becomes whitespace-only lines that `\s*` would swallow.
+        let src = b"unit U;\nimplementation\n{ a\n  multi-line\n  comment }\nprocedure Documented;\nbegin\nend;\nend.\n";
+        let r = extract_pascal_source("src/U.pas", src);
+        assert_eq!(line_of(&r, "Documented()"), Some("L6".to_string()));
+    }
+
+    #[test]
+    fn a_type_after_blank_lines_keeps_its_own_line() {
+        let src = b"unit U;\ntype\n\n\n  TThing = class\n  end;\nend.\n";
+        let r = extract_pascal_source("src/U.pas", src);
+        assert_eq!(line_of(&r, "TThing"), Some("L5".to_string()));
+    }
+
+    #[test]
+    fn anonymous_method_does_not_capture_the_next_line() {
+        // Delphi anonymous method: `procedure` with no name, `begin` on the next
+        // line. `\s+` spanning newlines captured `begin` as the routine name.
+        let src = b"unit U;\nimplementation\nprocedure Run;\nbegin\n  THorse.Listen(9000,\n    procedure\n    begin\n      Writeln('up');\n    end);\nend;\nend.\n";
+        let r = extract_pascal_source("src/U.pas", src);
+        let ls = labels(&r);
+        assert!(ls.contains(&"Run()".to_string()), "{ls:?}");
+        assert!(!ls.contains(&"begin()".to_string()), "{ls:?}");
+    }
+
+    #[test]
+    fn anonymous_function_does_not_capture_a_var_block() {
+        let src = b"unit U;\nimplementation\nprocedure Run;\nbegin\n  X := function\n  var\n    I: Integer;\n  begin\n  end;\nend;\nend.\n";
+        let ls = labels(&extract_pascal_source("src/U.pas", src));
+        assert!(!ls.contains(&"var()".to_string()), "{ls:?}");
+        assert!(!ls.contains(&"begin()".to_string()), "{ls:?}");
     }
 
     #[test]

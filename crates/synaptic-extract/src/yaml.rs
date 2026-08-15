@@ -62,6 +62,7 @@ pub fn extract_yaml_source(path: &str, source: &[u8]) -> ExtractionResult {
     let mut b = Builder::new(path);
     let file_nid = file_node_id(path);
     b.add_node(file_nid.clone(), filename, 1);
+    b.note_parse_health(tree.root_node());
 
     for (idx, (_m, pairs)) in per_doc.iter().enumerate() {
         let keys = doc_keys(pairs);

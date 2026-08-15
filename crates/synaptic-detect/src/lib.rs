@@ -1,7 +1,7 @@
 //! Synaptic file detection: discovery, classification, ignore handling, manifest.
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use ignore::WalkBuilder;
@@ -72,6 +72,52 @@ pub fn detect_inputs(root: &Path) -> DetectResult {
     detect_impl(root, false)
 }
 
+/// Files git tracks under `root` that the ignore-aware walk did not yield.
+///
+/// `git ls-files` is scoped to the working directory, so paths come back relative
+/// to `root`. Returns empty when git is unavailable, `root` is not a repository, or
+/// the command fails -- discovery degrades to the plain ignore walk rather than
+/// erroring. Noise directories are pruned here too, so an accidentally committed
+/// `node_modules/` entry stays out.
+fn tracked_but_ignored(root: &Path, already: &[PathBuf]) -> Vec<PathBuf> {
+    let Ok(out) = std::process::Command::new("git")
+        .args(["ls-files", "-z"])
+        .current_dir(root)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let seen: HashSet<&Path> = already.iter().map(PathBuf::as_path).collect();
+    String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|rel| !rel.is_empty())
+        .map(|rel| root.join(rel))
+        .filter(|p| !seen.contains(p.as_path()) && p.is_file() && !in_noise_dir(root, p))
+        .collect()
+}
+
+/// True when any directory between `root` and `path` is a pruned noise directory
+/// (the walk prunes these via `filter_entry`; recovered paths must match).
+fn in_noise_dir(root: &Path, path: &Path) -> bool {
+    let Ok(rel) = path.strip_prefix(root) else {
+        return false;
+    };
+    let mut prefix = root.to_path_buf();
+    let mut parts: Vec<_> = rel.components().collect();
+    parts.pop(); // the file name itself is not a directory
+    for part in parts {
+        let name = part.as_os_str().to_string_lossy();
+        if noise::is_noise_dir(&name, &prefix) {
+            return true;
+        }
+        prefix.push(part);
+    }
+    false
+}
+
 fn detect_impl(root: &Path, count: bool) -> DetectResult {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
 
@@ -115,12 +161,26 @@ fn detect_impl(root: &Path, count: bool) -> DetectResult {
     let mut ts_config_files: Vec<PathBuf> = Vec::new();
     let mut total_words = 0usize;
 
-    for entry in walker.filter_map(Result::ok) {
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
-            continue;
-        }
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy();
+    let mut candidates: Vec<PathBuf> = walker
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+        .map(|e| e.path().to_path_buf())
+        .collect();
+    // Git does not apply ignore rules to files it already tracks, so neither do we:
+    // a tracked file is unambiguously part of the codebase. Repos routinely add a
+    // broad rule long after committing sources under it (a `**/console/` coverage
+    // rule over real sources), and dropping those loses real code. Noise-dir and
+    // sensitive-file rules below still apply.
+    candidates.extend(tracked_but_ignored(&root, &candidates));
+    candidates.sort();
+    candidates.dedup();
+
+    for path in &candidates {
+        let path = path.as_path();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default();
         if noise::is_skip_file(&name) {
             continue;
         }
@@ -467,5 +527,58 @@ mod tests {
             !names.contains(&"build_artifact.py".to_string()),
             "subdir .gitignore must still apply"
         );
+    }
+
+    /// Git does not apply `.gitignore` to files it already tracks, and neither
+    /// should we: a tracked file is unambiguously part of the codebase. Repos
+    /// routinely add a broad rule (`**/console/`) long after committing sources
+    /// under it, and those sources must not vanish from the graph.
+    #[test]
+    fn tracked_files_survive_a_matching_gitignore_rule() {
+        let Some(dir) = git_repo_fixture() else {
+            eprintln!("git unavailable; skipping");
+            return;
+        };
+        let r = dir.path();
+        let found = detect(r);
+        let names: Vec<String> = found
+            .of(FileType::Code)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.contains(&"tracked.py".to_string()),
+            "tracked-but-ignored file must be kept: {names:?}"
+        );
+        assert!(
+            !names.contains(&"untracked.py".to_string()),
+            "untracked ignored file must stay ignored: {names:?}"
+        );
+    }
+
+    /// Repo with `console/` ignored, one tracked file under it (added before the
+    /// rule) and one untracked. `None` when git is unavailable.
+    fn git_repo_fixture() -> Option<tempfile::TempDir> {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(r)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+        };
+        git(&["init"])?;
+        git(&["config", "user.email", "t@example.invalid"])?;
+        git(&["config", "user.name", "t"])?;
+        write(r, "src/main.py", "def main():\n    pass\n");
+        write(r, "console/tracked.py", "def tracked():\n    pass\n");
+        git(&["add", "-A"])?;
+        git(&["commit", "-m", "init"])?;
+        // Rule added after the fact; `tracked.py` stays tracked, the new one does not.
+        write(r, ".gitignore", "console/\n");
+        write(r, "console/untracked.py", "def untracked():\n    pass\n");
+        Some(dir)
     }
 }
