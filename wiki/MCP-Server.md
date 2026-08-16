@@ -221,6 +221,31 @@ port) are accepted; others get 403 (`forbidden host`). Binding to a wildcard
 address (`0.0.0.0` / `::`) disables this check, treated as an intentional public
 exposure.
 
+## Memory sizing
+
+A `serve` over a single `graph.json` holds the whole graph and its search
+indexes resident. Peak cost is roughly **3x the file size**, reached while the
+indexes are built; the steady state after that is lower. A 965 MiB `graph.json`
+(about 570,000 nodes and 1.6M edges) peaks near 2.4 GiB, so size the container
+for the peak, not the file.
+
+The server states the cost itself rather than leaving an OOM kill as the first
+diagnostic:
+
+```
+$ synaptic serve
+[synaptic] loading a 742 MiB graph.json needs roughly 2.2 GiB at peak
+```
+
+When the process runs under a cgroup memory limit (any container) and the
+projection does not fit inside it, the note says so and names the ways out. Set
+[`SYNAPTIC_MAX_SERVE_MB`](Configuration) to refuse an oversized graph outright
+with a clear error instead of being killed mid-load; it is uncapped by default,
+because a served graph is your own extraction and is expected to be large.
+
+If the peak is more than you want to provision, serve the shard store instead:
+memory then tracks the working set rather than the whole federation.
+
 ## Serving a federated store (shard-aware)
 
 `extract` and `workspace build` write the per-repo shard store by default

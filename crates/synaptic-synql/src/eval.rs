@@ -59,7 +59,7 @@ fn prop(kg: &KnowledgeGraph, id: &NodeId, field: Field) -> Val {
             .map(|n| Val::S(bare_name(&n.label).to_string()))
             .unwrap_or(Val::Null),
         Field::File => node
-            .map(|n| Val::S(n.source_file.clone()))
+            .map(|n| Val::S(n.source_file.to_string()))
             .unwrap_or(Val::Null),
         Field::Lang => node
             .and_then(|n| lang_of(&n.source_file))
@@ -514,7 +514,7 @@ mod tests {
             id: NodeId(id.into()),
             label: label.into(),
             file_type: synaptic_core::FileType::Code,
-            source_file: format!("{id}.rs"),
+            source_file: format!("{id}.rs").into(),
             source_location: Some("L1".into()),
             community: None,
             repo: None,
@@ -567,7 +567,7 @@ mod tests {
         use serde_json::json;
         let mut route = node("r", "/api/x", NodeKind::Function, 1);
         route.extra.insert("_node_type".into(), json!("route"));
-        route.source_file = String::new();
+        route.source_file = String::new().into();
         let plain = node("f", "load()", NodeKind::Function, 3);
         let kg = graph(vec![route, plain], vec![]);
         let rows = run(&kg, "MATCH (n) WHERE n.node_type = \"route\" RETURN n");

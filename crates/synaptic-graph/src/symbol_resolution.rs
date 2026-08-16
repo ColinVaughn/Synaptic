@@ -306,10 +306,10 @@ fn calls_edge(
     Edge {
         source: caller,
         target,
-        relation: "calls".to_string(),
+        relation: "calls".to_string().into(),
         confidence,
         confidence_score: Some(score),
-        source_file,
+        source_file: source_file.into(),
         source_location,
         weight: 1.0,
         context: Some(context.to_string()),
@@ -647,7 +647,7 @@ pub fn resolve_symbols(
     let mut known: HashSet<(NodeId, NodeId, String)> = HashSet::new();
     let mut bash_sourced: HashMap<NodeId, HashSet<NodeId>> = HashMap::new();
     for e in kg.edges() {
-        known.insert((e.source.clone(), e.target.clone(), e.relation.clone()));
+        known.insert((e.source.clone(), e.target.clone(), e.relation.to_string()));
         if e.relation == "imports_from" && is_bash_file(&e.source_file) {
             bash_sourced
                 .entry(e.source.clone())

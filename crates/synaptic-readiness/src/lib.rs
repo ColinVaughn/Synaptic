@@ -324,7 +324,10 @@ fn source_findings(
         if !repo_matches(n, repo) || n.source_file.is_empty() || n.span().is_none() {
             continue;
         }
-        by_file.entry(n.source_file.clone()).or_default().push(n);
+        by_file
+            .entry(n.source_file.to_string())
+            .or_default()
+            .push(n);
     }
 
     let placeholder_re = placeholder_regex();
@@ -1294,7 +1297,7 @@ mod tests {
             target: NodeId(to.into()),
             relation: "shadows".into(),
             confidence: synaptic_core::Confidence::Extracted,
-            source_file: String::new(),
+            source_file: String::new().into(),
             source_location: None,
             confidence_score: None,
             weight: 1.0,

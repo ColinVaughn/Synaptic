@@ -215,7 +215,7 @@ mod federated_tests {
             id: NodeId(id.into()),
             label: format!("{id}()"),
             file_type: FileType::Code,
-            source_file: format!("{id}.py"),
+            source_file: format!("{id}.py").into(),
             source_location: Some("L1".into()),
             community: Some(community),
             repo: None,

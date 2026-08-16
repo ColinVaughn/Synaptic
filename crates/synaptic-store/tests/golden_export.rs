@@ -204,12 +204,12 @@ proptest! {
 
         let mut got: Vec<(String, String, String)> = back
             .edges()
-            .map(|e| (e.source.0.clone(), e.target.0.clone(), e.relation.clone()))
+            .map(|e| (e.source.0.clone(), e.target.0.clone(), e.relation.to_string()))
             .collect();
         let mut want: Vec<(String, String, String)> = original
             .links
             .iter()
-            .map(|e| (e.source.0.clone(), e.target.0.clone(), e.relation.clone()))
+            .map(|e| (e.source.0.clone(), e.target.0.clone(), e.relation.to_string()))
             .collect();
         got.sort();
         want.sort();

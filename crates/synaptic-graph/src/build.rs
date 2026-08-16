@@ -29,7 +29,7 @@ pub fn build_from_parts(
 
     // nodes: normalize source_file, upsert (last write wins)
     for mut node in nodes {
-        node.source_file = norm_source_file(&node.source_file, opts.root.as_deref());
+        node.source_file = norm_source_file(&node.source_file, opts.root.as_deref()).into();
         kg.upsert_node(node);
     }
 
@@ -61,7 +61,7 @@ pub fn build_from_parts(
     let edges: Vec<Edge> = edges
         .into_iter()
         .map(|mut e| {
-            e.source_file = norm_source_file(&e.source_file, root);
+            e.source_file = norm_source_file(&e.source_file, root).into();
             e
         })
         .collect();
@@ -315,7 +315,7 @@ mod tests {
             kg.nodes().map(|n| n.source_file.clone()).collect();
         assert_eq!(
             forms,
-            ["src/middleware/auth.py".to_string()].into_iter().collect()
+            ["src/middleware/auth.py".into()].into_iter().collect()
         );
     }
 

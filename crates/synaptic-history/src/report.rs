@@ -163,7 +163,7 @@ pub fn removed_apis(old: &KnowledgeGraph, new: &KnowledgeGraph, top: usize) -> V
             is_api.then(|| RemovedApi {
                 id: n.id.0.clone(),
                 label: n.label.clone(),
-                source_file: n.source_file.clone(),
+                source_file: n.source_file.to_string(),
                 referenced_by: by,
             })
         })

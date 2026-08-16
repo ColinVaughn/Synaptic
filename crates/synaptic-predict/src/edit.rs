@@ -243,7 +243,7 @@ pub fn assess_edit(
         if let Some((will_break, reason)) = classified {
             let dep = EditDependent {
                 label: node.label.clone(),
-                file,
+                file: file.to_string(),
                 depth: hit.depth,
                 via_relation: rel,
                 reason,
@@ -305,7 +305,7 @@ pub fn assess_edit(
         };
         let dep = EditDependent {
             label: node.label.clone(),
-            file: node.source_file.clone(),
+            file: node.source_file.to_string(),
             depth: 1,
             via_relation: mi.via_relation,
             reason,
@@ -327,7 +327,7 @@ pub fn assess_edit(
     Some(EditImpact {
         symbol: symbol.to_string(),
         kind: kind.as_str().to_string(),
-        target_file,
+        target_file: target_file.to_string(),
         breaks,
         review,
         summary,

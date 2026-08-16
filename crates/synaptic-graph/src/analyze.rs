@@ -266,6 +266,7 @@ fn source_of(kg: &KnowledgeGraph, id: &NodeId) -> String {
     kg.node(id)
         .map(|n| n.source_file.clone())
         .unwrap_or_default()
+        .to_string()
 }
 
 fn is_file_node(kg: &KnowledgeGraph, id: &NodeId, degrees: &HashMap<NodeId, usize>) -> bool {
@@ -448,9 +449,9 @@ pub fn surprising_connections(
     communities: &BTreeMap<u32, Vec<NodeId>>,
     top_n: usize,
 ) -> Vec<Surprise> {
-    let source_files: HashSet<String> = kg
+    let source_files: HashSet<&str> = kg
         .nodes()
-        .map(|n| n.source_file.clone())
+        .map(|n| n.source_file.as_str())
         .filter(|s| !s.is_empty())
         .collect();
     if source_files.len() > 1 {
@@ -500,7 +501,7 @@ fn cross_file_surprises(
                 target: label_of(kg, &e.target),
                 source_files: [us, vs],
                 confidence: e.confidence,
-                relation: e.relation.clone(),
+                relation: e.relation.to_string(),
                 why: if reasons.is_empty() {
                     "cross-file semantic connection".to_string()
                 } else {
@@ -544,7 +545,7 @@ fn edge_betweenness_surprises(kg: &KnowledgeGraph, top_n: usize) -> Vec<Surprise
         edge_of.entry(key).or_insert((
             e.source.clone(),
             e.target.clone(),
-            e.relation.clone(),
+            e.relation.to_string(),
             e.confidence,
         ));
     }
@@ -616,7 +617,7 @@ fn cross_community_surprises(
                 target: label_of(kg, &e.target),
                 source_files: [source_of(kg, &e.source), source_of(kg, &e.target)],
                 confidence: e.confidence,
-                relation: e.relation.clone(),
+                relation: e.relation.to_string(),
                 why: format!("bridges community {a} → community {b}"),
             },
         ));
@@ -932,7 +933,7 @@ pub fn find_import_cycles(
         if tgt.is_empty() {
             continue;
         }
-        adj.entry(edge_src.clone()).or_default().insert(tgt);
+        adj.entry(edge_src.to_string()).or_default().insert(tgt);
     }
     if adj.is_empty() {
         return Vec::new();

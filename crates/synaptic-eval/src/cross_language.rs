@@ -119,7 +119,7 @@ pub fn calibrate_cross_language(graph: &GraphData) -> CrossLanguageReport {
         }
         *report
             .relation_counts
-            .entry(e.relation.clone())
+            .entry(e.relation.to_string())
             .or_insert(0) += 1;
         report.total_edges += 1;
         match e.relation.as_str() {
@@ -178,7 +178,7 @@ mod tests {
             id: NodeId(id.into()),
             label: label.into(),
             file_type: FileType::Code,
-            source_file: format!("{id}.rs"),
+            source_file: format!("{id}.rs").into(),
             source_location: None,
             community: None,
             repo: None,
@@ -194,7 +194,7 @@ mod tests {
             id: NodeId(id.into()),
             label: label.into(),
             file_type: FileType::Code,
-            source_file: String::new(),
+            source_file: String::new().into(),
             source_location: None,
             community: None,
             repo: None,

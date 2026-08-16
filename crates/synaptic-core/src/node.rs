@@ -9,14 +9,16 @@ use crate::span::Span;
 
 /// A graph node. The required fields are the ones in `REQUIRED_NODE_FIELDS`.
 /// Optional fields are omitted from `graph.json` when unset so output stays in
-/// the node-link format. `extra` captures any additional keys (`norm_label`,
-/// `_origin`, `source_url`, …) so round-trips are lossless.
+/// the node-link format. `extra` captures any additional keys (`_node_type`,
+/// `source_url`, …) so round-trips are lossless. The one exception is
+/// `norm_label`, which the writer derives from `label` on export and the reader
+/// discards again; see `DERIVED_NORM_LABEL_KEY`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Node {
     pub id: NodeId,
     pub label: String,
     pub file_type: FileType,
-    pub source_file: String,
+    pub source_file: crate::Interned,
 
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub source_location: Option<String>,
@@ -57,8 +59,58 @@ pub struct Node {
     #[serde(rename = "_origin", skip_serializing_if = "Option::is_none", default)]
     pub origin: Option<Origin>,
 
-    #[serde(flatten)]
+    #[serde(flatten, deserialize_with = "deserialize_extra")]
     pub extra: Map<String, Value>,
+}
+
+/// `norm_label`: a lowercased copy of `label` that the JSON writer adds on export
+/// (see `wiki/Output-Formats.md`). Nothing reads it back -- every consumer that
+/// wants a search key recomputes one from `label` -- but because it is present on
+/// every node, materializing it hands every node a one-key `BTreeMap`, and the
+/// smallest `BTreeMap` allocation is a fixed ~630-byte 11-slot leaf regardless of
+/// how few keys it holds. On a 569k-node graph that is 342 MiB of scaffolding
+/// allocated only to be dropped again by `KnowledgeGraph::from_graph_data`.
+const DERIVED_NORM_LABEL_KEY: &str = "norm_label";
+
+/// Deserialize the flattened metadata map, skipping keys that the export layer
+/// derives from typed fields. The value is consumed as `IgnoredAny` so a skipped
+/// key costs no allocation at all, and the map stays empty (and therefore
+/// allocation-free) for the common node that carries nothing else.
+///
+/// This is a read-side filter only: [`crate::Node`] still serializes whatever is
+/// in `extra`, and the JSON writer still emits `norm_label`, so `graph.json` is
+/// byte-identical across a load/store round trip.
+fn deserialize_extra<'de, D>(deserializer: D) -> Result<Map<String, Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct ExtraVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for ExtraVisitor {
+        type Value = Map<String, Value>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a map of additional node metadata")
+        }
+
+        fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut out = Map::new();
+            while let Some(key) = access.next_key::<String>()? {
+                if key == DERIVED_NORM_LABEL_KEY {
+                    access.next_value::<serde::de::IgnoredAny>()?;
+                    continue;
+                }
+                let value = access.next_value()?;
+                out.insert(key, value);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_map(ExtraVisitor)
 }
 
 /// Keys for the metadata still carried inside `extra`. Because `extra` is
@@ -261,7 +313,7 @@ mod tests {
     fn external_stub_is_a_node_with_no_source_file() {
         let mut n = sample();
         assert!(!n.is_external_stub(), "a located node is not a stub");
-        n.source_file = String::new();
+        n.source_file = String::new().into();
         assert!(
             n.is_external_stub(),
             "empty source_file marks an import stub"
@@ -456,14 +508,17 @@ mod tests {
             "visibility": "public",
             "span": {"start_line": 1, "start_col": 1, "end_line": 4, "end_col": 2},
             "_origin": "ast",
-            "norm_label": "auth.py"
+            "source_url": "https://example.invalid/auth"
         });
         let node: Node = serde_json::from_value(raw).unwrap();
         assert_eq!(node.kind(), Some(NodeKind::Function));
         assert_eq!(node.visibility(), Some(Visibility::Public));
         assert_eq!(node.loc(), Some(4));
         assert_eq!(node.origin(), Some("ast"));
-        assert_eq!(node.extra.get("norm_label").unwrap(), "auth.py");
+        assert_eq!(
+            node.extra.get("source_url").unwrap(),
+            "https://example.invalid/auth"
+        );
         // Hot keys are consumed by their fields, not left duplicated in extra.
         assert!(!node.extra.contains_key("kind"));
         assert!(!node.extra.contains_key("span"));
@@ -524,6 +579,48 @@ mod tests {
         );
     }
 
+    /// `norm_label` is a lowercased copy of `label` that the JSON writer adds on
+    /// export and no reader consumes. Materializing it into `extra` gives every
+    /// node in the graph a one-key `BTreeMap`, whose smallest allocation is a
+    /// fixed ~630-byte 11-slot leaf. Dropping it during deserialization is what
+    /// lets a plain code node keep the empty map that costs nothing.
+    #[test]
+    fn norm_label_is_dropped_during_deserialization() {
+        let raw = serde_json::json!({
+            "id": "auth",
+            "label": "Auth.py",
+            "file_type": "code",
+            "source_file": "src/auth.py",
+            "norm_label": "auth.py"
+        });
+        let node: Node = serde_json::from_value(raw).unwrap();
+        assert!(
+            node.extra.is_empty(),
+            "norm_label must not reach extra, held: {:?}",
+            node.extra
+        );
+    }
+
+    /// Dropping `norm_label` must not disturb genuinely unknown keys sharing the
+    /// same flattened map.
+    #[test]
+    fn dropping_norm_label_keeps_other_unknown_keys() {
+        let raw = serde_json::json!({
+            "id": "auth",
+            "label": "auth.py",
+            "file_type": "code",
+            "source_file": "src/auth.py",
+            "norm_label": "auth.py",
+            "source_url": "https://example.invalid/auth"
+        });
+        let node: Node = serde_json::from_value(raw).unwrap();
+        assert!(!node.extra.contains_key("norm_label"));
+        assert_eq!(
+            node.extra.get("source_url").unwrap(),
+            "https://example.invalid/auth"
+        );
+    }
+
     #[test]
     fn unknown_keys_roundtrip_via_extra() {
         let raw = serde_json::json!({
@@ -532,7 +629,6 @@ mod tests {
             "file_type": "code",
             "source_file": "src/auth.py",
             "community": 3,
-            "norm_label": "auth.py",
             "_origin": "ast",
             "source_url": "https://example.invalid/auth"
         });
@@ -553,6 +649,5 @@ mod tests {
             obj["source_url"],
             serde_json::json!("https://example.invalid/auth")
         );
-        assert_eq!(obj["norm_label"], serde_json::json!("auth.py"));
     }
 }

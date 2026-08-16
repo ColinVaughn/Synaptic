@@ -593,7 +593,7 @@ impl GraphProvider {
                                 .map(|e| EdgeRef {
                                     source: e.source.clone(),
                                     target: e.target.clone(),
-                                    relation: e.relation.clone(),
+                                    relation: e.relation.to_string(),
                                 }),
                         );
                     }
@@ -605,7 +605,7 @@ impl GraphProvider {
                         .map(|e| EdgeRef {
                             source: e.source.clone(),
                             target: e.target.clone(),
-                            relation: e.relation.clone(),
+                            relation: e.relation.to_string(),
                         }),
                 );
                 let edges = rank_result_edges(edges, &ranked.nodes, &ranked.scores);
@@ -872,7 +872,7 @@ impl GraphProvider {
                 .filter(|e| {
                     (&e.source == a && &e.target == b) || (&e.source == b && &e.target == a)
                 })
-                .map(|e| e.relation.clone())
+                .map(|e| e.relation.to_string())
                 .min(),
         }
     }
@@ -1104,7 +1104,7 @@ mod tests {
             id: NodeId(id.into()),
             label: id.into(),
             file_type: FileType::Code,
-            source_file: format!("{}/{id}.rs", repo.unwrap_or("x")),
+            source_file: format!("{}/{id}.rs", repo.unwrap_or("x")).into(),
             source_location: None,
             community: None,
             repo: repo.map(|r| r.into()),
@@ -1118,7 +1118,7 @@ mod tests {
             target: NodeId(t.into()),
             relation: "calls".into(),
             confidence: Confidence::Extracted,
-            source_file: format!("{s}.rs"),
+            source_file: format!("{s}.rs").into(),
             source_location: None,
             confidence_score: None,
             weight: 1.0,
@@ -1133,7 +1133,7 @@ mod tests {
             id: NodeId(id.into()),
             label: label.into(),
             file_type: FileType::Code,
-            source_file: format!("{repo}/{id}.rs"),
+            source_file: format!("{repo}/{id}.rs").into(),
             source_location: None,
             community: None,
             repo: Some(repo.into()),
@@ -1147,7 +1147,7 @@ mod tests {
             id: NodeId(id.into()),
             label: id.into(),
             file_type: FileType::Code,
-            source_file: format!("{repo}/{id}.rs"),
+            source_file: format!("{repo}/{id}.rs").into(),
             source_location: None,
             community: Some(community),
             repo: Some(repo.into()),
@@ -1161,7 +1161,7 @@ mod tests {
             target: NodeId(t.into()),
             relation: rel.into(),
             confidence: conf,
-            source_file: format!("{s}.rs"),
+            source_file: format!("{s}.rs").into(),
             source_location: None,
             confidence_score: None,
             weight: 1.0,

@@ -287,7 +287,7 @@ fn measure(dir: &Path, repo: &CorpusRepo, reps: usize) -> Result<ScaleResult, St
     } else {
         gd.nodes
             .iter()
-            .map(|n| n.source_file.clone())
+            .map(|n| n.source_file.to_string())
             .filter(|s| is_programming_source(s) && dir.join(s).is_file())
             .min()
     };

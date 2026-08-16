@@ -36,7 +36,7 @@ fn synthetic_graph(n: usize) -> KnowledgeGraph {
             id: NodeId(format!("n{i}")),
             label: format!("symbol_{i}"),
             file_type: FileType::Code,
-            source_file: format!("src/mod_{}.rs", i % 50),
+            source_file: format!("src/mod_{}.rs", i % 50).into(),
             source_location: Some("L1".into()),
             community: Some((i % 10) as u32),
             repo: None,

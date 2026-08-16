@@ -56,7 +56,7 @@ fn value_to_node(v: &Value) -> Option<Node> {
         id: NodeId(id),
         label,
         file_type,
-        source_file: str_field(v, "source_file").unwrap_or_default(),
+        source_file: str_field(v, "source_file").unwrap_or_default().into(),
         source_location: str_field(v, "source_location"),
         community: None,
         repo: None,
@@ -80,13 +80,15 @@ fn value_to_edge(v: &Value) -> Option<Edge> {
     Some(Edge {
         source: NodeId(source),
         target: NodeId(target),
-        relation: str_field(v, "relation").unwrap_or_else(|| "conceptually_related_to".to_string()),
+        relation: str_field(v, "relation")
+            .unwrap_or_else(|| "conceptually_related_to".to_string())
+            .into(),
         confidence: parse_confidence(v.get("confidence").and_then(Value::as_str)),
         confidence_score: v
             .get("confidence_score")
             .and_then(Value::as_f64)
             .map(|f| f as f32),
-        source_file: str_field(v, "source_file").unwrap_or_default(),
+        source_file: str_field(v, "source_file").unwrap_or_default().into(),
         source_location: str_field(v, "source_location"),
         weight: v
             .get("weight")

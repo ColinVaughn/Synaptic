@@ -131,14 +131,18 @@ pub fn load_graph(path: &Path) -> Result<GraphData> {
         source,
     })?;
     check_size(&label, meta.len(), synaptic_core::max_graph_bytes())?;
-    let bytes = std::fs::read(path).map_err(|source| WorkspaceError::Io {
-        context: format!("reading {label}"),
-        source,
-    })?;
-    let g: GraphData = serde_json::from_slice(&bytes).map_err(|source| WorkspaceError::Json {
-        path: label.clone(),
-        source,
-    })?;
+    // The file buffer is scoped to the parse so callers that go on to merge or
+    // index the result never pay for it on top of their own working set.
+    let g: GraphData = {
+        let bytes = std::fs::read(path).map_err(|source| WorkspaceError::Io {
+            context: format!("reading {label}"),
+            source,
+        })?;
+        serde_json::from_slice(&bytes).map_err(|source| WorkspaceError::Json {
+            path: label.clone(),
+            source,
+        })?
+    };
     check_nodes(&label, g.nodes.len(), synaptic_core::max_nodes())?;
     Ok(g)
 }

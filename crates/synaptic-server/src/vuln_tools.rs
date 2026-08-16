@@ -706,22 +706,31 @@ fn scope_graph_to_repo(mut graph: GraphData, tag: &str) -> GraphData {
         .retain(|hyperedge| hyperedge.nodes.iter().all(|node| kept.contains(&node.0)));
 
     for node in &mut graph.nodes {
-        strip_repo_prefix(&mut node.source_file, tag);
+        strip_interned_repo_prefix(&mut node.source_file, tag);
     }
     for edge in &mut graph.links {
         let mut aggregated_sites = edge
             .extra
             .contains_key("sites")
             .then(|| EdgeSiteAccumulator::new(edge));
-        strip_repo_prefix(&mut edge.source_file, tag);
+        strip_interned_repo_prefix(&mut edge.source_file, tag);
         if let Some(sites) = &mut aggregated_sites {
-            sites.rewrite(|site| strip_repo_prefix(&mut site.source_file, tag));
+            sites.rewrite(|site| strip_interned_repo_prefix(&mut site.source_file, tag));
         }
         if let Some(sites) = aggregated_sites {
             sites.apply_to(edge);
         }
     }
     graph
+}
+
+/// `strip_repo_prefix` for the shared-string fields. The prefix is stripped on
+/// an owned copy and re-interned, so the pool still holds one allocation per
+/// distinct path.
+fn strip_interned_repo_prefix(path: &mut synaptic_core::Interned, tag: &str) {
+    let mut owned = path.to_string();
+    strip_repo_prefix(&mut owned, tag);
+    *path = owned.into();
 }
 
 fn strip_repo_prefix(path: &mut String, tag: &str) {

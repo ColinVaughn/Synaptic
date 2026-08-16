@@ -1112,9 +1112,24 @@ impl Server {
 
     /// Load a server from a `graph.json` path.
     pub fn load(path: PathBuf) -> std::io::Result<Server> {
-        let bytes = std::fs::read(&path)?;
-        let gd: GraphData = serde_json::from_slice(&bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        // Check what the load will cost before allocating any of it. Without
+        // this the only symptom of an oversized graph is the OOM killer, which
+        // explains nothing.
+        match synaptic_core::serve_guard_for(std::fs::metadata(&path)?.len()) {
+            synaptic_core::ServeGuard::Proceed => {}
+            synaptic_core::ServeGuard::Warn(note) => eprintln!("[synaptic] {note}"),
+            synaptic_core::ServeGuard::Refuse(why) => {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, why));
+            }
+        }
+        // The file buffer is scoped to the parse. Index building is the peak
+        // phase of a load, so a buffer that survives into it adds the whole file
+        // length to peak RSS.
+        let gd: GraphData = {
+            let bytes = std::fs::read(&path)?;
+            serde_json::from_slice(&bytes)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+        };
         Ok(Server::from_graph_data(gd, Some(path)))
     }
 
@@ -1371,7 +1386,7 @@ impl Server {
         }
         self.source_root
             .as_ref()
-            .map(|r| (r.clone(), n.source_file.clone()))
+            .map(|r| (r.clone(), n.source_file.to_string()))
     }
 
     /// Resolve a node's source to a real, in-jail path, or an explanation of why
@@ -1450,9 +1465,9 @@ impl Server {
             } else {
                 continue;
             };
-            let v = into.entry((nb, e.relation.clone(), dir)).or_default();
+            let v = into.entry((nb, e.relation.to_string(), dir)).or_default();
             for site in e.sites() {
-                let site = (site.source_file, site.source_location);
+                let site = (site.source_file.to_string(), site.source_location);
                 if !v.contains(&site) {
                     v.push(site);
                 }
@@ -1833,7 +1848,7 @@ impl Server {
                         hits.push(AffectedHit {
                             node_id: src.clone(),
                             depth: cross_depth,
-                            via_relation: e.relation.clone(),
+                            via_relation: e.relation.to_string(),
                         });
                     }
                     if cross_depth < depth
@@ -2177,7 +2192,7 @@ impl Server {
                 ex.neighbors.push(synaptic_query::Neighbor {
                     label: self.label_of(&nid),
                     id: nid,
-                    relation: e.relation.clone(),
+                    relation: e.relation.to_string(),
                     direction,
                     context: e.context.clone(),
                     cross_repo: true,
@@ -2732,7 +2747,7 @@ impl Server {
             self.provider.for_each_node(&mut |n| {
                 if hit_files.contains(n.source_file.as_str()) && n.span().is_some() {
                     by_file
-                        .entry(n.source_file.clone())
+                        .entry(n.source_file.to_string())
                         .or_default()
                         .push(n.clone());
                 }
@@ -2880,7 +2895,7 @@ impl Server {
         if let Some(tn) = &tnorm {
             self.provider.for_each_node(&mut |n| {
                 if !n.source_file.is_empty() && hazard_bare(&n.label) == *tn {
-                    target_files.insert(n.source_file.clone());
+                    target_files.insert(n.source_file.to_string());
                 }
             });
         }
@@ -2911,7 +2926,8 @@ impl Server {
                 }
                 if let Some(tn) = &tnorm {
                     let key_match = s.key.as_deref().is_some_and(|k| hazard_key_seg(k) == *tn);
-                    let opaque_in_file = s.key.is_none() && target_files.contains(&n.source_file);
+                    let opaque_in_file =
+                        s.key.is_none() && target_files.contains(n.source_file.as_str());
                     if !key_match && !opaque_in_file {
                         continue;
                     }
@@ -2920,7 +2936,7 @@ impl Server {
                 if rows.len() < cap {
                     rows.push((
                         n.repo.clone().unwrap_or_default(),
-                        n.source_file.clone(),
+                        n.source_file.to_string(),
                         s.line,
                         ks,
                         s.key.clone(),
@@ -3600,7 +3616,7 @@ Cross-repo: {} edge(s) span repositories{}",
                 })
                 .map(|e| {
                     let forward = &e.source == a;
-                    (e.relation, forward)
+                    (e.relation.to_string(), forward)
                 })
                 .min_by(|(x, _), (y, _)| priority(x).cmp(&priority(y)).then_with(|| x.cmp(y)))
         };
@@ -3725,10 +3741,10 @@ Cross-repo: {} edge(s) span repositories{}",
                     {
                         continue;
                     }
-                    if !seen.insert((nb_id.clone(), e.relation.clone())) {
+                    if !seen.insert((nb_id.clone(), e.relation.to_string())) {
                         continue;
                     }
-                    *by_rel.entry(e.relation.clone()).or_default() += 1;
+                    *by_rel.entry(e.relation.to_string()).or_default() += 1;
                     let mut detail = String::new();
                     if let Some(ctx) = &e.context {
                         detail.push_str(&format!(" ({})", sanitize_label(ctx)));
@@ -3737,7 +3753,7 @@ Cross-repo: {} edge(s) span repositories{}",
                     hits.push((
                         show_sites.then(|| nb_id.clone()),
                         self.label_of(&nb_id),
-                        e.relation.clone(),
+                        e.relation.to_string(),
                         detail,
                     ));
                 }
@@ -4008,7 +4024,7 @@ Cross-repo: {} edge(s) span repositories{}",
         let mut rows: Vec<(String, Option<u32>)> = Vec::new();
         self.provider.for_each_node(&mut |n| {
             if !code_only || n.file_type == synaptic_core::FileType::Code {
-                rows.push((n.source_file.clone(), n.community));
+                rows.push((n.source_file.to_string(), n.community));
             }
         });
         compute_pr_impact(rows.iter().map(|(f, c)| (f.as_str(), *c)), files)
@@ -4605,7 +4621,7 @@ Cross-repo: {} edge(s) span repositories{}",
         let impact = {
             let mut rows: Vec<(String, Option<u32>)> = Vec::new();
             self.provider
-                .for_each_node(&mut |n| rows.push((n.source_file.clone(), n.community)));
+                .for_each_node(&mut |n| rows.push((n.source_file.to_string(), n.community)));
             ImpactIndex::build(rows.iter().map(|(f, c)| (f.as_str(), *c)))
         };
         for (p, fc) in actionable.iter_mut().zip(files) {
@@ -4782,7 +4798,7 @@ Cross-repo: {} edge(s) span repositories{}",
                                 .unwrap_or_else(|| id.0.clone()),
                         )
                     })
-                    .unwrap_or_else(|| (String::new(), 0, id.0.clone()));
+                    .unwrap_or_else(|| (String::new().into(), 0, id.0.clone()));
                 json!({ "id": id.0, "file": file, "degree": degree, "qualified": qualified })
             })
             .collect();
@@ -7925,7 +7941,7 @@ mod tests {
             id: NodeId(id.into()),
             label: label.into(),
             file_type: FileType::Code,
-            source_file: format!("{id}.py"),
+            source_file: format!("{id}.py").into(),
             source_location: Some("L1".into()),
             community,
             repo: None,
@@ -8287,7 +8303,7 @@ mod tests {
                     id: NodeId("leaf_parse".into()),
                     label: "Sdk: cargo:leaf#parse".into(),
                     file_type: synaptic_core::FileType::Code,
-                    source_file: String::new(),
+                    source_file: String::new().into(),
                     source_location: None,
                     community: None,
                     repo: None,
@@ -8411,7 +8427,7 @@ mod tests {
                     id: NodeId("inventory::leaf_parse".into()),
                     label: "Sdk: cargo:leaf#parse".into(),
                     file_type: synaptic_core::FileType::Code,
-                    source_file: String::new(),
+                    source_file: String::new().into(),
                     source_location: None,
                     community: None,
                     // Federation deduplicates shared external SDK stubs onto
@@ -8931,7 +8947,7 @@ mod tests {
         // total reflects only real members.
         let real = node("real", "RealThing", Some(0));
         let mut stub = node("pkg", "@acme/router", Some(0));
-        stub.source_file = String::new();
+        stub.source_file = String::new().into();
         // A rationale (captured TODO comment) node also carries a community label
         // but is not a code symbol.
         let mut todo = node("todo", "// TODO: handle the edge case", Some(0));
@@ -10722,7 +10738,7 @@ mod tests {
         std::fs::write(&full, contents).unwrap();
         let mut n = node("sym", node_label, Some(0));
         n.set_kind(NodeKind::Method);
-        n.source_file = rel.replace('\\', "/");
+        n.source_file = rel.replace('\\', "/").into();
         n.source_location = Some(format!("L{}", span.0));
         n.set_span(synaptic_core::Span {
             start_line: span.0,
@@ -12200,7 +12216,7 @@ mod tests {
     fn query_graph_boundary_not_external() {
         let mut route = node("route", "/api/users", Some(0));
         route.extra.insert("_node_type".into(), json!("route"));
-        route.source_file = String::new();
+        route.source_file = String::new().into();
         let gd = GraphData {
             nodes: vec![node("client", "load_users", Some(0)), route],
             links: vec![edge("client", "route", "calls_service")],
@@ -12911,7 +12927,7 @@ mod tests {
             id: NodeId("jsonwebtoken".into()),
             label: "jsonwebtoken".into(),
             file_type: FileType::Code,
-            source_file: String::new(),
+            source_file: String::new().into(),
             source_location: None,
             community: Some(0),
             repo: None,
@@ -13402,7 +13418,7 @@ mod tests {
             id: NodeId(id.into()),
             label: label.into(),
             file_type: synaptic_core::FileType::Code,
-            source_file: format!("{repo}/{id}.rs"),
+            source_file: format!("{repo}/{id}.rs").into(),
             source_location: Some("L1".into()),
             community: Some(1),
             repo: Some(repo.into()),
@@ -13414,7 +13430,7 @@ mod tests {
             target: NodeId(t.into()),
             relation: "calls".into(),
             confidence: synaptic_core::Confidence::Extracted,
-            source_file: format!("{sr}.rs"),
+            source_file: format!("{sr}.rs").into(),
             source_location: Some("L2".into()),
             confidence_score: None,
             weight: 1.0,
@@ -13477,7 +13493,7 @@ mod tests {
             id: NodeId(id.into()),
             label: format!("{id}_fn"),
             file_type: synaptic_core::FileType::Code,
-            source_file: format!("{repo}/{id}.rs"),
+            source_file: format!("{repo}/{id}.rs").into(),
             source_location: Some("L1".into()),
             community: Some(1),
             repo: Some(repo.into()),
@@ -13533,7 +13549,7 @@ mod tests {
             id: NodeId(id.into()),
             label: label.into(),
             file_type: synaptic_core::FileType::Code,
-            source_file: format!("{repo}/{id}.rs"),
+            source_file: format!("{repo}/{id}.rs").into(),
             source_location: Some("L1".into()),
             community: Some(1),
             repo: Some(repo.into()),
@@ -13545,7 +13561,7 @@ mod tests {
             target: NodeId(t.into()),
             relation: "calls".into(),
             confidence: synaptic_core::Confidence::Extracted,
-            source_file: format!("{sr}.rs"),
+            source_file: format!("{sr}.rs").into(),
             source_location: Some("L2".into()),
             confidence_score: None,
             weight: 1.0,
@@ -13604,7 +13620,7 @@ mod tests {
             id: NodeId(id.into()),
             label: label.into(),
             file_type: synaptic_core::FileType::Code,
-            source_file: format!("{repo}/{id}.rs"),
+            source_file: format!("{repo}/{id}.rs").into(),
             source_location: Some("L1".into()),
             community: Some(1),
             repo: Some(repo.into()),
@@ -13616,7 +13632,7 @@ mod tests {
             target: NodeId(t.into()),
             relation: "calls".into(),
             confidence: synaptic_core::Confidence::Extracted,
-            source_file: format!("{sr}.rs"),
+            source_file: format!("{sr}.rs").into(),
             source_location: Some("L2".into()),
             confidence_score: None,
             weight: 1.0,

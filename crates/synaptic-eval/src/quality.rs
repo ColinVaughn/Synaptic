@@ -852,7 +852,7 @@ mod tests {
         let mut n = Node {
             id: NodeId(format!("{file}::{label}")),
             label: label.to_string(),
-            source_file: file.to_string(),
+            source_file: file.to_string().into(),
             ..Default::default()
         };
         n.kind = Some(KindValue::Known(NodeKind::Function));
@@ -871,7 +871,7 @@ mod tests {
         Node {
             id: NodeId(format!("{file}::{label}")),
             label: label.to_string(),
-            source_file: file.to_string(),
+            source_file: file.to_string().into(),
             source_location: Some(format!("L{line}")),
             ..Default::default()
         }
@@ -882,7 +882,7 @@ mod tests {
         Node {
             id: file_node_id(file),
             label: file.rsplit('/').next().unwrap_or(file).to_string(),
-            source_file: file.to_string(),
+            source_file: file.to_string().into(),
             ..Default::default()
         }
     }

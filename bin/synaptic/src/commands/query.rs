@@ -180,7 +180,7 @@ pub(crate) fn run_path(
                     });
                     let rel = hop
                         .map(|e| e.relation.clone())
-                        .unwrap_or_else(|| "related".to_string());
+                        .unwrap_or_else(|| "related".to_string().into());
                     // Arrow follows the EDGE's direction, not path order.
                     let forward = hop.map(|e| &e.source == prev).unwrap_or(true);
                     if forward {
@@ -294,7 +294,7 @@ pub(crate) fn run_affected(
                     if n.source_file.is_empty() {
                         "-".to_string()
                     } else {
-                        n.source_file.clone()
+                        n.source_file.to_string()
                     }
                 }
             })
@@ -387,7 +387,7 @@ pub(crate) fn run_hazards(
                 continue;
             }
             rows.push((
-                n.source_file.clone(),
+                n.source_file.to_string(),
                 s.line,
                 ks,
                 s.key.clone(),

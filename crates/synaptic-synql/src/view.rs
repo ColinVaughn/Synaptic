@@ -42,7 +42,7 @@ impl NodeView {
                 label: n.label.clone(),
                 kind: n.kind().map(|k| k.as_str().to_string()),
                 visibility: n.visibility().map(|v| v.as_str().to_string()),
-                file: n.source_file.clone(),
+                file: n.source_file.to_string(),
                 line: n.source_location.clone(),
                 loc: n.loc(),
                 signature: n.signature(),

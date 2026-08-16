@@ -320,7 +320,7 @@ pub fn attach_api_coverage_with_evidence(
             id: id.clone(),
             label: format!("{:?}: {}", observation.kind, observation.identity),
             file_type: FileType::Concept,
-            source_file: String::new(),
+            source_file: String::new().into(),
             source_location: None,
             community: None,
             repo: None,
@@ -346,7 +346,7 @@ pub fn attach_api_coverage_with_evidence(
             target: id,
             relation: OBSERVES_EXTERNAL_RELATION.into(),
             confidence: Confidence::Inferred,
-            source_file: observation.source_file.clone(),
+            source_file: observation.source_file.clone().into(),
             source_location: observation.source_location.clone(),
             confidence_score: Some(0.70),
             weight: 0.0,
@@ -868,7 +868,7 @@ fn generic_observation(
         member: None,
         operation_id: None,
         resolved_version: None,
-        source_file: source.source_file.clone(),
+        source_file: source.source_file.to_string(),
         source_location: source.source_location.clone(),
         source_node_id: Some(source.source.0.clone()),
         evidence_digest: evidence_digest(source),
@@ -985,7 +985,7 @@ fn http_observation(
         member: None,
         operation_id,
         resolved_version: None,
-        source_file: source.source_file.clone(),
+        source_file: source.source_file.to_string(),
         source_location: source.source_location.clone(),
         source_node_id: Some(source.source.0.clone()),
         evidence_digest: evidence_digest(source),
@@ -1055,7 +1055,7 @@ fn sdk_observation(
         .or_else(|| {
             package.as_deref().and_then(|package| {
                 dependency_version_cache
-                    .entry((package.to_string(), source.source_file.clone()))
+                    .entry((package.to_string(), source.source_file.to_string()))
                     .or_insert_with(|| {
                         crate::binding::installed_version_for_source(
                             package,
@@ -1098,7 +1098,7 @@ fn sdk_observation(
         member: Some(member),
         operation_id,
         resolved_version,
-        source_file: source.source_file.clone(),
+        source_file: source.source_file.to_string(),
         source_location: source.source_location.clone(),
         source_node_id: Some(source.source.0.clone()),
         evidence_digest: evidence_digest(source),
@@ -1135,7 +1135,7 @@ fn dynamic_observations(node: &Node) -> Vec<ExternalSurfaceObservation> {
                 member: site.key,
                 operation_id: None,
                 resolved_version: None,
-                source_file: node.source_file.clone(),
+                source_file: node.source_file.to_string(),
                 source_location,
                 source_node_id: Some(node.id.0.clone()),
                 evidence_digest: digest,

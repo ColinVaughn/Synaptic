@@ -372,7 +372,7 @@ mod tests {
                 id: NodeId(format!("src/mod_{}.rs::f_{i}", i % 7)),
                 label: format!("f_{i}()"),
                 file_type: FileType::Code,
-                source_file: format!("src/mod_{}.rs", i % 7),
+                source_file: format!("src/mod_{}.rs", i % 7).into(),
                 source_location: Some(format!("L{}", i + 1)),
                 community: Some((i % 3) as u32),
                 repo: None,

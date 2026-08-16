@@ -99,7 +99,7 @@ pub fn merge_incremental(
         .filter(|n| {
             let replaced = new_ast_ids.contains(&n.id);
             let stale_ast = full_rebuild && is_ast(n);
-            let evicted = evict_sources.contains(&n.source_file);
+            let evicted = evict_sources.contains(n.source_file.as_str());
             !(replaced || stale_ast || evicted)
         })
         .cloned()
@@ -123,7 +123,7 @@ pub fn merge_incremental(
     let evicted_node_ids: HashSet<NodeId> = existing
         .nodes
         .iter()
-        .filter(|n| evict_sources.contains(&n.source_file))
+        .filter(|n| evict_sources.contains(n.source_file.as_str()))
         .map(|n| n.id.clone())
         .collect();
 
@@ -156,7 +156,7 @@ pub fn merge_incremental(
             live_ids.contains(&e.source)
                 && live_ids.contains(&e.target)
                 && !evicted_node_ids.contains(&e.source)
-                && !evict_sources.contains(&e.source_file)
+                && !evict_sources.contains(e.source_file.as_str())
                 && !(ast_ids.contains(&e.source) && ast_ids.contains(&e.target))
         })
         .cloned()
@@ -180,7 +180,13 @@ pub fn topology(gd: &GraphData) -> (Vec<String>, Vec<(String, String, String)>) 
     let mut edges: Vec<(String, String, String)> = gd
         .links
         .iter()
-        .map(|e| (e.source.0.clone(), e.target.0.clone(), e.relation.clone()))
+        .map(|e| {
+            (
+                e.source.0.clone(),
+                e.target.0.clone(),
+                e.relation.to_string(),
+            )
+        })
         .collect();
     edges.sort();
     edges.dedup();
@@ -453,7 +459,7 @@ pub fn rebuild_with_detect(
                     }
                     let norm = norm_source_file(&n.source_file, Some(&root_str));
                     if !current.contains(&norm) {
-                        evict_sources.insert(n.source_file.clone());
+                        evict_sources.insert(n.source_file.to_string());
                         evict_sources.insert(norm);
                         had_deletions = true;
                     }

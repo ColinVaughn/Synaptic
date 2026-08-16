@@ -22,7 +22,7 @@ fn node(id: &str, label: &str, node_type: Option<&str>) -> Node {
         label: label.into(),
         file_type: FileType::Code,
         source_file: if node_type == Some("route") {
-            String::new()
+            String::new().into()
         } else {
             "src/client.ts".into()
         },
@@ -241,7 +241,7 @@ packages = ["npm:stripe"]
     );
     let package_id = NodeId(make_id(&["npm", "stripe"]));
     let mut package = node(&package_id.0, "stripe", None);
-    package.source_file.clear();
+    package.source_file = Default::default();
     let mut nodes = vec![package];
     let mut edges = Vec::new();
     let mut dependency = Dependency::new(
@@ -290,7 +290,7 @@ path = "/v1/customers"
         "npm:stripe#customers.create",
         Some("sdk_call_candidate"),
     );
-    candidate.source_file.clear();
+    candidate.source_file = Default::default();
     candidate
         .extra
         .insert("sdk_package".into(), json!("npm:stripe"));
@@ -357,7 +357,7 @@ path = "/repos/{owner}/{repo}"
         "go-github#Repositories.Get",
         Some("sdk_call_candidate"),
     );
-    candidate.source_file.clear();
+    candidate.source_file = Default::default();
     candidate
         .extra
         .insert("sdk_package".into(), json!(sdk_package));
@@ -411,7 +411,7 @@ path = "/v1/customers"
         "com.stripe#StripeClient.customers.create",
         Some("sdk_call_candidate"),
     );
-    candidate.source_file.clear();
+    candidate.source_file = Default::default();
     candidate
         .extra
         .insert("sdk_ecosystem".into(), json!("maven"));

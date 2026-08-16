@@ -12,8 +12,9 @@ pub mod dynamic;
 pub use dynamic::{DynamicCaveat, DynamicHazardIndex, SiteRef, dependents_caveat};
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
-use serde::ser::{SerializeMap, SerializeSeq};
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use synaptic_core::{Edge, FileType, Node, NodeId, NodeKind};
 use synaptic_graph::KnowledgeGraph;
@@ -483,88 +484,403 @@ where
     out.end()
 }
 
-struct OrderedSet<'a, T>(&'a HashSet<T>);
-
-impl<T> Serialize for OrderedSet<'_, T>
-where
-    T: Ord + Serialize,
-{
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut values: Vec<_> = self.0.iter().collect();
-        values.sort_unstable();
-        let mut out = serializer.serialize_seq(Some(values.len()))?;
-        for value in values {
-            out.serialize_element(value)?;
-        }
-        out.end()
-    }
-}
-
-fn serialize_ordered_set_map<S, K, V>(
-    map: &HashMap<K, HashSet<V>>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-    K: Ord + Serialize,
-    V: Ord + Serialize,
-{
-    let mut entries: Vec<_> = map.iter().collect();
-    entries.sort_unstable_by_key(|(key, _)| *key);
-    let mut out = serializer.serialize_map(Some(entries.len()))?;
-    for (key, values) in entries {
-        out.serialize_entry(key, &OrderedSet(values))?;
-    }
-    out.end()
-}
-
 /// Precomputed, **query-independent** index for [`query_modal`]: per-node label
 /// tokens, their document frequencies, and the undirected adjacency. Building it
 /// is O(nodes·label + edges); the per-query [`query`](QueryIndex::query) then
 /// only scores and expands. Build it **once** and reuse it across many queries —
 /// the MCP server does this at graph load/reload instead of rebuilding the index
 /// on every request (H1).
-#[derive(Serialize, Deserialize)]
+/// # Storage
+///
+/// Every per-node table is a `Vec` indexed by a dense **slot**, with one
+/// `NodeId -> slot` map and one `slot -> NodeId` list shared between them. The previous shape gave each of the six
+/// per-node tables its own `HashMap<NodeId, _>`, so every node id was cloned six
+/// times: on a 569k-node graph that was 372 MiB of duplicated keys against 26 MiB
+/// for the same data in slot-indexed vectors, and the `HashMap<NodeId,
+/// Vec<NodeId>>` adjacency cost 220 B/edge against 21 B/edge for `Vec<Vec<u32>>`.
+/// The serialized form is unchanged (see the `Serialize`/`Deserialize` impls), so
+/// persisted shard-index blobs written by earlier versions still load.
 pub struct QueryIndex {
     /// `node_count().max(1)` as the IDF denominator base.
     n: f64,
+    /// The one owned `NodeId -> slot` lookup. All per-node vectors below are
+    /// indexed by the slot it yields.
+    slots: HashMap<NodeId, u32>,
+    /// `slot -> NodeId`, for reporting results and walking the adjacency.
+    ids: Vec<NodeId>,
     /// Each node's set of label tokens.
-    #[serde(serialize_with = "serialize_ordered_set_map")]
-    node_tokens: HashMap<NodeId, HashSet<String>>,
+    ///
+    /// Every per-node table is `Option`-wrapped so that "this slot has no entry"
+    /// stays distinguishable from "this slot has an empty entry", which is what
+    /// the `HashMap` shape gave for free and what several call sites depend on:
+    /// `add_bridge_pairs` mints a slot for a bridge endpoint living in another
+    /// shard, and that slot must stay invisible to seeding and to the IDF base.
+    /// `HashSet`, `String` and `Vec` all carry a non-null pointer, so the
+    /// `Option` is niche-packed and costs nothing.
+    node_tokens: Vec<Option<HashSet<String>>>,
     /// Architectural tokens from the node's source path. Kept separate so path
     /// evidence can be weighted below direct symbol-name evidence.
-    #[serde(default, serialize_with = "serialize_ordered_set_map")]
-    node_path_tokens: HashMap<NodeId, HashSet<String>>,
+    node_path_tokens: Vec<Option<HashSet<String>>>,
     /// Extractor-provided search aliases (for example localization identifiers).
-    #[serde(default, serialize_with = "serialize_ordered_set_map")]
-    node_search_tokens: HashMap<NodeId, HashSet<String>>,
+    node_search_tokens: Vec<Option<HashSet<String>>>,
     /// Normalized exact label for each node. Retained so merged shard indexes
     /// can recompute repeated-label priors over the full graph rather than
     /// inheriting shard-local counts.
-    #[serde(default, serialize_with = "serialize_ordered_map")]
-    node_label_keys: HashMap<NodeId, String>,
-    /// How many nodes contain each token (document frequency).
-    #[serde(serialize_with = "serialize_ordered_map")]
+    node_label_keys: Vec<Option<String>>,
+    /// How many nodes contain each token (document frequency). Token-keyed, not
+    /// node-keyed, so it stays a map.
     df: HashMap<String, usize>,
     /// Undirected adjacency (sorted, deduped) for subgraph expansion.
-    #[serde(serialize_with = "serialize_ordered_map")]
-    adjacency: HashMap<NodeId, Vec<NodeId>>,
+    adjacency: Vec<Option<Vec<u32>>>,
     /// Mean undirected degree, used to normalise the hub penalty so it is
     /// graph-relative (a "hub" is a node whose degree dwarfs the average).
     avg_degree: f64,
     /// Query-independent source-quality prior. Missing entries (including old
     /// serialized indexes from before this field existed) are neutral `1.0`.
-    #[serde(default, serialize_with = "serialize_ordered_map")]
-    node_prior: HashMap<NodeId, f64>,
+    node_prior: Vec<Option<f64>>,
     /// Query-independent penalty applied only when a node is reached as a
     /// non-matching neighbour. Repeated labels such as `render()` should not
     /// crowd out specific downstream nodes, but remain full-strength seeds when
     /// the user asks for them directly.
-    #[serde(default, serialize_with = "serialize_ordered_map")]
-    neighbor_prior: HashMap<NodeId, f64>,
+    neighbor_prior: Vec<Option<f64>>,
+}
+
+/// Slot-indexed accessors. Each returns exactly what the equivalent
+/// `HashMap::get` returned before: `None` both for an id the index does not know
+/// and for a slot that carries no entry in that particular table.
+impl QueryIndex {
+    fn slot(&self, id: &NodeId) -> Option<usize> {
+        self.slots.get(id).map(|&s| s as usize)
+    }
+
+    /// The slot for `id`, minting one if absent. A new slot is appended to every
+    /// per-node vector as `None`, so all of them stay the same length as `ids`.
+    fn slot_or_insert(&mut self, id: &NodeId) -> usize {
+        if let Some(&s) = self.slots.get(id) {
+            return s as usize;
+        }
+        let slot = self.ids.len();
+        self.slots.insert(id.clone(), slot as u32);
+        self.ids.push(id.clone());
+        self.node_tokens.push(None);
+        self.node_path_tokens.push(None);
+        self.node_search_tokens.push(None);
+        self.node_label_keys.push(None);
+        self.adjacency.push(None);
+        self.node_prior.push(None);
+        self.neighbor_prior.push(None);
+        slot
+    }
+
+    fn tokens_of(&self, id: &NodeId) -> Option<&HashSet<String>> {
+        self.slot(id).and_then(|s| self.node_tokens[s].as_ref())
+    }
+
+    fn path_tokens_of(&self, id: &NodeId) -> Option<&HashSet<String>> {
+        self.slot(id)
+            .and_then(|s| self.node_path_tokens[s].as_ref())
+    }
+
+    fn search_tokens_of(&self, id: &NodeId) -> Option<&HashSet<String>> {
+        self.slot(id)
+            .and_then(|s| self.node_search_tokens[s].as_ref())
+    }
+
+    fn label_key_of(&self, id: &NodeId) -> Option<&String> {
+        self.slot(id).and_then(|s| self.node_label_keys[s].as_ref())
+    }
+
+    fn prior_of(&self, id: &NodeId) -> f64 {
+        self.slot(id)
+            .and_then(|s| self.node_prior[s])
+            .unwrap_or(1.0)
+    }
+
+    fn neighbor_prior_of(&self, id: &NodeId) -> f64 {
+        self.slot(id)
+            .and_then(|s| self.neighbor_prior[s])
+            .unwrap_or(1.0)
+    }
+
+    /// Undirected neighbours of `id`, or an empty walk when it has no adjacency
+    /// row (matching `HashMap::get(id).into_iter().flatten()`).
+    fn neighbor_ids(&self, id: &NodeId) -> impl Iterator<Item = &NodeId> + '_ {
+        self.slot(id)
+            .and_then(|s| self.adjacency[s].as_ref())
+            .into_iter()
+            .flatten()
+            .map(move |&n| &self.ids[n as usize])
+    }
+
+    fn has_adjacency(&self, id: &NodeId) -> bool {
+        self.slot(id).is_some_and(|s| self.adjacency[s].is_some())
+    }
+
+    fn degree_of(&self, id: &NodeId) -> usize {
+        self.slot(id)
+            .and_then(|s| self.adjacency[s].as_ref())
+            .map_or(0, Vec::len)
+    }
+
+    /// Ids that carry a token entry, in slot order. Replaces
+    /// `node_tokens.keys()`; every consumer sorts afterwards, so order is not
+    /// load-bearing.
+    fn token_bearing_ids(&self) -> impl Iterator<Item = &NodeId> + '_ {
+        self.ids
+            .iter()
+            .enumerate()
+            .filter(|(s, _)| self.node_tokens[*s].is_some())
+            .map(|(_, id)| id)
+    }
+
+    /// Slots in id order, so the persisted form keeps the sorted-key layout the
+    /// previous `serialize_ordered_map` produced.
+    fn slots_in_id_order(&self) -> Vec<u32> {
+        let mut order: Vec<u32> = (0..self.ids.len() as u32).collect();
+        order.sort_unstable_by(|&a, &b| self.ids[a as usize].cmp(&self.ids[b as usize]));
+        order
+    }
+
+    /// Sort an adjacency row into **`NodeId` order** and dedup it. Rows used to be
+    /// `Vec<NodeId>` sorted lexicographically, and expansion pushes neighbours
+    /// onto the frontier in row order, where the insertion sequence breaks score
+    /// ties. Sorting the slot numbers instead would silently reorder tied results.
+    fn sort_row(ids: &[NodeId], row: &mut Vec<u32>) {
+        row.sort_unstable_by(|&a, &b| ids[a as usize].cmp(&ids[b as usize]));
+        row.dedup();
+    }
+}
+
+/// How one stored table value is rendered into the persisted form: a `HashSet`
+/// becomes a sorted array, an adjacency row of slots becomes a list of `NodeId`s.
+trait SlotValue {
+    type Rendered<'a>: Serialize
+    where
+        Self: 'a;
+
+    fn render<'a>(&'a self, ids: &'a [NodeId]) -> Self::Rendered<'a>;
+}
+
+impl SlotValue for HashSet<String> {
+    type Rendered<'a> = Vec<&'a String>;
+
+    fn render<'a>(&'a self, _ids: &'a [NodeId]) -> Vec<&'a String> {
+        let mut values: Vec<&String> = self.iter().collect();
+        values.sort_unstable();
+        values
+    }
+}
+
+impl SlotValue for String {
+    type Rendered<'a> = &'a String;
+
+    fn render<'a>(&'a self, _ids: &'a [NodeId]) -> &'a String {
+        self
+    }
+}
+
+impl SlotValue for f64 {
+    type Rendered<'a> = f64;
+
+    fn render<'a>(&'a self, _ids: &'a [NodeId]) -> f64 {
+        *self
+    }
+}
+
+impl SlotValue for Vec<u32> {
+    type Rendered<'a> = Vec<&'a NodeId>;
+
+    fn render<'a>(&'a self, ids: &'a [NodeId]) -> Vec<&'a NodeId> {
+        self.iter().map(|&slot| &ids[slot as usize]).collect()
+    }
+}
+
+/// One slot-indexed table rendered as the id-keyed map the persisted format uses.
+struct SlotTable<'a, T> {
+    ids: &'a [NodeId],
+    order: &'a [u32],
+    values: &'a [Option<T>],
+}
+
+impl<T: SlotValue> Serialize for SlotTable<'_, T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let len = self.values.iter().filter(|v| v.is_some()).count();
+        let mut out = serializer.serialize_map(Some(len))?;
+        for &slot in self.order {
+            if let Some(value) = &self.values[slot as usize] {
+                out.serialize_entry(&self.ids[slot as usize], &value.render(self.ids))?;
+            }
+        }
+        out.end()
+    }
+}
+
+/// Field names of the persisted form, in the order the derived implementation
+/// used to emit them. The layout is a compatibility surface: shard-index blobs
+/// written by earlier versions are still read back by the `Deserialize` impl.
+const QUERY_INDEX_FIELDS: &[&str] = &[
+    "n",
+    "node_tokens",
+    "node_path_tokens",
+    "node_search_tokens",
+    "node_label_keys",
+    "df",
+    "adjacency",
+    "avg_degree",
+    "node_prior",
+    "neighbor_prior",
+];
+
+impl Serialize for QueryIndex {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let order = self.slots_in_id_order();
+        let mut out = serializer.serialize_struct("QueryIndex", QUERY_INDEX_FIELDS.len())?;
+        out.serialize_field("n", &self.n)?;
+        for (name, values) in [
+            ("node_tokens", &self.node_tokens),
+            ("node_path_tokens", &self.node_path_tokens),
+            ("node_search_tokens", &self.node_search_tokens),
+        ] {
+            out.serialize_field(
+                name,
+                &SlotTable {
+                    ids: &self.ids,
+                    order: &order,
+                    values,
+                },
+            )?;
+        }
+        out.serialize_field(
+            "node_label_keys",
+            &SlotTable {
+                ids: &self.ids,
+                order: &order,
+                values: &self.node_label_keys,
+            },
+        )?;
+        out.serialize_field("df", &OrderedMap(&self.df))?;
+        out.serialize_field(
+            "adjacency",
+            &SlotTable {
+                ids: &self.ids,
+                order: &order,
+                values: &self.adjacency,
+            },
+        )?;
+        out.serialize_field("avg_degree", &self.avg_degree)?;
+        for (name, values) in [
+            ("node_prior", &self.node_prior),
+            ("neighbor_prior", &self.neighbor_prior),
+        ] {
+            out.serialize_field(
+                name,
+                &SlotTable {
+                    ids: &self.ids,
+                    order: &order,
+                    values,
+                },
+            )?;
+        }
+        out.end()
+    }
+}
+
+/// `df` stays token-keyed, so it keeps the plain sorted-map rendering.
+struct OrderedMap<'a>(&'a HashMap<String, usize>);
+
+impl Serialize for OrderedMap<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serialize_ordered_map(self.0, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for QueryIndex {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct IndexVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for IndexVisitor {
+            type Value = QueryIndex;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a QueryIndex")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<QueryIndex, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut ix = QueryIndex::empty();
+                // Adjacency rows arrive as ids and are converted to slots only
+                // after every field is in, since a row may name a node whose own
+                // slot is minted by a later entry.
+                let mut adjacency: Vec<(NodeId, Vec<NodeId>)> = Vec::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "n" => ix.n = map.next_value()?,
+                        "avg_degree" => ix.avg_degree = map.next_value()?,
+                        "df" => ix.df = map.next_value()?,
+                        "node_tokens" | "node_path_tokens" | "node_search_tokens" => {
+                            let rows: HashMap<NodeId, HashSet<String>> = map.next_value()?;
+                            for (id, set) in rows {
+                                let slot = ix.slot_or_insert(&id);
+                                match key.as_str() {
+                                    "node_tokens" => ix.node_tokens[slot] = Some(set),
+                                    "node_path_tokens" => ix.node_path_tokens[slot] = Some(set),
+                                    _ => ix.node_search_tokens[slot] = Some(set),
+                                }
+                            }
+                        }
+                        "node_label_keys" => {
+                            let rows: HashMap<NodeId, String> = map.next_value()?;
+                            for (id, label) in rows {
+                                let slot = ix.slot_or_insert(&id);
+                                ix.node_label_keys[slot] = Some(label);
+                            }
+                        }
+                        "node_prior" | "neighbor_prior" => {
+                            let rows: HashMap<NodeId, f64> = map.next_value()?;
+                            for (id, value) in rows {
+                                let slot = ix.slot_or_insert(&id);
+                                if key == "node_prior" {
+                                    ix.node_prior[slot] = Some(value);
+                                } else {
+                                    ix.neighbor_prior[slot] = Some(value);
+                                }
+                            }
+                        }
+                        "adjacency" => {
+                            let rows: HashMap<NodeId, Vec<NodeId>> = map.next_value()?;
+                            adjacency = rows.into_iter().collect();
+                        }
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                for (id, row) in adjacency {
+                    let slot = ix.slot_or_insert(&id);
+                    let mapped = row.iter().map(|n| ix.slot_or_insert(n) as u32).collect();
+                    ix.adjacency[slot] = Some(mapped);
+                }
+                Ok(ix)
+            }
+        }
+
+        deserializer.deserialize_struct("QueryIndex", QUERY_INDEX_FIELDS, IndexVisitor)
+    }
 }
 
 /// Relevance decay applied per expansion hop: a node `k` hops from the seed that
@@ -649,17 +965,26 @@ impl QueryIndex {
     /// two inputs equivalent (`shard_index_matches_graph_built_index` pins it).
     pub fn build_from_parts(nodes: &[&Node], edges: &[&Edge]) -> Self {
         let n = nodes.len().max(1) as f64;
-        let mut node_tokens: HashMap<NodeId, HashSet<String>> = HashMap::new();
-        let mut node_path_tokens: HashMap<NodeId, HashSet<String>> = HashMap::new();
-        let mut node_search_tokens: HashMap<NodeId, HashSet<String>> = HashMap::new();
-        let mut node_label_keys: HashMap<NodeId, String> = HashMap::new();
-        let mut priors: HashMap<NodeId, f64> = HashMap::new();
+
+        // Build straight into the slot layout. An earlier version assembled the
+        // id-keyed maps first and folded them in afterwards, which kept both
+        // shapes resident at once and cost ~670 MiB of transient peak on a
+        // 569k-node graph -- most of the saving the layout was meant to deliver.
+        let mut ix = QueryIndex::empty();
+        ix.n = n;
+        ix.ids.reserve(nodes.len());
+        ix.slots.reserve(nodes.len());
+        for node in nodes {
+            ix.slot_or_insert(&node.id);
+        }
+
         let mut df: HashMap<String, usize> = HashMap::new();
         let mut label_counts: HashMap<String, usize> = HashMap::new();
         for node in nodes {
             *label_counts.entry(node.label.to_lowercase()).or_default() += 1;
         }
         for node in nodes {
+            let slot = ix.slot_or_insert(&node.id);
             let toks: HashSet<String> = tokenize(&node.label).into_iter().collect();
             let path_toks = tokenize_path(&node.source_file);
             let search_toks = search_tokens(node);
@@ -671,40 +996,52 @@ impl QueryIndex {
             for t in all {
                 *df.entry(t.clone()).or_insert(0) += 1;
             }
-            priors.insert(node.id.clone(), node_prior(node));
-            node_label_keys.insert(node.id.clone(), node.label.to_lowercase());
-            node_path_tokens.insert(node.id.clone(), path_toks);
-            node_search_tokens.insert(node.id.clone(), search_toks);
-            node_tokens.insert(node.id.clone(), toks);
+            ix.node_prior[slot] = Some(node_prior(node));
+            ix.node_label_keys[slot] = Some(node.label.to_lowercase());
+            ix.node_path_tokens[slot] = Some(path_toks);
+            ix.node_search_tokens[slot] = Some(search_toks);
+            ix.node_tokens[slot] = Some(toks);
+            let count = label_counts
+                .get(&node.label.to_lowercase())
+                .copied()
+                .unwrap_or(1);
+            ix.neighbor_prior[slot] = Some(repeated_label_neighbor_prior(count));
         }
-        let neighbor_prior = nodes
-            .iter()
-            .map(|node| {
-                let count = label_counts
-                    .get(&node.label.to_lowercase())
-                    .copied()
-                    .unwrap_or(1);
-                (node.id.clone(), repeated_label_neighbor_prior(count))
-            })
-            .collect();
-        let adjacency = undirected_adjacency_parts(nodes, edges);
-        let avg_degree = if adjacency.is_empty() {
+        ix.df = df;
+
+        // Undirected adjacency, mirroring `undirected_adjacency_parts`: every node
+        // gets a row, self-loops are skipped, and rows end up sorted by `NodeId`
+        // and deduped.
+        for node in nodes {
+            let slot = ix.slot_or_insert(&node.id);
+            ix.adjacency[slot].get_or_insert_default();
+        }
+        for e in edges {
+            if e.source == e.target {
+                continue;
+            }
+            let source = ix.slot_or_insert(&e.source) as u32;
+            let target = ix.slot_or_insert(&e.target) as u32;
+            ix.adjacency[source as usize]
+                .get_or_insert_default()
+                .push(target);
+            ix.adjacency[target as usize]
+                .get_or_insert_default()
+                .push(source);
+        }
+        let ids = std::mem::take(&mut ix.ids);
+        for row in ix.adjacency.iter_mut().flatten() {
+            QueryIndex::sort_row(&ids, row);
+        }
+        ix.ids = ids;
+
+        let rows = ix.adjacency.iter().flatten().count();
+        ix.avg_degree = if rows == 0 {
             0.0
         } else {
-            adjacency.values().map(|v| v.len()).sum::<usize>() as f64 / adjacency.len() as f64
+            ix.adjacency.iter().flatten().map(Vec::len).sum::<usize>() as f64 / rows as f64
         };
-        QueryIndex {
-            n,
-            node_tokens,
-            node_path_tokens,
-            node_search_tokens,
-            node_label_keys,
-            df,
-            adjacency,
-            avg_degree,
-            node_prior: priors,
-            neighbor_prior,
-        }
+        ix
     }
 
     /// Retrieve a subgraph relevant to `query_text` using the precomputed index:
@@ -742,7 +1079,7 @@ impl QueryIndex {
             .map(|e| EdgeRef {
                 source: e.source.clone(),
                 target: e.target.clone(),
-                relation: e.relation.clone(),
+                relation: e.relation.to_string(),
             })
             .collect();
         let edges = rank_result_edges(edges, &ranked.nodes, &ranked.scores);
@@ -759,15 +1096,17 @@ impl QueryIndex {
     pub fn empty() -> QueryIndex {
         QueryIndex {
             n: 1.0,
-            node_tokens: HashMap::new(),
-            node_path_tokens: HashMap::new(),
-            node_search_tokens: HashMap::new(),
-            node_label_keys: HashMap::new(),
+            slots: HashMap::new(),
+            ids: Vec::new(),
+            node_tokens: Vec::new(),
+            node_path_tokens: Vec::new(),
+            node_search_tokens: Vec::new(),
+            node_label_keys: Vec::new(),
             df: HashMap::new(),
-            adjacency: HashMap::new(),
+            adjacency: Vec::new(),
             avg_degree: 0.0,
-            node_prior: HashMap::new(),
-            neighbor_prior: HashMap::new(),
+            node_prior: Vec::new(),
+            neighbor_prior: Vec::new(),
         }
     }
 
@@ -775,32 +1114,42 @@ impl QueryIndex {
     /// nodes, so token sets and adjacency rows are disjoint and document
     /// frequencies sum. Streaming-friendly: only one part need be resident.
     pub fn absorb(&mut self, part: &QueryIndex) {
-        for (id, toks) in &part.node_tokens {
-            self.node_tokens.insert(id.clone(), toks.clone());
-        }
-        for (id, toks) in &part.node_path_tokens {
-            self.node_path_tokens.insert(id.clone(), toks.clone());
-        }
-        for (id, toks) in &part.node_search_tokens {
-            self.node_search_tokens.insert(id.clone(), toks.clone());
-        }
-        for (id, label) in &part.node_label_keys {
-            self.node_label_keys.insert(id.clone(), label.clone());
-        }
-        for (id, prior) in &part.node_prior {
-            self.node_prior.insert(id.clone(), *prior);
-        }
-        for (id, prior) in &part.neighbor_prior {
-            self.neighbor_prior.insert(id.clone(), *prior);
+        for (part_slot, id) in part.ids.iter().enumerate() {
+            let slot = self.slot_or_insert(id);
+            if let Some(toks) = &part.node_tokens[part_slot] {
+                self.node_tokens[slot] = Some(toks.clone());
+            }
+            if let Some(toks) = &part.node_path_tokens[part_slot] {
+                self.node_path_tokens[slot] = Some(toks.clone());
+            }
+            if let Some(toks) = &part.node_search_tokens[part_slot] {
+                self.node_search_tokens[slot] = Some(toks.clone());
+            }
+            if let Some(label) = &part.node_label_keys[part_slot] {
+                self.node_label_keys[slot] = Some(label.clone());
+            }
+            if let Some(prior) = part.node_prior[part_slot] {
+                self.node_prior[slot] = Some(prior);
+            }
+            if let Some(prior) = part.neighbor_prior[part_slot] {
+                self.neighbor_prior[slot] = Some(prior);
+            }
         }
         for (t, c) in &part.df {
             *self.df.entry(t.clone()).or_insert(0) += c;
         }
-        for (id, nbrs) in &part.adjacency {
-            self.adjacency
-                .entry(id.clone())
-                .or_default()
-                .extend(nbrs.iter().cloned());
+        // Adjacency is folded in a second pass so both endpoints of every row
+        // already own a slot in this accumulator.
+        for (part_slot, id) in part.ids.iter().enumerate() {
+            let Some(nbrs) = &part.adjacency[part_slot] else {
+                continue;
+            };
+            let mapped: Vec<u32> = nbrs
+                .iter()
+                .map(|&n| self.slot_or_insert(&part.ids[n as usize]) as u32)
+                .collect();
+            let slot = self.slot_or_insert(id);
+            self.adjacency[slot].get_or_insert_default().extend(mapped);
         }
     }
 
@@ -810,8 +1159,9 @@ impl QueryIndex {
             if a == b {
                 continue;
             }
-            self.adjacency.entry(a.clone()).or_default().push(b.clone());
-            self.adjacency.entry(b.clone()).or_default().push(a.clone());
+            let (sa, sb) = (self.slot_or_insert(a), self.slot_or_insert(b));
+            self.adjacency[sa].get_or_insert_default().push(sb as u32);
+            self.adjacency[sb].get_or_insert_default().push(sa as u32);
         }
     }
 
@@ -820,34 +1170,36 @@ impl QueryIndex {
     /// recompute the IDF base and mean degree, exactly as
     /// [`build`](Self::build) would on the union graph.
     pub fn finalize_merge(&mut self) {
-        for v in self.adjacency.values_mut() {
-            v.sort();
-            v.dedup();
+        let ids = std::mem::take(&mut self.ids);
+        for row in self.adjacency.iter_mut().flatten() {
+            QueryIndex::sort_row(&ids, row);
         }
-        self.n = self.node_tokens.len().max(1) as f64;
-        self.avg_degree = if self.adjacency.is_empty() {
+        self.ids = ids;
+
+        self.n = self.node_tokens.iter().flatten().count().max(1) as f64;
+        let rows = self.adjacency.iter().flatten().count();
+        self.avg_degree = if rows == 0 {
             0.0
         } else {
-            self.adjacency.values().map(|v| v.len()).sum::<usize>() as f64
-                / self.adjacency.len() as f64
+            self.adjacency.iter().flatten().map(Vec::len).sum::<usize>() as f64 / rows as f64
         };
-        if !self.node_label_keys.is_empty() {
+        if self.node_label_keys.iter().any(Option::is_some) {
             let mut counts = HashMap::<&str, usize>::new();
-            for label in self.node_label_keys.values() {
+            for label in self.node_label_keys.iter().flatten() {
                 *counts.entry(label.as_str()).or_default() += 1;
             }
-            self.neighbor_prior = self
+            let recomputed: Vec<Option<f64>> = self
                 .node_label_keys
                 .iter()
-                .map(|(id, label)| {
-                    (
-                        id.clone(),
+                .map(|label| {
+                    label.as_ref().map(|label| {
                         repeated_label_neighbor_prior(
                             counts.get(label.as_str()).copied().unwrap_or(1),
-                        ),
-                    )
+                        )
+                    })
                 })
                 .collect();
+            self.neighbor_prior = recomputed;
         }
     }
 
@@ -936,8 +1288,7 @@ impl QueryIndex {
             is_symbol_shaped_query(query_text).then(|| bare_name(query_text.trim()));
         let is_full_exact_symbol_match = |id: &NodeId| {
             exact_symbol_label.as_ref().is_some_and(|query_label| {
-                self.node_label_keys
-                    .get(id)
+                self.label_key_of(id)
                     .is_some_and(|node_label| bare_name(node_label) == *query_label)
             })
         };
@@ -951,16 +1302,13 @@ impl QueryIndex {
                     continue;
                 }
                 let matched = self
-                    .node_tokens
-                    .get(id)
+                    .tokens_of(id)
                     .is_some_and(|tokens| tokens.contains(token))
                     || self
-                        .node_path_tokens
-                        .get(id)
+                        .path_tokens_of(id)
                         .is_some_and(|tokens| tokens.contains(token))
                     || self
-                        .node_search_tokens
-                        .get(id)
+                        .search_tokens_of(id)
                         .is_some_and(|tokens| tokens.contains(token));
                 if matched {
                     concepts.insert(
@@ -992,9 +1340,9 @@ impl QueryIndex {
                     .sum();
                 sum * weight / (tokens.len().max(1) as f64).sqrt()
             };
-            let channel_score = channel(self.node_tokens.get(id), 1.0)
-                + channel(self.node_path_tokens.get(id), 0.35)
-                + channel(self.node_search_tokens.get(id), 0.55);
+            let channel_score = channel(self.tokens_of(id), 1.0)
+                + channel(self.path_tokens_of(id), 0.35)
+                + channel(self.search_tokens_of(id), 0.55);
             if discriminative_query_concepts.len() <= 1 {
                 return channel_score;
             }
@@ -1002,9 +1350,9 @@ impl QueryIndex {
                 candidate_concepts(id).len() as f64 / discriminative_query_concepts.len() as f64;
             channel_score * (0.25 + 0.75 * coverage)
         };
-        let degree = |id: &NodeId| self.adjacency.get(id).map_or(0, |v| v.len());
-        let prior = |id: &NodeId| self.node_prior.get(id).copied().unwrap_or(1.0);
-        let neighbor_prior = |id: &NodeId| self.neighbor_prior.get(id).copied().unwrap_or(1.0);
+        let degree = |id: &NodeId| self.degree_of(id);
+        let prior = |id: &NodeId| self.prior_of(id);
+        let neighbor_prior = |id: &NodeId| self.neighbor_prior_of(id);
         // Additive recency bonus (0.0 when no recency signal or node unchanged).
         // Added to a node's relevance before the hub penalty, so changed code both
         // ranks higher and is more likely to be pulled into the node budget.
@@ -1013,8 +1361,7 @@ impl QueryIndex {
         // Score and rank seeds by raw relevance (no hub penalty here: a seed earns
         // its place by matching the query, even if it is also well-connected).
         let mut scored: Vec<(NodeId, f64)> = self
-            .node_tokens
-            .keys()
+            .token_bearing_ids()
             .map(|id| (id.clone(), node_relevance(id) * prior(id)))
             .filter(|(_, s)| *s > 0.0)
             .collect();
@@ -1043,12 +1390,12 @@ impl QueryIndex {
                 selected_seeds.insert(id.clone());
                 continue;
             }
-            let intent_alias_candidate = self.node_tokens.get(id).is_some_and(|tokens| {
+            let intent_alias_candidate = self.tokens_of(id).is_some_and(|tokens| {
                 intent_variant_tokens
                     .iter()
                     .any(|token| tokens.contains(token))
             });
-            let direct_non_intent_evidence = self.node_tokens.get(id).is_some_and(|tokens| {
+            let direct_non_intent_evidence = self.tokens_of(id).is_some_and(|tokens| {
                 tokens.iter().any(|token| {
                     q_token_concepts.get(token).is_some_and(|concept| {
                         q_token_weights.contains_key(token)
@@ -1108,7 +1455,7 @@ impl QueryIndex {
             let mut best_intent: Option<(NodeId, usize, usize, f64, f64, f64)> = None;
             for (id, own_score) in &scored {
                 if selected_seeds.contains(id)
-                    || !self.node_tokens.get(id).is_some_and(|tokens| {
+                    || !self.tokens_of(id).is_some_and(|tokens| {
                         intent_variant_tokens
                             .iter()
                             .any(|token| tokens.contains(token))
@@ -1117,10 +1464,7 @@ impl QueryIndex {
                     continue;
                 }
                 let supporting: Vec<&NodeId> = self
-                    .adjacency
-                    .get(id)
-                    .into_iter()
-                    .flatten()
+                    .neighbor_ids(id)
                     .filter(|neighbor| lexical_anchors.contains(*neighbor))
                     .collect();
                 if supporting.is_empty() {
@@ -1221,7 +1565,7 @@ impl QueryIndex {
             let mut inject: Vec<NodeId> = r
                 .changed
                 .iter()
-                .filter(|id| self.adjacency.contains_key(*id) && !existing.contains(*id))
+                .filter(|id| self.has_adjacency(id) && !existing.contains(*id))
                 .cloned()
                 .collect();
             inject.sort(); // deterministic injection order
@@ -1267,25 +1611,23 @@ impl QueryIndex {
             }
             included.push(cur.id.clone());
             scores.push(cur.key);
-            if let Some(nbrs) = self.adjacency.get(&cur.id) {
-                for nb in nbrs {
-                    if done.contains(nb) {
-                        continue;
-                    }
-                    let own = node_relevance(nb);
-                    let inherited = cur.rel * DECAY * neighbor_prior(nb);
-                    let rel = own.max(inherited) * prior(nb);
-                    let key = (rel + recency_bonus(nb)) * hub_penalty(degree(nb), self.avg_degree);
-                    heap.push(Frontier {
-                        seed: false,
-                        key,
-                        rel,
-                        seq,
-                        bias: mode,
-                        id: nb.clone(),
-                    });
-                    seq += 1;
+            for nb in self.neighbor_ids(&cur.id) {
+                if done.contains(nb) {
+                    continue;
                 }
+                let own = node_relevance(nb);
+                let inherited = cur.rel * DECAY * neighbor_prior(nb);
+                let rel = own.max(inherited) * prior(nb);
+                let key = (rel + recency_bonus(nb)) * hub_penalty(degree(nb), self.avg_degree);
+                heap.push(Frontier {
+                    seed: false,
+                    key,
+                    rel,
+                    seq,
+                    bias: mode,
+                    id: nb.clone(),
+                });
+                seq += 1;
             }
         }
 
@@ -1563,7 +1905,7 @@ pub fn explain(kg: &KnowledgeGraph, id: &NodeId) -> Option<Explain> {
             neighbors.push(Neighbor {
                 id: e.target.clone(),
                 label,
-                relation: e.relation.clone(),
+                relation: e.relation.to_string(),
                 direction: "out",
                 context: e.context.clone(),
                 cross_repo: e.cross_repo,
@@ -1576,7 +1918,7 @@ pub fn explain(kg: &KnowledgeGraph, id: &NodeId) -> Option<Explain> {
             neighbors.push(Neighbor {
                 id: e.source.clone(),
                 label,
-                relation: e.relation.clone(),
+                relation: e.relation.to_string(),
                 direction: "in",
                 context: e.context.clone(),
                 cross_repo: e.cross_repo,
@@ -1592,7 +1934,7 @@ pub fn explain(kg: &KnowledgeGraph, id: &NodeId) -> Option<Explain> {
     Some(Explain {
         id: id.clone(),
         label: node.label.clone(),
-        source_file: node.source_file.clone(),
+        source_file: node.source_file.to_string(),
         community: node.community,
         neighbors,
     })
@@ -1752,7 +2094,10 @@ pub fn candidate_details(kg: &KnowledgeGraph, ids: &[NodeId]) -> Vec<AmbiguityCa
             let node = kg.node(id);
             AmbiguityCandidate {
                 id: id.clone(),
-                file: node.map(|n| n.source_file.clone()).unwrap_or_default(),
+                file: node
+                    .map(|n| n.source_file.clone())
+                    .unwrap_or_default()
+                    .to_string(),
                 degree: kg.degree(id),
                 qualified: node.map(qualified_ref).unwrap_or_else(|| id.0.clone()),
             }
@@ -1884,7 +2229,7 @@ pub fn module_importers(kg: &KnowledgeGraph, target: &NodeId) -> Vec<ModuleImpor
             out.push(ModuleImporter {
                 node_id: e.source.clone(),
                 confirmed,
-                via_relation: e.relation.clone(),
+                via_relation: e.relation.to_string(),
             });
         }
     }
@@ -1956,7 +2301,7 @@ pub fn affected_nodes(
         }
         rev.entry(e.target.clone())
             .or_default()
-            .push((e.source.clone(), e.relation.clone()));
+            .push((e.source.clone(), e.relation.to_string()));
     }
     for v in rev.values_mut() {
         v.sort();
@@ -2215,11 +2560,99 @@ pub fn affected_including_members(
 /// forecasts many changes against a static graph can build it once per graph load
 /// rather than per request. The relation set is fixed at build time; rebuild the
 /// index whenever the graph or the relation set changes.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct ReverseImpactIndex {
     /// target -> [(source, relation)] over the chosen impact relations.
-    #[serde(serialize_with = "serialize_ordered_map")]
-    rev: HashMap<NodeId, Vec<(NodeId, String)>>,
+    ///
+    /// The relation is an `Arc<str>` drawn from a per-build intern table. A graph
+    /// has a handful of distinct relation names (17 in a large real corpus) but
+    /// one entry here per qualifying edge, so storing an owned `String` per entry
+    /// meant 1.5M heap allocations holding 17 distinct values. `Arc<str>` also
+    /// narrows the tuple from 24 to 16 bytes. `Arc<T>` delegates `Ord` to `T`, so
+    /// the row ordering below is byte-for-byte what `String` produced.
+    rev: HashMap<NodeId, Vec<(NodeId, Arc<str>)>>,
+}
+
+/// One `rev` row, written as the `[source, relation]` pairs the persisted format
+/// uses. Hand-rolled because serde only implements `Arc` behind its `rc` feature.
+struct RevRow<'a>(&'a [(NodeId, Arc<str>)]);
+
+impl Serialize for RevRow<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeSeq;
+        let mut out = serializer.serialize_seq(Some(self.0.len()))?;
+        for (source, relation) in self.0 {
+            out.serialize_element(&(source, &**relation))?;
+        }
+        out.end()
+    }
+}
+
+impl Serialize for ReverseImpactIndex {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut entries: Vec<_> = self.rev.iter().collect();
+        entries.sort_unstable_by_key(|(key, _)| *key);
+        let mut out = serializer.serialize_struct("ReverseImpactIndex", 1)?;
+        out.serialize_field("rev", &OrderedRev(&entries))?;
+        out.end()
+    }
+}
+
+/// `target -> incoming (source, relation)` pairs, as borrowed for serialization.
+type RevEntry<'a> = (&'a NodeId, &'a Vec<(NodeId, Arc<str>)>);
+
+struct OrderedRev<'a>(&'a [RevEntry<'a>]);
+
+impl Serialize for OrderedRev<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut out = serializer.serialize_map(Some(self.0.len()))?;
+        for (key, row) in self.0 {
+            out.serialize_entry(key, &RevRow(row))?;
+        }
+        out.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ReverseImpactIndex {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            rev: HashMap<NodeId, Vec<(NodeId, String)>>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let mut intern: HashMap<String, Arc<str>> = HashMap::new();
+        let rev = wire
+            .rev
+            .into_iter()
+            .map(|(target, row)| {
+                let row = row
+                    .into_iter()
+                    .map(|(source, relation)| {
+                        let shared = intern
+                            .entry(relation)
+                            .or_insert_with_key(|r| Arc::from(r.as_str()))
+                            .clone();
+                        (source, shared)
+                    })
+                    .collect();
+                (target, row)
+            })
+            .collect();
+        Ok(ReverseImpactIndex { rev })
+    }
 }
 
 impl ReverseImpactIndex {
@@ -2246,14 +2679,20 @@ impl ReverseImpactIndex {
     /// here so the two cannot drift.
     pub fn build_from_parts(edges: &[&Edge], relations: &[&str]) -> Self {
         let relation_set: HashSet<&str> = relations.iter().copied().collect();
-        let mut rev: HashMap<NodeId, Vec<(NodeId, String)>> = HashMap::new();
+        // One `Arc<str>` per distinct relation name, shared by every row.
+        let mut intern: HashMap<&str, Arc<str>> = HashMap::new();
+        let mut rev: HashMap<NodeId, Vec<(NodeId, Arc<str>)>> = HashMap::new();
         for e in edges {
             if e.source == e.target || !relation_set.contains(e.relation.as_str()) {
                 continue;
             }
+            let relation = intern
+                .entry(e.relation.as_str())
+                .or_insert_with(|| Arc::from(e.relation.as_str()))
+                .clone();
             rev.entry(e.target.clone())
                 .or_default()
-                .push((e.source.clone(), e.relation.clone()));
+                .push((e.source.clone(), relation));
         }
         for incoming in rev.values_mut() {
             incoming.sort_unstable();
@@ -2294,7 +2733,7 @@ impl ReverseImpactIndex {
         // node's first visit is its min depth and all its min-depth in-edges are
         // seen during that layer; the explicit (min depth, smallest relation)
         // comparison then makes the result independent of seed/edge order.
-        let mut best: HashMap<NodeId, (usize, String)> = HashMap::new();
+        let mut best: HashMap<NodeId, (usize, Option<Arc<str>>)> = HashMap::new();
         let mut seen: HashSet<NodeId> = root_set.iter().map(|root| (*root).clone()).collect();
         let mut queue: VecDeque<(NodeId, usize)> =
             root_set.iter().map(|root| ((*root).clone(), 0)).collect();
@@ -2310,11 +2749,12 @@ impl ReverseImpactIndex {
                     continue;
                 }
                 let nd = d + 1;
-                let entry = best
-                    .entry(src.clone())
-                    .or_insert((usize::MAX, String::new()));
-                if nd < entry.0 || (nd == entry.0 && rel.as_str() < entry.1.as_str()) {
-                    *entry = (nd, rel.clone());
+                let entry = best.entry(src.clone()).or_insert((usize::MAX, None));
+                // `None` stands in for the empty-string sentinel the owned form
+                // used, and compares below every real relation exactly as "" did.
+                let current = entry.1.as_deref().unwrap_or("");
+                if nd < entry.0 || (nd == entry.0 && &**rel < current) {
+                    *entry = (nd, Some(rel.clone()));
                 }
                 if seen.insert(src.clone()) {
                     queue.push_back((src.clone(), nd));
@@ -2327,7 +2767,9 @@ impl ReverseImpactIndex {
             .map(|(node_id, (depth, via_relation))| AffectedHit {
                 node_id,
                 depth,
-                via_relation,
+                // Owned again at the boundary: one allocation per reported hit,
+                // not one per indexed edge.
+                via_relation: via_relation.as_deref().unwrap_or_default().to_string(),
             })
             .collect();
         hits.sort_by(|a, b| {
@@ -2356,7 +2798,7 @@ mod tests {
                     id: NodeId(id.to_string()),
                     label: label.to_string(),
                     file_type: FileType::Code,
-                    source_file: format!("{id}.py"),
+                    source_file: format!("{id}.py").into(),
                     source_location: Some("L1".into()),
                     community: Some(0),
                     repo: None,
@@ -2369,7 +2811,7 @@ mod tests {
                 .map(|(s, t, r)| Edge {
                     source: NodeId(s.to_string()),
                     target: NodeId(t.to_string()),
-                    relation: r.to_string(),
+                    relation: r.to_string().into(),
                     confidence: Confidence::Extracted,
                     source_file: "x.py".into(),
                     source_location: Some("L1".into()),
@@ -3096,11 +3538,22 @@ mod tests {
         v.as_object_mut().unwrap().remove("node_search_tokens");
         v.as_object_mut().unwrap().remove("node_label_keys");
         let back: QueryIndex = serde_json::from_value(v).unwrap();
-        assert!(back.node_prior.is_empty(), "old index has no priors");
+        // No prior was recorded for any node, so every lookup falls back to the
+        // neutral 1.0 rather than to a value invented at load time.
+        let id = NodeId("code".into());
         assert!(
-            back.neighbor_prior.is_empty(),
-            "old index has no neighbour priors"
+            back.node_prior.iter().all(Option::is_none),
+            "old index records no priors"
         );
+        assert!(
+            back.neighbor_prior.iter().all(Option::is_none),
+            "old index records no neighbour priors"
+        );
+        assert_eq!(back.prior_of(&id), 1.0);
+        assert_eq!(back.neighbor_prior_of(&id), 1.0);
+        assert!(back.label_key_of(&id).is_none());
+        assert!(back.path_tokens_of(&id).is_none());
+        assert!(back.search_tokens_of(&id).is_none());
         let r = back.query(&kg, "portal", 10, TraversalMode::Bfs);
         assert_eq!(r.nodes.first(), Some(&NodeId("code".into())));
     }
@@ -3237,7 +3690,7 @@ mod tests {
                     id: NodeId("stub".into()),
                     label: "Portal".into(),
                     file_type: FileType::Code,
-                    source_file: String::new(),
+                    source_file: String::new().into(),
                     source_location: None,
                     community: None,
                     repo: None,
@@ -3852,7 +4305,7 @@ mod tests {
                 id: NodeId(id.into()),
                 label: id.into(),
                 file_type: FileType::Code,
-                source_file: format!("{id}.rs"),
+                source_file: format!("{id}.rs").into(),
                 source_location: Some("L1".into()),
                 community: None,
                 repo: None,
@@ -4183,7 +4636,7 @@ mod tests {
             id: NodeId(id.into()),
             label: "react".into(),
             file_type: FileType::Code,
-            source_file: String::new(),
+            source_file: String::new().into(),
             source_location: None,
             community: None,
             repo: None,

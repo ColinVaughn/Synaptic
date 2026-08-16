@@ -75,7 +75,7 @@ mod tests {
             id: NodeId(id.into()),
             label: id.into(),
             file_type: FileType::Code,
-            source_file: format!("src/{id}.rs"),
+            source_file: format!("src/{id}.rs").into(),
             source_location: None,
             community: None,
             repo: None,
@@ -90,7 +90,7 @@ mod tests {
             target: NodeId(t.into()),
             relation: "calls".into(),
             confidence: Confidence::Extracted,
-            source_file: format!("src/{s}.rs"),
+            source_file: format!("src/{s}.rs").into(),
             source_location: None,
             confidence_score: None,
             weight: 1.0,
@@ -119,11 +119,22 @@ mod tests {
     #[test]
     fn node_with_flattened_extra_survives() {
         let mut n = node("x");
-        n.extra.insert("norm_label".into(), serde_json::json!("x"));
+        n.extra.insert("_node_type".into(), serde_json::json!("x"));
         n.set_origin("ast");
         let back: Node = decode(&encode(&n).unwrap()).unwrap();
-        assert_eq!(back.extra.get("norm_label").unwrap(), "x");
+        assert_eq!(back.extra.get("_node_type").unwrap(), "x");
         assert_eq!(back.origin(), Some("ast"));
+    }
+
+    /// The derived `norm_label` is dropped on the way in through the binary codec
+    /// too, not just through JSON, so a shard never spends a `BTreeMap` leaf per
+    /// node on a key nothing reads.
+    #[test]
+    fn norm_label_is_dropped_by_the_binary_codec() {
+        let mut n = node("x");
+        n.extra.insert("norm_label".into(), serde_json::json!("x"));
+        let back: Node = decode(&encode(&n).unwrap()).unwrap();
+        assert!(back.extra.is_empty(), "held: {:?}", back.extra);
     }
 
     #[test]

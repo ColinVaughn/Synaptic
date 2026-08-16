@@ -274,7 +274,7 @@ fn resolve_hits(kg: &KnowledgeGraph, hits: Vec<AffectedHit>) -> Vec<(ImpactHit, 
                     ImpactHit {
                         id: n.id.0.clone(),
                         label: n.label.clone(),
-                        file: n.source_file.clone(),
+                        file: n.source_file.to_string(),
                         depth: hit.depth,
                         via_relation: hit.via_relation,
                     },
@@ -451,7 +451,7 @@ fn node_ref(n: &Node) -> NodeRef {
     NodeRef {
         id: n.id.0.clone(),
         label: n.label.clone(),
-        file: n.source_file.clone(),
+        file: n.source_file.to_string(),
         kind: n.kind().map(|k| k.as_str().to_string()),
         visibility: n.visibility().map(|v| v.as_str().to_string()),
     }

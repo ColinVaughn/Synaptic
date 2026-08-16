@@ -15,6 +15,7 @@ pub mod fsio;
 pub mod graph_data;
 pub mod hyperedge;
 pub mod id;
+pub mod interned;
 pub mod limits;
 pub mod node;
 pub mod node_kind;
@@ -34,7 +35,11 @@ pub use fsio::{write_atomic, write_atomic_with};
 pub use graph_data::GraphData;
 pub use hyperedge::Hyperedge;
 pub use id::{NodeId, make_id};
-pub use limits::{max_graph_bytes, max_nodes, max_shard_bytes, max_shard_nodes};
+pub use interned::Interned;
+pub use limits::{
+    MAX_SERVE_MB_ENV, ServeGuard, max_graph_bytes, max_nodes, max_serve_bytes, max_shard_bytes,
+    max_shard_nodes, projected_peak_bytes, serve_guard, serve_guard_for,
+};
 pub use node::Node;
 pub use node_kind::{KindValue, NodeKind, Origin, OriginKind, Visibility};
 pub use raw_call::{ImportRecord, RawCall};

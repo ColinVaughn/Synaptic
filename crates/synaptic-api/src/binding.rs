@@ -296,7 +296,7 @@ fn bind_sdk_usages_with_dependencies(
         if usage_keys.insert(usage_key) {
             let installed = if let Some(dependencies) = dependencies {
                 dependency_version_cache
-                    .entry((package_raw.clone(), source_edge.source_file.clone()))
+                    .entry((package_raw.clone(), source_edge.source_file.to_string()))
                     .or_insert_with(|| {
                         installed_version_for_source(
                             &package_raw,
@@ -603,7 +603,7 @@ fn reusable_package_node(
         id: canonical_id.clone(),
         label: dependency.package.name.clone(),
         file_type: FileType::Code,
-        source_file: String::new(),
+        source_file: String::new().into(),
         source_location: None,
         community: None,
         repo: None,
@@ -640,7 +640,7 @@ fn sdk_for_edge(
         target: vendor_id_node.clone(),
         relation: "sdk_for".into(),
         confidence: Confidence::Extracted,
-        source_file: dependency.source_file.clone(),
+        source_file: dependency.source_file.clone().into(),
         source_location: None,
         confidence_score: Some(Confidence::Extracted.default_score()),
         weight: 1.0,
@@ -690,7 +690,7 @@ fn vendor_node(vendor: &VendorConfig) -> Node {
         id: NodeId(format!("api_vendor:{}", vendor.id)),
         label: vendor.id.clone(),
         file_type: FileType::Concept,
-        source_file: String::new(),
+        source_file: String::new().into(),
         source_location: None,
         community: None,
         repo: None,
@@ -717,7 +717,7 @@ fn operation_node(anchor: &ApiOperationAnchor, authority: Option<&str>) -> Node 
             anchor.method, anchor.canonical_path, anchor.vendor
         ),
         file_type: FileType::Concept,
-        source_file: String::new(),
+        source_file: String::new().into(),
         source_location: None,
         community: None,
         repo: None,
@@ -812,7 +812,7 @@ fn provided_by_edge(operation_id: &NodeId, vendor_node_id: &NodeId, vendor_id: &
         target: vendor_node_id.clone(),
         relation: "provided_by".into(),
         confidence: Confidence::Extracted,
-        source_file: String::new(),
+        source_file: String::new().into(),
         source_location: None,
         confidence_score: Some(Confidence::Extracted.default_score()),
         weight: 1.0,

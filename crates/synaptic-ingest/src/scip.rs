@@ -233,10 +233,10 @@ fn emit_relationships(
         edges.push(Edge {
             source: NodeId(record.node_id.clone()),
             target: NodeId(target_node_id),
-            relation: relation.to_string(),
+            relation: relation.to_string().into(),
             confidence: Confidence::Extracted,
             confidence_score: Some(1.0),
-            source_file: record.doc_path.clone(),
+            source_file: record.doc_path.clone().into(),
             source_location,
             weight: 1.0,
             context: Some("scip".to_string()),
@@ -358,7 +358,7 @@ fn make_scip_node(
         id: NodeId(id.to_string()),
         label: sanitize_label(label),
         file_type: FileType::Code,
-        source_file: source_file.to_string(),
+        source_file: source_file.to_string().into(),
         source_location: if line > 0 {
             Some(format!("L{line}"))
         } else {

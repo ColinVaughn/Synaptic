@@ -289,7 +289,7 @@ mod tests {
         let mut n = Node {
             id: NodeId(format!("{file}::{label}")),
             label: label.to_string(),
-            source_file: file.to_string(),
+            source_file: file.to_string().into(),
             ..Default::default()
         };
         n.kind = Some(KindValue::Known(NodeKind::Function));

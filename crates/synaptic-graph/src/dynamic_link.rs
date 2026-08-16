@@ -60,7 +60,7 @@ pub fn link_dynamic_refs(mut nodes: Vec<Node>, mut edges: Vec<Edge>) -> (Vec<Nod
         edges.push(Edge {
             source: nodes[si].id.clone(),
             target: nodes[ti].id.clone(),
-            relation: "dynamic_ref".to_string(),
+            relation: "dynamic_ref".to_string().into(),
             confidence: Confidence::Inferred,
             source_file: nodes[si].source_file.clone(),
             source_location: None,
@@ -141,7 +141,7 @@ mod tests {
             id: NodeId(id.into()),
             label: label.into(),
             file_type: FileType::Code,
-            source_file: format!("{id}.ts"),
+            source_file: format!("{id}.ts").into(),
             source_location: None,
             community: None,
             repo: repo.map(|s| s.to_string()),

@@ -43,7 +43,7 @@ impl DynamicHazardIndex {
             for s in n.dynamic_sites() {
                 if s.key.is_none() {
                     file_opaque
-                        .entry(n.source_file.clone())
+                        .entry(n.source_file.to_string())
                         .or_default()
                         .push(SiteRef {
                             kind: s.kind,
@@ -92,7 +92,7 @@ pub fn dependents_caveat(
     }
     let referenced = idx.referenced.contains(&node.id);
     let sites = (!node.source_file.is_empty())
-        .then(|| idx.file_opaque.get(&node.source_file))
+        .then(|| idx.file_opaque.get(node.source_file.as_str()))
         .flatten();
     let opaque = sites.map_or(0, Vec::len);
     if !referenced && opaque == 0 {

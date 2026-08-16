@@ -25,7 +25,7 @@ fn node(i: usize) -> Node {
         // Multi-token labels so tokenize/IDF has real work; deliberate stem reuse.
         label: format!("Service_{} handler_{}", i % 64, i % 16),
         file_type: FileType::Code,
-        source_file: format!("src/mod_{}.rs", i % 32),
+        source_file: format!("src/mod_{}.rs", i % 32).into(),
         source_location: Some(format!("L{i}")),
         community: Some((i % 8) as u32),
         repo: None,
@@ -38,9 +38,9 @@ fn edge(src: usize, dst: usize) -> Edge {
     Edge {
         source: NodeId(format!("n{src}")),
         target: NodeId(format!("n{dst}")),
-        relation: "calls".to_string(),
+        relation: "calls".to_string().into(),
         confidence: Confidence::Extracted,
-        source_file: format!("src/mod_{}.rs", src % 32),
+        source_file: format!("src/mod_{}.rs", src % 32).into(),
         source_location: None,
         confidence_score: None,
         weight: 1.0,

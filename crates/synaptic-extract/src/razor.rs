@@ -163,7 +163,7 @@ fn ensure_type_node(result: &mut ExtractionResult, name: &str) -> synaptic_core:
             id: id.clone(),
             label: name.to_string(),
             file_type: synaptic_core::FileType::Code,
-            source_file: String::new(),
+            source_file: String::new().into(),
             source_location: None,
             origin: Some("ast".into()),
             ..Default::default()
@@ -255,9 +255,9 @@ pub fn extract_razor_source(path: &str, source: &[u8]) -> ExtractionResult {
                     result.edges.push(synaptic_core::Edge {
                         source: component_id.clone(),
                         target,
-                        relation: relation.to_string(),
+                        relation: relation.to_string().into(),
                         confidence: synaptic_core::Confidence::Extracted,
-                        source_file: path.to_string(),
+                        source_file: path.to_string().into(),
                         source_location: Some(format!("L{line}")),
                         confidence_score: None,
                         weight: 1.0,

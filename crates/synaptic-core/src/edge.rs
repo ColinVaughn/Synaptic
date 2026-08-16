@@ -17,7 +17,7 @@ const SITES_KEY: &str = "sites";
 pub struct EdgeKey {
     pub source: NodeId,
     pub target: NodeId,
-    pub relation: String,
+    pub relation: crate::Interned,
     pub context: Option<String>,
 }
 
@@ -41,7 +41,7 @@ impl EdgeKey {
 /// One concrete source location that produced an edge.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EdgeSite {
-    pub source_file: String,
+    pub source_file: crate::Interned,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub source_location: Option<String>,
 }
@@ -117,9 +117,9 @@ impl EdgeSiteAccumulator {
 pub struct Edge {
     pub source: NodeId,
     pub target: NodeId,
-    pub relation: String,
+    pub relation: crate::Interned,
     pub confidence: Confidence,
-    pub source_file: String,
+    pub source_file: crate::Interned,
 
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub source_location: Option<String>,

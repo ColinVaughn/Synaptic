@@ -521,7 +521,7 @@ impl Server {
             Some(node) => SymbolAnchor {
                 node_id: node.id.0,
                 label: node.label,
-                source_file: node.source_file,
+                source_file: node.source_file.to_string(),
                 repo: node.repo,
                 commit: commit.map(str::to_string),
                 confidence: 1.0,

@@ -21,7 +21,7 @@ fn graph(ids: &[&str]) -> GraphData {
             id: NodeId((*id).into()),
             label: (*id).into(),
             file_type: FileType::Code,
-            source_file: format!("src/{id}.rs"),
+            source_file: format!("src/{id}.rs").into(),
             source_location: None,
             community: None,
             repo: None,

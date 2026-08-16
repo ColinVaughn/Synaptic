@@ -317,11 +317,10 @@ mod tests {
     use serde_json::Map;
     use synaptic_core::{Confidence, FileType};
 
-    /// A loaded graph must not carry the derived `norm_label` on its nodes: it
-    /// would keep a BTreeMap leaf alive on every node to hold a value the export
-    /// path regenerates anyway.
+    /// Parsing a `graph.json` already discards the derived `norm_label`, so it
+    /// never costs a BTreeMap leaf per node in the first place.
     #[test]
-    fn from_graph_data_drops_the_derived_norm_label() {
+    fn parsing_drops_the_derived_norm_label_before_it_reaches_a_graph() {
         let raw = serde_json::json!({
             "directed": false, "multigraph": false, "graph": {},
             "nodes": [{
@@ -332,9 +331,25 @@ mod tests {
         });
         let gd: GraphData = serde_json::from_value(raw).unwrap();
         assert!(
-            gd.nodes[0].extra.contains_key("norm_label"),
-            "precondition: the file carries it"
+            gd.nodes[0].extra.is_empty(),
+            "the reader drops it, held: {:?}",
+            gd.nodes[0].extra
         );
+        assert_eq!(gd.nodes[0].label, "Auth.py", "the source of truth is kept");
+    }
+
+    /// `from_graph_data` keeps its own guard for a graph assembled in memory
+    /// rather than parsed, where the reader-side filter never runs.
+    #[test]
+    fn from_graph_data_drops_the_derived_norm_label() {
+        let mut n = node("a", "Auth.py", "a.py");
+        n.set_origin("ast");
+        n.extra
+            .insert("norm_label".into(), serde_json::json!("auth.py"));
+        let gd = GraphData {
+            nodes: vec![n],
+            ..Default::default()
+        };
 
         let kg = KnowledgeGraph::from_graph_data(gd);
         let node = kg.node(&NodeId("a".into())).unwrap();

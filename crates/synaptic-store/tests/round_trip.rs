@@ -24,7 +24,7 @@ fn edge(s: &str, t: &str) -> Edge {
         target: NodeId(t.into()),
         relation: "calls".into(),
         confidence: Confidence::Extracted,
-        source_file: format!("{s}.rs"),
+        source_file: format!("{s}.rs").into(),
         source_location: None,
         confidence_score: None,
         weight: 1.0,
@@ -95,12 +95,18 @@ fn materialize_matches_from_graph_data() {
     let dump = |kg: &KnowledgeGraph| {
         let mut ns: Vec<(String, String, String)> = kg
             .nodes()
-            .map(|n| (n.id.0.clone(), n.label.clone(), n.source_file.clone()))
+            .map(|n| (n.id.0.clone(), n.label.clone(), n.source_file.to_string()))
             .collect();
         ns.sort();
         let mut es: Vec<(String, String, String)> = kg
             .edges()
-            .map(|e| (e.source.0.clone(), e.target.0.clone(), e.relation.clone()))
+            .map(|e| {
+                (
+                    e.source.0.clone(),
+                    e.target.0.clone(),
+                    e.relation.to_string(),
+                )
+            })
             .collect();
         es.sort();
         (ns, es)

@@ -32,7 +32,7 @@ pub fn prefix_graph(graph: GraphData, tag: &str) -> GraphData {
             .entry("local_id".to_string())
             .or_insert_with(|| Value::String(original));
         if !n.source_file.is_empty() {
-            n.source_file = format!("{tag}/{}", n.source_file);
+            n.source_file = format!("{tag}/{}", n.source_file).into();
         }
         nodes.push(n);
     }
@@ -46,12 +46,12 @@ pub fn prefix_graph(graph: GraphData, tag: &str) -> GraphData {
             .contains_key("sites")
             .then(|| EdgeSiteAccumulator::new(&e));
         if !e.source_file.is_empty() {
-            e.source_file = format!("{tag}/{}", e.source_file);
+            e.source_file = format!("{tag}/{}", e.source_file).into();
         }
         if let Some(sites) = &mut aggregated_sites {
             sites.rewrite(|site| {
                 if !site.source_file.is_empty() {
-                    site.source_file = format!("{tag}/{}", site.source_file);
+                    site.source_file = format!("{tag}/{}", site.source_file).into();
                 }
             });
         }

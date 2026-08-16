@@ -238,7 +238,7 @@ mod fed_tests {
             id: NodeId(label.into()),
             label: label.into(),
             file_type: FileType::Code,
-            source_file: String::new(),
+            source_file: String::new().into(),
             source_location: None,
             community: None,
             repo: None,

@@ -86,7 +86,7 @@ pub fn to_obsidian(
         neighbors
             .entry(e.source.clone())
             .or_default()
-            .entry(e.relation.clone())
+            .entry(e.relation.to_string())
             .or_default()
             .push(e.target.clone());
         neighbors

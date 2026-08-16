@@ -203,7 +203,13 @@ fn import_edges(r: &crate::result::ExtractionResult) -> Vec<(String, String, Str
     r.edges
         .iter()
         .filter(|e| matches!(e.relation.as_str(), "imports" | "imports_from"))
-        .map(|e| (e.source.0.clone(), e.relation.clone(), e.target.0.clone()))
+        .map(|e| {
+            (
+                e.source.0.clone(),
+                e.relation.to_string(),
+                e.target.0.clone(),
+            )
+        })
         .collect()
 }
 

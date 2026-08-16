@@ -243,7 +243,7 @@ pub fn extract_sdk_surface_from_graph(
             Some(signature) => signature.raw.trim().to_string(),
             None => {
                 losses.push(SdkSurfaceLoss {
-                    source_file: node.source_file.clone(),
+                    source_file: node.source_file.to_string(),
                     symbol: symbol.clone(),
                     reason: "public symbol has no extracted signature".into(),
                 });

@@ -319,7 +319,7 @@ fn resolve_anchor(
         SymbolAnchor {
             node_id: node.id.0.clone(),
             label: node.label.clone(),
-            source_file: node.source_file.clone(),
+            source_file: node.source_file.to_string(),
             repo: node.repo.clone(),
             commit: commit.map(str::to_string),
             confidence: 1.0,

@@ -2186,7 +2186,7 @@ pub fn prune_local_sdk_candidates(
         .iter()
         .filter(|node| node.source_file.ends_with(".csproj"))
     {
-        let Ok(text) = std::fs::read_to_string(root.join(&project.source_file)) else {
+        let Ok(text) = std::fs::read_to_string(root.join(&*project.source_file)) else {
             continue;
         };
         let Ok(document) = roxmltree::Document::parse(&text) else {
@@ -3109,7 +3109,7 @@ fn emit_pyo3_module(result: &mut ExtractionResult, module: &str, registers: &[St
         id,
         label: format!("pyo3:{module}"),
         file_type: FileType::Code,
-        source_file: String::new(),
+        source_file: String::new().into(),
         source_location: None,
         community: None,
         repo: None,
@@ -5078,9 +5078,9 @@ fn emit_handler_to(
     result.edges.push(Edge {
         source: route,
         target: handler,
-        relation: "handled_by".to_string(),
+        relation: "handled_by".to_string().into(),
         confidence: Confidence::Inferred,
-        source_file: path.to_string(),
+        source_file: path.to_string().into(),
         source_location: Some(format!("L{line}")),
         confidence_score: Some(Confidence::Inferred.default_score()),
         weight: 1.0,
@@ -5411,9 +5411,9 @@ fn emit_grpc_handler(
     result.edges.push(Edge {
         source: id,
         target: handler,
-        relation: "handled_by".to_string(),
+        relation: "handled_by".to_string().into(),
         confidence: Confidence::Inferred,
-        source_file: path.to_string(),
+        source_file: path.to_string().into(),
         source_location: Some(format!("L{line}")),
         confidence_score: Some(Confidence::Inferred.default_score()),
         weight: 1.0,
@@ -5431,9 +5431,9 @@ fn emit_grpc_client(result: &mut ExtractionResult, path: &str, line: u32, svc: &
     result.edges.push(Edge {
         source,
         target: id,
-        relation: "calls_service".to_string(),
+        relation: "calls_service".to_string().into(),
         confidence: Confidence::Inferred,
-        source_file: path.to_string(),
+        source_file: path.to_string().into(),
         source_location: Some(format!("L{line}")),
         confidence_score: Some(Confidence::Inferred.default_score()),
         weight: 1.0,
@@ -6043,9 +6043,9 @@ fn boundary_link(
             result.edges.push(Edge {
                 source: node,
                 target: handler,
-                relation: "handled_by".to_string(),
+                relation: "handled_by".to_string().into(),
                 confidence: Confidence::Inferred,
-                source_file: path.to_string(),
+                source_file: path.to_string().into(),
                 source_location: Some(format!("L{line}")),
                 confidence_score: Some(Confidence::Inferred.default_score()),
                 weight: 1.0,
@@ -6713,7 +6713,7 @@ fn ensure_target(result: &mut ExtractionResult, id: &NodeId, label: &str, node_t
         id: id.clone(),
         label: label.to_string(),
         file_type: FileType::Code,
-        source_file: String::new(),
+        source_file: String::new().into(),
         source_location: None,
         community: None,
         repo: None,
@@ -6737,9 +6737,9 @@ fn link(
     result.edges.push(Edge {
         source,
         target,
-        relation: relation.to_string(),
+        relation: relation.to_string().into(),
         confidence: Confidence::Inferred,
-        source_file: path.to_string(),
+        source_file: path.to_string().into(),
         source_location: Some(format!("L{line}")),
         confidence_score: Some(Confidence::Inferred.default_score()),
         weight: 1.0,
@@ -6774,7 +6774,7 @@ pub(crate) fn ensure_file_node(result: &mut ExtractionResult, path: &str) -> Nod
             id: id.clone(),
             label: path.to_string(),
             file_type: FileType::Code,
-            source_file: path.to_string(),
+            source_file: path.to_string().into(),
             source_location: None,
             community: None,
             repo: None,

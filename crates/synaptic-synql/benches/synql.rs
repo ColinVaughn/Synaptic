@@ -12,7 +12,7 @@ fn synthetic(n: usize) -> KnowledgeGraph {
             id: NodeId(format!("n{i}")),
             label: format!("Sym{i}"),
             file_type: FileType::Code,
-            source_file: format!("src/mod_{}.rs", i % 32),
+            source_file: format!("src/mod_{}.rs", i % 32).into(),
             source_location: Some("L1".into()),
             community: Some((i % 16) as u32),
             repo: None,

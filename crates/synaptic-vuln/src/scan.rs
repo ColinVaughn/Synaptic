@@ -157,7 +157,7 @@ impl GraphUsageOracle {
                 entry.2.push(CallSite {
                     symbol: source.label.clone(),
                     symbol_id: source.id.0.clone(),
-                    file,
+                    file: file.to_string(),
                     line: parse_line(site.source_location.as_deref()),
                     member: member.clone(),
                 });
@@ -817,7 +817,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
     fn reaching_graph() -> GraphData {
         let mut route = source_node("route_items", false);
         route.label = "/items".into();
-        route.source_file = String::new();
+        route.source_file = String::new().into();
         route
             .extra
             .insert("_node_type".into(), "route".to_string().into());
@@ -890,7 +890,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             label: label.into(),
             file_type: synaptic_core::FileType::Code,
             // An empty source file is what marks a node as an external stub.
-            source_file: String::new(),
+            source_file: String::new().into(),
             source_location: None,
             community: None,
             repo: None,

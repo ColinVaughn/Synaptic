@@ -308,7 +308,7 @@ fn dependency_binding_fixture(
             id: NodeId(format!("node:{index}")),
             label: format!("symbol_{index}"),
             file_type: FileType::Code,
-            source_file: format!("src/file_{index}.rs"),
+            source_file: format!("src/file_{index}.rs").into(),
             source_location: None,
             community: None,
             repo: None,

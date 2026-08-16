@@ -273,7 +273,7 @@ mod tests {
             id: NodeId(id.into()),
             label: id.into(),
             file_type: FileType::Code,
-            source_file: format!("{id}.rs"),
+            source_file: format!("{id}.rs").into(),
             source_location: Some("L1".into()),
             community,
             repo: None,
@@ -460,7 +460,7 @@ mod tests {
         let mk_boundary = |id: &str, nt: &str| {
             let mut n = node(id, NodeKind::Function, None);
             n.extra.insert("_node_type".into(), json!(nt));
-            n.source_file = String::new();
+            n.source_file = String::new().into();
             n
         };
         let nodes = vec![

@@ -73,7 +73,7 @@ mod tests {
             id: NodeId(id.into()),
             label: id.into(),
             file_type: FileType::Code,
-            source_file: format!("{id}.rs"),
+            source_file: format!("{id}.rs").into(),
             source_location: None,
             community: None,
             repo: None,

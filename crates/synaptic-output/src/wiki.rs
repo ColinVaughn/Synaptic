@@ -174,7 +174,7 @@ pub fn to_wiki(
         let mut files: Vec<String> = members
             .iter()
             .filter_map(|id| kg.node(id))
-            .map(|n| n.source_file.clone())
+            .map(|n| n.source_file.to_string())
             .filter(|f| !f.is_empty())
             .collect();
         files.sort();
@@ -238,7 +238,7 @@ pub fn to_wiki(
         for e in kg.edges() {
             if &e.source == *id {
                 by_rel
-                    .entry(e.relation.clone())
+                    .entry(e.relation.to_string())
                     .or_default()
                     .push(label_of(&e.target));
             } else if &e.target == *id {

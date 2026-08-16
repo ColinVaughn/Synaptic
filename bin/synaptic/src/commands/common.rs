@@ -78,13 +78,27 @@ pub(crate) fn load_graph_data_backend(
 ) -> Result<GraphData> {
     match backend {
         StoreBackend::Json => {
-            let text = fs::read_to_string(graph_path).with_context(|| {
-                format!(
-                    "reading {} (run `synaptic extract` first?)",
-                    graph_path.display()
-                )
-            })?;
-            let gd: GraphData = serde_json::from_str(&text).context("parsing graph.json")?;
+            // Same memory guard the MCP server applies: report or refuse before
+            // allocating, rather than letting the OOM killer be the diagnostic.
+            if let Ok(meta) = fs::metadata(graph_path) {
+                match synaptic_core::serve_guard_for(meta.len()) {
+                    synaptic_core::ServeGuard::Proceed => {}
+                    synaptic_core::ServeGuard::Warn(note) => eprintln!("[synaptic] {note}"),
+                    synaptic_core::ServeGuard::Refuse(why) => anyhow::bail!(why),
+                }
+            }
+            // The file buffer is scoped to the parse: `filter_repo` below builds a
+            // second graph, and holding the text across it doubles the file's
+            // contribution to peak RSS.
+            let gd: GraphData = {
+                let text = fs::read_to_string(graph_path).with_context(|| {
+                    format!(
+                        "reading {} (run `synaptic extract` first?)",
+                        graph_path.display()
+                    )
+                })?;
+                serde_json::from_str(&text).context("parsing graph.json")?
+            };
             match repo {
                 Some(r) => Ok(synaptic_workspace::repo_scope::filter_repo(&gd, r)),
                 None => Ok(gd),
@@ -389,7 +403,7 @@ mod tests {
             id: NodeId(id.into()),
             label: id.into(),
             file_type: FileType::Code,
-            source_file: format!("src/{id}.rs"),
+            source_file: format!("src/{id}.rs").into(),
             source_location: None,
             community: None,
             repo: None,
@@ -453,7 +467,13 @@ mod tests {
             ns.sort();
             let mut es: Vec<(String, String, String)> = kg
                 .edges()
-                .map(|e| (e.source.0.clone(), e.target.0.clone(), e.relation.clone()))
+                .map(|e| {
+                    (
+                        e.source.0.clone(),
+                        e.target.0.clone(),
+                        e.relation.to_string(),
+                    )
+                })
                 .collect();
             es.sort();
             (ns, es)

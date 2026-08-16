@@ -1011,7 +1011,7 @@ mod tests {
                 id: NodeId(format!("n{i}")),
                 label: format!("Node_{i}"),
                 file_type: FileType::Code,
-                source_file: format!("src/m{}.rs", i % 16),
+                source_file: format!("src/m{}.rs", i % 16).into(),
                 source_location: Some("L1".into()),
                 community: Some((i % 8) as u32),
                 repo: None,

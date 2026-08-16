@@ -52,7 +52,7 @@ pub fn find_candidates(kg: &KnowledgeGraph, name: &str) -> Vec<Candidate> {
             label: n.label.clone(),
             kind: n.kind().map(|k| k.as_str().to_string()),
             visibility: n.visibility().map(|v| v.as_str().to_string()),
-            file: n.source_file.clone(),
+            file: n.source_file.to_string(),
             span: n.span(),
         })
         .collect();

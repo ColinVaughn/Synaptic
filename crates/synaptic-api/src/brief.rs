@@ -206,7 +206,7 @@ pub fn impact_from_nodes(
                     ApiImpactHit {
                         id: node.id.0.clone(),
                         label: node.label.clone(),
-                        file: node.source_file.clone(),
+                        file: node.source_file.to_string(),
                         depth: hit.depth,
                         via_relation: hit.via_relation,
                         community: node.community,

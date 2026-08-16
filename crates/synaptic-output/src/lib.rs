@@ -334,7 +334,7 @@ pub fn to_html_string(kg: &KnowledgeGraph) -> String {
             }));
         }
         for (i, e) in kg.edges().enumerate() {
-            relations.insert(e.relation.clone());
+            relations.insert(e.relation.to_string());
             // Color by relation so SQL structure and code->SQL bridges stand out.
             let color = crate::common::relation_color(&e.relation);
             vis_edges.push(serde_json::json!({
@@ -557,6 +557,50 @@ mod tests {
     use super::*;
     use serde_json::Map;
     use synaptic_core::{Confidence, Edge, FileType, GraphData, Node, NodeId};
+
+    /// `norm_label` is dropped when a `graph.json` is read and re-derived when one
+    /// is written, so a load/store round trip leaves the file's node keys exactly
+    /// as they were. The reader-side drop is what keeps a one-key `BTreeMap` off
+    /// every node in memory; this pins that it stays invisible on disk.
+    #[test]
+    fn norm_label_survives_a_full_graph_json_round_trip() {
+        let original = serde_json::json!({
+            "directed": true, "multigraph": false, "graph": {},
+            "nodes": [{
+                "id": "auth", "label": "AuthService", "file_type": "code",
+                "source_file": "src/auth.rs", "source_location": "L1",
+                "norm_label": "authservice", "_origin": "ast"
+            }, {
+                "id": "login", "label": "LogIn", "file_type": "code",
+                "source_file": "src/login.rs", "source_location": "L4",
+                "norm_label": "login"
+            }],
+            "links": [], "hyperedges": []
+        });
+
+        let gd: GraphData = serde_json::from_value(original.clone()).unwrap();
+        for node in &gd.nodes {
+            assert!(node.extra.is_empty(), "reader drops the derived key");
+        }
+
+        let kg = synaptic_graph::KnowledgeGraph::from_graph_data(gd);
+        let written = to_json_value(&kg);
+        let nodes = written["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 2);
+        for node in nodes {
+            let label = node["label"].as_str().unwrap();
+            assert_eq!(
+                node["norm_label"].as_str().unwrap(),
+                label.to_lowercase(),
+                "the writer re-derives norm_label for {label}"
+            );
+        }
+        // And the round trip is stable: reading what we just wrote and writing it
+        // again reproduces the same bytes.
+        let again: GraphData = serde_json::from_value(written.clone()).unwrap();
+        let twice = to_json_value(&synaptic_graph::KnowledgeGraph::from_graph_data(again));
+        assert_eq!(written, twice, "load/store is idempotent");
+    }
     use synaptic_graph::{ClusterOptions, apply_communities, cluster};
 
     fn sample_kg() -> KnowledgeGraph {

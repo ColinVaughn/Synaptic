@@ -53,7 +53,7 @@ pub fn attach_cpp_methods(nodes: &mut [Node], edges: &mut Vec<Edge>) -> usize {
         owners
             .entry(node.label.clone())
             .or_default()
-            .push((node.id.clone(), node.source_file.clone()));
+            .push((node.id.clone(), node.source_file.to_string()));
     }
     let mut seen: HashSet<(NodeId, NodeId)> = edges
         .iter()
@@ -354,7 +354,7 @@ fn make_asset_node(canonical: &str, kind: &'static str) -> Node {
         id: file_node_id(canonical),
         label: canonical.to_string(),
         file_type,
-        source_file: canonical.to_string(),
+        source_file: canonical.to_string().into(),
         source_location: None,
         community: None,
         repo: None,

@@ -212,7 +212,7 @@ mod tests {
             id: NodeId(id.into()),
             label: label.into(),
             file_type: FileType::Code,
-            source_file: format!("{id}.py"),
+            source_file: format!("{id}.py").into(),
             source_location: None,
             community: None,
             repo: None,
