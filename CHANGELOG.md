@@ -10,6 +10,58 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.14] - 2026-08-16
+
+### Changed
+
+- Loading a `graph.json` to serve or query it uses far less memory. Peak
+  resident set on a 569,000-node / 1.57M-edge graph fell from 3,964 MiB to
+  2,193 MiB (-44.7%), measured under a counting allocator. Four independent
+  costs were stacked on the load path; parsing itself was never the expensive
+  part.
+  - The file buffer no longer outlives the parse. `Server::load`, the CLI's
+    JSON read path, and `synaptic-workspace`'s `load_graph` all held the whole
+    file while the graph and its indexes were built -- the peak phase -- adding
+    the file's entire length to peak RSS for nothing.
+  - `norm_label` is dropped as the node is read rather than after the whole
+    graph is in memory. It is derived from `label`, written only by the export
+    path, and read by nothing, but it sits on every node, so materializing it
+    gave every node a one-key `BTreeMap`, whose smallest allocation is a fixed
+    ~630-byte 11-slot leaf however few keys it holds: 342 MiB of scaffolding
+    allocated purely to be discarded again. The writer still emits it, so
+    `graph.json` is unchanged and existing graphs benefit without re-extraction.
+  - `QueryIndex` keys its per-node tables by a dense slot instead of a cloned
+    `NodeId`. Six separate `HashMap<NodeId, _>` tables meant six copies of every
+    node id (372 MiB against 26 MiB for the same data in slot-indexed vectors),
+    and the `HashMap<NodeId, Vec<NodeId>>` adjacency cost 220 B/edge against
+    21 B/edge for `Vec<Vec<u32>>`. The index went from 1,058 MiB to 569 MiB.
+  - `source_file` and `relation` are shared strings (`Interned`), not one
+    `String` per occurrence. They are the graph's most repetitive fields: a
+    large corpus holds a few hundred distinct source paths across millions of
+    node and edge occurrences, and 17 distinct relation names across 1.5M
+    edges.
+
+  The on-disk contracts are unchanged and verified so: a real `graph.json`
+  round-trips byte-for-byte through a load and store, and the persisted
+  `QueryIndex` / `ReverseImpactIndex` shard-index blobs are byte-identical to
+  those written by 0.9.13, so existing stores load without a rebuild. Query
+  rankings (node ids *and* scores) and `affected` reverse-impact results are
+  byte-identical to 0.9.13 across the regression corpus.
+
+### Added
+
+- `SYNAPTIC_MAX_SERVE_MB` caps the `graph.json` a serve or query load will
+  accept, refusing an oversized graph with an explanation instead of letting the
+  process grow until the OOM killer takes it. It is **uncapped by default**: a
+  served graph is the operator's own extraction and is routinely far larger than
+  the 50 MiB `SYNAPTIC_MAX_GRAPH_MB` guard, which exists for untrusted input
+  (the merge driver, federation, remote fetches) and is unchanged.
+- A serve or query load projected to need 1 GiB or more now reports its expected
+  peak on stderr, so memory pressure is visible before it becomes an OOM. When
+  the process runs under a cgroup memory limit (v2 `memory.max` or v1
+  `memory.limit_in_bytes`) that the projection does not fit inside, the note
+  says the process is likely to be killed and names the ways out.
+
 ## [0.9.13] - 2026-08-15
 
 ### Fixed
@@ -2412,7 +2464,8 @@ parameters), and `graph.json` gains only additive edge keys.
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.13...HEAD
+[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.14...HEAD
+[0.9.14]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.13...v0.9.14
 [0.9.13]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.10...v0.9.11
