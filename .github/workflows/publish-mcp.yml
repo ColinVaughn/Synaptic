@@ -2,10 +2,6 @@ name: Publish to MCP Registry
 
 on:
   push:
-    branches: [master]
-    paths:
-      - server.json
-      - .github/workflows/publish-mcp.yml
     tags: ["v*"]
   workflow_dispatch:
 
@@ -18,6 +14,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+      - name: Set release version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          jq --arg version "${GITHUB_REF_NAME#v}" '.version = $version' server.json > server.tmp
+          mv server.tmp server.json
       - name: Install mcp-publisher
         run: |
           curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
