@@ -1,0 +1,32 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ColinVaughn/synaptic",
+  "title": "Synaptic Code Intelligence",
+  "description": "Code intelligence for repository graphs, change impact, test selection, and engineering memory.",
+  "repository": {
+    "url": "https://github.com/ColinVaughn/Synaptic",
+    "source": "github"
+  },
+  "websiteUrl": "https://synapticgraph.com",
+  "version": "0.9.14",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://synapticgraph.com/api/mcp/projects/{project_id}",
+      "variables": {
+        "project_id": {
+          "description": "Synaptic project UUID from the MCP dashboard",
+          "isRequired": true
+        }
+      },
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Bearer token from the Synaptic MCP dashboard, including the Bearer prefix",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}
