@@ -58,12 +58,16 @@ pub const ECMASCRIPT_BUILTINS: &[&str] = &[
 const FUNCTION_TYPES: &[&str] = &[
     "function_declaration",
     "generator_function_declaration",
+    "function_expression",
+    "arrow_function",
     "function_signature",
     "method_definition",
 ];
 const TS_FUNCTION_TYPES: &[&str] = &[
     "function_declaration",
     "generator_function_declaration",
+    "function_expression",
+    "arrow_function",
     "function_signature",
     "method_definition",
     "method_signature",
@@ -73,6 +77,7 @@ const FUNCTION_BOUNDARY_TYPES: &[&str] = &[
     "function_declaration",
     "generator_function_declaration",
     "function_signature",
+    "function_expression",
     "arrow_function",
     "method_definition",
 ];
@@ -80,6 +85,7 @@ const TS_FUNCTION_BOUNDARY_TYPES: &[&str] = &[
     "function_declaration",
     "generator_function_declaration",
     "function_signature",
+    "function_expression",
     "arrow_function",
     "method_definition",
     "method_signature",
@@ -275,6 +281,23 @@ mod tests {
                 .iter()
                 .any(|call| call.callee == "w.render" && call.is_member_call)
         );
+    }
+
+    #[cfg(feature = "lang-javascript")]
+    #[test]
+    fn js_named_arrow_is_a_function_with_its_own_calls() {
+        let r = super::extract_js_source(
+            "app.js",
+            b"const load =\n  async (value) => helper(value);\nfunction helper(value) { return value; }\n",
+        );
+        assert!(labels(&r).contains(&"load()".to_string()));
+        assert!(
+            call_pairs(&r).contains(&("load()".into(), "helper()".into())),
+            "calls: {:?}",
+            call_pairs(&r)
+        );
+        let load = r.nodes.iter().find(|node| node.label == "load()").unwrap();
+        assert_eq!(load.source_location.as_deref(), Some("L1"));
     }
 
     fn rel_pairs(

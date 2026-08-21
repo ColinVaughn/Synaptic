@@ -166,7 +166,7 @@ pub(crate) fn git_output(args: &[&str], cwd: Option<&Path>) -> Result<String, St
     }
 }
 
-pub(crate) fn ensure_checkout(cache_dir: &Path, repo: &CorpusRepo) -> Result<PathBuf, String> {
+pub fn ensure_checkout(cache_dir: &Path, repo: &CorpusRepo) -> Result<PathBuf, String> {
     std::fs::create_dir_all(cache_dir).map_err(|e| e.to_string())?;
     let dir = cache_dir.join(repo_name(&repo.url));
     if !dir.join(".git").exists() {

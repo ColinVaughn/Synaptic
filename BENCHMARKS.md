@@ -1,13 +1,15 @@
 # Synaptic benchmarks
 
 Synaptic's claims are backed by reproducible benchmarks rather than assertion. There are
-four families:
+five families:
 
 1. **Token economy** — how much smaller a graph query is than reading source (see the README).
 2. **Accuracy** — extraction correctness against a hand-labeled corpus (this document).
 3. **Scale** — extraction throughput across repository sizes and language families.
 4. **Extraction quality at scale** — correctness on 60 real repositories covering every
    shipped language, measured without hand labels and gated against pinned baselines.
+5. **Competitor head-to-head** — the same hand labels and fresh-build timing applied to
+   Synaptic and Graphify.
 
 All accuracy numbers are exact set-comparison against human-verified labels; nothing here is
 estimated or self-reported by the tool.
@@ -113,6 +115,94 @@ resolution), the affected baseline is updated upward deliberately.
 - Per-fixture call precision is reported and gated only via the pinned baseline; on tiny
   fixtures one unlabeled-but-real edge would swing the ratio, so the guard pins the measured
   value rather than asserting a universal 100%.
+
+## Graphify head-to-head
+
+`synaptic eval head-to-head` runs both real CLI pipelines on fresh copies of every accuracy
+fixture and scores both `graph.json` files through the evaluator above. Quality is pooled
+micro-F1 across calls, affected tests, blast radius, and cross-language labels. Accuracy is set
+or Jaccard accuracy (`TP / (TP + FP + FN)`), which avoids inventing a true-negative universe for
+graph extraction. Speed is the sum of per-fixture median cold build times.
+
+The 2026-08-20 Windows run used three repetitions and Graphify
+`b2cd36267456c166788c95be6e68574064a92a42`:
+
+| Tool | Quality F1 | Accuracy | Precision | Recall | Labels resolved | Cold corpus |
+|---|---:|---:|---:|---:|---:|---:|
+| Synaptic | 98.55% | 97.14% | 100.00% | 97.14% | 100.00% | 1.13 s |
+| Graphify | 87.10% | 77.14% | 100.00% | 77.14% | 100.00% | 6.37 s |
+
+Both tools tied on the six single-language fixtures. Graphify missed all labeled couplings in
+the TypeScript/Rust, gRPC, and queue fixtures, and the cross-language coupling in each of the
+pyo3 and WebSocket fixtures. Timings are machine-dependent; the accuracy corpus is deliberately
+small and measures labeled extraction behavior, not downstream agent task success.
+
+Reproduce after cloning Graphify and installing it into its local virtual environment:
+
+```powershell
+git clone https://github.com/safishamsi/graphify synaptic-out/competitors/graphify
+git -C synaptic-out/competitors/graphify checkout --detach b2cd36267456c166788c95be6e68574064a92a42
+python -m venv synaptic-out/competitors/graphify/.venv
+synaptic-out/competitors/graphify/.venv/Scripts/python -m pip install -e synaptic-out/competitors/graphify
+cargo build --release -p synaptic --bin synaptic
+target/release/synaptic eval head-to-head
+```
+
+The command writes full per-fixture timings and confusion counts to
+`synaptic-out/eval/head-to-head/report.json` and a readable comparison to `report.md`. Use
+`--fixture NAME` for a smoke run or `--json` for stdout-only automation.
+
+Add `--projects` to run the same comparison over the ten pinned, multi-language repositories
+in the scale corpus. Because those repositories have no exhaustive hand labels, quality,
+accuracy, precision, and recall are explicitly reported as agreement with the same Universal
+Ctags oracle over detector-selected code files and structural declaration kinds; imports,
+fields, rationale nodes, generated output, dependencies, and documentation do not pollute the
+declaration score. Source-anchor exactness is checked directly against the source. This is a
+broad coverage benchmark, not a substitute for the hand-labeled result above.
+
+```powershell
+target/release/synaptic eval head-to-head --projects --reps 1
+target/release/synaptic eval head-to-head --projects --repo p-map --reps 1
+```
+
+The 2026-08-20 Windows run covered all ten projects with no skips:
+
+| Tool | Projects | Quality F1 | Accuracy | Precision | Recall | Anchor exact | Parse warnings | Cold total |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Synaptic | 10 | 92.20% | 85.53% | 91.12% | 93.31% | 100.00% | 1.17% | 15.39 s |
+| Graphify | 10 | 81.10% | 68.21% | 75.01% | 88.27% | 94.01% | 0.00% | 50.07 s |
+
+Synaptic led by 11.10 percentage points in F1, 17.32 in accuracy, 16.11 in
+precision, 5.04 in recall, and 5.99 in anchor exactness while completing the
+corpus 3.25x faster. It won F1, accuracy, precision, and cold speed on all ten
+projects. Graphify had higher recall on cobra, gson, and Humanizer; Synaptic had
+higher recall on the other seven. Synaptic's 44 parse warnings were concentrated
+in fmt (27), Humanizer (15), and rack (2), and all 60,501 checked source anchors
+remained exact.
+
+`S/G` below means Synaptic / Graphify. These are the per-project scores behind
+the aggregate rather than a second benchmark run:
+
+| Project | Quality F1 S/G | Accuracy S/G | Precision S/G | Recall S/G | Anchor exact S/G | Cold seconds S/G |
+|---|---:|---:|---:|---:|---:|---:|
+| memchr | 98.68 / 40.29 | 97.39 / 25.23 | 98.19 / 25.42 | 99.17 / 97.01 | 100.00 / 98.40 | 0.37 / 5.06 |
+| click | 99.93 / 86.59 | 99.86 / 76.36 | 100.00 / 93.53 | 99.86 / 80.62 | 100.00 / 96.17 | 0.98 / 3.46 |
+| p-map | 84.75 / 58.46 | 73.53 / 41.30 | 75.76 / 48.72 | 96.15 / 73.08 | 100.00 / 93.94 | 0.11 / 0.70 |
+| cobra | 98.52 / 96.28 | 97.09 / 92.82 | 98.69 / 93.25 | 98.36 / 99.51 | 100.00 / 100.00 | 0.32 / 1.70 |
+| axum | 94.46 / 85.10 | 89.50 / 74.06 | 96.86 / 85.23 | 92.17 / 84.97 | 100.00 / 90.84 | 1.58 / 4.52 |
+| gson | 97.70 / 94.82 | 95.49 / 90.16 | 96.00 / 90.38 | 99.45 / 99.72 | 100.00 / 93.41 | 2.23 / 7.22 |
+| fmt | 85.19 / 72.09 | 74.21 / 56.36 | 90.43 / 78.87 | 80.53 / 66.38 | 100.00 / 98.62 | 1.60 / 5.04 |
+| Humanizer | 87.24 / 81.18 | 77.37 / 68.32 | 81.34 / 70.57 | 94.07 / 95.54 | 100.00 / 89.29 | 7.07 / 18.22 |
+| rack | 94.34 / 86.86 | 89.29 / 76.78 | 91.83 / 82.30 | 97.00 / 91.97 | 100.00 / 90.28 | 0.41 / 1.93 |
+| Slim | 99.65 / 91.52 | 99.31 / 84.36 | 100.00 / 86.99 | 99.31 / 96.54 | 100.00 / 100.00 | 0.72 / 2.23 |
+
+Across the corpus, Synaptic produced 74,889 nodes and 118,000 edges; Graphify
+produced 32,547 nodes and 77,238 edges. Against 18,787 oracle declarations,
+Synaptic matched 17,531 with 1,256 oracle-only and 1,709 tool-only declarations;
+Graphify matched 16,584 with 2,203 oracle-only and 5,525 tool-only declarations.
+
+Full per-project counts, timings, and skips are written to
+`synaptic-out/eval/head-to-head-projects/report.json` and `report.md`.
 
 ## Prediction calibration
 

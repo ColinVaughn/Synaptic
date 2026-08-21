@@ -106,13 +106,13 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         let k = ts_kind.to_ascii_lowercase();
         if k.contains("type_alias") {
             TypeAlias
-        } else if k.contains("interface") {
+        } else if k.contains("annotation") || k.contains("interface") {
             Interface
         } else if k.contains("trait") {
             Trait
         } else if k.contains("enum") {
             Enum
-        } else if k.contains("struct") {
+        } else if k.contains("struct") || k.contains("record") {
             Struct
         } else if k.contains("protocol") {
             Protocol
@@ -293,7 +293,28 @@ impl<'tree> Extractor<'_, '_, 'tree> {
         if let Some(n) = self.field(node, self.cfg.name_field) {
             return Some(n);
         }
+        if let Some(declarator) = self.bound_function_declarator(node) {
+            return self.field(declarator, "name");
+        }
         Self::declarator_name(node.child_by_field_name("declarator")?, 0)
+    }
+
+    /// The variable declarator naming an anonymous JS/TS function expression.
+    pub(crate) fn bound_function_declarator(&self, node: TsNode<'tree>) -> Option<TsNode<'tree>> {
+        if !matches!(node.kind(), "arrow_function" | "function_expression")
+            || self.field(node, self.cfg.name_field).is_some()
+        {
+            return None;
+        }
+        let parent = node.parent().filter(|parent| {
+            parent.kind() == "variable_declarator"
+                && self
+                    .field(*parent, "value")
+                    .is_some_and(|value| value.id() == node.id())
+        })?;
+        self.field(parent, "name")
+            .is_some_and(|name| name.kind() == "identifier")
+            .then_some(parent)
     }
 
     pub(crate) fn function_name(&self, node: TsNode<'tree>) -> Option<String> {
@@ -529,6 +550,9 @@ impl<'tree> Extractor<'_, '_, 'tree> {
 
         if self.cfg.function_types.contains(&t) {
             let Some(func_name) = self.function_name(node) else {
+                for child in Self::children(node) {
+                    self.walk(child, file_nid, parent_class, stem, depth + 1);
+                }
                 return;
             };
             let mut ancestor = node.parent();
@@ -548,8 +572,9 @@ impl<'tree> Extractor<'_, '_, 'tree> {
             {
                 return;
             }
-            let line = Self::line(node);
-            let vis = self.decl_visibility(node, &func_name);
+            let declaration = self.bound_function_declarator(node).unwrap_or(node);
+            let line = Self::line(declaration);
+            let vis = self.decl_visibility(declaration, &func_name);
             let sig = crate::signature::extract_signature(node, self.source);
             let id_name = if matches!(self.cfg.type_ref_style, Some(TypeRefStyle::Cpp)) {
                 c_family_function_id_part(&func_name)
@@ -588,7 +613,7 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                 self.add_code_node(
                     nid.clone(),
                     format!(".{func_name}()"),
-                    node,
+                    declaration,
                     if ecmascript_constructor {
                         synaptic_core::NodeKind::Constructor
                     } else {
@@ -614,7 +639,7 @@ impl<'tree> Extractor<'_, '_, 'tree> {
                 self.add_code_node(
                     nid.clone(),
                     format!("{func_name}()"),
-                    node,
+                    declaration,
                     if ecmascript_constructor {
                         synaptic_core::NodeKind::Constructor
                     } else if standalone_method {

@@ -20,15 +20,29 @@ use crate::walker::extract_with_config;
 pub fn java_config() -> LanguageConfig {
     LanguageConfig {
         language: || tree_sitter_java::LANGUAGE.into(),
-        class_types: &["class_declaration", "interface_declaration"],
-        function_types: &["method_declaration", "constructor_declaration"],
+        class_types: &[
+            "class_declaration",
+            "interface_declaration",
+            "enum_declaration",
+            "record_declaration",
+            "annotation_type_declaration",
+        ],
+        function_types: &[
+            "method_declaration",
+            "constructor_declaration",
+            "compact_constructor_declaration",
+        ],
         call_types: &["method_invocation"],
         name_field: "name",
         body_field: "body",
         call_function_field: "name",
         call_accessor_node_types: &[],
         call_accessor_field: "",
-        function_boundary_types: &["method_declaration", "constructor_declaration"],
+        function_boundary_types: &[
+            "method_declaration",
+            "constructor_declaration",
+            "compact_constructor_declaration",
+        ],
         superclasses_field: None,
         decorated_types: &[],
         builtins: &[],
@@ -143,6 +157,23 @@ class Dog extends Animal implements Greeter {
         assert!(ls.contains(&"Animal".to_string()));
         assert!(ls.contains(&"Greeter".to_string()));
         assert!(ls.contains(&"Sample.java".to_string())); // file node
+    }
+
+    #[test]
+    fn enum_record_and_annotation_are_type_nodes() {
+        let r = extract_java_source(
+            "Types.java",
+            b"@interface Marker {}\nenum Mode { ON }\nrecord User(String name) {}\n",
+        );
+        let kind = |label: &str| {
+            r.nodes
+                .iter()
+                .find(|node| node.label == label)
+                .and_then(|node| node.kind())
+        };
+        assert_eq!(kind("Marker"), Some(synaptic_core::NodeKind::Interface));
+        assert_eq!(kind("Mode"), Some(synaptic_core::NodeKind::Enum));
+        assert_eq!(kind("User"), Some(synaptic_core::NodeKind::Struct));
     }
 
     #[test]

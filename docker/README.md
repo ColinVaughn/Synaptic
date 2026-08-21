@@ -12,8 +12,8 @@ the locked Rust workspace. They never include the proprietary Platform source.
 Build them from the public repository root:
 
 ```text
-docker build -f docker/synaptic-engine.Dockerfile -t synaptic-engine:0.9.14 .
-docker build -f docker/synaptic-engine-worker.Dockerfile -t synaptic-engine-worker:0.9.14 .
+docker build -f docker/synaptic-engine.Dockerfile -t synaptic-engine:0.9.15 .
+docker build -f docker/synaptic-engine-worker.Dockerfile -t synaptic-engine-worker:0.9.15 .
 ```
 
 Release automation must record the image manifest digest and SHA-256 of

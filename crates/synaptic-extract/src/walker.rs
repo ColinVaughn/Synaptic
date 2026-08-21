@@ -119,6 +119,22 @@ pub(crate) fn normalize_c_family_source(
             i += 1;
         }
         let token = &source[start..i];
+        if matches!(token, b"__declspec" | b"__attribute__") {
+            let end = next_non_whitespace(source, i)
+                .filter(|&p| source[p] == b'(')
+                .and_then(|p| matching_paren(source, p))
+                .map_or(i, |close| close + 1);
+            blank_preserving_lines(&mut normalized, source, start, end);
+            i = end;
+            continue;
+        }
+        if matches!(
+            token,
+            b"__cdecl" | b"__fastcall" | b"__stdcall" | b"__vectorcall"
+        ) {
+            blank_preserving_lines(&mut normalized, source, start, i);
+            continue;
+        }
         if token == b"extern"
             && next_non_whitespace(source, i).is_some_and(|next| {
                 source[next..].starts_with(b"template")
@@ -201,6 +217,7 @@ fn declaration_macro(token: &[u8]) -> bool {
             | "CALLBACK"
             | "WINAPI"
             | "APIENTRY"
+            | "FMT_FUNC"
             | "UCLASS"
             | "UENUM"
             | "UFUNCTION"

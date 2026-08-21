@@ -244,7 +244,9 @@ impl<'tree> RustExtractor<'_, 'tree> {
                     }
                 }
             }
-            "struct_item" | "enum_item" | "trait_item" => self.walk_type_item(node),
+            "struct_item" | "union_item" | "enum_item" | "trait_item" | "type_item" => {
+                self.walk_type_item(node)
+            }
             "impl_item" => self.walk_impl(node, depth),
             "use_declaration" => self.walk_use(node),
             _ => {
@@ -264,8 +266,10 @@ impl<'tree> RustExtractor<'_, 'tree> {
         let item_nid = NodeId(make_id(&[&self.stem, &item_name]));
         let kind = match node.kind() {
             "struct_item" => synaptic_core::NodeKind::Struct,
+            "union_item" => synaptic_core::NodeKind::Struct,
             "enum_item" => synaptic_core::NodeKind::Enum,
             "trait_item" => synaptic_core::NodeKind::Trait,
+            "type_item" => synaptic_core::NodeKind::TypeAlias,
             _ => synaptic_core::NodeKind::Other,
         };
         self.b.add_code_node(
@@ -313,7 +317,7 @@ impl<'tree> RustExtractor<'_, 'tree> {
                 }
             }
         }
-        if node.kind() == "struct_item" {
+        if matches!(node.kind(), "struct_item" | "union_item") {
             for fdl in Self::children(node)
                 .into_iter()
                 .filter(|c| c.kind() == "field_declaration_list")
@@ -665,6 +669,22 @@ mod tests {
                 .map(|e| (&e.relation, &e.target))
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn aliases_and_unions_are_type_nodes() {
+        let r = extract_rust_source(
+            "src/lib.rs",
+            b"pub type Bytes = Vec<u8>;\npub union Word { whole: u32, bytes: [u8; 4] }\n",
+        );
+        let kind = |label: &str| {
+            r.nodes
+                .iter()
+                .find(|node| node.label == label)
+                .and_then(|node| node.kind())
+        };
+        assert_eq!(kind("Bytes"), Some(synaptic_core::NodeKind::TypeAlias));
+        assert_eq!(kind("Word"), Some(synaptic_core::NodeKind::Struct));
     }
 
     #[test]

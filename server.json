@@ -8,7 +8,7 @@
     "source": "github"
   },
   "websiteUrl": "https://synapticgraph.com",
-  "version": "0.9.14",
+  "version": "0.9.15",
   "remotes": [
     {
       "type": "streamable-http",

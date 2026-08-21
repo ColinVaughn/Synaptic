@@ -10,6 +10,36 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.15] - 2026-08-20
+
+### Added
+
+- `synaptic eval head-to-head` now runs Synaptic and pinned Graphify builds
+  through the same hand-labeled accuracy corpus and emits machine-readable JSON
+  plus a Markdown comparison of quality F1, Jaccard accuracy, precision, recall,
+  label resolution, and cold speed.
+- `synaptic eval head-to-head --projects` extends the comparison across ten
+  pinned real-world Rust, Python, JavaScript, Go, Java, C++, C#, and Ruby
+  projects. The shared Universal Ctags oracle is limited to detector-selected
+  code files and structural declarations, and source anchors are checked
+  directly. On the 2026-08-20 run Synaptic led Graphify 92.20% to 81.10% F1,
+  85.53% to 68.21% accuracy, 91.12% to 75.01% precision, and completed the
+  corpus in 15.39 seconds versus 50.07 seconds. Per-project results and
+  reproducible commands are in `BENCHMARKS.md`.
+
+### Fixed
+
+- JavaScript and TypeScript now retain named arrow functions and function
+  expressions assigned to variables as functions with their own calls and the
+  variable declaration's source anchor.
+- Rust extraction now retains type aliases and unions; Java extraction retains
+  enums, records, annotation declarations, and compact constructors.
+- C and C++ declaration normalization no longer lets calling-convention,
+  attribute, or project macros fuse adjacent functions or move their anchors.
+- Quality-oracle scoring excludes imports, fields, generated/dependency noise,
+  rationale nodes, and anonymous declarations that cannot be matched by name.
+  Long C# attribute blocks are included when validating declaration anchors.
+
 ## [0.9.14] - 2026-08-16
 
 ### Changed
@@ -2464,7 +2494,8 @@ parameters), and `graph.json` gains only additive edge keys.
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.14...HEAD
+[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.15...HEAD
+[0.9.15]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.14...v0.9.15
 [0.9.14]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.13...v0.9.14
 [0.9.13]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.11...v0.9.12

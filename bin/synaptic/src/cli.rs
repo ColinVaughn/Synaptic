@@ -781,6 +781,46 @@ pub(crate) enum EvalAction {
         #[arg(long)]
         json: bool,
     },
+    /// Run Synaptic and Graphify on the same fresh copies of the hand-labeled
+    /// corpus, then compare quality, accuracy, precision, recall, and cold speed.
+    HeadToHead {
+        /// Use the pinned real-project scale subset instead of hand-labeled fixtures.
+        #[arg(long)]
+        projects: bool,
+        /// Graphify source checkout (default: synaptic-out/competitors/graphify).
+        #[arg(long, default_value = "synaptic-out/competitors/graphify")]
+        graphify_root: PathBuf,
+        /// Python executable with Graphify installed (default: the checkout's .venv).
+        #[arg(long)]
+        graphify_python: Option<PathBuf>,
+        /// Corpus root holding manifest.toml (default: the in-tree corpus).
+        #[arg(long, conflicts_with = "projects")]
+        root: Option<PathBuf>,
+        /// Restrict the match to one fixture directory name.
+        #[arg(long, conflicts_with = "projects")]
+        fixture: Option<String>,
+        /// Pinned project manifest (only with --projects).
+        #[arg(long, requires = "projects")]
+        manifest: Option<PathBuf>,
+        /// Project checkout cache (only with --projects).
+        #[arg(long, requires = "projects")]
+        cache: Option<PathBuf>,
+        /// Restrict project mode to one manifest repository name.
+        #[arg(long, requires = "projects")]
+        repo: Option<String>,
+        /// Fresh extraction repetitions per fixture/project; medians are reported.
+        #[arg(long, default_value_t = 3)]
+        reps: usize,
+        /// Output directory for report.json + report.md.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Emit the report as JSON to stdout.
+        #[arg(long)]
+        json: bool,
+        /// Return success when a project could not be cloned, built, or scored.
+        #[arg(long, requires = "projects")]
+        allow_skips: bool,
+    },
     /// Calibrate co-change prediction confidence over recent history: bin each
     /// prediction's confidence against whether it actually co-changed, and report
     /// a reliability table plus a Brier score (0 = perfect, lower is better).

@@ -433,6 +433,22 @@ FMT_END_NAMESPACE
     }
 
     #[test]
+    fn windows_compiler_annotations_do_not_merge_neighboring_functions() {
+        let r = extract_cpp_source(
+            "fmt/format-inl.h",
+            b"extern \"C\" __declspec(dllimport) int __stdcall WriteConsoleW(void*);\n\
+              FMT_FUNC bool write_console(int fd) { return fd != 0; }\n",
+        );
+        let function = r
+            .nodes
+            .iter()
+            .find(|node| node.label == "write_console()")
+            .expect("write_console extracted");
+        assert_eq!(function.source_location.as_deref(), Some("L2"));
+        assert!(!r.parse_error);
+    }
+
+    #[test]
     fn macro_blocks_are_not_functions() {
         let r = extract_cpp_source(
             "test.cc",

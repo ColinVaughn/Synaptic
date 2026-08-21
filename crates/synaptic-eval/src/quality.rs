@@ -42,6 +42,9 @@ const INCREMENTAL_SAMPLE_FILES: usize = 5;
 /// what remains.
 pub fn bare_name(label: &str) -> Option<&str> {
     let s = label.trim();
+    if s.starts_with("anonymous@") {
+        return None;
+    }
     // Qualifier and callable decoration the extractors add, not source text.
     let s = s.strip_prefix('.').unwrap_or(s);
     let s = s.strip_suffix("()").unwrap_or(s);
@@ -194,7 +197,7 @@ fn bracket_delta(line: &str) -> i32 {
 }
 
 /// How far past its anchor a declaration's leading annotation block may run.
-const MAX_LEADING_MATTER_LINES: usize = 24;
+const MAX_LEADING_MATTER_LINES: usize = 256;
 
 /// Resolve one anchor against the file's lines (`at` is 1-based).
 ///
@@ -899,6 +902,7 @@ mod tests {
         );
         assert_eq!(bare_name("Vec<T>"), Some("Vec"));
         assert_eq!(bare_name("()"), None);
+        assert_eq!(bare_name("anonymous@42"), None);
         assert_eq!(bare_name(""), None);
     }
 
@@ -986,6 +990,17 @@ mod tests {
         let rs = src("#[derive(Debug, Clone)]\npub struct Span {\n");
         assert_eq!(
             resolve_anchor(&rs, 1, "Span", false, None),
+            Verdict::LeadingMatter
+        );
+    }
+
+    #[test]
+    fn large_parameterized_test_attribute_blocks_reach_the_method() {
+        let mut lines = vec!["[Theory]".to_string()];
+        lines.extend((0..100).map(|n| format!("[InlineData({n})]")));
+        lines.push("public void accepts_all_cases(int value) {}".to_string());
+        assert_eq!(
+            resolve_anchor(&lines, 1, ".accepts_all_cases()", false, None),
             Verdict::LeadingMatter
         );
     }

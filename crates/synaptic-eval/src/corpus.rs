@@ -411,6 +411,17 @@ impl CorpusReport {
 /// Score one fixture directory given its labels.
 pub fn score_fixture(dir: &Path, name: &str, family: &str) -> Result<FixtureReport, String> {
     let gd = build_fixture(dir)?;
+    score_graph(dir, name, family, &gd)
+}
+
+/// Score an already-built graph against one fixture's labels. Used by
+/// cross-tool benchmarks so every product goes through the same evaluator.
+pub fn score_graph(
+    dir: &Path,
+    name: &str,
+    family: &str,
+    gd: &GraphData,
+) -> Result<FixtureReport, String> {
     let gt = GroundTruth::parse(
         &std::fs::read_to_string(dir.join("ground_truth.toml")).map_err(|e| e.to_string())?,
     )
@@ -418,11 +429,11 @@ pub fn score_fixture(dir: &Path, name: &str, family: &str) -> Result<FixtureRepo
     Ok(FixtureReport {
         dir: name.to_string(),
         family: family.to_string(),
-        resolution: resolution_coverage(&gd, &gt),
-        call_edges: score_call_edges(&gd, &gt),
-        affected_tests: score_affected_tests(&gd, &gt),
-        blast: score_blast_radius(&gd, &gt),
-        cross_edges: score_cross_edges(&gd, &gt),
+        resolution: resolution_coverage(gd, &gt),
+        call_edges: score_call_edges(gd, &gt),
+        affected_tests: score_affected_tests(gd, &gt),
+        blast: score_blast_radius(gd, &gt),
+        cross_edges: score_cross_edges(gd, &gt),
     })
 }
 

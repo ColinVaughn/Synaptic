@@ -30,7 +30,7 @@ pub use calibrate::{
 };
 pub use corpus::{
     BlastScore, CorpusReport, FixtureReport, PrF1, ResolutionReport, build_fixture,
-    resolution_coverage, run_corpus, score_fixture,
+    resolution_coverage, run_corpus, score_fixture, score_graph,
 };
 pub use cross_language::{CrossLanguageReport, calibrate_cross_language};
 pub use groundtruth::{GroundTruth, Manifest};

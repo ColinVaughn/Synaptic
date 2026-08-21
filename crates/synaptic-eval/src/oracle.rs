@@ -18,27 +18,46 @@
 //! than as a total miss, so Apex or QL do not post a fake 0%.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde::Serialize;
 
-use synaptic_core::GraphData;
+use synaptic_core::{FileType as NodeFileType, GraphData};
+use synaptic_detect::FileType as DetectFileType;
 
 use crate::quality::bare_name;
 use crate::repo_corpus::language_of;
 
-/// ctags kinds that name something Synaptic does not model as a graph node.
-/// Comparing against them would manufacture disagreement rather than find it.
-const IGNORED_KINDS: &[&str] = &[
-    "local",
-    "parameter",
-    "argument",
-    "label",
-    "anonymous",
-    "unknown",
-    "header",
-    "include",
+/// Ctags kinds that correspond to declaration nodes Synaptic models. Variables,
+/// fields, imports, packages, macros, and enum cases are represented as edges or
+/// deliberately omitted, so counting them as missing nodes is not a quality test.
+const DECLARATION_KINDS: &[&str] = &[
+    "alias",
+    "class",
+    "constructor",
+    "enum",
+    "func",
+    "function",
+    "generator",
+    "getter",
+    "interface",
+    "method",
+    "methodSpec",
+    "procedure",
+    "protocol",
+    "struct",
+    "setter",
+    "singletonMethod",
+    "table",
+    "talias",
+    "trait",
+    "trigger",
+    "typedef",
+    "type",
+    "union",
+    "view",
 ];
 
 /// One tag as the oracle reported it.
@@ -160,11 +179,33 @@ pub fn parse_tags(stdout: &str) -> (Vec<Tag>, usize) {
             .and_then(|x| x.as_str())
             .unwrap_or("unknown")
             .to_string();
-        if IGNORED_KINDS.contains(&kind.as_str()) {
+        let path = normalize_path(path);
+        let language = crate::repo_corpus::language_of(&path).map(|lang| lang.name);
+        let language_specific = kind == "member" && language == Some("python")
+            || kind == "object" && matches!(language, Some("kotlin" | "scala"));
+        let import_alias = kind == "alias"
+            && v.get("pattern")
+                .and_then(|x| x.as_str())
+                .is_some_and(|pattern| {
+                    let pattern = pattern.trim_start_matches("/^").trim_start();
+                    pattern.starts_with("import ")
+                        || pattern.starts_with("export {")
+                        || pattern.starts_with("use ")
+                        || pattern.starts_with("pub use ")
+                        || pattern.starts_with("using ")
+                        || pattern.starts_with("global using ")
+                });
+        let synthetic = name.starts_with("__anon")
+            || name.starts_with("anonymousFunction")
+            || name.starts_with("anonymousObject");
+        if (!DECLARATION_KINDS.contains(&kind.as_str()) && !language_specific)
+            || import_alias
+            || synthetic
+        {
             continue;
         }
         tags.push(Tag {
-            path: normalize_path(path),
+            path,
             name: name.to_string(),
             kind,
             line: v.get("line").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
@@ -201,7 +242,10 @@ pub fn diff(tags: &[Tag], gd: &GraphData) -> Vec<OracleLanguage> {
 
     let mut syn_by_lang: BTreeMap<&str, BTreeSet<(String, String)>> = BTreeMap::new();
     for n in &gd.nodes {
-        if n.source_file.is_empty() || crate::quality::is_file_node(n) {
+        if n.file_type != NodeFileType::Code
+            || n.source_file.is_empty()
+            || crate::quality::is_file_node(n)
+        {
             continue;
         }
         let Some(lang) = language_of(&n.source_file) else {
@@ -246,21 +290,43 @@ pub fn compare(dir: &Path, gd: &GraphData) -> OracleOutcome {
     if let Err(e) = probe() {
         return OracleOutcome::unavailable(e);
     }
-    let out = match Command::new("ctags")
+    let detected = synaptic_detect::detect(dir);
+    let files: Vec<_> = detected
+        .of(DetectFileType::Code)
+        .iter()
+        .filter_map(|path| path.strip_prefix(&detected.scan_root).ok())
+        .map(|path| normalize_path(&path.to_string_lossy()))
+        .collect();
+    if files.is_empty() {
+        return OracleOutcome::unavailable("no code files in the shared scan scope");
+    }
+    let mut child = match Command::new("ctags")
         .current_dir(dir)
         .args([
             "--output-format=json",
             "--fields=+n",
             "--quiet",
-            "-R",
             "-f",
             "-",
-            ".",
+            "-L",
+            "-",
         ])
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
     {
-        Ok(o) => o,
+        Ok(child) => child,
         Err(e) => return OracleOutcome::unavailable(format!("running ctags: {e}")),
+    };
+    if let Some(mut stdin) = child.stdin.take()
+        && let Err(e) = files.iter().try_for_each(|path| writeln!(stdin, "{path}"))
+    {
+        return OracleOutcome::unavailable(format!("sending file list to ctags: {e}"));
+    }
+    let out = match child.wait_with_output() {
+        Ok(out) => out,
+        Err(e) => return OracleOutcome::unavailable(format!("waiting for ctags: {e}")),
     };
     let stdout = String::from_utf8_lossy(&out.stdout);
     let (tags, malformed) = parse_tags(&stdout);
@@ -328,6 +394,25 @@ mod tests {
     }
 
     #[test]
+    fn oracle_scope_keeps_modeled_types_and_python_methods_only() {
+        let src = r#"{"_type":"tag","name":"Shape","path":"a.ts","kind":"alias","pattern":"/^type Shape = {}$/"}
+{"_type":"tag","name":"Shape","path":"use.ts","kind":"alias","pattern":"/^import { Shape } from '.\/a'$/"}
+{"_type":"tag","name":"run","path":"a.py","kind":"member"}
+{"_type":"tag","name":"Build","path":"a.go","kind":"func"}
+{"_type":"tag","name":"field","path":"a.c","kind":"member"}
+{"_type":"tag","name":"LIMIT","path":"a.rs","kind":"constant"}
+{"_type":"tag","name":"0","path":"a.json","kind":"object"}
+{"_type":"tag","name":"anonymousFunction01","path":"a.js","kind":"function"}
+"#;
+        let (tags, malformed) = parse_tags(src);
+        assert_eq!(malformed, 0);
+        assert_eq!(
+            tags.iter().map(|tag| tag.name.as_str()).collect::<Vec<_>>(),
+            ["Shape", "run", "Build"]
+        );
+    }
+
+    #[test]
     fn diff_splits_agreement_from_each_side() {
         let tags = vec![
             Tag {
@@ -356,6 +441,27 @@ mod tests {
         assert_eq!(d[0].synaptic_only, 1);
         assert_eq!(d[0].missed_rate(), 0.5);
         assert_eq!(d[0].samples, vec!["a.rs:7 ctags_found"]);
+    }
+
+    #[test]
+    fn diff_does_not_count_rationale_as_a_code_declaration() {
+        let tags = vec![Tag {
+            path: "a.rs".into(),
+            name: "explanation".into(),
+            kind: "function".into(),
+            line: 1,
+        }];
+        let gd = GraphData {
+            nodes: vec![Node {
+                label: "explanation".into(),
+                source_file: "a.rs".into(),
+                file_type: NodeFileType::Rationale,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let d = diff(&tags, &gd);
+        assert_eq!((d[0].agreement, d[0].ctags_only), (0, 1));
     }
 
     /// A language the oracle knows nothing about must not be reported as a

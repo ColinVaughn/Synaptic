@@ -11,6 +11,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 synaptic-core = { workspace = true }
+synaptic-detect = { workspace = true }
 synaptic-graph = { workspace = true }
 synaptic-history = { workspace = true }
 synaptic-incremental = { workspace = true }
@@ -21,9 +22,8 @@ toml = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 criterion = { workspace = true }
-# Only the corpus-coverage test needs these: it probes the real extractor
-# dispatch so a new language cannot ship without a repository behind it.
-synaptic-detect = { workspace = true }
+# Only the corpus-coverage test needs the extractor: it probes the real dispatch
+# so a new language cannot ship without a repository behind it.
 synaptic-extract = { workspace = true }
 
 [[bench]]

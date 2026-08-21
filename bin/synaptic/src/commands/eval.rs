@@ -4,13 +4,16 @@
 //! metric.
 
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 
 use synaptic_eval::{
-    Baselines, CalibrationReport, CorpusReport, QualityFilter, QualityReport, ReplayOptions,
+    Baselines, CalibrationReport, CorpusManifest, CorpusRepo, CorpusReport, FixtureReport,
+    LanguageQuality, Manifest, OracleOutcome, PrF1, QualityFilter, QualityReport, ReplayOptions,
     ReplayReport, ScaleReport, baselines, calibrate_cross_language, calibrate_history,
-    pin_manifest, replay, run_corpus, run_quality, run_scale,
+    pin_manifest, replay, run_corpus, run_quality, run_scale, score_graph,
 };
 
 use crate::cli::EvalAction;
@@ -38,6 +41,44 @@ pub(crate) fn run_eval(action: EvalAction) -> Result<()> {
         }),
         EvalAction::CrossLanguage { graph, json } => run_cross_language(graph, json),
         EvalAction::Corpus { root, out, json } => run_corpus_cmd(root, out, json),
+        EvalAction::HeadToHead {
+            projects,
+            graphify_root,
+            graphify_python,
+            root,
+            fixture,
+            manifest,
+            cache,
+            repo,
+            reps,
+            out,
+            json,
+            allow_skips,
+        } => {
+            if projects {
+                run_project_head_to_head_cmd(ProjectHeadToHeadArgs {
+                    graphify_root,
+                    graphify_python,
+                    manifest,
+                    cache,
+                    repo,
+                    reps,
+                    out,
+                    json,
+                    allow_skips,
+                })
+            } else {
+                run_head_to_head_cmd(
+                    graphify_root,
+                    graphify_python,
+                    root,
+                    fixture,
+                    reps,
+                    out,
+                    json,
+                )
+            }
+        }
         EvalAction::Calibrate {
             root,
             max_commits,
@@ -673,6 +714,794 @@ fn corpus_markdown(report: &CorpusReport) -> String {
     s
 }
 
+#[derive(serde::Serialize)]
+struct HeadToHeadReport {
+    schema: &'static str,
+    generated_at_unix: u64,
+    corpus_root: String,
+    repetitions: usize,
+    synaptic_revision: String,
+    graphify_revision: String,
+    tools: Vec<ToolBenchmark>,
+}
+
+#[derive(serde::Serialize)]
+struct ToolBenchmark {
+    name: String,
+    summary: Headline,
+    fixtures: Vec<FixtureBenchmark>,
+}
+
+#[derive(serde::Serialize)]
+struct FixtureBenchmark {
+    fixture: String,
+    family: String,
+    nodes: usize,
+    edges: usize,
+    times_ms: Vec<f64>,
+    scores: Headline,
+    metrics: FixtureReport,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct Headline {
+    /// Micro-F1 pooled across calls, affected tests, blast radius, and
+    /// cross-language coupling labels.
+    quality_f1_pct: f64,
+    /// Set/Jaccard accuracy: TP / (TP + FP + FN). There is no invented
+    /// true-negative universe for graph extraction.
+    accuracy_pct: f64,
+    precision_pct: f64,
+    recall_pct: f64,
+    label_resolution_pct: f64,
+    /// Median fresh-build time for a fixture, or the sum of fixture medians for
+    /// a whole-tool summary.
+    cold_ms: f64,
+}
+
+struct ProjectHeadToHeadArgs {
+    graphify_root: PathBuf,
+    graphify_python: Option<PathBuf>,
+    manifest: Option<PathBuf>,
+    cache: Option<PathBuf>,
+    repo: Option<String>,
+    reps: usize,
+    out: Option<PathBuf>,
+    json: bool,
+    allow_skips: bool,
+}
+
+#[derive(serde::Serialize)]
+struct ProjectHeadToHeadReport {
+    schema: &'static str,
+    generated_at_unix: u64,
+    repetitions: usize,
+    manifest: String,
+    synaptic_revision: String,
+    graphify_revision: String,
+    tools: Vec<ProjectToolBenchmark>,
+    skipped: Vec<ProjectSkip>,
+}
+
+#[derive(serde::Serialize)]
+struct ProjectToolBenchmark {
+    name: String,
+    summary: ProjectHeadline,
+    counts: ProjectCounts,
+    projects: Vec<ProjectBenchmark>,
+}
+
+#[derive(serde::Serialize)]
+struct ProjectBenchmark {
+    project: String,
+    url: String,
+    sha: String,
+    family: String,
+    tier: String,
+    nodes: usize,
+    edges: usize,
+    times_ms: Vec<f64>,
+    scores: ProjectHeadline,
+    counts: ProjectCounts,
+    per_language: Vec<LanguageQuality>,
+    oracle: OracleOutcome,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ProjectHeadline {
+    /// Universal Ctags is an independent agreement proxy, not exhaustive truth.
+    quality_f1_pct: f64,
+    accuracy_pct: f64,
+    precision_pct: f64,
+    recall_pct: f64,
+    anchor_exactness_pct: f64,
+    parse_error_file_pct: f64,
+    zero_declaration_file_pct: f64,
+    cold_ms: f64,
+}
+
+#[derive(Clone, Default, serde::Serialize)]
+struct ProjectCounts {
+    oracle_agreement: usize,
+    oracle_only: usize,
+    tool_only: usize,
+    anchors_exact: usize,
+    anchors_checked: usize,
+    files: usize,
+    parse_error_files: usize,
+    zero_declaration_files: usize,
+}
+
+impl ProjectCounts {
+    fn add(&mut self, other: &Self) {
+        self.oracle_agreement += other.oracle_agreement;
+        self.oracle_only += other.oracle_only;
+        self.tool_only += other.tool_only;
+        self.anchors_exact += other.anchors_exact;
+        self.anchors_checked += other.anchors_checked;
+        self.files += other.files;
+        self.parse_error_files += other.parse_error_files;
+        self.zero_declaration_files += other.zero_declaration_files;
+    }
+}
+
+#[derive(serde::Serialize)]
+struct ProjectSkip {
+    url: String,
+    reason: String,
+}
+
+#[derive(Default)]
+struct Counts {
+    tp: usize,
+    fp: usize,
+    r#fn: usize,
+}
+
+impl Counts {
+    fn add(&mut self, score: &PrF1) {
+        self.tp += score.true_positive;
+        self.fp += score.false_positive;
+        self.r#fn += score.false_negative;
+    }
+}
+
+enum BenchTool<'a> {
+    Synaptic(&'a Path),
+    Graphify { python: &'a Path, root: &'a Path },
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_head_to_head_cmd(
+    graphify_root: PathBuf,
+    graphify_python: Option<PathBuf>,
+    root: Option<PathBuf>,
+    fixture: Option<String>,
+    reps: usize,
+    out: Option<PathBuf>,
+    json: bool,
+) -> Result<()> {
+    if reps == 0 {
+        bail!("--reps must be at least 1");
+    }
+    let corpus_root = root
+        .unwrap_or_else(default_corpus_root)
+        .canonicalize()
+        .context("resolving corpus root")?;
+    let (graphify_root, graphify_python) = graphify_paths(graphify_root, graphify_python)?;
+
+    let mut manifest = Manifest::parse(
+        &std::fs::read_to_string(corpus_root.join("manifest.toml"))
+            .context("reading corpus manifest")?,
+    )
+    .context("parsing corpus manifest")?;
+    if let Some(name) = fixture {
+        manifest.fixtures.retain(|f| f.dir == name);
+        if manifest.fixtures.is_empty() {
+            bail!("fixture {name:?} is not in the corpus manifest");
+        }
+    }
+    if manifest.fixtures.is_empty() {
+        bail!("corpus manifest contains no fixtures");
+    }
+
+    let synaptic_exe = std::env::current_exe().context("locating the Synaptic executable")?;
+    let synaptic = benchmark_tool(
+        "synaptic",
+        BenchTool::Synaptic(&synaptic_exe),
+        &corpus_root,
+        &manifest,
+        reps,
+    )?;
+    let graphify = benchmark_tool(
+        "graphify",
+        BenchTool::Graphify {
+            python: &graphify_python,
+            root: &graphify_root,
+        },
+        &corpus_root,
+        &manifest,
+        reps,
+    )?;
+    let report = HeadToHeadReport {
+        schema: "synaptic.head-to-head/v1",
+        generated_at_unix: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        corpus_root: corpus_root.display().to_string(),
+        repetitions: reps,
+        synaptic_revision: git_revision(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
+        graphify_revision: git_revision(&graphify_root),
+        tools: vec![synaptic, graphify],
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        let out = out.unwrap_or_else(|| PathBuf::from("synaptic-out/eval/head-to-head"));
+        std::fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
+        let markdown = head_to_head_markdown(&report);
+        std::fs::write(
+            out.join("report.json"),
+            serde_json::to_string_pretty(&report)?,
+        )?;
+        std::fs::write(out.join("report.md"), &markdown)?;
+        print!("{markdown}");
+        println!("  report: {}", out.join("report.json").display());
+    }
+    Ok(())
+}
+
+fn graphify_paths(root: PathBuf, python: Option<PathBuf>) -> Result<(PathBuf, PathBuf)> {
+    let root = root
+        .canonicalize()
+        .context("resolving Graphify checkout (pass --graphify-root)")?;
+    let python = python.unwrap_or_else(|| {
+        if cfg!(windows) {
+            root.join(".venv/Scripts/python.exe")
+        } else {
+            root.join(".venv/bin/python")
+        }
+    });
+    if !python.is_file() {
+        bail!(
+            "Graphify Python not found at {} (pass --graphify-python)",
+            python.display()
+        );
+    }
+    Ok((root, python))
+}
+
+fn run_project_head_to_head_cmd(args: ProjectHeadToHeadArgs) -> Result<()> {
+    if args.reps == 0 {
+        bail!("--reps must be at least 1");
+    }
+    synaptic_eval::oracle::probe()
+        .map_err(|e| anyhow!("project precision/recall needs Universal Ctags: {e}"))?;
+    let manifest_path = args.manifest.unwrap_or_else(default_scale_manifest);
+    let manifest = CorpusManifest::parse(
+        &std::fs::read_to_string(&manifest_path)
+            .with_context(|| format!("reading {}", manifest_path.display()))?,
+    )
+    .context("parsing project manifest")?;
+    let repos: Vec<CorpusRepo> = manifest
+        .in_suite(synaptic_eval::repo_corpus::SUITE_SCALE)
+        .filter(|r| args.repo.as_deref().is_none_or(|name| r.name() == name))
+        .cloned()
+        .collect();
+    if repos.is_empty() {
+        bail!("no matching projects in the manifest's scale suite");
+    }
+
+    let cache = args
+        .cache
+        .unwrap_or_else(|| PathBuf::from("synaptic-out/bench"));
+    let (graphify_root, graphify_python) =
+        graphify_paths(args.graphify_root, args.graphify_python)?;
+    let synaptic_exe = std::env::current_exe().context("locating the Synaptic executable")?;
+    let mut synaptic = Vec::new();
+    let mut graphify = Vec::new();
+    let mut skipped = Vec::new();
+
+    for repo in &repos {
+        eprintln!("project: {} ({})", repo.name(), repo.sha);
+        let checkout = match synaptic_eval::scale::ensure_checkout(&cache, repo)
+            .and_then(|path| path.canonicalize().map_err(|err| err.to_string()))
+        {
+            Ok(path) => path,
+            Err(reason) => {
+                skipped.push(ProjectSkip {
+                    url: repo.url.clone(),
+                    reason,
+                });
+                continue;
+            }
+        };
+        let syn = benchmark_project(
+            "synaptic",
+            BenchTool::Synaptic(&synaptic_exe),
+            &checkout,
+            repo,
+            args.reps,
+        );
+        let graph = benchmark_project(
+            "graphify",
+            BenchTool::Graphify {
+                python: &graphify_python,
+                root: &graphify_root,
+            },
+            &checkout,
+            repo,
+            args.reps,
+        );
+        match (syn, graph) {
+            (Ok(s), Ok(g)) => {
+                synaptic.push(s);
+                graphify.push(g);
+            }
+            (s, g) => skipped.push(ProjectSkip {
+                url: repo.url.clone(),
+                reason: format!(
+                    "synaptic: {}; graphify: {}",
+                    s.err()
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "ok".into()),
+                    g.err()
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "ok".into()),
+                ),
+            }),
+        }
+    }
+
+    let report = ProjectHeadToHeadReport {
+        schema: "synaptic.project-head-to-head/v1",
+        generated_at_unix: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        repetitions: args.reps,
+        manifest: manifest_path.display().to_string(),
+        synaptic_revision: git_revision(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
+        graphify_revision: git_revision(&graphify_root),
+        tools: vec![
+            finish_project_tool("synaptic", synaptic),
+            finish_project_tool("graphify", graphify),
+        ],
+        skipped,
+    };
+    if report.tools[0].projects.is_empty() {
+        bail!(
+            "no projects completed for both tools: {}",
+            report
+                .skipped
+                .iter()
+                .map(|s| format!("{}: {}", s.url, s.reason))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        let out = args
+            .out
+            .unwrap_or_else(|| PathBuf::from("synaptic-out/eval/head-to-head-projects"));
+        std::fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
+        let markdown = project_head_to_head_markdown(&report);
+        std::fs::write(
+            out.join("report.json"),
+            serde_json::to_string_pretty(&report)?,
+        )?;
+        std::fs::write(out.join("report.md"), &markdown)?;
+        print!("{markdown}");
+        println!("  report: {}", out.join("report.json").display());
+    }
+    if !report.skipped.is_empty() && !args.allow_skips {
+        bail!(
+            "{} project(s) skipped (pass --allow-skips for an exploratory run)",
+            report.skipped.len()
+        );
+    }
+    Ok(())
+}
+
+fn benchmark_project(
+    name: &str,
+    tool: BenchTool<'_>,
+    checkout: &Path,
+    repo: &CorpusRepo,
+    reps: usize,
+) -> Result<ProjectBenchmark> {
+    let mut times_ms = Vec::with_capacity(reps);
+    let mut measured_graph = None;
+    for run in 1..=reps {
+        eprintln!("  {name}: run {run}/{reps}");
+        clear_project_outputs(checkout)?;
+        let temp = tempfile::tempdir().context("creating benchmark directory")?;
+        let started = Instant::now();
+        let graph_path = run_tool(&tool, checkout, temp.path(), true)?;
+        times_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+        measured_graph = Some(read_graph(&graph_path)?);
+    }
+    clear_project_outputs(checkout)?;
+    let graph = measured_graph.expect("at least one repetition");
+    let per_language = synaptic_eval::quality::score_graph(checkout, &graph);
+    let oracle = synaptic_eval::oracle::compare(checkout, &graph);
+    if !oracle.available {
+        bail!(
+            "ctags unavailable: {}",
+            oracle.reason.as_deref().unwrap_or("unknown reason")
+        );
+    }
+    let counts = project_counts(&per_language, &oracle);
+    let scores = project_headline(&counts, median(&times_ms));
+    Ok(ProjectBenchmark {
+        project: repo.name().to_string(),
+        url: repo.url.clone(),
+        sha: repo.sha.clone(),
+        family: repo.family.clone(),
+        tier: repo.tier.clone(),
+        nodes: graph.nodes.len(),
+        edges: graph.links.len(),
+        times_ms,
+        scores,
+        counts,
+        per_language,
+        oracle,
+    })
+}
+
+fn clear_project_outputs(root: &Path) -> Result<()> {
+    for name in ["synaptic-out", "graphify-out"] {
+        let path = root.join(name);
+        if path.exists() {
+            std::fs::remove_dir_all(&path)
+                .with_context(|| format!("removing stale {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn project_counts(languages: &[LanguageQuality], oracle: &OracleOutcome) -> ProjectCounts {
+    ProjectCounts {
+        oracle_agreement: oracle.per_language.iter().map(|l| l.agreement).sum(),
+        oracle_only: oracle.per_language.iter().map(|l| l.ctags_only).sum(),
+        tool_only: oracle.per_language.iter().map(|l| l.synaptic_only).sum(),
+        anchors_exact: languages.iter().map(|l| l.anchors_exact).sum(),
+        anchors_checked: languages.iter().map(|l| l.anchors_checked).sum(),
+        files: languages.iter().map(|l| l.files).sum(),
+        parse_error_files: languages.iter().map(|l| l.parse_error_files).sum(),
+        zero_declaration_files: languages.iter().map(|l| l.zero_decl_files).sum(),
+    }
+}
+
+fn project_headline(counts: &ProjectCounts, cold_ms: f64) -> ProjectHeadline {
+    let tp = counts.oracle_agreement;
+    let fp = counts.tool_only;
+    let r#fn = counts.oracle_only;
+    ProjectHeadline {
+        quality_f1_pct: percent(2 * tp, 2 * tp + fp + r#fn, 0.0),
+        accuracy_pct: percent(tp, tp + fp + r#fn, 100.0),
+        precision_pct: percent(tp, tp + fp, 100.0),
+        recall_pct: percent(tp, tp + r#fn, 100.0),
+        anchor_exactness_pct: percent(counts.anchors_exact, counts.anchors_checked, 100.0),
+        parse_error_file_pct: percent(counts.parse_error_files, counts.files, 0.0),
+        zero_declaration_file_pct: percent(counts.zero_declaration_files, counts.files, 0.0),
+        cold_ms: (cold_ms * 100.0).round() / 100.0,
+    }
+}
+
+fn finish_project_tool(name: &str, projects: Vec<ProjectBenchmark>) -> ProjectToolBenchmark {
+    let mut counts = ProjectCounts::default();
+    for project in &projects {
+        counts.add(&project.counts);
+    }
+    let cold_ms = projects.iter().map(|p| p.scores.cold_ms).sum();
+    ProjectToolBenchmark {
+        name: name.to_string(),
+        summary: project_headline(&counts, cold_ms),
+        counts,
+        projects,
+    }
+}
+
+fn benchmark_tool(
+    name: &str,
+    tool: BenchTool<'_>,
+    corpus_root: &Path,
+    manifest: &Manifest,
+    reps: usize,
+) -> Result<ToolBenchmark> {
+    let mut fixtures = Vec::new();
+    for fixture in &manifest.fixtures {
+        let original = corpus_root.join(&fixture.dir);
+        let mut times_ms = Vec::with_capacity(reps);
+        let mut measured_graph = None;
+        for run in 1..=reps {
+            eprintln!("{name}: {} run {run}/{reps}", fixture.dir);
+            let temp = tempfile::tempdir().context("creating benchmark directory")?;
+            let source = temp.path().join("fixture");
+            copy_fixture(&original, &source)?;
+            let started = Instant::now();
+            let graph_path = run_tool(&tool, &source, temp.path(), false)?;
+            times_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+            measured_graph = Some(read_graph(&graph_path)?);
+        }
+        let graph = measured_graph.expect("at least one repetition");
+        let metrics = score_graph(&original, &fixture.dir, &fixture.family, &graph)
+            .map_err(|e| anyhow!("scoring {name} on {}: {e}", fixture.dir))?;
+        let cold_ms = median(&times_ms);
+        let scores = summarize(&[&metrics], cold_ms);
+        fixtures.push(FixtureBenchmark {
+            fixture: fixture.dir.clone(),
+            family: fixture.family.clone(),
+            nodes: graph.nodes.len(),
+            edges: graph.links.len(),
+            times_ms,
+            scores,
+            metrics,
+        });
+    }
+    Ok(ToolBenchmark {
+        name: name.to_string(),
+        summary: summarize(
+            &fixtures.iter().map(|f| &f.metrics).collect::<Vec<_>>(),
+            fixtures.iter().map(|f| f.scores.cold_ms).sum(),
+        ),
+        fixtures,
+    })
+}
+
+fn run_tool(tool: &BenchTool<'_>, source: &Path, scratch: &Path, project: bool) -> Result<PathBuf> {
+    let (output, graph) = match tool {
+        BenchTool::Synaptic(exe) => {
+            let mut command = Command::new(exe);
+            command
+                .arg("extract")
+                .arg(source)
+                .args(["--directed", "--no-store"]);
+            if project {
+                command.arg("--no-resources");
+            }
+            (
+                command.output().context("starting Synaptic")?,
+                source.join("synaptic-out/graph.json"),
+            )
+        }
+        BenchTool::Graphify { python, root } => {
+            let out = scratch.join("graphify");
+            (
+                Command::new(python)
+                    .current_dir(root)
+                    .args(["-m", "graphify", "extract"])
+                    .arg(source)
+                    .arg("--out")
+                    .arg(&out)
+                    .args(["--code-only", "--force"])
+                    .output()
+                    .context("starting Graphify")?,
+                out.join("graphify-out/graph.json"),
+            )
+        }
+    };
+    require_success(output)?;
+    if !graph.is_file() {
+        bail!("tool succeeded but did not write {}", graph.display());
+    }
+    Ok(graph)
+}
+
+fn require_success(output: Output) -> Result<()> {
+    if output.status.success() {
+        return Ok(());
+    }
+    bail!(
+        "tool exited with {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+fn read_graph(path: &Path) -> Result<synaptic_core::GraphData> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
+}
+
+fn copy_fixture(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == "synaptic-out" || name == "graphify-out" {
+            continue;
+        }
+        let target = to.join(&name);
+        if entry.file_type()?.is_dir() {
+            copy_fixture(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+fn summarize(reports: &[&FixtureReport], cold_ms: f64) -> Headline {
+    let mut counts = Counts::default();
+    let mut labels = 0usize;
+    let mut unresolved = 0usize;
+    for report in reports {
+        counts.add(&report.call_edges);
+        counts.add(&report.affected_tests);
+        counts.add(&report.cross_edges);
+        counts.tp += report.blast.found;
+        counts.fp += report.blast.distractors_hit;
+        counts.r#fn += report.blast.missed;
+        labels += report.resolution.total;
+        unresolved += report.resolution.unresolved.len();
+    }
+    Headline {
+        quality_f1_pct: percent(2 * counts.tp, 2 * counts.tp + counts.fp + counts.r#fn, 0.0),
+        accuracy_pct: percent(counts.tp, counts.tp + counts.fp + counts.r#fn, 100.0),
+        precision_pct: percent(counts.tp, counts.tp + counts.fp, 100.0),
+        recall_pct: percent(counts.tp, counts.tp + counts.r#fn, 100.0),
+        label_resolution_pct: percent(labels - unresolved, labels, 100.0),
+        cold_ms: (cold_ms * 100.0).round() / 100.0,
+    }
+}
+
+fn percent(numerator: usize, denominator: usize, empty: f64) -> f64 {
+    if denominator == 0 {
+        empty
+    } else {
+        (numerator as f64 * 10_000.0 / denominator as f64).round() / 100.0
+    }
+}
+
+fn median(values: &[f64]) -> f64 {
+    let mut values = values.to_vec();
+    values.sort_by(f64::total_cmp);
+    let mid = values.len() / 2;
+    if values.len() % 2 == 1 {
+        values[mid]
+    } else {
+        (values[mid - 1] + values[mid]) / 2.0
+    }
+}
+
+fn git_revision(root: &Path) -> String {
+    let head = Command::new("git")
+        .args(["-C"])
+        .arg(root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let dirty = Command::new("git")
+        .args(["-C"])
+        .arg(root)
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .output()
+        .ok()
+        .is_some_and(|o| o.status.success() && !o.stdout.is_empty());
+    if dirty { format!("{head}+dirty") } else { head }
+}
+
+fn head_to_head_markdown(report: &HeadToHeadReport) -> String {
+    let mut out = String::from("# Synaptic vs Graphify\n\n");
+    out.push_str(&format!(
+        "Synaptic `{}` vs Graphify `{}`; {} fresh run(s) per fixture. Quality is pooled relation F1; accuracy is set/Jaccard accuracy (`TP / (TP + FP + FN)`); cold time is the sum of per-fixture medians.\n\n",
+        short_revision(&report.synaptic_revision),
+        short_revision(&report.graphify_revision),
+        report.repetitions,
+    ));
+    out.push_str(
+        "| Tool | Quality F1 | Accuracy | Precision | Recall | Labels resolved | Cold corpus |\n",
+    );
+    out.push_str("|---|---:|---:|---:|---:|---:|---:|\n");
+    for tool in &report.tools {
+        let s = &tool.summary;
+        out.push_str(&format!(
+            "| {} | {:.2}% | {:.2}% | {:.2}% | {:.2}% | {:.2}% | {:.2} ms |\n",
+            tool.name,
+            s.quality_f1_pct,
+            s.accuracy_pct,
+            s.precision_pct,
+            s.recall_pct,
+            s.label_resolution_pct,
+            s.cold_ms,
+        ));
+    }
+    out.push_str(
+        "\n| Fixture | Tool | Nodes/edges | Quality F1 | Accuracy | Precision | Cold median |\n",
+    );
+    out.push_str("|---|---|---:|---:|---:|---:|---:|\n");
+    for tool in &report.tools {
+        for fixture in &tool.fixtures {
+            let s = &fixture.scores;
+            out.push_str(&format!(
+                "| {} | {} | {}/{} | {:.2}% | {:.2}% | {:.2}% | {:.2} ms |\n",
+                fixture.fixture,
+                tool.name,
+                fixture.nodes,
+                fixture.edges,
+                s.quality_f1_pct,
+                s.accuracy_pct,
+                s.precision_pct,
+                s.cold_ms,
+            ));
+        }
+    }
+    out
+}
+
+fn project_head_to_head_markdown(report: &ProjectHeadToHeadReport) -> String {
+    let mut out = String::from("# Synaptic vs Graphify on pinned projects\n\n");
+    out.push_str(&format!(
+        "Synaptic `{}` vs Graphify `{}`; {} fresh run(s) per project. Quality, accuracy, precision, and recall are agreement proxies against Universal Ctags over the same detector-selected code files and structural declaration kinds; anchor exactness is checked directly against source lines.\n\n",
+        short_revision(&report.synaptic_revision),
+        short_revision(&report.graphify_revision),
+        report.repetitions,
+    ));
+    out.push_str("| Tool | Projects | Quality F1 | Accuracy | Precision | Recall | Anchor exact | Parse errors | Cold total |\n");
+    out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+    for tool in &report.tools {
+        let s = &tool.summary;
+        out.push_str(&format!(
+            "| {} | {} | {:.2}% | {:.2}% | {:.2}% | {:.2}% | {:.2}% | {:.2}% | {:.2} s |\n",
+            tool.name,
+            tool.projects.len(),
+            s.quality_f1_pct,
+            s.accuracy_pct,
+            s.precision_pct,
+            s.recall_pct,
+            s.anchor_exactness_pct,
+            s.parse_error_file_pct,
+            s.cold_ms / 1000.0,
+        ));
+    }
+    out.push_str("\n| Project | Tool | Nodes/edges | Quality F1 | Accuracy | Precision | Anchor exact | Cold median |\n");
+    out.push_str("|---|---|---:|---:|---:|---:|---:|---:|\n");
+    for tool in &report.tools {
+        for project in &tool.projects {
+            let s = &project.scores;
+            out.push_str(&format!(
+                "| {} | {} | {}/{} | {:.2}% | {:.2}% | {:.2}% | {:.2}% | {:.2} s |\n",
+                project.project,
+                tool.name,
+                project.nodes,
+                project.edges,
+                s.quality_f1_pct,
+                s.accuracy_pct,
+                s.precision_pct,
+                s.anchor_exactness_pct,
+                s.cold_ms / 1000.0,
+            ));
+        }
+    }
+    if !report.skipped.is_empty() {
+        out.push_str("\n## Skipped\n\n");
+        for skip in &report.skipped {
+            out.push_str(&format!("- {}: {}\n", skip.url, skip.reason));
+        }
+    }
+    out
+}
+
+fn short_revision(revision: &str) -> String {
+    let dirty = revision.ends_with("+dirty");
+    format!(
+        "{}{}",
+        revision.chars().take(8).collect::<String>(),
+        if dirty { "+dirty" } else { "" }
+    )
+}
+
 /// Calibrate the cross-language edge layer over a built graph.json.
 fn run_cross_language(graph_path: PathBuf, json: bool) -> Result<()> {
     let bytes =
@@ -797,4 +1626,77 @@ fn render_markdown(r: &ReplayReport) -> String {
 
 fn short(sha: &str) -> String {
     sha.chars().take(8).collect()
+}
+
+#[cfg(test)]
+mod head_to_head_tests {
+    use super::*;
+    use synaptic_eval::{BlastScore, ResolutionReport};
+
+    #[test]
+    fn headline_pools_raw_counts_and_uses_the_median() {
+        let fixture = FixtureReport {
+            dir: "fixture".into(),
+            family: "test".into(),
+            resolution: ResolutionReport {
+                total: 4,
+                unresolved: vec!["missing".into()],
+            },
+            call_edges: PrF1 {
+                true_positive: 2,
+                false_positive: 1,
+                false_negative: 1,
+            },
+            affected_tests: PrF1::default(),
+            blast: BlastScore {
+                found: 1,
+                missed: 1,
+                distractors_hit: 1,
+                ..Default::default()
+            },
+            cross_edges: PrF1::default(),
+        };
+        let score = summarize(&[&fixture], median(&[30.0, 10.0, 20.0]));
+        assert_eq!(
+            (
+                score.quality_f1_pct,
+                score.accuracy_pct,
+                score.precision_pct,
+                score.recall_pct,
+                score.label_resolution_pct,
+                score.cold_ms,
+            ),
+            (60.0, 42.86, 60.0, 60.0, 75.0, 20.0)
+        );
+    }
+
+    #[test]
+    fn project_headline_keeps_oracle_and_anchor_denominators_separate() {
+        let score = project_headline(
+            &ProjectCounts {
+                oracle_agreement: 8,
+                oracle_only: 2,
+                tool_only: 6,
+                anchors_exact: 9,
+                anchors_checked: 10,
+                files: 20,
+                parse_error_files: 1,
+                zero_declaration_files: 2,
+            },
+            1250.0,
+        );
+        assert_eq!(
+            (
+                score.quality_f1_pct,
+                score.accuracy_pct,
+                score.precision_pct,
+                score.recall_pct,
+                score.anchor_exactness_pct,
+                score.parse_error_file_pct,
+                score.zero_declaration_file_pct,
+                score.cold_ms,
+            ),
+            (66.67, 50.0, 57.14, 80.0, 90.0, 5.0, 10.0, 1250.0)
+        );
+    }
 }
