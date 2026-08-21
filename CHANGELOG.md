@@ -10,6 +10,15 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.16] - 2026-08-20
+
+### Fixed
+
+- Updated `h2` from 0.4.14 to 0.4.16 to fix RUSTSEC-2026-0258, which could
+  allow an HTTP/2 peer to queue empty DATA frames without bound when a stream
+  was not actively drained. The release audit now passes without ignoring the
+  advisory.
+
 ## [0.9.15] - 2026-08-20
 
 ### Added
@@ -2494,7 +2503,8 @@ parameters), and `graph.json` gains only additive edge keys.
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.15...HEAD
+[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.16...HEAD
+[0.9.16]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.15...v0.9.16
 [0.9.15]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.14...v0.9.15
 [0.9.14]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.13...v0.9.14
 [0.9.13]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.12...v0.9.13
