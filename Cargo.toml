@@ -100,7 +100,7 @@ petgraph = "0.8"
 rmp-serde = "1"
 notify = "8"
 redis = { version = "1.2", default-features = false }
-rust_xlsxwriter = "0.97"
+rust_xlsxwriter = "0.98"
 ignore = "0.4"
 # ripgrep's matcher + searcher core, for the MCP `search_text` content-search
 # tool. Same crate family as `ignore`, so they version together.
