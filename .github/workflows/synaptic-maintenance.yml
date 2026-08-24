@@ -113,7 +113,6 @@ jobs:
           vendor: ${{ inputs.vendor }}
           offline: ${{ inputs.offline || false }}
           agent_command: node ${{ github.workspace }}/automation/api-maintenance/dependency-agent.mjs {request}
-          network_guard_json: '["unshare","-Urn","--"]'
           handoff_directory: ${{ github.workspace }}/.synaptic-ci/handoffs
           cloud_url: ${{ inputs.cloud_url }}
           cloud_policy_id: ${{ inputs.cloud_policy_id }}

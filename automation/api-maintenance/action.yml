@@ -47,7 +47,7 @@ inputs:
     description: Local isolated agent command containing {request}; never logged
     default: ""
   network_guard_json:
-    description: JSON argv array for the no-network guard
+    description: Optional JSON argv array for a custom no-network guard; GitHub-hosted Linux uses the built-in guard
     default: "[]"
   handoff_directory:
     description: Repair output or downloaded publication handoff directory

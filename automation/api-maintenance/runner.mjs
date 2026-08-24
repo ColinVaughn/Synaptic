@@ -29,6 +29,7 @@ const TERMINAL_FAILURES = new Set(["repair_failed", "verification_failed"]);
 const INCONCLUSIVE_STATES = new Set(["inconclusive"]);
 const NON_PUBLISHING_STATES = new Set(["no_change", "not_applicable", "review_required", "planned"]);
 const DEPENDENCY_AGENT = fileURLToPath(new URL("./dependency-agent.mjs", import.meta.url));
+const HOSTED_NETWORK_GUARD = fileURLToPath(new URL("./network-guard.mjs", import.meta.url));
 
 function fail(message) {
   throw new Error(message);
@@ -70,6 +71,14 @@ function automationFamily() {
   const family = optional("SYNAPTIC_AUTOMATION_FAMILY", "api");
   if (family !== "api" && family !== "vulnerability" && family !== "dependency") fail("SYNAPTIC_AUTOMATION_FAMILY must be api, vulnerability, or dependency");
   return family;
+}
+
+function networkGuard() {
+  const configured = parseArray("SYNAPTIC_NETWORK_GUARD_JSON");
+  const hosted = process.platform === "linux" && process.env.GITHUB_ACTIONS === "true";
+  const incompatibleHostedUnshare = configured[0] === "unshare" && configured.some((argument) => argument === "--user" || /^-[^-]*U/.test(argument) || argument.startsWith("--map-"));
+  if (hosted && (configured.length === 0 || incompatibleHostedUnshare)) return [process.execPath, HOSTED_NETWORK_GUARD];
+  return configured;
 }
 
 function vulnerabilityFinding() {
@@ -495,9 +504,11 @@ async function repair() {
   let agentCommand = "";
   let guard = [];
   if (mode === "draft_change_request") {
-    agentCommand = required("SYNAPTIC_AGENT_COMMAND");
-    if (!agentCommand.includes("{request}")) fail("SYNAPTIC_AGENT_COMMAND must contain {request}");
-    guard = parseArray("SYNAPTIC_NETWORK_GUARD_JSON");
+    if (family !== "dependency") {
+      agentCommand = required("SYNAPTIC_AGENT_COMMAND");
+      if (!agentCommand.includes("{request}")) fail("SYNAPTIC_AGENT_COMMAND must contain {request}");
+    }
+    guard = networkGuard();
     if (guard.length === 0) fail("draft_change_request mode requires a network-isolation guard");
   }
 
