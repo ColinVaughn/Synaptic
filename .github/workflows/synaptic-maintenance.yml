@@ -65,7 +65,7 @@ jobs:
       base_sha: ${{ steps.synaptic.outputs.base_sha }}
       has_verified: ${{ steps.synaptic.outputs.has_verified }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -119,7 +119,7 @@ jobs:
           cloud_oidc_audience: ${{ inputs.cloud_oidc_audience || 'synaptic-api-maintenance' }}
       - name: Upload checksummed handoff only
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: synaptic-${{ inputs.automation_family || (github.event.schedule == '17 7 * * *' && 'dependency' || 'vulnerability') }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: .synaptic-ci/handoffs
@@ -148,7 +148,7 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
           permission-workflows: write
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.repair.outputs.base_sha }}
           fetch-depth: 0
@@ -175,7 +175,7 @@ jobs:
           chmod 0755 "$binary"
           echo "binary=$binary" >> "$GITHUB_OUTPUT"
           echo "sha256=$actual_binary" >> "$GITHUB_OUTPUT"
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: synaptic-${{ inputs.automation_family || (github.event.schedule == '17 7 * * *' && 'dependency' || 'vulnerability') }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: .synaptic-ci/handoffs
