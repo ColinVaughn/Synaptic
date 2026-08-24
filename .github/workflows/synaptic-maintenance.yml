@@ -3,6 +3,14 @@ name: Synaptic dependency maintenance
 on:
   workflow_dispatch:
     inputs:
+      maintenance_family:
+        description: Maintenance family to run
+        required: true
+        default: vulnerability
+        type: choice
+        options:
+          - vulnerability
+          - api
       vulnerability_finding:
         description: Optional exact Synaptic vulnerability finding ID
         required: false
@@ -13,7 +21,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: synaptic-vulnerability-${{ github.repository }}
+  group: synaptic-${{ inputs.maintenance_family || 'vulnerability' }}-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
@@ -68,8 +76,8 @@ jobs:
           provider: github
           provider_base_url: ${{ github.server_url }}
           target_branch: ${{ github.event.repository.default_branch }}
-          automation_mode: draft_change_request
-          automation_family: vulnerability
+          automation_mode: ${{ (inputs.maintenance_family || 'vulnerability') == 'api' && 'report_only' || 'draft_change_request' }}
+          automation_family: ${{ inputs.maintenance_family || 'vulnerability' }}
           vulnerability_finding: ${{ inputs.vulnerability_finding }}
           offline: false
           agent_command: node ${{ github.workspace }}/automation/api-maintenance/dependency-agent.mjs {request}
@@ -82,7 +90,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: synaptic-vulnerability-${{ github.run_id }}-${{ github.run_attempt }}
+          name: synaptic-${{ inputs.maintenance_family || 'vulnerability' }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: .synaptic-ci/handoffs
           if-no-files-found: error
           retention-days: 3
@@ -127,7 +135,7 @@ jobs:
           echo "sha256=$actual_binary" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: synaptic-vulnerability-${{ github.run_id }}-${{ github.run_attempt }}
+          name: synaptic-${{ inputs.maintenance_family || 'vulnerability' }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: .synaptic-ci/handoffs
       - uses: ./automation/api-maintenance
         env:
@@ -142,8 +150,8 @@ jobs:
           provider: github
           provider_base_url: ${{ github.server_url }}
           target_branch: ${{ github.event.repository.default_branch }}
-          automation_mode: draft_change_request
-          automation_family: vulnerability
+          automation_mode: ${{ (inputs.maintenance_family || 'vulnerability') == 'api' && 'report_only' || 'draft_change_request' }}
+          automation_family: ${{ inputs.maintenance_family || 'vulnerability' }}
           vulnerability_finding: ${{ inputs.vulnerability_finding }}
           handoff_directory: ${{ github.workspace }}/.synaptic-ci/handoffs
           expected_handoff_digest: ${{ needs.repair.outputs.manifest_digest }}
