@@ -66,6 +66,8 @@ jobs:
         run: cargo fetch --locked
       - id: synaptic
         uses: ./automation/api-maintenance
+        env:
+          SYNAPTIC_REQUIRE_COMPLETE: ${{ (inputs.maintenance_family || 'vulnerability') == 'api' && 'false' || 'true' }}
         with:
           stage: repair
           synaptic_binary: ${{ steps.engine.outputs.binary }}
