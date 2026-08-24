@@ -106,6 +106,7 @@ async function raiseManifestFloors(files, packageName, target) {
 function directCargoDependencies(metadata, root) {
   const workspace = new Set(metadata.workspace_members || []);
   const packages = new Map(metadata.packages.map((item) => [item.id, item]));
+  const workspaceManifest = resolve(metadata.workspace_root || root, "Cargo.toml");
   const direct = new Map();
   for (const node of metadata.resolve?.nodes || []) {
     if (!workspace.has(node.id)) continue;
@@ -116,9 +117,11 @@ function directCargoDependencies(metadata, root) {
       const manifest = resolve(owner.manifest_path);
       const manifestRelative = relative(root, manifest);
       if (!manifestRelative || manifestRelative.startsWith("..") || resolve(root, manifestRelative) !== manifest) continue;
-      const current = direct.get(item.name) || { name: item.name, version: item.version, manifests: new Set() };
+      const current = direct.get(item.name) || { name: item.name, version: item.version, versions: new Set(), manifests: new Set() };
       if (compareSemver(item.version, current.version) > 0) current.version = item.version;
+      current.versions.add(item.version);
       current.manifests.add(manifest);
+      if (!relative(root, workspaceManifest).startsWith("..")) current.manifests.add(workspaceManifest);
       direct.set(item.name, current);
     }
   }
@@ -152,7 +155,7 @@ async function mapLimit(values, limit, operation) {
 }
 
 function cargoMetadata(root) {
-  return JSON.parse(run("cargo", ["metadata", "--format-version", "1", "--locked"], { cwd: root }));
+  return JSON.parse(run("cargo", ["metadata", "--format-version", "1", "--locked", "--all-features"], { cwd: root }));
 }
 
 function versionSets(metadata) {
@@ -180,21 +183,43 @@ async function updateCargo(root) {
   if (!await readFile(join(root, "Cargo.toml"), "utf8").catch(() => null)) return [];
   const before = cargoMetadata(root);
   const direct = directCargoDependencies(before, root);
-  run("cargo", ["update", "--workspace"], { cwd: root });
-  const compatible = cargoMetadata(root);
-  const compatibleDirect = directCargoDependencies(compatible, root);
+  let compatible = before;
+  for (const dependency of direct.values()) {
+    for (const version of [...dependency.versions].sort(compareSemver)) {
+      if (!versionSets(compatible).get(dependency.name)?.has(version)) continue;
+      run("cargo", ["update", "-p", `${dependency.name}@${version}`], { cwd: root });
+      compatible = cargoMetadata(root);
+    }
+  }
+  let resolvedMetadata = compatible;
   const names = [...direct.keys()].sort();
   const latest = await mapLimit(names, 8, latestCrateVersion);
   for (let index = 0; index < names.length; index += 1) {
     const name = names[index];
     const target = latest[index];
     const original = direct.get(name);
-    const resolved = compatibleDirect.get(name)?.version || original.version;
+    const resolved = directCargoDependencies(resolvedMetadata, root).get(name)?.version || original.version;
     const originalVersion = semver(original.version);
     const targetVersion = semver(target);
     if (targetVersion[0] !== originalVersion[0] || compareSemver(target, resolved) <= 0) continue;
-    if (await raiseManifestFloors([...original.manifests], name, target) === 0) continue;
-    run("cargo", ["update", "-p", `${name}@${resolved}`, "--precise", target], { cwd: root });
+    const manifests = [...original.manifests];
+    const manifestSources = await Promise.all(manifests.map(async (file) => [file, await readFile(file, "utf8")]));
+    const lockFile = join(root, "Cargo.lock");
+    const lockSource = await readFile(lockFile, "utf8");
+    if (await raiseManifestFloors(manifests, name, target) === 0) continue;
+    const attempt = spawnSync("cargo", ["update", "-p", `${name}@${resolved}`, "--precise", target], {
+      cwd: root,
+      encoding: "utf8",
+      shell: false,
+      maxBuffer: MAX_OUTPUT_BYTES
+    });
+    if (attempt.error) throw attempt.error;
+    if (attempt.status !== 0) {
+      await Promise.all(manifestSources.map(([file, source]) => writeFile(file, source, "utf8")));
+      await writeFile(lockFile, lockSource, "utf8");
+      continue;
+    }
+    resolvedMetadata = cargoMetadata(root);
   }
   run("cargo", ["fetch", "--locked"], { cwd: root });
   return cargoChanges(before, cargoMetadata(root));
@@ -384,6 +409,17 @@ function selfTest() {
   const workflow = rewriteGitHubActions("- uses: actions/checkout@v5\n", targets);
   if (!workflow.includes("actions/checkout@v7")) fail("GitHub Action rewrite failed");
   if (splitCommand('cargo test --package "hello world"').at(-1) !== "hello world") fail("command parsing failed");
+  const metadataRoot = resolve("test-workspace");
+  const direct = directCargoDependencies({
+    workspace_root: metadataRoot,
+    workspace_members: ["owner"],
+    packages: [
+      { id: "owner", manifest_path: join(metadataRoot, "crate", "Cargo.toml") },
+      { id: "dependency", name: "demo", version: "1.2.3", source: "registry+https://github.com/rust-lang/crates.io-index" }
+    ],
+    resolve: { nodes: [{ id: "owner", deps: [{ pkg: "dependency" }] }] }
+  }, metadataRoot).get("demo");
+  if (!direct?.versions.has("1.2.3") || !direct.manifests.has(join(metadataRoot, "Cargo.toml"))) fail("Cargo workspace dependency discovery failed");
   process.stdout.write('{"ok":true}\n');
 }
 
