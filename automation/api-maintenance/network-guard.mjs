@@ -27,12 +27,13 @@ if (args[0] === "--inside") {
   const uid = Number(args[1]);
   const gid = Number(args[2]);
   const home = args[3];
-  const program = args[4];
-  if (!Number.isSafeInteger(uid) || uid < 1 || !Number.isSafeInteger(gid) || gid < 1 || !/^\/[^\0\r\n]*$/.test(home || "") || !program) fail("network guard received an invalid identity or command");
+  const path = args[4];
+  const program = args[5];
+  if (!Number.isSafeInteger(uid) || uid < 1 || !Number.isSafeInteger(gid) || gid < 1 || !/^\/[^\0\r\n]*$/.test(home || "") || !path || /[\0\r\n]/.test(path) || !program) fail("network guard received an invalid identity or command");
   process.setgroups([]);
   process.setgid(gid);
   process.setuid(uid);
-  run(program, args.slice(5), { ...safeEnvironment(), HOME: home });
+  run(program, args.slice(6), { ...safeEnvironment(), HOME: home, PATH: path });
 }
 
 if (args[0] === "self-test") {
@@ -59,5 +60,6 @@ run("sudo", [
   String(process.getuid()),
   String(process.getgid()),
   process.env.HOME || process.cwd(),
+  process.env.PATH || "/usr/local/bin:/usr/bin:/bin",
   ...args
 ], safeEnvironment());
