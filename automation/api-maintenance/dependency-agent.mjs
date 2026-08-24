@@ -22,7 +22,7 @@ function run(program, args, options = {}) {
     maxBuffer: MAX_OUTPUT_BYTES
   });
   if (result.error) throw result.error;
-  if (result.status !== 0) fail((result.stderr || `${program} failed with ${result.status}`).trim().slice(-4_000));
+  if (result.status !== 0) fail(([result.stderr, result.stdout].filter(Boolean).join("\n") || `${program} failed with ${result.status}`).trim().slice(-4_000));
   return result.stdout;
 }
 

@@ -30,6 +30,8 @@ if (args[0] === "--inside") {
   const path = args[4];
   const program = args[5];
   if (!Number.isSafeInteger(uid) || uid < 1 || !Number.isSafeInteger(gid) || gid < 1 || !/^\/[^\0\r\n]*$/.test(home || "") || !path || /[\0\r\n]/.test(path) || !program) fail("network guard received an invalid identity or command");
+  const loopback = spawnSync("ip", ["link", "set", "lo", "up"], { shell: false, stdio: "inherit" });
+  if (loopback.error || loopback.status !== 0) fail(loopback.error?.message || "network guard could not enable isolated loopback");
   process.setgroups([]);
   process.setgid(gid);
   process.setuid(uid);
