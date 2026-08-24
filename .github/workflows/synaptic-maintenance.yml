@@ -1,9 +1,9 @@
-name: Synaptic dependency maintenance
+name: Synaptic maintenance
 
 on:
   workflow_dispatch:
     inputs:
-      maintenance_family:
+      automation_family:
         description: Maintenance family to run
         required: true
         default: vulnerability
@@ -11,21 +11,50 @@ on:
         options:
           - vulnerability
           - api
+          - dependency
+      automation_mode:
+        description: Optional Cloud override (report_only or draft_change_request)
+        required: false
+        type: string
       vulnerability_finding:
         description: Optional exact Synaptic vulnerability finding ID
         required: false
         type: string
+      vendor:
+        description: Optional API vendor filter
+        required: false
+        type: string
+      offline:
+        description: Disable online OSV, API, registry, and Git tag sources
+        required: false
+        default: false
+        type: boolean
+      cloud_url:
+        description: Synaptic Cloud HTTPS origin
+        required: false
+        type: string
+      cloud_policy_id:
+        description: Synaptic Cloud automation policy UUID
+        required: false
+        type: string
+      cloud_oidc_audience:
+        description: Synaptic Cloud OIDC audience
+        required: false
+        default: synaptic-api-maintenance
+        type: string
   schedule:
-    - cron: "17 7 * * *"
+    - cron: "17 7 * * 1"
+    - cron: "47 7 * * *"
 
 permissions: {}
 
 concurrency:
-  group: synaptic-${{ inputs.maintenance_family || 'vulnerability' }}-${{ github.repository }}
+  group: synaptic-${{ inputs.automation_family || (github.event.schedule == '17 7 * * 1' && 'dependency' || 'vulnerability') }}-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
   repair:
+    if: github.event_name != 'pull_request' && !startsWith(github.ref_name, 'synaptic/api/') && !startsWith(github.ref_name, 'synaptic/vuln/') && !startsWith(github.ref_name, 'synaptic/deps/')
     runs-on: ubuntu-24.04
     permissions:
       attestations: read
@@ -67,7 +96,7 @@ jobs:
       - id: synaptic
         uses: ./automation/api-maintenance
         env:
-          SYNAPTIC_REQUIRE_COMPLETE: ${{ (inputs.maintenance_family || 'vulnerability') == 'api' && 'false' || 'true' }}
+          SYNAPTIC_REQUIRE_COMPLETE: ${{ (inputs.automation_family || (github.event.schedule == '17 7 * * 1' && 'dependency' || 'vulnerability')) == 'api' && 'false' || 'true' }}
         with:
           stage: repair
           synaptic_binary: ${{ steps.engine.outputs.binary }}
@@ -78,27 +107,28 @@ jobs:
           provider: github
           provider_base_url: ${{ github.server_url }}
           target_branch: ${{ github.event.repository.default_branch }}
-          automation_mode: ${{ (inputs.maintenance_family || 'vulnerability') == 'api' && 'report_only' || 'draft_change_request' }}
-          automation_family: ${{ inputs.maintenance_family || 'vulnerability' }}
+          automation_mode: ${{ inputs.automation_mode || ((inputs.automation_family || (github.event.schedule == '17 7 * * 1' && 'dependency' || 'vulnerability')) == 'api' && 'report_only' || 'draft_change_request') }}
+          automation_family: ${{ inputs.automation_family || (github.event.schedule == '17 7 * * 1' && 'dependency' || 'vulnerability') }}
           vulnerability_finding: ${{ inputs.vulnerability_finding }}
-          offline: false
+          vendor: ${{ inputs.vendor }}
+          offline: ${{ inputs.offline || false }}
           agent_command: node ${{ github.workspace }}/automation/api-maintenance/dependency-agent.mjs {request}
           network_guard_json: '["unshare","-Urn","--"]'
           handoff_directory: ${{ github.workspace }}/.synaptic-ci/handoffs
-          cloud_url: ""
-          cloud_policy_id: ""
-          cloud_oidc_audience: synaptic-api-maintenance
+          cloud_url: ${{ inputs.cloud_url }}
+          cloud_policy_id: ${{ inputs.cloud_policy_id }}
+          cloud_oidc_audience: ${{ inputs.cloud_oidc_audience || 'synaptic-api-maintenance' }}
       - name: Upload checksummed handoff only
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: synaptic-${{ inputs.maintenance_family || 'vulnerability' }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: synaptic-${{ inputs.automation_family || (github.event.schedule == '17 7 * * 1' && 'dependency' || 'vulnerability') }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: .synaptic-ci/handoffs
           if-no-files-found: error
           retention-days: 3
 
   publish:
-    if: needs.repair.result == 'success' && needs.repair.outputs.has_verified == 'true'
+    if: needs.repair.result == 'success' && needs.repair.outputs.has_verified == 'true' && (inputs.automation_mode || ((inputs.automation_family || (github.event.schedule == '17 7 * * 1' && 'dependency' || 'vulnerability')) == 'api' && 'report_only' || 'draft_change_request')) == 'draft_change_request'
     needs: repair
     runs-on: ubuntu-24.04
     environment: synaptic-api-publisher
@@ -137,7 +167,7 @@ jobs:
           echo "sha256=$actual_binary" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: synaptic-${{ inputs.maintenance_family || 'vulnerability' }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: synaptic-${{ inputs.automation_family || (github.event.schedule == '17 7 * * 1' && 'dependency' || 'vulnerability') }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: .synaptic-ci/handoffs
       - uses: ./automation/api-maintenance
         env:
@@ -152,11 +182,11 @@ jobs:
           provider: github
           provider_base_url: ${{ github.server_url }}
           target_branch: ${{ github.event.repository.default_branch }}
-          automation_mode: ${{ (inputs.maintenance_family || 'vulnerability') == 'api' && 'report_only' || 'draft_change_request' }}
-          automation_family: ${{ inputs.maintenance_family || 'vulnerability' }}
+          automation_mode: ${{ inputs.automation_mode || ((inputs.automation_family || (github.event.schedule == '17 7 * * 1' && 'dependency' || 'vulnerability')) == 'api' && 'report_only' || 'draft_change_request') }}
+          automation_family: ${{ inputs.automation_family || (github.event.schedule == '17 7 * * 1' && 'dependency' || 'vulnerability') }}
           vulnerability_finding: ${{ inputs.vulnerability_finding }}
           handoff_directory: ${{ github.workspace }}/.synaptic-ci/handoffs
           expected_handoff_digest: ${{ needs.repair.outputs.manifest_digest }}
-          cloud_url: ""
-          cloud_policy_id: ""
-          cloud_oidc_audience: synaptic-api-maintenance
+          cloud_url: ${{ inputs.cloud_url }}
+          cloud_policy_id: ${{ inputs.cloud_policy_id }}
+          cloud_oidc_audience: ${{ inputs.cloud_oidc_audience || 'synaptic-api-maintenance' }}

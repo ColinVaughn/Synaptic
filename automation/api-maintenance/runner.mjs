@@ -6,6 +6,7 @@ import { constants } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const CONTRACT = Object.freeze({
   schema_version: 1,
@@ -27,6 +28,7 @@ const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const TERMINAL_FAILURES = new Set(["repair_failed", "verification_failed"]);
 const INCONCLUSIVE_STATES = new Set(["inconclusive"]);
 const NON_PUBLISHING_STATES = new Set(["no_change", "not_applicable", "review_required", "planned"]);
+const DEPENDENCY_AGENT = fileURLToPath(new URL("./dependency-agent.mjs", import.meta.url));
 
 function fail(message) {
   throw new Error(message);
@@ -66,7 +68,7 @@ function provider(value) {
 
 function automationFamily() {
   const family = optional("SYNAPTIC_AUTOMATION_FAMILY", "api");
-  if (family !== "api" && family !== "vulnerability") fail("SYNAPTIC_AUTOMATION_FAMILY must be api or vulnerability");
+  if (family !== "api" && family !== "vulnerability" && family !== "dependency") fail("SYNAPTIC_AUTOMATION_FAMILY must be api, vulnerability, or dependency");
   return family;
 }
 
@@ -335,10 +337,7 @@ async function prefetchCargoUpgrade(repository, finding) {
   const name = String(finding.package?.name || "");
   const current = String(finding.resolved_version || "");
   const target = String(finding.remediation?.recommended_version || "");
-  if (!/^[A-Za-z0-9_.-]{1,120}$/.test(name) || !/^[A-Za-z0-9.+_-]{1,80}$/.test(current) || !/^[A-Za-z0-9.+_-]{1,80}$/.test(target)) {
-    fail("Cargo vulnerability finding has an invalid package or version");
-  }
-
+  if (!/^[A-Za-z0-9_.-]{1,120}$/.test(name) || !/^[A-Za-z0-9.+_-]{1,80}$/.test(current) || !/^[A-Za-z0-9.+_-]{1,80}$/.test(target)) fail("Cargo vulnerability finding has an invalid package or version");
   const sandbox = await mkdtemp(join(tmpdir(), "synaptic-prefetch-"));
   const checkout = join(sandbox, "checkout");
   try {
@@ -378,6 +377,102 @@ async function withPublicationCheckout(repository, operation) {
     await command("git", ["-C", repository.root, "worktree", "remove", "--force", checkout], { label: "Publication worktree cleanup" }).catch(() => undefined);
     await rm(sandbox, { recursive: true, force: true });
   }
+}
+
+function dependencyBundleDigest(bundle) {
+  return sha256(Buffer.from(JSON.stringify({ ...bundle, bundle_digest: "" })));
+}
+
+function dependencyBody(bundle) {
+  const updates = bundle.updates.slice(0, 100).map((update) => `| \`${update.name}\` | \`${update.from}\` | \`${update.to}\` |`).join("\n");
+  const gates = bundle.verification.gates.map((gate) => `- ${gate.gate}: ${gate.outcome}`).join("\n");
+  return [
+    "## Synaptic verified dependency maintenance",
+    "",
+    `Ecosystem: **${bundle.ecosystem}**`,
+    "",
+    "| Dependency | From | To |",
+    "| --- | --- | --- |",
+    updates || "| lockfile resolution | current | refreshed |",
+    "",
+    "### Compatibility evidence",
+    "",
+    gates,
+    "",
+    `Base: \`${bundle.base_sha}\``,
+    `Patch SHA-256: \`${bundle.patch_digest}\``,
+    "",
+    "This pull request is intentionally draft-only. Synaptic never approves or merges it."
+  ].join("\n");
+}
+
+async function dependencyOutcomes(engine, repository, mode, offline, guard, outputDirectory) {
+  const outcomes = [];
+  for (const ecosystem of ["cargo", "github-actions"]) {
+    const fallback = sha256(`${repository.base_sha}\0${ecosystem}`).slice(0, 20);
+    const policyDigest = sha256(`synaptic-dependency-maintenance-v1\0${ecosystem}`);
+    if (offline) {
+      outcomes.push({
+        run: `dependency_run_${fallback}`,
+        event: `dependency_update_${ecosystem.replaceAll("-", "_")}_${fallback}`,
+        vendor: ecosystem,
+        policy_digest: policyDigest,
+        state: "review_required"
+      });
+      continue;
+    }
+    const result = await withPublicationCheckout(repository, async (checkout) => jsonOutput(await command(process.execPath, [DEPENDENCY_AGENT, "freshness"], {
+      cwd: checkout,
+      env: {
+        ...process.env,
+        SYNAPTIC_REPOSITORY_ROOT: checkout,
+        SYNAPTIC_BINARY: engine.binary,
+        SYNAPTIC_DEPENDENCY_ECOSYSTEM: ecosystem,
+        SYNAPTIC_NETWORK_GUARD_JSON: JSON.stringify(guard)
+      },
+      label: `Synaptic ${ecosystem} freshness maintenance`
+    }), `Synaptic ${ecosystem} freshness maintenance`));
+    if (result?.version !== 1 || result.ecosystem !== ecosystem || !["no_change", "verified"].includes(result.state)) fail("Dependency agent returned an invalid outcome contract");
+    const run = typeof result.run === "string" ? result.run : `dependency_run_${fallback}`;
+    const event = typeof result.event === "string" ? result.event : `dependency_update_${ecosystem.replaceAll("-", "_")}_${fallback}`;
+    const outcome = { ...result, run, event, vendor: ecosystem, policy_digest: result.policy_digest || policyDigest };
+    if (result.state === "verified") {
+      const verification = { gates: verificationGateSummaries(result.verification?.gates) };
+      const bundle = {
+        version: 1,
+        engine_version: engine.version,
+        repository_identity: repository.identity,
+        provider: repository.provider,
+        target_branch: repository.target_branch,
+        base_sha: repository.base_sha,
+        branch: `synaptic/deps/${ecosystem}-${sha256(result.patch).slice(0, 16)}`,
+        run,
+        event,
+        ecosystem,
+        title: result.title,
+        updates: result.updates,
+        files: result.files,
+        patch: result.patch,
+        patch_digest: result.patch_digest,
+        policy_digest: outcome.policy_digest,
+        verification,
+        bundle_digest: ""
+      };
+      bundle.bundle_digest = dependencyBundleDigest(bundle);
+      if (mode === "draft_change_request") {
+        const bundleName = `${run}.handoff.json`;
+        await writeFile(join(outputDirectory, bundleName), `${JSON.stringify(bundle, null, 2)}\n`, { flag: "wx" });
+        outcome.bundle = bundleName;
+        outcome.bundle_digest = bundle.bundle_digest;
+        outcome.patch_digest = bundle.patch_digest;
+        outcome.verification_gates = verification.gates;
+      } else {
+        outcome.state = "planned";
+      }
+    }
+    outcomes.push(outcome);
+  }
+  return outcomes;
 }
 
 async function setOutput(name, value) {
@@ -426,7 +521,7 @@ async function repair() {
     const composed = jsonOutput(await command(engine.binary, runArgs, { cwd: repository.root, label: "Synaptic deferred API maintenance" }), "Synaptic API maintenance");
     if (composed.publication_deferred !== true || !Array.isArray(composed.outcomes)) fail("Synaptic did not return the deferred-publication outcome contract");
     outcomes = composed.outcomes;
-  } else {
+  } else if (family === "vulnerability") {
     const scanArgs = ["vuln", "scan", "--root", repository.root, "--graph", join(repository.root, "synaptic-out", "graph.json"), "--record", "--json", offline ? "--offline" : "--online"];
     const scan = jsonOutput(await command(engine.binary, scanArgs, { cwd: repository.root, label: "Synaptic vulnerability scan" }), "Synaptic vulnerability scan");
     if (!Array.isArray(scan.findings)) fail("Synaptic vulnerability scan omitted findings");
@@ -446,12 +541,18 @@ async function repair() {
       if (result.publication_deferred !== true || result.finding !== finding.id || typeof result.run !== "string") fail("Synaptic did not return the vulnerability deferred-publication contract");
       outcomes.push({ ...result, event: result.finding, vendor: String(finding.package || "vulnerability") });
     }
+  } else {
+    outcomes = await dependencyOutcomes(engine, repository, mode, offline, guard, outputDirectory);
   }
 
   const runs = [];
   for (const outcome of outcomes) {
     const state = String(outcome.state || "");
-    if (state === "verified") {
+    if (state === "verified" && family === "dependency") {
+      const record = { run: outcome.run, event: outcome.event, vendor: outcome.vendor, state, bundle: outcome.bundle, bundle_digest: outcome.bundle_digest, patch_digest: outcome.patch_digest, verification_gates: outcome.verification_gates };
+      await reportCloudRepair(cloud, repository, engine, outcome, record);
+      runs.push(record);
+    } else if (state === "verified") {
       const bundleName = `${outcome.run}.handoff.json`;
       const bundlePath = join(outputDirectory, bundleName);
       const exported = jsonOutput(await command(engine.binary, [family === "api" ? "api" : "vuln", "export-run", "--run", String(outcome.run), "--root", repository.root, "--output", bundlePath, "--json"], { cwd: repository.root, label: "Synaptic verified-run export" }), "Synaptic verified-run export");
@@ -498,6 +599,83 @@ async function repair() {
   if (runs.some((run) => TERMINAL_FAILURES.has(run.state) || INCONCLUSIVE_STATES.has(run.state))) fail(`One or more ${family} maintenance runs failed or were inconclusive`);
 }
 
+function verifiedDependencyBundle(value, repository, engine, expectedDigest) {
+  if (!value || value.version !== 1 || value.engine_version !== engine.version) fail("Dependency handoff engine identity is invalid");
+  if (value.repository_identity !== repository.identity || value.provider !== repository.provider || value.target_branch !== repository.target_branch || value.base_sha !== repository.base_sha) fail("Dependency handoff repository identity is invalid");
+  if (value.ecosystem !== "cargo" && value.ecosystem !== "github-actions") fail("Dependency handoff ecosystem is invalid");
+  if (!/^dependency_run_[a-f0-9]{20}$/.test(value.run) || !/^dependency_update_(?:cargo|github_actions)_[a-f0-9]{20}$/.test(value.event)) fail("Dependency handoff run identity is invalid");
+  if (!/^synaptic\/deps\/(?:cargo|github-actions)-[a-f0-9]{16}$/.test(value.branch)) fail("Dependency handoff branch is invalid");
+  if (typeof value.title !== "string" || value.title.length < 1 || value.title.length > 200 || /[\0\r\n]/.test(value.title)) fail("Dependency handoff title is invalid");
+  if (!Array.isArray(value.updates) || value.updates.length > 500 || value.updates.some((update) => !update || ![update.name, update.from, update.to].every((item) => typeof item === "string" && item.length > 0 && item.length <= 240 && !/[\0\r\n|]/.test(item)))) fail("Dependency handoff updates are invalid");
+  if (!Array.isArray(value.files) || value.files.length < 1 || value.files.length > 100 || value.files.some((file) => typeof file !== "string" || !file || file.includes("\\") || file.startsWith("/") || file.split("/").includes(".."))) fail("Dependency handoff files are invalid");
+  if (typeof value.patch !== "string" || !value.patch.trim() || Buffer.byteLength(value.patch) > MAX_OUTPUT_BYTES) fail("Dependency handoff patch is invalid");
+  if (sha256(value.patch) !== digest(value.patch_digest, "dependency patch digest")) fail("Dependency handoff patch digest mismatch");
+  if (dependencyBundleDigest(value) !== digest(value.bundle_digest, "dependency bundle digest") || value.bundle_digest !== digest(expectedDigest, "bundle digest")) fail("Dependency handoff bundle digest mismatch");
+  value.verification = { gates: verificationGateSummaries(value.verification?.gates) };
+  return value;
+}
+
+async function pushDependencyBranch(repository, checkout, branch) {
+  const reference = `refs/heads/${branch}`;
+  const remote = await command("git", ["-C", checkout, "ls-remote", "--refs", "origin", reference], { label: "Dependency branch lookup" });
+  const head = remote.stdout.trim().split(/\s+/)[0] || "";
+  if (head && !/^[a-f0-9]{40,64}$/.test(head)) fail("Dependency branch lookup returned an invalid commit");
+  await command("git", ["-C", checkout, "push", `--force-with-lease=${reference}:${head}`, "origin", `HEAD:${reference}`], { label: "Dependency branch push" });
+}
+
+async function publishGitHubDependency(repository, bundle) {
+  const host = new URL(repository.provider_base_url).hostname.toLowerCase();
+  const repositoryArgument = host === "github.com" ? repository.identity : `${host}/${repository.identity}`;
+  const listed = jsonOutput(await command("gh", ["pr", "list", "--repo", repositoryArgument, "--head", bundle.branch, "--base", repository.target_branch, "--state", "open", "--limit", "1", "--json", "number,url"], { label: "GitHub dependency pull-request lookup" }), "GitHub dependency pull-request lookup");
+  const existing = Array.isArray(listed) ? listed[0] : null;
+  const body = dependencyBody(bundle);
+  if (existing?.number && existing?.url) {
+    await command("gh", ["pr", "edit", String(existing.number), "--repo", repositoryArgument, "--title", bundle.title, "--body", body], { label: "GitHub dependency pull-request update" });
+    return { publish: { kind: "pull_request", number: existing.number, url: existing.url, branch: bundle.branch, draft: true } };
+  }
+  const created = await command("gh", ["pr", "create", "--repo", repositoryArgument, "--draft", "--base", repository.target_branch, "--head", bundle.branch, "--title", bundle.title, "--body", body], { label: "GitHub dependency pull-request creation" });
+  const url = created.stdout.match(/https:\/\/[^\s]+\/pull\/\d+/)?.[0];
+  const number = url?.match(/\/pull\/(\d+)/)?.[1];
+  if (!url || !number) fail("GitHub dependency pull-request creation omitted its identity");
+  return { publish: { kind: "pull_request", number, url, branch: bundle.branch, draft: true } };
+}
+
+async function publishGitLabDependency(repository, bundle) {
+  const listed = jsonOutput(await command("glab", ["mr", "list", "--source-branch", bundle.branch, "--target-branch", repository.target_branch, "--state", "opened", "--output", "json"], { label: "GitLab dependency merge-request lookup" }), "GitLab dependency merge-request lookup");
+  const existing = Array.isArray(listed) ? listed[0] : null;
+  const body = dependencyBody(bundle);
+  if (existing?.iid && existing?.web_url) {
+    await command("glab", ["mr", "update", String(existing.iid), "--title", bundle.title, "--description", body], { label: "GitLab dependency merge-request update" });
+    return { publish: { kind: "merge_request", number: existing.iid, url: existing.web_url, branch: bundle.branch, draft: true } };
+  }
+  const created = await command("glab", ["mr", "create", "--draft", "--source-branch", bundle.branch, "--target-branch", repository.target_branch, "--title", bundle.title, "--description", body, "--yes"], { label: "GitLab dependency merge-request creation" });
+  const url = created.stdout.match(/https:\/\/[^\s]+\/-\/merge_requests\/\d+/)?.[0];
+  const number = url?.match(/\/merge_requests\/(\d+)/)?.[1];
+  if (!url || !number) fail("GitLab dependency merge-request creation omitted its identity");
+  return { publish: { kind: "merge_request", number, url, branch: bundle.branch, draft: true } };
+}
+
+async function publishDependencyBundle(repository, engine, bundlePath, expectedDigest) {
+  const source = await readFile(bundlePath, "utf8");
+  if (Buffer.byteLength(source) > 16 * 1024 * 1024) fail("Dependency handoff exceeds 16 MiB");
+  const bundle = verifiedDependencyBundle(JSON.parse(source), repository, engine, expectedDigest);
+  return withPublicationCheckout(repository, async (checkout) => {
+    const patchPath = join(dirname(checkout), `${bundle.run}.patch`);
+    await writeFile(patchPath, bundle.patch, { flag: "wx" });
+    await command("git", ["-C", checkout, "apply", "--check", "--binary", patchPath], { label: "Dependency patch validation" });
+    await command("git", ["-C", checkout, "apply", "--binary", patchPath], { label: "Dependency patch application" });
+    const changed = (await command("git", ["-C", checkout, "diff", "--name-only", "--diff-filter=ACMRTUXB"], { label: "Dependency changed-file validation" })).stdout.trim().split(/\r?\n/).filter(Boolean).map((file) => file.replaceAll("\\", "/")).sort();
+    if (JSON.stringify(changed) !== JSON.stringify([...bundle.files].sort())) fail("Dependency handoff changed-file set mismatch");
+    await command("git", ["-C", checkout, "switch", "-c", bundle.branch], { label: "Dependency branch creation" });
+    await command("git", ["-C", checkout, "config", "user.name", "synaptic-bot"], { label: "Dependency commit author" });
+    await command("git", ["-C", checkout, "config", "user.email", "synaptic-bot@users.noreply.github.com"], { label: "Dependency commit author" });
+    await command("git", ["-C", checkout, "add", "--", ...bundle.files], { label: "Dependency patch staging" });
+    await command("git", ["-C", checkout, "commit", "-m", bundle.title], { label: "Dependency verified commit" });
+    await pushDependencyBranch(repository, checkout, bundle.branch);
+    return repository.provider === "github" ? publishGitHubDependency(repository, bundle) : publishGitLabDependency(repository, bundle);
+  });
+}
+
 async function publish() {
   const engine = await engineIdentity();
   const repository = await repositoryContext();
@@ -508,7 +686,7 @@ async function publish() {
   if (sha256(bytes) !== expectedDigest) fail("Handoff manifest digest mismatch");
   const manifest = JSON.parse(bytes.toString("utf8"));
   if (manifest.schema_version !== CONTRACT.schema_version || manifest.engine_version !== engine.version || manifest.engine_digest !== engine.digest) fail("Handoff runner/engine identity mismatch");
-  if (manifest.family !== "api" && manifest.family !== "vulnerability") fail("Handoff manifest maintenance family is invalid");
+  if (manifest.family !== "api" && manifest.family !== "vulnerability" && manifest.family !== "dependency") fail("Handoff manifest maintenance family is invalid");
   if (manifest.family !== automationFamily()) fail("Handoff maintenance family does not match the publication job");
   if (manifest.repository_identity !== repository.identity || manifest.base_sha !== repository.base_sha || manifest.provider !== repository.provider || manifest.target_branch !== repository.target_branch) fail("Handoff publication context mismatch");
   if (!Array.isArray(manifest.runs)) fail("Handoff manifest runs must be an array");
@@ -541,10 +719,12 @@ async function publish() {
     if (cloud && !run.cloud_run_id) fail("Verified Cloud-managed run omitted cloud_run_id");
     if (cloud) await cloudRequest(cloud, `/api/v1/automation/runs/${run.cloud_run_id}`, "PATCH", { status: "publishing", sequence: 3 });
     const bundlePath = resolve(dirname(manifestPath), run.bundle);
-    const published = await withPublicationCheckout(repository, async (checkout) => {
-      await command(engine.binary, [commandFamily, "import-run", "--bundle", bundlePath, "--expected-digest", digest(run.bundle_digest, "bundle digest"), "--root", checkout, "--json"], { cwd: checkout, label: "Synaptic verified-run import" });
-      return jsonOutput(await command(engine.binary, [commandFamily, "publish", "--run", String(run.run), "--root", checkout, "--provider", repository.provider, "--provider-base-url", repository.provider_base_url, "--repository", repository.identity, "--target-branch", repository.target_branch, "--json"], { cwd: checkout, label: "Synaptic draft change-request publication" }), "Synaptic publication");
-    });
+    const published = manifest.family === "dependency"
+      ? await publishDependencyBundle(repository, engine, bundlePath, run.bundle_digest)
+      : await withPublicationCheckout(repository, async (checkout) => {
+        await command(engine.binary, [commandFamily, "import-run", "--bundle", bundlePath, "--expected-digest", digest(run.bundle_digest, "bundle digest"), "--root", checkout, "--json"], { cwd: checkout, label: "Synaptic verified-run import" });
+        return jsonOutput(await command(engine.binary, [commandFamily, "publish", "--run", String(run.run), "--root", checkout, "--provider", repository.provider, "--provider-base-url", repository.provider_base_url, "--repository", repository.identity, "--target-branch", repository.target_branch, "--json"], { cwd: checkout, label: "Synaptic draft change-request publication" }), "Synaptic publication");
+      });
     const change = published.publish;
     if (cloud) {
       const externalId = change?.number ?? String(change?.url || "").match(/\/(\d+)(?:[/?#]|$)/)?.[1];

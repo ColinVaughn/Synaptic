@@ -1,5 +1,5 @@
 name: Synaptic maintenance stage
-description: Runs one credential-separated API or vulnerability maintenance stage.
+description: Runs one credential-separated API, vulnerability, or dependency maintenance stage.
 inputs:
   stage:
     description: repair or publish
@@ -32,7 +32,7 @@ inputs:
     description: report_only or draft_change_request
     default: report_only
   automation_family:
-    description: api or vulnerability
+    description: api, vulnerability, or dependency
     default: api
   vulnerability_finding:
     description: Optional vulnerability finding id; blank repairs every eligible finding
