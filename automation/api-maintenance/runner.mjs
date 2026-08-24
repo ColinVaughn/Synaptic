@@ -681,7 +681,7 @@ async function publishDependencyBundle(repository, engine, bundlePath, expectedD
     await command("git", ["-C", checkout, "config", "user.name", "synaptic-bot"], { label: "Dependency commit author" });
     await command("git", ["-C", checkout, "config", "user.email", "synaptic-bot@users.noreply.github.com"], { label: "Dependency commit author" });
     await command("git", ["-C", checkout, "add", "--", ...bundle.files], { label: "Dependency patch staging" });
-    await command("git", ["-C", checkout, "commit", "-m", bundle.title], { label: "Dependency verified commit" });
+    await command("git", ["-C", checkout, "commit", "-s", "-m", bundle.title], { label: "Dependency verified commit" });
     await pushDependencyBranch(repository, checkout, bundle.branch);
     return repository.provider === "github" ? publishGitHubDependency(repository, bundle) : publishGitLabDependency(repository, bundle);
   });

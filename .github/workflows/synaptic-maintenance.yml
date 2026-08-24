@@ -132,7 +132,7 @@ jobs:
     runs-on: ubuntu-24.04
     environment: synaptic-api-publisher
     env:
-      SYNAPTIC_GITHUB_APP_ID: ${{ secrets.synaptic_github_app_id }}
+      SYNAPTIC_GITHUB_APP_CLIENT_ID: ${{ secrets.synaptic_github_app_client_id }}
     permissions:
       attestations: read
       contents: write
@@ -140,10 +140,10 @@ jobs:
       pull-requests: write
     steps:
       - id: publisher-token
-        if: env.SYNAPTIC_GITHUB_APP_ID != ''
+        if: env.SYNAPTIC_GITHUB_APP_CLIENT_ID != ''
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
         with:
-          app-id: ${{ env.SYNAPTIC_GITHUB_APP_ID }}
+          client-id: ${{ env.SYNAPTIC_GITHUB_APP_CLIENT_ID }}
           private-key: ${{ secrets.synaptic_github_app_private_key }}
           permission-contents: write
           permission-pull-requests: write
