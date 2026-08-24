@@ -1,0 +1,105 @@
+name: Synaptic maintenance stage
+description: Runs one credential-separated API or vulnerability maintenance stage.
+inputs:
+  stage:
+    description: repair or publish
+    required: true
+  synaptic_binary:
+    description: Trusted Synaptic 0.9 executable path
+    required: true
+  synaptic_engine_sha256:
+    description: SHA-256 of the trusted executable
+    required: true
+  repository_root:
+    description: Absolute repository checkout path
+    required: true
+  repository_identity:
+    description: Canonical provider namespace/repository identity
+    required: true
+  base_sha:
+    description: Immutable checkout commit SHA
+    required: true
+  provider:
+    description: github or gitlab
+    required: true
+  provider_base_url:
+    description: HTTPS provider origin
+    required: true
+  target_branch:
+    description: Draft change request target branch
+    required: true
+  automation_mode:
+    description: report_only or draft_change_request
+    default: report_only
+  automation_family:
+    description: api or vulnerability
+    default: api
+  vulnerability_finding:
+    description: Optional vulnerability finding id; blank repairs every eligible finding
+    default: ""
+  vendor:
+    description: Optional configured vendor id
+    default: ""
+  offline:
+    description: Use checked-in sources only
+    default: "false"
+  agent_command:
+    description: Local isolated agent command containing {request}; never logged
+    default: ""
+  network_guard_json:
+    description: JSON argv array for the no-network guard
+    default: "[]"
+  handoff_directory:
+    description: Repair output or downloaded publication handoff directory
+    required: true
+  expected_handoff_digest:
+    description: Expected repair manifest SHA-256 for publication
+    default: ""
+  cloud_url:
+    description: Optional Synaptic Cloud HTTPS URL for OIDC callbacks
+    default: ""
+  cloud_policy_id:
+    description: Tenant policy UUID used to bind Cloud callbacks
+    default: ""
+  cloud_oidc_audience:
+    description: OIDC audience configured by the Cloud policy
+    default: synaptic-api-maintenance
+outputs:
+  manifest_digest:
+    description: SHA-256 of the handoff manifest
+    value: ${{ steps.runner.outputs.manifest_digest }}
+  base_sha:
+    description: Verified immutable base SHA
+    value: ${{ steps.runner.outputs.base_sha }}
+  has_verified:
+    description: Whether at least one run is ready for publication
+    value: ${{ steps.runner.outputs.has_verified }}
+runs:
+  using: composite
+  steps:
+    - id: runner
+      shell: bash
+      env:
+        SYNAPTIC_BINARY: ${{ inputs.synaptic_binary }}
+        SYNAPTIC_ENGINE_VERSION: "0.9.14"
+        SYNAPTIC_ENGINE_SHA256: ${{ inputs.synaptic_engine_sha256 }}
+        SYNAPTIC_REPOSITORY_ROOT: ${{ inputs.repository_root }}
+        SYNAPTIC_REPOSITORY_IDENTITY: ${{ inputs.repository_identity }}
+        SYNAPTIC_BASE_SHA: ${{ inputs.base_sha }}
+        SYNAPTIC_PROVIDER: ${{ inputs.provider }}
+        SYNAPTIC_PROVIDER_BASE_URL: ${{ inputs.provider_base_url }}
+        SYNAPTIC_TARGET_BRANCH: ${{ inputs.target_branch }}
+        SYNAPTIC_AUTOMATION_MODE: ${{ inputs.automation_mode }}
+        SYNAPTIC_AUTOMATION_FAMILY: ${{ inputs.automation_family }}
+        SYNAPTIC_VULNERABILITY_FINDING: ${{ inputs.vulnerability_finding }}
+        SYNAPTIC_VENDOR: ${{ inputs.vendor }}
+        SYNAPTIC_OFFLINE: ${{ inputs.offline }}
+        SYNAPTIC_AGENT_COMMAND: ${{ inputs.agent_command }}
+        SYNAPTIC_NETWORK_GUARD_JSON: ${{ inputs.network_guard_json }}
+        SYNAPTIC_HANDOFF_DIRECTORY: ${{ inputs.handoff_directory }}
+        SYNAPTIC_HANDOFF_MANIFEST: ${{ inputs.handoff_directory }}/manifest.json
+        SYNAPTIC_EXPECTED_HANDOFF_DIGEST: ${{ inputs.expected_handoff_digest }}
+        SYNAPTIC_CLOUD_URL: ${{ inputs.cloud_url }}
+        SYNAPTIC_CLOUD_POLICY_ID: ${{ inputs.cloud_policy_id }}
+        SYNAPTIC_CLOUD_OIDC_AUDIENCE: ${{ inputs.cloud_oidc_audience }}
+      run: node "$GITHUB_ACTION_PATH/runner.mjs" "${{ inputs.stage }}"
