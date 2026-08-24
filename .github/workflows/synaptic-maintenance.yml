@@ -1,0 +1,152 @@
+name: Synaptic dependency maintenance
+
+on:
+  workflow_dispatch:
+    inputs:
+      vulnerability_finding:
+        description: Optional exact Synaptic vulnerability finding ID
+        required: false
+        type: string
+  schedule:
+    - cron: "17 7 * * *"
+
+permissions: {}
+
+concurrency:
+  group: synaptic-vulnerability-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    permissions:
+      attestations: read
+      contents: read
+      id-token: write
+    outputs:
+      manifest_digest: ${{ steps.synaptic.outputs.manifest_digest }}
+      base_sha: ${{ steps.synaptic.outputs.base_sha }}
+      has_verified: ${{ steps.synaptic.outputs.has_verified }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: engine
+        name: Install and verify Synaptic 0.9.14
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_BINARY_SHA256: dee79784f1c814e5c8d9fdc79daadc5d337d645fc3cd7ca6e4f7acf03a078339
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/synaptic-dist"
+          mkdir -p "$dist"
+          gh release download v0.9.14 --repo "$GITHUB_REPOSITORY" --pattern 'synaptic-x86_64-unknown-linux-gnu.tar.gz' --pattern 'synaptic-x86_64-unknown-linux-gnu.tar.gz.sha256' --dir "$dist"
+          archive="$dist/synaptic-x86_64-unknown-linux-gnu.tar.gz"
+          gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY"
+          expected_archive="$(tr -d '[:space:]' < "$archive.sha256")"
+          printf '%s  %s\n' "$expected_archive" "$archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$dist"
+          binary="$dist/synaptic-x86_64-unknown-linux-gnu/synaptic"
+          actual_binary="$(sha256sum "$binary" | awk '{print $1}')"
+          test "$actual_binary" = "$EXPECTED_BINARY_SHA256"
+          chmod 0755 "$binary"
+          echo "binary=$binary" >> "$GITHUB_OUTPUT"
+          echo "sha256=$actual_binary" >> "$GITHUB_OUTPUT"
+      - name: Cache current Cargo dependency graph
+        run: cargo fetch --locked
+      - id: synaptic
+        uses: ./automation/api-maintenance
+        with:
+          stage: repair
+          synaptic_binary: ${{ steps.engine.outputs.binary }}
+          synaptic_engine_sha256: ${{ steps.engine.outputs.sha256 }}
+          repository_root: ${{ github.workspace }}
+          repository_identity: ${{ github.repository }}
+          base_sha: ${{ github.sha }}
+          provider: github
+          provider_base_url: ${{ github.server_url }}
+          target_branch: ${{ github.event.repository.default_branch }}
+          automation_mode: draft_change_request
+          automation_family: vulnerability
+          vulnerability_finding: ${{ inputs.vulnerability_finding }}
+          offline: false
+          agent_command: node ${{ github.workspace }}/automation/api-maintenance/dependency-agent.mjs {request}
+          network_guard_json: '["unshare","-Urn","--"]'
+          handoff_directory: ${{ github.workspace }}/.synaptic-ci/handoffs
+          cloud_url: ""
+          cloud_policy_id: ""
+          cloud_oidc_audience: synaptic-api-maintenance
+      - name: Upload checksummed handoff only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: synaptic-vulnerability-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .synaptic-ci/handoffs
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    if: needs.repair.result == 'success' && needs.repair.outputs.has_verified == 'true'
+    needs: repair
+    runs-on: ubuntu-24.04
+    environment: synaptic-api-publisher
+    permissions:
+      attestations: read
+      contents: write
+      id-token: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.repair.outputs.base_sha }}
+          fetch-depth: 0
+          token: ${{ github.token }}
+      - id: engine
+        name: Install and verify Synaptic 0.9.14
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_BINARY_SHA256: dee79784f1c814e5c8d9fdc79daadc5d337d645fc3cd7ca6e4f7acf03a078339
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/synaptic-dist"
+          mkdir -p "$dist"
+          gh release download v0.9.14 --repo "$GITHUB_REPOSITORY" --pattern 'synaptic-x86_64-unknown-linux-gnu.tar.gz' --pattern 'synaptic-x86_64-unknown-linux-gnu.tar.gz.sha256' --dir "$dist"
+          archive="$dist/synaptic-x86_64-unknown-linux-gnu.tar.gz"
+          gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY"
+          expected_archive="$(tr -d '[:space:]' < "$archive.sha256")"
+          printf '%s  %s\n' "$expected_archive" "$archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$dist"
+          binary="$dist/synaptic-x86_64-unknown-linux-gnu/synaptic"
+          actual_binary="$(sha256sum "$binary" | awk '{print $1}')"
+          test "$actual_binary" = "$EXPECTED_BINARY_SHA256"
+          chmod 0755 "$binary"
+          echo "binary=$binary" >> "$GITHUB_OUTPUT"
+          echo "sha256=$actual_binary" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: synaptic-vulnerability-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .synaptic-ci/handoffs
+      - uses: ./automation/api-maintenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          stage: publish
+          synaptic_binary: ${{ steps.engine.outputs.binary }}
+          synaptic_engine_sha256: ${{ steps.engine.outputs.sha256 }}
+          repository_root: ${{ github.workspace }}
+          repository_identity: ${{ github.repository }}
+          base_sha: ${{ needs.repair.outputs.base_sha }}
+          provider: github
+          provider_base_url: ${{ github.server_url }}
+          target_branch: ${{ github.event.repository.default_branch }}
+          automation_mode: draft_change_request
+          automation_family: vulnerability
+          vulnerability_finding: ${{ inputs.vulnerability_finding }}
+          handoff_directory: ${{ github.workspace }}/.synaptic-ci/handoffs
+          expected_handoff_digest: ${{ needs.repair.outputs.manifest_digest }}
+          cloud_url: ""
+          cloud_policy_id: ""
+          cloud_oidc_audience: synaptic-api-maintenance
