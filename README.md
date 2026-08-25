@@ -42,6 +42,8 @@ assistant can use these systems before grepping or reading files.
 
 If you do not want to run the MCP server yourself, **Synaptic Cloud** is a paid hosted MCP
 service for using Synaptic with your projects: [synapticgraph.com](https://synapticgraph.com/).
+For commit-triggered graph sync and verified API or dependency draft repairs, follow the
+[GitHub automation guide](https://synapticgraph.com/docs/github-automation).
 
 ## Use Synaptic with a project
 
