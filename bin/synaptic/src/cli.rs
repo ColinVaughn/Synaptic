@@ -104,6 +104,9 @@ pub(crate) enum Cmd {
         /// changed surface appears even when the query matches little.
         #[arg(long)]
         seed_changed: bool,
+        /// Emit ranked nodes and edges as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Shortest path between two nodes (by id or label).
     Path {

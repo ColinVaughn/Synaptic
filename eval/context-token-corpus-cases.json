@@ -1,0 +1,65 @@
+{
+  "schema": "synaptic.context-token-corpus-cases/v1",
+  "cases": [
+    {
+      "name": "memchr",
+      "family": "systems-rust",
+      "commit": "bd6068c30e9074a90c285e47912fa0b047d07597",
+      "queries": ["substring search implementation"]
+    },
+    {
+      "name": "click",
+      "family": "scripting-python",
+      "commit": "8b44edfff7d9a6c895fa804148c16b3a0bc9efb5",
+      "queries": ["command context invocation"]
+    },
+    {
+      "name": "p-map",
+      "family": "web-ts",
+      "commit": "bc26cf03f81292325236a1188063dac8e7a4de0f",
+      "queries": ["concurrent promise mapping"]
+    },
+    {
+      "name": "cobra",
+      "family": "systems-go",
+      "commit": "adbc8813901bba65827259daa8e22ff94ec1f30e",
+      "queries": ["command execution arguments"]
+    },
+    {
+      "name": "axum",
+      "family": "systems-rust",
+      "commit": "6ab6f99aac9428f1acc0e21871e86f12a1e5384e",
+      "queries": ["HTTP router request handler"]
+    },
+    {
+      "name": "gson",
+      "family": "jvm-java",
+      "commit": "dae37cf0fe12235b76fb09f01118a0a8c8823f42",
+      "queries": ["JSON object deserialization"]
+    },
+    {
+      "name": "fmt",
+      "family": "systems-cpp",
+      "commit": "cde18a38bbd960a2e803b76880fbbf4b4ffb3cd7",
+      "queries": ["format string parsing"]
+    },
+    {
+      "name": "Humanizer",
+      "family": "dotnet-csharp",
+      "commit": "ffc2b77c0f30d2fb176875841424379319d0ae9b",
+      "queries": ["humanize string transformation"]
+    },
+    {
+      "name": "rack",
+      "family": "scripting-ruby",
+      "commit": "8bf4eb078498edc9105fb04add80d89c5340e60b",
+      "queries": ["HTTP request response middleware"]
+    },
+    {
+      "name": "Slim",
+      "family": "web-php",
+      "commit": "80900fb39cafce3ae53b18a2c4f642a122f03095",
+      "queries": ["route middleware dispatch"]
+    }
+  ]
+}

@@ -30,6 +30,7 @@ pub(crate) fn run_query(
     dfs: bool,
     since: Option<&str>,
     seed_changed: bool,
+    json: bool,
 ) -> Result<()> {
     let kg = load_scoped_graph(&default_graph_path(graph), repo)?;
     let mode = if dfs {
@@ -39,9 +40,9 @@ pub(crate) fn run_query(
     };
     // Resolve the changed-files set when --since is given (current dir = repo root).
     let resolved = since.and_then(|s| resolve_recency_cli(&kg, Path::new("."), s));
-    if let Some((_, _, label, n_files)) = resolved.as_ref() {
+    if !json && let Some((_, _, label, n_files)) = resolved.as_ref() {
         println!("Recency: since {label} | {n_files} changed file(s)");
-    } else if since.is_some() {
+    } else if !json && since.is_some() {
         println!("Recency: unavailable (not a git repo, bad ref, or no changes) — plain query.");
     }
     let rec = resolved.as_ref().map(|(changed, churn, _, _)| Recency {
@@ -60,6 +61,41 @@ pub(crate) fn run_query(
         }
         None => query_modal(&kg, text, max_nodes, mode),
     };
+    if json {
+        let node_json = |id: &NodeId, score: Option<f64>, rank: Option<usize>| {
+            let node = kg.node(id);
+            serde_json::json!({
+                "rank": rank,
+                "id": id,
+                "label": node.map(|n| n.label.as_str()).unwrap_or(id.as_str()),
+                "source_file": node.map(|n| n.source_file.as_ref()).unwrap_or(""),
+                "score": score,
+            })
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema": "synaptic.query/v1",
+                "query": text,
+                "mode": if dfs { "dfs" } else { "bfs" },
+                "max_nodes": max_nodes,
+                "recency": resolved.as_ref().map(|(_, _, label, files)| serde_json::json!({
+                    "base": label,
+                    "changed_files": files,
+                })),
+                "seeds": r.seeds.iter().map(|id| node_json(id, None, None)).collect::<Vec<_>>(),
+                "nodes": r.nodes.iter().zip(&r.scores).enumerate()
+                    .map(|(i, (id, score))| node_json(id, Some(*score), Some(i + 1)))
+                    .collect::<Vec<_>>(),
+                "edges": r.edges.iter().map(|edge| serde_json::json!({
+                    "source": edge.source,
+                    "target": edge.target,
+                    "relation": edge.relation,
+                })).collect::<Vec<_>>(),
+            }))?
+        );
+        return Ok(());
+    }
     if r.seeds.is_empty() && r.nodes.is_empty() {
         println!("No matches for {text:?}.");
         return Ok(());

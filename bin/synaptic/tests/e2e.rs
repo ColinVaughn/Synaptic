@@ -139,6 +139,22 @@ fn extract_then_query_roundtrip() {
     let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
     assert!(stdout.contains("Seeds:"), "query output: {stdout}");
 
+    let json_out = Command::cargo_bin("synaptic")
+        .unwrap()
+        .current_dir(root)
+        .args(["query", "analysis", "--json"])
+        .assert()
+        .success();
+    let query: serde_json::Value =
+        serde_json::from_slice(&json_out.get_output().stdout).expect("query JSON");
+    assert_eq!(query["schema"], "synaptic.query/v1");
+    assert!(
+        query["nodes"].as_array().is_some_and(|nodes| nodes
+            .iter()
+            .any(|node| node["source_file"] == "src/analysis.py")),
+        "query JSON: {query}"
+    );
+
     // explain a node by label
     Command::cargo_bin("synaptic")
         .unwrap()

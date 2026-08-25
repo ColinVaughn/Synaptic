@@ -78,6 +78,15 @@ The duplicate-provenance benchmark intentionally runs the former repeated-
 materialization comparison only through 1,000 sites; the linear accumulator is
 also measured at 10,000 sites so the full benchmark remains practical.
 
+The dependency-free agent-token and BEIR adapter has a smoke check:
+
+```sh
+python scripts/benchmark-token-savings.py self-test
+```
+
+See `BENCHMARKS.md` for paired SWE-bench normalization, statistical gates,
+CodeRAG-Bench/BEIR scoring, and historical task materialization.
+
 ## Repository layout
 
 ```

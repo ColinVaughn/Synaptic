@@ -93,6 +93,7 @@ fn run() -> Result<()> {
             dfs,
             since,
             seed_changed,
+            json,
         } => run_query(
             &text,
             graph,
@@ -101,6 +102,7 @@ fn run() -> Result<()> {
             dfs,
             since.as_deref(),
             seed_changed,
+            json,
         ),
         Cmd::Update {
             paths,

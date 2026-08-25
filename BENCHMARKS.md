@@ -1,18 +1,184 @@
 # Synaptic benchmarks
 
 Synaptic's claims are backed by reproducible benchmarks rather than assertion. There are
-five families:
+six families:
 
 1. **Token economy** — how much smaller a graph query is than reading source (see the README).
-2. **Accuracy** — extraction correctness against a hand-labeled corpus (this document).
-3. **Scale** — extraction throughput across repository sizes and language families.
-4. **Extraction quality at scale** — correctness on 60 real repositories covering every
+2. **Agent token efficiency** — paired task success and provider tokens with Synaptic off/on.
+3. **Accuracy** — extraction correctness against a hand-labeled corpus (this document).
+4. **Scale** — extraction throughput across repository sizes and language families.
+5. **Extraction quality at scale** — correctness on 60 real repositories covering every
    shipped language, measured without hand labels and gated against pinned baselines.
-5. **Competitor head-to-head** — the same hand labels and fresh-build timing applied to
+6. **Competitor head-to-head** — the same hand labels and fresh-build timing applied to
    Synaptic and Graphify.
 
 All accuracy numbers are exact set-comparison against human-verified labels; nothing here is
 estimated or self-reported by the tool.
+
+## Agent token efficiency and standard retrieval
+
+[`scripts/benchmark-token-savings.py`](scripts/benchmark-token-savings.py) is a dependency-free
+adapter and scorer. It deliberately does not run a paid model itself: the official benchmark
+harness remains responsible for inference and test grading, while this script normalizes its
+trajectories and performs the paired comparison.
+
+### Current context-token result
+
+The 2026-08-25 Windows run rebuilt this dirty worktree at
+`7ff785091b238a24de283cc68502efc133452616` into 13,851 nodes and 38,093 edges, then ran six
+fixed queries with `--max-nodes 30`. Counts use exact `cl100k_base` tokenization. The baseline
+is the unique complete source files referenced by each ranked JSON response.
+
+| Query | Response | Referenced files | Savings | Reduction |
+|---|---:|---:|---:|---:|
+| http request handling | 3,914 | 155,734 | 97.49% | 39.79x |
+| session create reap | 4,499 | 26,491 | 83.02% | 5.89x |
+| query graph subgraph | 4,063 | 198,651 | 97.95% | 48.89x |
+| extraction walker | 3,219 | 17,745 | 81.86% | 5.51x |
+| pull request fetch rank | 3,619 | 70,037 | 94.83% | 19.35x |
+| incremental merge | 4,756 | 31,308 | 84.81% | 6.58x |
+| **Total** | **24,070** | **499,966** | **95.19%** | **20.77x** |
+
+Reproduce the generated report after `synaptic extract . --directed --no-store`:
+
+```sh
+python scripts/benchmark-token-savings.py context-benchmark \
+  --synaptic target/debug/synaptic --tokcount target/debug/examples/tokcount \
+  --graph synaptic-out/graph.json --max-nodes 30 \
+  --out synaptic-out/eval/context-token-results \
+  --query "http request handling" --query "session create reap" \
+  --query "query graph subgraph" --query "extraction walker" \
+  --query "pull request fetch rank" --query "incremental merge"
+```
+
+This measures retrieved-context compression, not end-to-end agent token savings. The latter
+still requires the paired task run below so reduced context is not mistaken for reduced quality.
+
+### Pinned multi-repository context result
+
+The broader 2026-08-25 run used one predeclared architectural query on each of the ten pinned
+repositories in the scale suite. These exact SHAs span eight language families and three size
+tiers; the case manifest is
+[`eval/context-token-corpus-cases.json`](eval/context-token-corpus-cases.json).
+
+| Repository | Family | Nodes | Response | Referenced files | Savings | Reduction |
+|---|---|---:|---:|---:|---:|---:|
+| memchr | systems-rust | 1,099 | 3,447 | 15,564 | 77.85% | 4.52x |
+| click | scripting-python | 3,971 | 3,500 | 39,819 | 91.21% | 11.38x |
+| p-map | web-ts | 143 | 3,430 | 4,240 | 19.10% | 1.24x |
+| cobra | systems-go | 923 | 2,908 | 31,944 | 90.90% | 10.98x |
+| axum | systems-rust | 6,056 | 3,377 | 17,171 | 80.33% | 5.08x |
+| gson | jvm-java | 7,661 | 4,409 | 24,806 | 82.23% | 5.63x |
+| fmt | systems-cpp | 6,897 | 3,272 | 81,399 | 95.98% | 24.88x |
+| Humanizer | dotnet-csharp | 44,564 | 4,600 | 9,856 | 53.33% | 2.14x |
+| rack | scripting-ruby | 1,540 | 3,384 | 16,434 | 79.41% | 4.86x |
+| Slim | web-php | 2,092 | 3,490 | 9,028 | 61.34% | 2.59x |
+| **Total** | | | **35,817** | **250,261** | **85.69%** | **6.99x** |
+
+The range matters: the tiny p-map repository only reduced context 1.24x, while fmt reduced it
+24.88x. The weighted aggregate is therefore published with every per-repository result rather
+than presented as a universal constant. The generated report contains the raw query/file lists
+and graph sizes.
+
+```sh
+python scripts/benchmark-token-savings.py context-corpus \
+  --synaptic target/debug/synaptic --tokcount target/debug/examples/tokcount \
+  --cases eval/context-token-corpus-cases.json --cache synaptic-out/bench \
+  --max-nodes 30 --extract --out synaptic-out/eval/context-token-corpus-results
+```
+
+### SWE-bench paired A/B
+
+Docker was validated on 2026-08-25 with the official SWE-bench harness pinned at
+`7a21e05772954cc81471ae19d56f436cecf43c54`: its gold patch resolved
+`sympy__sympy-20590` (1/1 completed and resolved, zero infrastructure or ambiguous failures).
+The local Windows runner had to force LF when writing `eval.sh`; otherwise Bash received CRLF
+commands. This validates the grading environment, not an agent or Synaptic result.
+
+Run the same pinned SWE-bench Verified or Multilingual instances twice with the same model,
+agent revision, base prompt, limits, and cache policy. The only predeclared treatment difference
+is Synaptic availability and its usage instruction. Grade both through the official SWE-bench
+harness, then normalize the mini-SWE-agent trajectories:
+
+```sh
+python scripts/benchmark-token-savings.py mini-swe-overlay \
+  --binary artifacts/synaptic-linux-x86_64 \
+  --out eval/mini-swe-synaptic.yaml
+
+# Inference uses the official base config in both conditions. The treatment adds:
+# mini-extra swebench -c swebench.yaml -c eval/mini-swe-synaptic.yaml ...
+
+python scripts/benchmark-token-savings.py normalize-mini-swe \
+  --trajectories runs/baseline --evaluation eval/baseline \
+  --condition baseline --out runs/baseline.json \
+  --dataset swe-bench-multilingual --dataset-revision <SHA> \
+  --model <MODEL> --agent-revision <MINI_SWE_SHA> \
+  --condition-config path/to/swebench.yaml
+
+python scripts/benchmark-token-savings.py normalize-mini-swe \
+  --trajectories runs/synaptic --evaluation eval/synaptic \
+  --condition synaptic --out runs/synaptic.json \
+  --dataset swe-bench-multilingual --dataset-revision <SHA> \
+  --model <MODEL> --agent-revision <MINI_SWE_SHA> \
+  --condition-config path/to/swebench.yaml \
+  --condition-config eval/mini-swe-synaptic.yaml
+
+python scripts/benchmark-token-savings.py agent-report \
+  --baseline runs/baseline.json --synaptic runs/synaptic.json \
+  --require-noninferior --min-token-savings 0.10
+```
+
+The report includes aggregate and median paired token savings, tokens per resolved task,
+Pass@1 delta, a deterministic paired-bootstrap 95% interval, and an exact paired McNemar test.
+The generated overlay refuses a non-Linux binary, records its SHA-256, mounts it read-only into
+each SWE-bench container, and hashes the ordered config files into the normalized run.
+The quality gate uses the lower end of the Pass@1-delta interval against a predeclared
+non-inferiority margin (default 5 percentage points). `input_tokens` must be the provider's full
+input count, including cached input; `cache_read_tokens` and `cache_write_tokens` are retained as
+diagnostic subsets and are not added again. Any model-backed indexing belongs in `index_tokens`;
+deterministic Synaptic extraction records zero tokens and its wall time separately.
+
+### CodeRAG-Bench / BEIR retrieval
+
+`query --json` exposes ranked nodes and source paths without parsing console text. CodeRAG-Bench
+already uses BEIR-shaped `queries.jsonl`, `corpus.jsonl`, and qrels; RepoBench-R can be converted
+to the same three files. Generate a standard TREC run and score Recall, Precision, MRR, and nDCG:
+
+```sh
+python scripts/benchmark-token-savings.py beir-run \
+  --synaptic target/release/synaptic --graph synaptic-out/graph.json \
+  --queries benchmark/queries.jsonl --corpus benchmark/corpus.jsonl \
+  --max-nodes 30 --out synaptic-out/eval/beir/run.txt
+
+python scripts/benchmark-token-savings.py beir-eval \
+  --qrels benchmark/qrels/test.tsv \
+  --run synaptic-out/eval/beir/run.txt
+```
+
+Corpus rows should expose their repository path as `file_path`, `path`,
+`metadata.file_path`, `metadata.path`, or `title`. Without a corpus map, source paths themselves
+are used as document IDs. Run several fixed `--max-nodes` values to publish the retrieval-quality
+curve instead of selecting a favorable budget after seeing the results.
+
+### Historical tasks for one codebase
+
+Generate candidates from real first-parent commits, then replace commit-message prose with the
+original issue text and add the held-out fail-to-pass/pass-to-pass test IDs before materializing
+a SWE-bench JSONL dataset:
+
+```sh
+python scripts/benchmark-token-savings.py history-candidates \
+  --repo . --limit 100 --out eval/historical-candidates.json
+
+python scripts/benchmark-token-savings.py swebench-dataset \
+  --repo . --cases eval/historical-cases.json \
+  --out eval/historical-swebench.jsonl
+```
+
+Commit messages are only curation seeds: evaluating directly on them can leak solution details.
+The materializer therefore requires an explicit problem statement and at least one fail-to-pass
+test. Publish the task manifest, pinned SHAs, normalized runs, raw trajectories, reports, and
+benchmark command so an independent runner can reproduce any token-saving claim.
 
 ## Accuracy corpus
 

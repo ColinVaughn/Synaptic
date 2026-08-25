@@ -259,9 +259,10 @@ get back only the slice above.
 
 **Reproducible.** Tokens are exact `cl100k_base` counts via
 `cargo run -p synaptic-server --example tokcount`. The baseline is the unique source files
-the result's nodes live in (whole files, the conservative grep-then-read case; it does not
+referenced by the result (whole files, the conservative grep-then-read case; it does not
 count the dead-end files you would open without the graph). Run `synaptic extract .` on any
-repo and compare for yourself.
+repo and compare for yourself. This is a context-compression measurement, not an end-to-end
+agent-savings claim; the paired SWE-bench/BEIR methodology is in [BENCHMARKS.md](BENCHMARKS.md#agent-token-efficiency-and-standard-retrieval).
 
 ## Advanced-tool performance
 
@@ -459,7 +460,7 @@ A code-only corpus runs fully offline; the optional LLM semantic pass over docs 
 |---|---|
 | `extract [path]` | Build the graph and write `synaptic-out/`. Flags: `--directed`, `--obsidian`, `--wiki`, `--semantic` |
 | `export <format>` | Re-emit a format from an existing `graph.json` (no rebuild) or push live to Neo4j/FalkorDB |
-| `query <text>` | Return a relevance-ranked subgraph (each node scored). Flags: `--max-nodes`, `--repo`, `--dfs`, `--since <ref>` (boost code changed on the branch), `--seed-changed` |
+| `query <text>` | Return a relevance-ranked subgraph (each node scored). Flags: `--max-nodes`, `--repo`, `--dfs`, `--since <ref>` (boost code changed on the branch), `--seed-changed`, `--json` |
 | `path <from> <to>` | Shortest path between two nodes |
 | `explain <node>` | Show a node and its neighbours |
 | `affected <node>` | Nodes that (transitively) depend on a node; adds a caveat when a "0 dependents" symbol is reachable only via dynamic dispatch. Flags: `--depth`, `--relation` |
