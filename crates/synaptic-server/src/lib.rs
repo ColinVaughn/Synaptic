@@ -6,7 +6,7 @@
 //! pure [`Server::handle_request`] dispatcher, which makes the whole protocol
 //! unit-testable without an async runtime.
 //!
-//! 30 core tools over a graph loaded at startup, plus five read-only repository
+//! 32 core tools over a graph loaded at startup, plus five read-only repository
 //! memory tools. `--allow-exec` adds the command-running `speculate`;
 //! `--allow-memory-write` adds the idempotent `record_change_outcome`. Graph navigation
 //! (`query_graph`, `get_node`, `get_source`, `get_neighbors`, `get_community`,
@@ -49,6 +49,10 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use synaptic_change::{
+    ChangeContract, ContractSnapshot, RecoveryOptions, VerificationInput,
+    historical_constraints_from_memory, recover_contract, verify_contract,
+};
 use synaptic_core::{GraphData, Node, NodeId, sanitize_label};
 use synaptic_graph::{
     GodNode, GraphStats, KnowledgeGraph, suggest_questions, surprising_connections,
@@ -5739,6 +5743,139 @@ Cross-repo: {} edge(s) span repositories{}",
             return Ok(self.dispatch_memory_tool(name, &args));
         }
 
+        if name == "recover_change_contract" {
+            if self.provider.is_sharded() {
+                return Ok(tool_error_result(
+                    "Change-contract recovery currently requires a single loaded graph; use the CLI for a repository-scoped contract.",
+                ));
+            }
+            let base_revision = s("base_revision");
+            let task = s("task");
+            let repository = opt("repository").map(str::to_string).unwrap_or_else(|| {
+                self.source_root
+                    .as_deref()
+                    .map(|root| root.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_else(|| "repository".to_string())
+            });
+            let recovered = recover_contract(
+                self.kg(),
+                self.query_index(),
+                self.affected_index(),
+                &task,
+                ContractSnapshot {
+                    repository,
+                    base_revision,
+                    graph_revision: self.kg().built_at_commit.clone(),
+                },
+                &[],
+                &RecoveryOptions {
+                    max_anchors: (u("max_anchors", 8) as usize).clamp(1, 32),
+                    depth: (u("depth", 3) as usize).clamp(1, 16),
+                    ..RecoveryOptions::default()
+                },
+            )
+            .map_err(|error| error.to_string())
+            .and_then(|mut contract| {
+                match self.memory.as_ref() {
+                    Some(store) if store.roots().iter().any(|root| root.exists()) => {
+                        let historical = historical_constraints_from_memory(
+                            store,
+                            &self.memory_principal,
+                            &contract.scope.anchors,
+                            if self.concise { 4 } else { 8 },
+                        )
+                        .map_err(|error| error.to_string())?;
+                        contract
+                            .add_historical_constraints(&historical)
+                            .map_err(|error| error.to_string())?;
+                    }
+                    _ => contract
+                        .note_unknown(
+                            "Repository memory is not configured; historical decisions and invariants were not evaluated",
+                        )
+                        .map_err(|error| error.to_string())?,
+                }
+                if b("approve") {
+                    contract.approve().map_err(|error| error.to_string())
+                } else {
+                    Ok(contract)
+                }
+            });
+            return Ok(match recovered {
+                Ok(contract) => {
+                    let structured = serde_json::to_value(&contract).unwrap_or(Value::Null);
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "Recovered change contract {} v{} ({:?}): {} requirement(s), {} proof obligation(s), {} unknown(s).",
+                                contract.id,
+                                contract.revision,
+                                contract.state,
+                                contract.requirements.len(),
+                                contract.proofs.len(),
+                                contract.unknowns.len()
+                            )
+                        }],
+                        "structuredContent": structured,
+                        "isError": false
+                    })
+                }
+                Err(error) => tool_error_result(error.to_string()),
+            });
+        }
+
+        if name == "verify_change_contract" {
+            if self.provider.is_sharded() {
+                return Ok(tool_error_result(
+                    "Change-contract verification currently requires a single loaded graph; use the CLI for a repository-scoped contract.",
+                ));
+            }
+            let contract = match serde_json::from_value::<ChangeContract>(args["contract"].clone())
+            {
+                Ok(contract) => contract,
+                Err(error) => {
+                    return Ok(tool_error_result(format!(
+                        "Invalid change contract: {error}"
+                    )));
+                }
+            };
+            let changed_files = args
+                .get("changed_files")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
+            let passed_proofs = args
+                .get("passed_proofs")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
+            let report = verify_contract(
+                &contract,
+                self.kg(),
+                &VerificationInput {
+                    base_revision: s("base_revision"),
+                    changed_files,
+                    passed_proofs,
+                },
+            );
+            let structured = serde_json::to_value(&report).unwrap_or(Value::Null);
+            return Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!("Change contract verification: {:?}. {}", report.state, report.summary)
+                }],
+                "structuredContent": structured,
+                "isError": false
+            }));
+        }
+
         // query_graph renders both text and structuredContent from a SINGLE
         // retrieval. The index query is O(graph); rendering both shapes from one
         // result avoids paying it twice per request.
@@ -7287,6 +7424,37 @@ fn build_tools_list(allow_exec: bool) -> Value {
               "limit": { "type": "integer", "description": "Max sites listed per section (Edits, Review) before a '+N more' summary (default 50). Ignored when verbose=true." },
               "verbose": { "type": "boolean", "description": "List every edit/review site instead of the summarized top-N (default false)." }
           }, "required": ["name", "to"] } },
+        { "name": "recover_change_contract", "description": "Recover an evidence-backed change contract from a task, graph structure, and active source-grounded repository memory. Returns a draft unless approve=true; does not persist or edit source.",
+          "inputSchema": { "type": "object", "properties": {
+              "task": { "type": "string", "description": "Natural-language change task." },
+              "base_revision": { "type": "string", "description": "Exact git revision the contract is recovered against." },
+              "repository": { "type": "string", "description": "Stable repository identity; defaults to the registered source root." },
+              "max_anchors": { "type": "integer", "description": "Maximum task-relevant graph anchors (default 8, max 32)." },
+              "depth": { "type": "integer", "description": "Reverse-impact hop bound (default 3, max 16)." },
+              "approve": { "type": "boolean", "description": "Explicitly mark the returned contract approved (default false)." }
+          }, "required": ["task", "base_revision"] },
+          "outputSchema": { "type": "object", "properties": {
+              "schema_version": {"type":"integer"}, "id": {"type":"string"},
+              "revision": {"type":"integer"}, "state": {"type":"string"},
+              "task": {"type":"string"}, "snapshot": {"type":"object"},
+              "requirements": {"type":"array","items":{"type":"object"}},
+              "evidence": {"type":"array","items":{"type":"object"}},
+              "proofs": {"type":"array","items":{"type":"object"}},
+              "scope": {"type":"object"}, "unknowns": {"type":"array","items":{"type":"string"}},
+              "contract_hash": {"type":"string"}
+          }, "required": ["schema_version","id","revision","state","task","snapshot","requirements","proofs","scope","contract_hash"] } },
+        { "name": "verify_change_contract", "description": "Verify a returned change contract against current graph state, changed files, and caller-attested passing proofs. Fails closed on drafts, stale bases, missing MUST proofs, or hash tampering.",
+          "inputSchema": { "type": "object", "properties": {
+              "contract": { "type": "object", "description": "A complete contract returned by recover_change_contract." },
+              "base_revision": { "type": "string", "description": "Current base revision; must equal the contract snapshot." },
+              "changed_files": { "type": "array", "items": {"type":"string"}, "description": "Repo-relative files changed from the contract base." },
+              "passed_proofs": { "type": "array", "items": {"type":"string"}, "description": "Proof ids whose executable or manual checks passed." }
+          }, "required": ["contract", "base_revision", "changed_files"] },
+          "outputSchema": { "type": "object", "properties": {
+              "contract_id": {"type":"string"}, "contract_revision": {"type":"integer"},
+              "state": {"type":"string"}, "proofs": {"type":"array","items":{"type":"object"}},
+              "warnings": {"type":"array","items":{"type":"string"}}, "summary": {"type":"string"}
+          }, "required": ["contract_id","contract_revision","state","proofs","warnings","summary"] } },
         { "name": "predict_impact", "description": "Full forecast for a multi-file change BEFORE editing (superset of affected_tests): changed nodes, the reverse-impact blast radius, public-API breaks (callers outside the module), and a verify checklist. Pure-graph; for new-cycle / removed-API detection use time_travel_diff.",
           "inputSchema": { "type": "object", "properties": {
               "files": { "type": "array", "items": { "type": "string" }, "description": "Repo-relative changed files to forecast. Omit to use the working-tree diff vs `base`." },
@@ -9534,16 +9702,15 @@ mod tests {
             .expect("cl100k tokenizer")
             .encode_with_special_tokens(&encoded)
             .len();
-        // Budget re-baselined for the five compact federated `repo` selectors
-        // and the scan/brief scope fields. They make member isolation
-        // machine-discoverable while this guard still catches prose creep.
+        // Budget includes the two typed change-contract tools. Keep enough room
+        // for their validation/output shapes while still catching prose creep.
         assert!(
-            encoded.len() <= 37_400,
+            encoded.len() <= 40_500,
             "tools/list prose grew beyond the measured character budget: {}",
             encoded.len()
         );
         assert!(
-            tokens <= 8_300,
+            tokens <= 9_000,
             "tools/list prose grew beyond the measured token budget: {tokens}"
         );
     }
@@ -9898,7 +10065,7 @@ mod tests {
             .unwrap();
         assert_eq!(tools["result"]["resultType"], "complete", "{tools}");
         assert_eq!(tools["result"]["cacheScope"], "public", "{tools}");
-        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 35);
+        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 37);
         assert!(matches!(lifecycle, ConnectionLifecycle::New));
 
         // The final schema marks clientInfo as SHOULD/optional. Clients that
@@ -10205,6 +10372,84 @@ mod tests {
     }
 
     #[test]
+    fn change_contract_tools_recover_and_verify_over_mcp() {
+        let memory_dir = tempfile::tempdir().unwrap();
+        let store = synaptic_memory::MemoryStore::open(memory_dir.path());
+        let mut invariant = synaptic_memory::MemoryRecord::new(
+            "auth-contract-invariant",
+            synaptic_memory::MemoryKind::Invariant,
+            "Preserve authentication behavior",
+            "Existing callers must keep working",
+            "fixture",
+            2,
+            vec![synaptic_memory::SourceArtifact {
+                kind: "adr".into(),
+                uri: "docs/adr/auth.md".into(),
+                revision: Some("base-1".into()),
+                digest: None,
+            }],
+        );
+        invariant.affected_symbols = vec![synaptic_memory::SymbolAnchor {
+            node_id: "auth".into(),
+            label: "AuthService".into(),
+            source_file: "auth.py".into(),
+            repo: None,
+            commit: Some("base-1".into()),
+            confidence: 1.0,
+        }];
+        invariant.verification.status = synaptic_memory::VerificationStatus::Passed;
+        store.record(&invariant).unwrap();
+        let mut s = server().with_memory_store(store);
+        let recovered = call_tool_full(
+            &mut s,
+            "recover_change_contract",
+            json!({
+                "task": "change AuthService",
+                "base_revision": "base-1",
+                "approve": true
+            }),
+        );
+        let contract = recovered["result"]["structuredContent"].clone();
+        assert_eq!(contract["state"], "approved", "{recovered}");
+        assert!(
+            contract["contract_hash"]
+                .as_str()
+                .is_some_and(|hash| !hash.is_empty())
+        );
+        assert!(
+            contract["requirements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|requirement| requirement["category"] == "historical_invariant")
+        );
+        let historical_proof = contract["proofs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|proof| proof["kind"] == "manual_attestation")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let verified = call_tool_full(
+            &mut s,
+            "verify_change_contract",
+            json!({
+                "contract": contract,
+                "base_revision": "base-1",
+                "changed_files": ["auth.py"],
+                "passed_proofs": [historical_proof]
+            }),
+        );
+        assert_eq!(
+            verified["result"]["structuredContent"]["state"], "satisfied",
+            "{verified}"
+        );
+    }
+
+    #[test]
     fn predict_impact_flags_public_api_and_sanitizes_output() {
         let mut svc = node("svc", "Service", Some(0));
         svc.set_visibility(synaptic_core::Visibility::Public);
@@ -10356,7 +10601,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 35);
+        assert_eq!(names.len(), 37);
         for expected in [
             "query_graph",
             "get_node",
@@ -10383,6 +10628,8 @@ mod tests {
             "time_travel_diff",
             "plan_rename",
             "predict_impact",
+            "recover_change_contract",
+            "verify_change_contract",
             "affected_tests",
             "predict_edit",
             "readiness_audit",
@@ -11822,6 +12069,8 @@ mod tests {
             "affected",
             "god_nodes",
             "predict_impact",
+            "recover_change_contract",
+            "verify_change_contract",
             "affected_tests",
             "get_neighbors",
             "list_repos",
@@ -11853,12 +12102,12 @@ mod tests {
             .collect();
         assert_eq!(
             structured.len(),
-            18,
+            20,
             "runtime structured-tool count changed"
         );
 
         let wiki = include_str!("../../../wiki/MCP-Server.md");
-        assert!(wiki.contains("Eighteen tools declare an `outputSchema`"));
+        assert!(wiki.contains("Twenty tools declare an `outputSchema`"));
         let table = wiki
             .split("### Structured output")
             .nth(1)

@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use synaptic_core::{GraphData, NodeId};
 use synaptic_graph::KnowledgeGraph;
 use synaptic_query::{DEFAULT_AFFECTED_RELATIONS, QueryIndex, ReverseImpactIndex};
@@ -17,6 +18,26 @@ use synaptic_store::{AFFECTED_INDEX_BLOB, QUERY_INDEX_BLOB, Scope, ShardStore};
 pub(crate) enum StoreBackend {
     Json,
     Sharded,
+}
+
+pub(crate) fn changed_files_from_git(root: &Path, base: &str) -> Result<Vec<String>> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--name-only", base])
+        .output()
+        .context("running git diff")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git diff failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 /// Resolve the backend for a given graph + store location.

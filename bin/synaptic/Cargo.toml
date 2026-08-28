@@ -66,6 +66,7 @@ synaptic-upgrade = { workspace = true }
 synaptic-store = { workspace = true }
 synaptic-memory = { workspace = true }
 synaptic-api = { workspace = true }
+synaptic-change = { workspace = true }
 synaptic-vuln = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

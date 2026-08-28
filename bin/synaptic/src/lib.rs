@@ -12,6 +12,7 @@ use cli::{Cli, Cmd};
 use commands::api::run_api;
 use commands::audit::run_audit;
 use commands::cache::run_cache;
+use commands::contract::run_contract;
 use commands::diff::run_diff;
 use commands::eval::run_eval;
 use commands::export::run_export;
@@ -311,6 +312,7 @@ fn run() -> Result<()> {
             repo,
             json,
         }),
+        Cmd::Contract { action } => run_contract(action),
         Cmd::Speculate {
             paths,
             base,

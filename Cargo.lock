@@ -3017,7 +3017,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3029,6 +3029,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "synaptic-api",
+ "synaptic-change",
  "synaptic-core",
  "synaptic-detect",
  "synaptic-eval",
@@ -3062,7 +3063,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-api"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -3083,8 +3084,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "synaptic-change"
+version = "1.0.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+ "synaptic-core",
+ "synaptic-graph",
+ "synaptic-memory",
+ "synaptic-predict",
+ "synaptic-query",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "synaptic-core"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "caseless",
  "regex",
@@ -3097,7 +3114,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-detect"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -3111,7 +3128,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-eval"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "serde",
@@ -3131,7 +3148,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-extract"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -3181,7 +3198,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-graph"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -3197,7 +3214,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-history"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "serde",
@@ -3211,7 +3228,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-incremental"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "rayon",
@@ -3228,7 +3245,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-ingest"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "blake3",
  "glob",
@@ -3248,7 +3265,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-llm"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -3269,7 +3286,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-memory"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "blake3",
  "serde",
@@ -3282,7 +3299,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-output"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "redis",
@@ -3295,7 +3312,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-predict"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "serde",
@@ -3309,7 +3326,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-prs"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "serde_json",
@@ -3318,7 +3335,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-query"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "serde",
@@ -3329,7 +3346,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-readiness"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "regex",
  "serde",
@@ -3342,7 +3359,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-refactor"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "regex",
@@ -3359,7 +3376,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-report"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "serde_json",
  "synaptic-core",
@@ -3369,7 +3386,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-sandbox"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "serde",
@@ -3381,7 +3398,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-semantic"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "serde_json",
@@ -3394,7 +3411,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-server"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -3407,6 +3424,7 @@ dependencies = [
  "regex",
  "serde_json",
  "synaptic-api",
+ "synaptic-change",
  "synaptic-core",
  "synaptic-graph",
  "synaptic-history",
@@ -3432,7 +3450,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-skillgen"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3444,7 +3462,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-sqlaudit"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "regex",
  "serde",
@@ -3461,7 +3479,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-store"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -3479,7 +3497,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-synql"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "regex",
@@ -3492,7 +3510,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-upgrade"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -3511,7 +3529,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-vuln"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -3534,7 +3552,7 @@ dependencies = [
 
 [[package]]
 name = "synaptic-workspace"
-version = "0.9.16"
+version = "1.0.0"
 dependencies = [
  "blake3",
  "criterion",

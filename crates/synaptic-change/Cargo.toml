@@ -1,0 +1,21 @@
+[package]
+name = "synaptic-change"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Implicit requirement recovery and executable change contracts for Synaptic."
+
+[dependencies]
+blake3 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+synaptic-core = { workspace = true }
+synaptic-graph = { workspace = true }
+synaptic-memory = { workspace = true }
+synaptic-predict = { workspace = true }
+synaptic-query = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

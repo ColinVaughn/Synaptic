@@ -10,6 +10,36 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-27
+
+### Added
+
+- `synaptic contract recover`, `approve`, and `verify` provide deterministic,
+  BLAKE3-sealed change contracts with explicit scope, evidence, requirements,
+  proof obligations, unknowns, approval, and immutable local revisions.
+- MCP clients can recover and verify the same complete contract model through
+  the structured `recover_change_contract` and `verify_change_contract` tools.
+- Contract recovery reuses task-ranked graph anchors, reverse-impact test
+  selection, public visibility metadata, and authorized repository memory.
+  Active source-grounded repository-wide decisions and relevant symbol-scoped
+  decisions become cited historical requirements without duplicating Synaptic's
+  memory lifecycle, supersession, ranking, or access-control systems.
+
+### Changed
+
+- Synaptic enters its stable 1.0 release line with the CLI, MCP server, graph,
+  repository-memory, and change-contract workflows validated together.
+
+### Fixed
+
+- Change-contract recovery excludes fileless external anchors and refuses to
+  create a contract when no repository-local scope remains.
+- Repeating recovery for the same task and base now appends immutable draft and
+  approval revisions instead of colliding with the existing `v1.json`.
+- Repository-wide decision records without symbol anchors participate in
+  recovery, while unrelated scoped records and federated peer globals remain
+  excluded.
+
 ## [0.9.16] - 2026-08-20
 
 ### Fixed
@@ -2503,7 +2533,8 @@ parameters), and `graph.json` gains only additive edge keys.
 - Azure backend was previously routed through the generic chat-completions path with bearer
   auth and could not reach a real Azure deployment.
 
-[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.16...HEAD
+[Unreleased]: https://github.com/ColinVaughn/Synaptic/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.16...v1.0.0
 [0.9.16]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.15...v0.9.16
 [0.9.15]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.14...v0.9.15
 [0.9.14]: https://github.com/ColinVaughn/Synaptic/compare/v0.9.13...v0.9.14

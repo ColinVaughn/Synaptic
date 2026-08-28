@@ -4,6 +4,7 @@ pub(crate) mod api;
 pub(crate) mod audit;
 pub(crate) mod cache;
 pub(crate) mod common;
+pub(crate) mod contract;
 pub(crate) mod diff;
 pub(crate) mod eval;
 pub(crate) mod export;

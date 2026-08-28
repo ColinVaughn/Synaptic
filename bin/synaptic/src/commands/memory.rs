@@ -151,7 +151,7 @@ pub(crate) fn run_memory(action: MemoryAction) -> Result<()> {
     }
 }
 
-fn memory_store(root: &Path) -> MemoryStore {
+pub(crate) fn memory_store(root: &Path) -> MemoryStore {
     MemoryStore::open(root.join(".synaptic").join("memory"))
 }
 

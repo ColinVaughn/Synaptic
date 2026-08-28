@@ -16,7 +16,7 @@ use synaptic_predict::{
 };
 use synaptic_prs::{SystemCommands, detect_default_branch};
 
-use crate::commands::common::{default_graph_path, load_scoped_graph};
+use crate::commands::common::{changed_files_from_git, default_graph_path, load_scoped_graph};
 
 pub(crate) struct PredictArgs {
     pub paths: Vec<PathBuf>,
@@ -296,26 +296,6 @@ fn git_transactions(root: &Path, limit: usize) -> Vec<Vec<String>> {
             (!files.is_empty()).then_some(files)
         })
         .collect()
-}
-
-fn changed_files_from_git(root: &Path, base: &str) -> Result<Vec<String>> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["diff", "--name-only", base])
-        .output()
-        .context("running git diff")?;
-    if !out.status.success() {
-        bail!(
-            "git diff failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .collect())
 }
 
 fn write_forecast(forecast: &ChangeForecast, out_dir: &Path) -> Result<()> {

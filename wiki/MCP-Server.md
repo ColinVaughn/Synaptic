@@ -287,7 +287,7 @@ size.
 
 ## MCP tools
 
-`tools/list` reports 35 core, analysis, and vulnerability tools plus five
+`tools/list` reports 37 core, analysis, and vulnerability tools plus five
 repository-memory query tools by default. `--allow-exec` adds `speculate`;
 `--allow-memory-write` adds `record_change_outcome`. Every tool documents its
 parameters in its input schema, and every tool carries annotations so a host
@@ -345,7 +345,7 @@ and retain matched subjects. Typed responses expose counts and compact cited
 records under `structuredContent.memory_evidence`.
 
 Each tool returns a text content block (the load-bearing, purpose-formatted
-output). Sixteen tools additionally declare an `outputSchema` and return a typed
+output). Twenty tools additionally declare an `outputSchema` and return a typed
 `structuredContent` object alongside the text (a 2025-06-18 feature) -- see
 [Structured output](#structured-output).
 
@@ -785,6 +785,51 @@ the blast radius (one dependent per line: hop count, relation, label, file), and
 the verify checklist, plus a `structuredContent` mirror carrying the full
 `ChangeForecast` (not truncated by `limit`, which caps only the text).
 
+### recover_change_contract
+
+Recover a deterministic change contract from a natural-language task. The tool
+uses task-ranked graph anchors, reverse-impact test selection, and public
+visibility metadata. If repository memory is configured, it also joins active,
+source-grounded repository-wide decisions and anchor-relevant decisions through
+the memory store's existing authorization, lifecycle, supersession, and ranking
+rules. Recovery fails when task retrieval yields no repository-local source
+scope. Without a memory store, the omitted evidence source is recorded in
+`unknowns`. The tool returns a draft unless `approve=true`; MCP recovery is
+read-only and does not persist the returned JSON.
+
+Parameters:
+- `task` (string, required) -- the proposed change.
+- `base_revision` (string, required) -- the exact revision the evidence applies
+  to.
+- `repository` (string) -- stable repository identity; defaults to the source
+  root.
+- `max_anchors` (integer) -- default 8, max 32.
+- `depth` (integer) -- reverse-impact hop bound; default 3, max 16.
+- `approve` (boolean) -- explicitly return an approved revision rather than a
+  draft.
+
+The structured result is the complete, hashed `ChangeContract`, including
+requirements, evidence, proof obligations, scope, and explicit unknowns.
+
+### verify_change_contract
+
+Verify a complete contract returned by `recover_change_contract`. Verification
+fails closed when the hash was changed, the base revision is stale, the contract
+is still a draft, a protected public symbol disappeared, or a MUST proof lacks a
+passing attestation.
+
+Parameters:
+- `contract` (object, required) -- the complete returned contract.
+- `base_revision` (string, required) -- the current base; it must match the
+  contract snapshot.
+- `changed_files` (array, required) -- repository-relative changed files.
+- `passed_proofs` (array) -- proof ids whose executable or manual checks passed.
+
+The structured result is a `VerificationReport` with a state, proof-level
+results, warnings, and summary. Both contract tools currently require a single
+loaded graph; a federated shard server returns a tool error rather than a partial
+contract.
+
 ### affected_tests
 
 Predictive test selection: the tests that exercise the code you are about to
@@ -1152,7 +1197,7 @@ Returns the findings as text + `structuredContent`.
 
 ### Structured output
 
-Eighteen tools declare an `outputSchema` and return a `structuredContent` object
+Twenty tools declare an `outputSchema` and return a `structuredContent` object
 beside the text content, so a client can parse the result instead of scraping the
 formatted text:
 
@@ -1170,6 +1215,8 @@ formatted text:
 | `get_neighbors` | `{ seed, seed_qualified, neighbors: [{ label, qualified, relation, direction }], by_relation: { <relation>: <count> }, total, truncated }` (`by_relation` tallies every edge before any filter; `total` is the full matched count, while `neighbors` is capped to `limit`) |
 | `list_repos` | `{ repos: [{ repo, nodes, edges, source_hash? }] }` (empty array for a single-repo graph; `source_hash` present when a `workspace-state.json` sibling exists) |
 | `predict_impact` | the full `ChangeForecast`: `{ summary, changed_files, changed_nodes, public_api_breaks, blast_radius, blast_radius_total, at_risk_tests, verify_checklist, risk }` (not truncated by `limit`, which caps only the text) |
+| `recover_change_contract` | the complete hashed `ChangeContract`: `{ schema_version, id, revision, state, task, snapshot, requirements, evidence, proofs, scope, unknowns, contract_hash }` |
+| `verify_change_contract` | `{ contract_id, contract_revision, state, proofs: [{ proof_id, status, detail }], warnings, summary }` |
 | `affected_tests` | `{ tests: [{ id, label, file, depth, via_relation }], total }` |
 | `readiness_audit` | `{ version, summary, counts_by_severity, groups, findings: [{ rule_id, severity, category, subsystem, title, detail, location, node_ids, evidence, remediation, confidence, impact }], skipped }` |
 | `audit_sql` / `advise_sql` | `{ version, summary, findings: [{ rule_id, severity, category, title, detail, location, remediation, confidence }] }` |

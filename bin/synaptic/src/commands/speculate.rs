@@ -15,7 +15,7 @@ use synaptic_predict::{ForecastOptions, forecast_changes};
 use synaptic_prs::{SystemCommands, detect_default_branch};
 use synaptic_sandbox::{Change, Outcome, SpeculateOptions, render_markdown, speculate};
 
-use crate::commands::common::{default_graph_path, load_scoped_graph};
+use crate::commands::common::{changed_files_from_git, default_graph_path, load_scoped_graph};
 
 pub(crate) struct SpeculateArgs {
     pub paths: Vec<PathBuf>,
@@ -212,26 +212,6 @@ fn files_from_patch(text: &str) -> Vec<String> {
         }
     }
     files
-}
-
-fn changed_files_from_git(root: &Path, base: &str) -> Result<Vec<String>> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["diff", "--name-only", base])
-        .output()
-        .context("running git diff")?;
-    if !out.status.success() {
-        bail!(
-            "git diff failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .collect())
 }
 
 fn write_report(report: &synaptic_sandbox::SpeculateReport, out_dir: &Path) -> Result<()> {

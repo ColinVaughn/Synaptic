@@ -71,7 +71,7 @@ get the binary.
 - Vendor-neutral API maintenance that discovers contracts, measures evidence gaps,
   localizes breaking changes, and prepares fail-closed verified draft repairs
   (`synaptic api`; [Commands](Commands#api)).
-- An MCP server (30 core tools plus five read-only repository-memory tools) and one-command assistant integration
+- An MCP server (32 core tools plus five read-only repository-memory tools) and one-command assistant integration
   ([MCP Server](MCP-Server), [Assistant Integration](Assistant-Integration)).
 - Multi-repo federation with real cross-repo edge resolution
   ([Workspaces and Federation](Workspaces-and-Federation)).

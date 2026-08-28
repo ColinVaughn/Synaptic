@@ -550,6 +550,11 @@ pub(crate) enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Recover, approve, and verify evidence-backed change contracts.
+    Contract {
+        #[command(subcommand)]
+        action: ContractAction,
+    },
     /// Speculatively execute a proposed change for real: apply it in a throwaway
     /// git worktree, run the forecast's at-risk tests plus a build/type-check,
     /// and report the actual pass/fail outcome. Disposable and opt-in -- it never
@@ -641,6 +646,65 @@ pub(crate) enum Cmd {
         /// Skip the confirmation prompt before downloading and replacing.
         #[arg(long, short = 'y')]
         yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ContractAction {
+    /// Recover implicit requirements from a task and the current graph.
+    Recover {
+        /// Natural-language change task.
+        task: String,
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        /// Repository root (default: current directory).
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Base revision recorded in the contract (default: current HEAD).
+        #[arg(long)]
+        base: Option<String>,
+        /// Maximum task-relevant graph anchors.
+        #[arg(long, default_value_t = 8)]
+        max_anchors: usize,
+        /// Reverse-impact hop bound.
+        #[arg(long, default_value_t = 3)]
+        depth: usize,
+        /// Explicitly approve the recovered contract immediately.
+        #[arg(long)]
+        approve: bool,
+        /// Emit the contract as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Approve the latest revision of a reviewed contract.
+    Approve {
+        /// Contract id or path to a contract JSON file.
+        contract: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Emit the approved contract as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify an approved contract against graph state and changed files.
+    Verify {
+        /// Contract id or path to a contract JSON file.
+        contract: String,
+        /// Changed files (repo-relative). Empty = git diff from the contract base.
+        paths: Vec<PathBuf>,
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Current base revision (default: current HEAD).
+        #[arg(long)]
+        base: Option<String>,
+        /// Proof id that passed; repeat for each executed/manual proof.
+        #[arg(long = "passed-proof")]
+        passed_proofs: Vec<String>,
+        /// Emit the verification report as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
