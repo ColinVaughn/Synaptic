@@ -9,7 +9,7 @@ license = "AGPL-3.0-or-later"
 rust-version = "1.97"
 
 [workspace.dependencies]
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
 # `float_roundtrip`: parse floats with full precision so a value survives a
 # serialize→deserialize round-trip exactly. Load-bearing: manifest `mtime` (f64)
 # and graph.json weights/confidence_scores must be byte-stable across load/save
@@ -49,7 +49,7 @@ synaptic-memory = { path = "crates/synaptic-memory" }
 synaptic-api = { path = "crates/synaptic-api" }
 synaptic-change = { path = "crates/synaptic-change" }
 synaptic-vuln = { path = "crates/synaptic-vuln" }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4.6.6", features = ["derive"] }
 anyhow = "1"
 eframe = { version = "0.36.1", default-features = false, features = ["default_fonts", "glow", "persistence", "wayland", "x11"] }
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
@@ -58,7 +58,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 axum = "0.8"
 tower = "0.5"
-futures-util = "0.3"
+futures-util = "0.3.34"
 getrandom = "0.4"
 async-trait = "0.1"
 wiremock = "0.6"
@@ -103,8 +103,8 @@ petgraph = "0.8"
 rmp-serde = "1"
 notify = "8"
 redis = { version = "1.2", default-features = false }
-rust_xlsxwriter = "0.97"
-ignore = "0.4"
+rust_xlsxwriter = "0.99.0"
+ignore = "0.4.33"
 # ripgrep's matcher + searcher core, for the MCP `search_text` content-search
 # tool. Same crate family as `ignore`, so they version together.
 grep-searcher = "0.1"
