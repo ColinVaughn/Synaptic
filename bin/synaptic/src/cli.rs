@@ -80,6 +80,21 @@ pub(crate) enum Cmd {
         #[arg(long)]
         password: Option<String>,
     },
+    /// Create a high-level, interactive architecture chart from graph.json.
+    Chart {
+        /// Source graph.json (default: synaptic-out/graph.json).
+        #[arg(long)]
+        graph: Option<PathBuf>,
+        /// Output HTML (default: chart.html beside graph.json).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Scope to one federated member (its `repo` tag) before charting.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Maximum graph communities to show (1-24).
+        #[arg(long, default_value_t = 12)]
+        max_communities: usize,
+    },
     /// Query the graph for a relevant subgraph.
     Query {
         /// Free-text query.

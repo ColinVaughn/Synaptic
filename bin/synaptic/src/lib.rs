@@ -12,6 +12,7 @@ use cli::{Cli, Cmd};
 use commands::api::run_api;
 use commands::audit::run_audit;
 use commands::cache::run_cache;
+use commands::chart::run_chart;
 use commands::contract::run_contract;
 use commands::diff::run_diff;
 use commands::eval::run_eval;
@@ -167,6 +168,12 @@ fn run() -> Result<()> {
             user,
             password,
         } => run_export(&format, graph, out, push, &user, password, repo),
+        Cmd::Chart {
+            graph,
+            out,
+            repo,
+            max_communities,
+        } => run_chart(graph, out, repo, max_communities),
         Cmd::Ingest { source } => run_ingest(source),
         Cmd::Api { action } => run_api(action),
         Cmd::Vuln { action } => commands::vuln::run_vuln(action),

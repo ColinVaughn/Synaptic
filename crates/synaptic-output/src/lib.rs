@@ -11,6 +11,7 @@ use std::path::Path;
 use serde_json::Value;
 use synaptic_graph::KnowledgeGraph;
 
+pub mod chart;
 mod common;
 pub mod cypher;
 pub mod dot;
@@ -29,6 +30,7 @@ mod golden;
 #[cfg(test)]
 mod tests_support;
 
+pub use chart::{to_chart, to_chart_html};
 pub use cypher::{to_cypher, to_cypher_string};
 pub use dot::{to_dot, to_dot_string};
 pub use force3d::{to_force3d, to_force3d_html};

@@ -107,6 +107,34 @@ synaptic export neo4j --push bolt://localhost:7687 --password secret
 
 See [Output-Formats](Output-Formats) and [Workspaces-and-Federation](Workspaces-and-Federation).
 
+## chart
+
+Create a bounded, high-level architecture map from an existing `graph.json`.
+
+```sh
+synaptic chart [--graph <PATH>] [--out <PATH>] [--repo <TAG>] [--max-communities <N>]
+```
+
+The command groups structural nodes by Synaptic's deterministic communities, names each plate from its dominant source area, ranks representative symbols, and draws the strongest exact inter-community relations. The output is one offline HTML file with search, connection focus, light/dark themes, and SVG download.
+
+| Name | Default | Description |
+| --- | --- | --- |
+| `--graph` | `synaptic-out/graph.json` | Source graph. |
+| `--out` | `chart.html` beside the source graph | Output HTML. |
+| `--repo` | none | Scope a federated graph to one repository tag. |
+| `--max-communities` | `12` | Maximum plates to show (`1`-`24`). |
+
+Example:
+
+```sh
+synaptic chart
+synaptic chart --graph synaptic-out/graph.json --out architecture.html --max-communities 16
+```
+
+`chart` is intentionally on demand rather than part of `extract`: it is a curated architecture summary, while the default visualizations preserve broader node-level exploration.
+
+In the generated page, select a subsystem to open its source-backed internal symbol graph. Selecting a symbol isolates its real one-hop dependencies and opens a clickable relationship inspector; search can jump directly to either level.
+
 ## query
 
 Find a relevant subgraph for a free-text query.

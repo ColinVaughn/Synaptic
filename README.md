@@ -43,6 +43,28 @@ machine-readable graphs alongside human-readable reports and 2D/3D/SVG
 visualizations, and exposes an MCP server so an AI coding assistant can use these systems before
 grepping or reading files.
 
+## Architecture explorer
+
+Turn an existing `graph.json` into a self-contained, offline architecture map:
+
+```sh
+synaptic chart
+```
+
+The overview ranks source-grounded communities and their strongest exact relationships. Search,
+switch themes, or open any subsystem without rebuilding the graph.
+
+<p align="center">
+  <img src="assets/readme/synaptic-chart-overview.gif" alt="Synaptic architecture chart switching themes and opening a subsystem" width="1200">
+</p>
+
+Inside a subsystem, select a symbol to isolate its real one-hop dependencies. The inspector shows
+incoming and outgoing relations, and each row continues directly to the connected symbol.
+
+<p align="center">
+  <img src="assets/readme/synaptic-chart-drilldown.gif" alt="Synaptic architecture chart tracing source-backed symbol relationships" width="1200">
+</p>
+
 The desktop app's **App** screen checks the GitHub Release published by the release workflow,
 downloads the matching archive, verifies its published checksum, and updates the bundled
 executables. **Add to applications** installs it for the current user and makes it searchable from
@@ -478,6 +500,7 @@ A code-only corpus runs fully offline; the optional LLM semantic pass over docs 
 | `graph.html` | Interactive 2D explorer (search + community color) |
 | `graph-3d.html` | Interactive 3D force graph (search, relation toggles, federation colors) |
 | `graph.svg` | Static layout (Barnes-Hut, component-packed, asset-shaped) |
+| `chart.html` | On-demand architecture map with community-to-symbol drill-down from `synaptic chart` |
 | `graph.graphml` / `graph.cypher` / `graph.dot` | Import into Gephi / Neo4j / Graphviz |
 | `callflow.html` / `tree.html` | Mermaid call-flow + D3 file tree |
 | `obsidian/`, `wiki/` | Obsidian vault / Markdown wiki (with `--obsidian` / `--wiki`) |
@@ -488,6 +511,7 @@ A code-only corpus runs fully offline; the optional LLM semantic pass over docs 
 |---|---|
 | `extract [path]` | Build the graph and write `synaptic-out/`. Flags: `--directed`, `--obsidian`, `--wiki`, `--semantic` |
 | `export <format>` | Re-emit a format from an existing `graph.json` (no rebuild) or push live to Neo4j/FalkorDB |
+| `chart` | Create an offline interactive architecture map with source-backed subsystem drill-down. Flags: `--graph`, `--out`, `--repo`, `--max-communities` |
 | `query <text>` | Return a relevance-ranked subgraph (each node scored). Flags: `--max-nodes`, `--repo`, `--dfs`, `--since <ref>` (boost code changed on the branch), `--seed-changed`, `--json` |
 | `path <from> <to>` | Shortest path between two nodes |
 | `explain <node>` | Show a node and its neighbours |

@@ -6,8 +6,9 @@ Two ways to produce artifacts:
 
 - `synaptic extract` writes a full default set in one pass (see [Extraction]).
 - `synaptic export <format>` regenerates a single artifact from an existing `graph.json` without re-extracting, or pushes the graph live to a database.
+- `synaptic chart` creates a bounded architecture summary from an existing `graph.json`.
 
-For the visual/interactive artifacts (`graph.html`, `graph-3d.html`, `graph.svg`, `callflow.html`, `tree.html`) see [Visualizations].
+For the visual/interactive artifacts (`chart.html`, `graph.html`, `graph-3d.html`, `graph.svg`, `callflow.html`, `tree.html`) see [Visualizations].
 
 ## What `extract` writes by default
 
@@ -73,6 +74,8 @@ Verified from the command dispatch, `export` accepts exactly these formats (case
 | `falkordb` | `graph.cypher` or live push | See live push below |
 
 Any other value is rejected with an error listing the valid formats.
+
+`chart.html` is deliberately a separate `synaptic chart` command rather than an `export` format because it is a bounded architecture summary with its own `--max-communities` control. It defaults beside the source `graph.json`, remains fully offline, and drills from communities into source-backed internal symbol graphs.
 
 ### `--repo` scoping guard
 

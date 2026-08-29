@@ -3,6 +3,7 @@
 pub(crate) mod api;
 pub(crate) mod audit;
 pub(crate) mod cache;
+pub(crate) mod chart;
 pub(crate) mod common;
 pub(crate) mod contract;
 pub(crate) mod diff;

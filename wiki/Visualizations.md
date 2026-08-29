@@ -1,18 +1,35 @@
 # Visualizations
 
-Synaptic renders the knowledge graph into several browser-viewable artifacts. All of them are self-contained HTML or SVG files that embed the graph data directly and load any libraries from a CDN, so you can open them by double-clicking (the interactive HTML viewers need a network connection for the CDN libraries).
+Synaptic renders the knowledge graph into several browser-viewable artifacts. They embed graph data directly; the node-level explorers may load pinned libraries from a CDN, while `chart.html` is fully offline.
 
-Each is written during `synaptic extract` and can be regenerated individually with `synaptic export <format>`. See [Output-Formats] for the full artifact list and the `export` flags (`--graph`, `--out`, `--repo`).
+The node-level artifacts are written during `synaptic extract` and can be regenerated individually with `synaptic export <format>`. The architecture chart is generated on demand with `synaptic chart`. See [Output-Formats] for the full artifact list.
 
-| Artifact | Format | What it shows |
+| Artifact | Command | What it shows |
 | --- | --- | --- |
+| `chart.html` | `chart` | High-level architecture map over graph communities |
 | `graph.html` | `export html` | Interactive 2D explorer (vis-network) |
 | `graph-3d.html` | `export 3d` (alias `force3d`) | Interactive 3D force graph |
 | `graph.svg` | `export svg` | Static, deterministic layout image |
 | `callflow.html` | `export callflow` | Mermaid call-flow diagram |
 | `tree.html` | `export tree` | Collapsible file/class/method tree (D3) |
 
-All five are written by default during `extract`.
+The five node-level artifacts are written by default during `extract`.
+
+`chart.html` is generated on demand with `synaptic chart`; it is not part of the default extraction set.
+
+## chart.html (architecture map)
+
+`synaptic chart` turns the node-level graph into a presentation-ready system map without inventing components or connections. It selects the highest-signal structural communities, derives readable subsystem names from their source paths, surfaces representative symbols, and draws the strongest exact inter-community relations. Observation overlays and zero-weight/provisional edges do not affect the map.
+
+The artifact is one offline HTML file with no CDN or runtime dependency. It includes:
+
+- Search across subsystem names, source-backed symbols, kinds, repository tags, and paths.
+- Click or press Enter on a subsystem to open its ranked internal symbol graph. Selecting a symbol isolates its real one-hop dependencies and opens a relationship inspector; each relationship can be selected to continue through the graph. Use **Overview** to return.
+- Light and dark themes and a native SVG download.
+- Deterministic ordering and a bounded `--max-communities` scale knob (default `12`, maximum `24`).
+- Responsive controls; on narrow screens the map keeps readable geometry in a horizontally scrollable viewport instead of shrinking labels into illegibility.
+
+Use `chart` for a concise architecture overview. Use `graph.html` or `graph-3d.html` when you need node-level exploration.
 
 ## graph.html (2D explorer)
 

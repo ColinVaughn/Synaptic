@@ -10,6 +10,12 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-08-29
+
+### Added
+
+- `synaptic chart` creates an offline architecture map from `graph.json`, with bounded community overviews, source-backed symbol drill-down, orthogonal relation routing, a clickable one-hop relationship inspector, search, theme switching, and SVG export.
+
 ## [1.1.0] - 2026-08-28
 
 ### Added
