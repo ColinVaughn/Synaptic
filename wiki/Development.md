@@ -22,10 +22,10 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
 ```
 
-A release build of just the binary:
+A release build of the CLI and optional desktop addon:
 
 ```sh
-cargo build --release --locked -p synaptic
+cargo build --release --locked -p synaptic -p synaptic-ui
 ```
 
 ## Per-language testing
@@ -52,7 +52,7 @@ CI runs this across a matrix of grammar-backed languages. See [Languages](Langua
   (`--no-default-features --features lang-<name>`).
 
 `.github/workflows/release.yml` runs on `v*` tags (and manual dispatch): it cross-compiles
-the binary for Linux (`x86_64`), macOS (`x86_64` and `aarch64`), and Windows (`x86_64`),
+the CLI and UI for Linux (`x86_64`), macOS (`x86_64` and `aarch64`), and Windows (`x86_64`),
 packages each with the README/LICENSE/NOTICE/CHANGELOG and locked third-party notices,
 publishes checksums and artifact attestations to a GitHub Release, and syncs `wiki/`.
 
@@ -108,6 +108,7 @@ crates/
   synaptic-skillgen/     assistant skill + hooks generation
 bin/
   synaptic/              the CLI
+  synaptic-ui/           optional native setup + complete CLI command app
 ```
 
 See [Architecture](Architecture) for what each crate does and how the pipeline fits together.

@@ -10,6 +10,26 @@ All notable changes to Synaptic are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-28
+
+### Added
+
+- An optional native desktop app for Windows, Linux, and macOS supports single repositories,
+  federated workspaces, MCP setup, and every CLI command through guided controls or direct
+  arguments.
+- A standalone `synaptic-ui` download automatically installs checksum-verified command tools from
+  the matching GitHub Release on first launch.
+- The desktop **App** page checks for updates, installs complete release bundles, and removes the
+  desktop installation without deleting user data or separately installed CLI tools.
+- A per-user **Add to applications** action registers Synaptic with Windows Start, macOS
+  Applications, or the Linux desktop application menu without requiring administrator access.
+
+### Changed
+
+- The desktop app follows the operating system's light or dark preference on first launch and
+  remembers later theme changes.
+- Desktop layouts adapt across monitor sizes and keep command output within a scrollable pane.
+
 ## [1.0.0] - 2026-08-27
 
 ### Added

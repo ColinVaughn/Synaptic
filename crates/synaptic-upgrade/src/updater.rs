@@ -11,6 +11,8 @@ use sha2::{Digest, Sha256};
 use crate::github::{Asset, Release};
 use crate::target::{archive_name, binary_name, sha256_name};
 
+const BUNDLE_BINARIES: &[&str] = &["synaptic", "syn", "synaptic-ui"];
+
 /// Find a release asset by exact file name.
 pub fn find_asset<'a>(release: &'a Release, name: &str) -> Option<&'a Asset> {
     release.assets.iter().find(|a| a.name == name)
@@ -105,9 +107,7 @@ fn make_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Run the full update: download + verify + extract + replace the running exe
-/// (and best-effort the sibling alias). `triple` is the current platform target.
-pub fn apply_update(release: &Release, triple: &str) -> Result<()> {
+fn verified_archive(release: &Release, triple: &str) -> Result<(tempfile::TempDir, PathBuf)> {
     let archive_file = archive_name(triple);
     let asset = find_asset(release, &archive_file)
         .ok_or_else(|| anyhow!("release {} has no asset {archive_file}", release.version))?;
@@ -134,34 +134,67 @@ pub fn apply_update(release: &Release, triple: &str) -> Result<()> {
     let tmp = tempfile::tempdir().context("creating temp dir")?;
     let archive_path = tmp.path().join(&archive_file);
     std::fs::write(&archive_path, &bytes).context("writing archive to temp")?;
+    Ok((tmp, archive_path))
+}
 
-    // Replace the running executable (whatever its name) with the matching new
-    // binary, then best-effort replace the sibling alias.
+/// Download and install the CLI beside an existing desktop app.
+pub fn install_cli(release: &Release, triple: &str, dest_dir: &Path) -> Result<PathBuf> {
+    let (_tmp, archive_path) = verified_archive(release, triple)?;
+    install_cli_from_archive(&archive_path, dest_dir)
+}
+
+fn install_cli_from_archive(archive_path: &Path, dest_dir: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(dest_dir)
+        .with_context(|| format!("creating {}", dest_dir.display()))?;
+    let tmp = tempfile::tempdir().context("creating extraction dir")?;
+
+    let extracted = extract_binary(archive_path, "synaptic", tmp.path())?;
+    let installed = dest_dir.join(binary_name("synaptic"));
+    std::fs::copy(&extracted, &installed)
+        .with_context(|| format!("installing {}", installed.display()))?;
+    make_executable(&installed)?;
+
+    if let Ok(alias) = extract_binary(archive_path, "syn", tmp.path()) {
+        let alias_path = dest_dir.join(binary_name("syn"));
+        if std::fs::copy(&alias, &alias_path).is_ok() {
+            let _ = make_executable(&alias_path);
+        }
+    }
+    Ok(installed)
+}
+
+/// Run the full update: download + verify + extract + replace the running
+/// Synaptic executable and best-effort update its bundled siblings.
+pub fn apply_update(release: &Release, triple: &str) -> Result<()> {
+    let (tmp, archive_path) = verified_archive(release, triple)?;
+
+    // Replace the running executable, then best-effort update the rest of the
+    // release bundle beside it.
     let current = std::env::current_exe().context("resolving current exe")?;
-    let cur_stem = if current
+    let cur_stem = current
         .file_stem()
         .and_then(|s| s.to_str())
-        .map(|s| s == "syn")
-        .unwrap_or(false)
-    {
-        "syn"
-    } else {
-        "synaptic"
-    };
-    let sibling_stem = if cur_stem == "syn" { "synaptic" } else { "syn" };
+        .filter(|stem| BUNDLE_BINARIES.contains(stem))
+        .ok_or_else(|| anyhow!("{} is not a Synaptic release binary", current.display()))?;
 
     let new_self = extract_binary(&archive_path, cur_stem, tmp.path())?;
     make_executable(&new_self)?;
     self_replace::self_replace(&new_self).context("replacing running executable")?;
 
-    if let Ok(new_sibling) = extract_binary(&archive_path, sibling_stem, tmp.path()) {
-        let _ = make_executable(&new_sibling);
-        let sibling_path = current.with_file_name(binary_name(sibling_stem));
-        if let Err(e) = std::fs::copy(&new_sibling, &sibling_path) {
-            eprintln!(
-                "warning: updated {cur_stem} but could not update the {sibling_stem} alias at {}: {e}",
-                sibling_path.display()
-            );
+    for sibling_stem in BUNDLE_BINARIES
+        .iter()
+        .copied()
+        .filter(|stem| *stem != cur_stem)
+    {
+        if let Ok(new_sibling) = extract_binary(&archive_path, sibling_stem, tmp.path()) {
+            let _ = make_executable(&new_sibling);
+            let sibling_path = current.with_file_name(binary_name(sibling_stem));
+            if let Err(e) = std::fs::copy(&new_sibling, &sibling_path) {
+                eprintln!(
+                    "warning: updated {cur_stem} but could not update {sibling_stem} at {}: {e}",
+                    sibling_path.display()
+                );
+            }
         }
     }
     Ok(())
@@ -185,6 +218,7 @@ mod tests {
 
     #[test]
     fn find_asset_by_name() {
+        assert!(BUNDLE_BINARIES.contains(&"synaptic-ui"));
         let r = Release {
             version: "v1".into(),
             notes: String::new(),
@@ -226,6 +260,8 @@ mod tests {
         let out = extract_binary(&archive, "synaptic", dir.path()).unwrap();
         assert!(out.exists());
         assert_eq!(std::fs::read(&out).unwrap(), b"#!/bin/true\n");
+        let installed = install_cli_from_archive(&archive, &dir.path().join("installed")).unwrap();
+        assert_eq!(std::fs::read(installed).unwrap(), b"#!/bin/true\n");
     }
 
     #[cfg(windows)]
@@ -245,5 +281,7 @@ mod tests {
         let out = extract_binary(&archive, "synaptic", dir.path()).unwrap();
         assert!(out.exists());
         assert_eq!(std::fs::read(&out).unwrap(), b"MZ binary");
+        let installed = install_cli_from_archive(&archive, &dir.path().join("installed")).unwrap();
+        assert_eq!(std::fs::read(installed).unwrap(), b"MZ binary");
     }
 }

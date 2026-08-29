@@ -1,7 +1,8 @@
 # Installation
 
-Synaptic is a single static Rust binary named `synaptic`. There is no runtime or
-interpreter to install alongside it.
+Synaptic's engine and terminal workflow are a single static Rust binary named `synaptic`.
+There is no runtime or interpreter to install alongside it. The optional `synaptic-ui`
+desktop addon provides visual setup and a searchable interface to the complete CLI.
 
 ## Requirements
 
@@ -15,15 +16,25 @@ interpreter to install alongside it.
 # Install the `synaptic` binary onto your PATH:
 cargo install --path bin/synaptic
 
+# Optional native UI (uses `synaptic` from the same directory or PATH):
+cargo install --path bin/synaptic-ui
+
 # ...or build it in-tree:
-cargo build --release      # -> target/release/synaptic
+cargo build --release -p synaptic -p synaptic-ui
 ```
 
 ## Prebuilt binaries
 
 Tagged releases attach prebuilt binaries for Linux (`x86_64`), macOS (`x86_64` and
 `aarch64`), and Windows (`x86_64`) to the [GitHub Releases](../../releases) page. Each
-archive bundles the `synaptic` binary plus the README, LICENSE, and CHANGELOG.
+archive bundles `synaptic`, its `syn` alias, the optional `synaptic-ui` executable, and the
+README, LICENSE, and CHANGELOG. Each operating system gets its own native build; the same UI
+source and workflow are used on all three platforms.
+
+Launch `synaptic-ui` from any directory. Open **App** and choose **Add to applications** to make it
+searchable from Windows Start, macOS Applications, or the Linux application menu without an
+administrator account. Then choose a workspace folder. See [Desktop UI](Desktop-UI) for the
+federation and MCP setup flow.
 
 ## Updating
 

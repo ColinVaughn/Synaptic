@@ -4,7 +4,7 @@ members = ["crates/*", "bin/*"]
 
 [workspace.package]
 edition = "2024"
-version = "1.0.0"
+version = "1.1.0"
 license = "AGPL-3.0-or-later"
 rust-version = "1.97"
 
@@ -51,6 +51,8 @@ synaptic-change = { path = "crates/synaptic-change" }
 synaptic-vuln = { path = "crates/synaptic-vuln" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+eframe = { version = "0.36.1", default-features = false, features = ["default_fonts", "glow", "persistence", "wayland", "x11"] }
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 rayon = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

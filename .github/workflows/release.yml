@@ -1,6 +1,6 @@
 name: release
 
-# Build prebuilt `synaptic` binaries for Linux/macOS/Windows and attach them to
+# Build prebuilt `synaptic` and optional `synaptic-ui` binaries for Linux/macOS/Windows and attach them to
 # the GitHub Release when a `v*` tag is pushed, and sync the `wiki/` directory to
 # the GitHub wiki. Run manually via workflow_dispatch to smoke-test the build
 # matrix (and re-sync the wiki) without cutting a release.
@@ -38,8 +38,8 @@ jobs:
         run: cargo install --locked --version 0.9.1 --features cli cargo-about
       - name: Generate locked third-party license notices
         shell: bash
-        run: cargo about generate about.hbs > THIRD_PARTY_LICENSES.html
-      - run: cargo build --release --locked -p synaptic --target ${{ matrix.target }}
+        run: cargo about generate --target "${{ matrix.target }}" about.hbs --output-file THIRD_PARTY_LICENSES.html
+      - run: cargo build --release --locked -p synaptic -p synaptic-ui --target ${{ matrix.target }}
       - name: Package
         shell: bash
         run: |
@@ -48,9 +48,25 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp "target/${{ matrix.target }}/release/synaptic.exe" "$dist/"
             cp "target/${{ matrix.target }}/release/syn.exe" "$dist/"
+            cp "target/${{ matrix.target }}/release/synaptic-ui.exe" "$dist/"
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            cp "target/${{ matrix.target }}/release/synaptic" "$dist/"
+            cp "target/${{ matrix.target }}/release/syn" "$dist/"
+            app="$dist/Synaptic.app"
+            mkdir -p "$app/Contents/MacOS"
+            cp "target/${{ matrix.target }}/release/synaptic-ui" "$app/Contents/MacOS/"
+            ln "$dist/synaptic" "$app/Contents/MacOS/synaptic"
+            ln "$dist/syn" "$app/Contents/MacOS/syn"
+            version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "synaptic-ui") | .version')"
+            cat > "$app/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict><key>CFBundleDisplayName</key><string>Synaptic</string><key>CFBundleExecutable</key><string>synaptic-ui</string><key>CFBundleIdentifier</key><string>com.synapticgraph.desktop</string><key>CFBundleName</key><string>Synaptic</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>${version}</string></dict></plist>
+          EOF
           else
             cp "target/${{ matrix.target }}/release/synaptic" "$dist/"
             cp "target/${{ matrix.target }}/release/syn" "$dist/"
+            cp "target/${{ matrix.target }}/release/synaptic-ui" "$dist/"
           fi
           cp README.md LICENSE NOTICE CHANGELOG.md THIRD_PARTY_LICENSES.html "$dist/"
           if [ "${{ runner.os }}" = "Windows" ]; then

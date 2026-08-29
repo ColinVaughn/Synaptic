@@ -35,10 +35,27 @@ The graph answers architectural questions, traces reverse impact ("what would th
 break?"), forecasts and speculatively runs changes before you make them, plans safe refactors,
 diffs architecture across git history, and audits SQL for performance and security. Memory adds
 what the graph cannot infer from the current tree alone. API maintenance uses both to turn
-upstream change into evidence-backed repair plans. It all ships as a single static Rust binary
-(`synaptic`) with no runtime and no interpreter, writes machine-readable graphs alongside
-human-readable reports and 2D/3D/SVG visualizations, and exposes an MCP server so an AI coding
-assistant can use these systems before grepping or reading files.
+upstream change into evidence-backed repair plans. The engine and terminal workflow ship as a
+single static Rust binary (`synaptic`) with no runtime or interpreter. An optional native
+`synaptic-ui` addon provides visual single-repository, workspace federation, and MCP setup plus a
+searchable Tools view for every Synaptic task on Windows, Linux, and macOS. Synaptic writes
+machine-readable graphs alongside human-readable reports and 2D/3D/SVG
+visualizations, and exposes an MCP server so an AI coding assistant can use these systems before
+grepping or reading files.
+
+The desktop app's **App** screen checks the GitHub Release published by the release workflow,
+downloads the matching archive, verifies its published checksum, and updates the bundled
+executables. **Add to applications** installs it for the current user and makes it searchable from
+Windows Start, macOS Applications, or the Linux application menu without administrator access.
+Removing the desktop installation does not touch project data, graphs, settings, or a separately
+installed CLI.
+
+The desktop app follows the operating system's light or dark preference on first launch and saves
+the user's choice after that.
+
+If someone downloads only `synaptic-ui`, its first-run screen automatically downloads the
+verified command tools from the latest GitHub Release and places them beside the app. No terminal,
+PATH change, or system-wide install is required.
 
 If you do not want to run the MCP server yourself, **Synaptic Cloud** is a paid hosted MCP
 service for using Synaptic with your projects: [synapticgraph.com](https://synapticgraph.com/).
@@ -63,6 +80,10 @@ cargo install --path bin/synaptic
 
 # Or download a prebuilt binary from GitHub Releases, then confirm it works
 synaptic --version
+
+# Optional: install and launch the native setup UI
+cargo install --path bin/synaptic-ui
+synaptic-ui
 
 # 2. Build the first graph for your project
 cd path/to/your/project
@@ -404,16 +425,21 @@ Synaptic builds with a stable Rust toolchain (pinned to 1.97.1 via
 # From a clone, installs the `synaptic` binary onto your PATH:
 cargo install --path bin/synaptic
 
+# Optional native workspace/MCP setup app (uses `synaptic` from the same directory or PATH):
+cargo install --path bin/synaptic-ui
+
 # ...or build it in-tree:
-cargo build --release      # -> target/release/synaptic
+cargo build --release -p synaptic -p synaptic-ui
 ```
 
-Prebuilt binaries for Linux/macOS/Windows are attached to each tagged
+Prebuilt CLI and optional UI binaries for Linux/macOS/Windows are attached to each tagged
 [GitHub Release](../../releases) (see the `release` workflow). Optional integrations are
 behind feature flags (off by default): `pg` (Postgres introspection), `push` (live
 Neo4j/FalkorDB export), and `office` / `gws` / `media` (spreadsheet / Google-Workspace /
 audio-video ingest), e.g. `cargo install --path bin/synaptic --features pg,push`. See
-[Installation](https://github.com/ColinVaughn/Synaptic/wiki/Installation) and [Configuration](https://github.com/ColinVaughn/Synaptic/wiki/Configuration).
+[Installation](https://github.com/ColinVaughn/Synaptic/wiki/Installation),
+[Desktop UI](https://github.com/ColinVaughn/Synaptic/wiki/Desktop-UI), and
+[Configuration](https://github.com/ColinVaughn/Synaptic/wiki/Configuration).
 
 Once installed, update in place with `synaptic self-update` (verifies a SHA-256
 checksum and prompts before replacing the binary). Opt in to a background

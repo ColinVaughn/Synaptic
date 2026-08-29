@@ -1,9 +1,9 @@
-//! Opt-in self-update for the Synaptic CLI.
+//! Opt-in self-update for Synaptic release binaries.
 //!
 //! Nothing here touches the network or the binary unless the user has opted in
-//! (`self-update --enable` for the background check) or explicitly run the
-//! update command. See the [`check`] module for the throttled background notice
-//! and the [`updater`] module for the actual download/verify/replace pipeline.
+//! (`self-update --enable` for the CLI background check) or explicitly run an
+//! update. See the [`check`] module for the throttled notice and the [`updater`]
+//! module for the shared download/verify/replace pipeline.
 
 pub mod check;
 pub mod config;

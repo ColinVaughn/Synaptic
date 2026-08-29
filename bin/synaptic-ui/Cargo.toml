@@ -1,0 +1,17 @@
+[package]
+name = "synaptic-ui"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Optional native desktop setup app for Synaptic workspaces and MCP."
+
+[[bin]]
+name = "synaptic-ui"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { workspace = true }
+rfd = { workspace = true }
+synaptic-upgrade = { workspace = true }
+synaptic-workspace = { workspace = true }

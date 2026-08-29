@@ -26,6 +26,7 @@
 
 **Integrations**
 - [MCP Server](MCP-Server)
+- [Desktop UI](Desktop-UI)
 - [Assistant Integration](Assistant-Integration)
 - [Ingestion](Ingestion)
 - [Semantic Analysis](Semantic-Analysis)
