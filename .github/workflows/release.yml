@@ -30,7 +30,7 @@ jobs:
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: ${{ matrix.target }}
@@ -76,7 +76,7 @@ jobs:
             tar czf "${dist}.tar.gz" "$dist"
             shasum -a 256 "${dist}.tar.gz" | awk '{print $1}' > "${dist}.tar.gz.sha256"
           fi
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: synaptic-${{ matrix.target }}
           path: |
@@ -91,7 +91,7 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v8.0.1
         with:
           path: dist
           merge-multiple: true
@@ -110,7 +110,7 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Sync wiki/ to the GitHub wiki
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
